@@ -29,6 +29,7 @@
             "rust-analyzer"
             "clippy"
             "llvm-tools-preview"
+            "miri"
           ];
         };
       in

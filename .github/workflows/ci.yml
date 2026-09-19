@@ -38,3 +38,26 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-features
+
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: miri, rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Miri
+        run: cargo miri test
+
+      - name: Miri (tree borrows, strict provenance)
+        run: cargo miri test
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance

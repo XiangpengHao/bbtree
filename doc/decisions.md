@@ -92,6 +92,17 @@ Fixed-size generic K/V needs none of the slotted machinery. Fences would need
 - Capacity is the largest `n` that fits, computed per `(K, V)` at compile time.
   u64→u64: leaf 255, internal 170.
 
+**D13. Every node holds at least 12 entries.** (2026-10-07)
+Refines D6: the node size is the smallest multiple of 4 KB at which both a
+leaf and an internal node hold ≥ 12 entries, and the node stays 4 KB-aligned
+(D7).
+
+- 4 KB is enough while `K + V` ≤ ~332 B (the internal node is the tighter
+  of the two). Larger entries get 8 KB, 12 KB, … nodes.
+- A type aligned to more than 4 KB raises the node alignment to its own,
+  which is still a multiple of 4 KB.
+- u64→u64 is unaffected: leaf 255, internal 170, 4 KB.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -103,12 +114,38 @@ Fixed-size generic K/V needs none of the slotted machinery. Fences would need
   re-descending from the root (as bf-tree does), this never calls `Ord` inside
   `next()`, matching std.
 
+## Safety
+
+**D14. Unsafe lives behind zero-overhead typed abstractions.** (2026-10-07)
+Every runtime fact the unsafe code needs is a check the B-tree algorithm
+already makes for its own reasons (is the node full? does the merge fit? is
+this a leaf?). That check returns a token, and the unchecked operation
+requires the token: one check, no duplicates, nothing on the hot path.
+
+- **One memory primitive:** `Slots<T, Dir>`, a fixed-capacity array in a page
+  that grows up (keys, edges) or down (values). Insert, remove, move a run to
+  another node, view as a slice. Written and tested once.
+- **Positions are proofs:** `Edge` (index ≤ len) and `Kv` (index < len).
+  They come from our own search (in bounds for any `Ord`), first/last
+  positions, or checked constructors that are off the hot path.
+- **Room and merge are tokens:** the insert-or-split decision yields the token
+  `insert_fit` needs; the should-we-merge check yields the token `merge` needs.
+- **Handles carry the height,** so `force` (leaf or internal) and `descend`
+  are safe; no caller ever asserts a node's kind.
+- **Edges come only from owned subtrees:** `Subtree { ptr, height }` goes in,
+  and removing an edge gives one back. The height match is asserted on
+  split/merge, off the hot path.
+- **Paths lend one mutable node at a time** (built with the tree layer).
+- **Enforced:** `#![forbid(unsafe_code)]` in every module except the slots,
+  handle and page modules of `node/` and the tree's path module.
+
 ## Proposed, not decided
 
 - **Path-stack frame** = one word: node address | index in the low 12 bits
   (D7), using strict-provenance `map_addr`. Caps node capacity at 4095.
-- **Stack depth `MAX_HEIGHT`:** 16 (128 B per stack; `K + V` above ~170 B
-  forces 8 KB internal nodes) or 24 (192 B; only above ~445 B).
+- **Stack depth `MAX_HEIGHT`:** D13 fixes it. Capacity ≥ 12 means a
+  non-root internal node has ≥ 6 children, so the height is ≤ 21. That gives
+  ~170 B per stack with one-word entries.
 - **Exact allocation count before mutating:** insert counts the full nodes on
   its path from the leaf upward, allocates that many first, and so can fail
   without changing the tree. Name of the fallible insert (`try_insert` is
