@@ -1,0 +1,8 @@
+[package]
+name = "bbtree"
+version = "0.1.0"
+edition = "2024"
+description = "Blessed B-tree."
+repository = "https://github.com/XiangpengHao/bbtree"
+
+[dependencies]
