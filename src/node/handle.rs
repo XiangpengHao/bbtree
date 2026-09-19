@@ -272,6 +272,16 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
         NodePtr::<K, V>::capacity(self.is_leaf())
     }
 
+    /// The fewest keys either half of a split of a node of this kind holds:
+    /// the smaller side of the full node around its separator, before the
+    /// new entry joins a side.
+    #[cfg(test)]
+    pub(crate) fn min_len_after_split(&self) -> usize {
+        let capacity = self.capacity();
+        let separator_index = FullEdge::<NodeMut<'_, K, V, Kind>>::separator_index(capacity);
+        separator_index.min(capacity - separator_index - 1)
+    }
+
     fn key_slots(&self) -> Slots<K, Up> {
         // SAFETY: the node is allocated (invariant 1).
         unsafe { self.node.key_slots(self.is_leaf()) }
@@ -912,6 +922,17 @@ pub(crate) struct Subtree<K, V, Kind = LeafOrInternal> {
     height: usize,
     _marker: PhantomData<(K, V, Kind)>,
 }
+
+// SAFETY: a `Subtree` owns its pages, keys and values, and nothing else
+// reaches them (type invariant), as a `Box` owns its contents: sending the
+// `Subtree` to another thread sends the keys and values along. The pages come
+// from the global allocator, which any thread may free.
+unsafe impl<K: Send, V: Send, Kind> Send for Subtree<K, V, Kind> {}
+
+// SAFETY: a `&Subtree` gives only shared access to its keys and values
+// (`borrow`, then `Immut` handles), as a `&Box` does; every change needs
+// `&mut Subtree` or the `Subtree` itself.
+unsafe impl<K: Sync, V: Sync, Kind> Sync for Subtree<K, V, Kind> {}
 
 impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
     /// # Safety

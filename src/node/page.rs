@@ -1,6 +1,7 @@
 //! Node pages: the allocation boundary ([`FreshPage`]) and raw access to an
 //! initialized node's header and slot arrays ([`NodePtr`]).
 
+use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::fmt;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -13,9 +14,43 @@ use super::slots::{Down, Slots, Up};
 /// A `FreshPage` owns its page, like a `Box` that has nothing in it: this is
 /// the only way to create a node, and what a node turns back into once it is
 /// released, ready to be reused or deallocated.
+///
+/// Invariant: the page comes from the global allocator, with
+/// `NodeLayout::<K, V>::LAYOUT`, and nothing else uses it.
 pub(crate) struct FreshPage<K, V> {
     page: NonNull<u8>,
     _marker: PhantomData<fn() -> (K, V)>,
+}
+
+/// Temporary allocation boundary, until the allocator trait (D8) replaces it:
+/// one global-allocator call per node page. Every node is 4 KB-aligned (D7),
+/// and an aligned allocation per page costs glibc about twice the memory of
+/// the page itself (D8's measurement: 8200 B of RSS per 4 KB node); carving
+/// pages from large chunks, as the allocator trait will, avoids that.
+impl<K, V> FreshPage<K, V> {
+    /// A page from the global allocator.
+    ///
+    /// Calls [`handle_alloc_error`] if the allocation fails.
+    pub(crate) fn allocate() -> Self {
+        let layout = NodeLayout::<K, V>::LAYOUT;
+        // SAFETY: `layout` has a non-zero size: nodes are at least 4 KB.
+        let page = unsafe { alloc(layout) };
+        let Some(page) = NonNull::new(page) else {
+            handle_alloc_error(layout)
+        };
+        // SAFETY: the page was just allocated by the global allocator with
+        // `LAYOUT`, and nothing else has it.
+        unsafe { Self::new(page) }
+    }
+
+    /// Gives the page back to the global allocator.
+    pub(crate) fn deallocate(self) {
+        let page = self.into_raw();
+        // SAFETY: the page came from the global allocator with `LAYOUT` and is
+        // used by nothing else (type invariant); consuming `self` gives up the
+        // last use of it.
+        unsafe { dealloc(page.as_ptr(), NodeLayout::<K, V>::LAYOUT) }
+    }
 }
 
 impl<K, V> FreshPage<K, V> {
@@ -25,7 +60,8 @@ impl<K, V> FreshPage<K, V> {
     ///
     /// # Safety
     ///
-    /// - `page` was allocated with `NodeLayout::<K, V>::LAYOUT`.
+    /// - `page` was allocated by the global allocator with
+    ///   `NodeLayout::<K, V>::LAYOUT`.
     /// - Until the page is handed back by [`Self::into_raw`], it stays
     ///   allocated and is accessed only through the returned value and the
     ///   nodes built from it.
@@ -43,7 +79,8 @@ impl<K, V> FreshPage<K, V> {
         }
     }
 
-    /// Hands the page back, e.g. for deallocation with `NodeLayout::<K, V>::LAYOUT`.
+    /// Hands the page back, e.g. for deallocation by the global allocator
+    /// with `NodeLayout::<K, V>::LAYOUT`.
     pub(crate) fn into_raw(self) -> NonNull<u8> {
         self.page
     }
@@ -243,9 +280,10 @@ mod test_pages {
                 self.allocated.borrow_mut().push(page);
                 page
             });
-            // SAFETY: allocated by this pool with `LAYOUT`, and either fresh
-            // or released, so nothing else owns it. It is freed only in
-            // `drop`, and only if it was released again by then.
+            // SAFETY: allocated by this pool from the global allocator with
+            // `LAYOUT`, and either fresh or released, so nothing else owns it.
+            // It is freed only in `drop`, and only if it was released again
+            // by then.
             unsafe { FreshPage::new(page) }
         }
 

@@ -1,0 +1,24 @@
+[package]
+name = "bbtree-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bbtree = { path = ".." }
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+
+# A workspace of its own: the fuzzing dependencies stay out of the library's
+# dependency graph and lockfile.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "map_insert_get"
+path = "fuzz_targets/map_insert_get.rs"
+test = false
+doc = false
+bench = false
