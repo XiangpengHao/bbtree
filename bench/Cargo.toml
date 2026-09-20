@@ -1,0 +1,47 @@
+[package]
+name = "bbtree-bench"
+version = "0.0.0"
+publish = false
+edition = "2024"
+description = "bbtree's benchmark suite: BBTreeMap against std's maps and hashbrown."
+default-run = "bbtree-bench"
+
+[dependencies]
+bbtree = { path = ".." }
+bytes = "1"
+hashbrown = "0.17"
+mimalloc = "0.1"
+tikv-jemallocator = { version = "0.7", optional = true }
+
+[features]
+# Time with jemalloc instead of mimalloc, the default.
+jemalloc = ["dep:tikv-jemallocator"]
+
+# Times with plain mimalloc.
+[[bin]]
+name = "bbtree-bench"
+path = "src/bin/bbtree-bench.rs"
+
+# Measures memory with a counting allocator around mimalloc: the global
+# allocator is fixed at compile time, so the counting one gets its own binary
+# and the timing binary pays nothing for it.
+[[bin]]
+name = "bbtree-bench-memory"
+path = "src/bin/bbtree-bench-memory.rs"
+
+[profile.release]
+# One codegen unit and full LTO, so that inlining doesn't depend on how the
+# crate happens to be partitioned; line tables for `perf record`.
+codegen-units = 1
+lto = "fat"
+debug = "line-tables-only"
+
+# jemalloc's configure turns warnings into errors, and under Nix's hardening
+# `_FORTIFY_SOURCE` warns at -O0: build it optimized even for `cargo check`.
+[profile.dev.package.tikv-jemalloc-sys]
+opt-level = 1
+
+# A workspace of its own: the benchmark dependencies stay out of the library's
+# dependency graph and lockfile.
+[workspace]
+members = ["."]

@@ -30,6 +30,7 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::hint;
 use core::marker::PhantomData;
+use core::mem;
 
 use super::page::{FreshPage, NodePtr};
 use super::slots::{Down, Slots, Up};
@@ -122,6 +123,38 @@ impl<K, V, Kind> Clone for NodeRef<Immut<'_>, K, V, Kind> {
 }
 
 impl<K, V, Kind> Copy for NodeRef<Immut<'_>, K, V, Kind> {}
+
+/// How a node searches its keys. Fixed per key type at compile time, so the
+/// choice costs nothing at run time.
+enum KeySearch {
+    /// For keys that compare in a register: branchless binary search.
+    Branchless,
+    /// For keys whose comparisons are expensive: branchy binary search, then
+    /// a linear scan of the last few keys.
+    NarrowThenScan,
+}
+
+impl KeySearch {
+    /// Keys left in the window when the narrowing search hands over to the
+    /// linear scan.
+    const SCAN_WINDOW: usize = 8;
+
+    /// Branchless for keys with no drop glue and at most 16 bytes: integers,
+    /// `char`, small tuples of them. Their comparisons are a few instructions
+    /// on data already loaded, so a chain of conditional moves is cheapest.
+    ///
+    /// Everything else (`String`, `Vec`, `Box`, large arrays) narrows then
+    /// scans. Without specialization this is a heuristic: `&str` and `&[u8]`
+    /// keys also have no drop glue and fit in 16 bytes, so they take the
+    /// branchless path although their comparisons follow a pointer.
+    const fn for_key<K>() -> Self {
+        if !mem::needs_drop::<K>() && mem::size_of::<K>() <= 16 {
+            Self::Branchless
+        } else {
+            Self::NarrowThenScan
+        }
+    }
+}
 
 /// A node, position or subtree sorted by kind; see [`NodeRef::force`].
 pub(crate) enum ForceResult<LeafThing, InternalThing> {
@@ -257,9 +290,22 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
         self.search(key)
     }
 
+    /// How this node's keys are searched, fixed per key type at compile time.
+    const KEY_SEARCH: KeySearch = KeySearch::for_key::<K>();
+
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` the edge
-    /// where `key` belongs.
-    ///
+    /// where `key` belongs. In bounds for any `Ord`, consistent or not.
+    fn search_index<Q>(&self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match Self::KEY_SEARCH {
+            KeySearch::Branchless => self.branchless_search_index(key),
+            KeySearch::NarrowThenScan => self.narrow_then_scan_index(key),
+        }
+    }
+
     /// Branchless: every search runs the full `log2(len)` steps with no early
     /// exit, and each step only picks the next `base` with
     /// `select_unpredictable`, which compiles to a conditional move instead
@@ -270,7 +316,7 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
     /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
     /// so `base < len` at the end. `Ok(base)` is then `< len`, and
     /// `Err(base)`/`Err(base + 1)` are `<= len`.
-    fn search_index<Q>(&self, key: &Q) -> Result<usize, usize>
+    fn branchless_search_index<Q>(&self, key: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -297,6 +343,46 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
             Ordering::Less => Err(base + 1),
             Ordering::Greater => Err(base),
         }
+    }
+
+    /// A branchy binary search down to at most `KeySearch::SCAN_WINDOW` keys,
+    /// then a linear scan that stops at the first key not less than `key`.
+    ///
+    /// For keys whose comparisons are expensive (a pointer to follow, a
+    /// `memcmp`), predictable branches let the CPU start the next
+    /// comparisons speculatively, so their cache misses overlap instead of
+    /// waiting on each other as in the branchless chain.
+    ///
+    /// In bounds by construction, whatever `Ord` answers: the loop keeps
+    /// `low <= high <= len` and probes only `mid` with `low <= mid < high`;
+    /// the scan visits `low..high` and returns an index in `low..=high`.
+    fn narrow_then_scan_index<Q>(&self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let keys = self.reborrow().keys();
+        let (mut low, mut high) = (0, keys.len());
+        while high - low > KeySearch::SCAN_WINDOW {
+            let mid = low + (high - low) / 2;
+            // SAFETY: `mid < high <= keys.len()`.
+            let probe = unsafe { keys.get_unchecked(mid) };
+            match key.cmp(probe.borrow()) {
+                Ordering::Less => high = mid,
+                Ordering::Equal => return Ok(mid),
+                Ordering::Greater => low = mid + 1,
+            }
+        }
+        // SAFETY: `low <= high <= keys.len()`.
+        let window = unsafe { keys.get_unchecked(low..high) };
+        for (offset, probe) in window.iter().enumerate() {
+            match key.cmp(probe.borrow()) {
+                Ordering::Greater => {}
+                Ordering::Equal => return Ok(low + offset),
+                Ordering::Less => return Err(low + offset),
+            }
+        }
+        Err(high)
     }
 
     fn is_leaf(&self) -> bool {
@@ -1289,5 +1375,35 @@ impl<'a, K, V> Mergeable<'a, K, V> {
         // SAFETY: `index <= parent_len - 1`, the parent's new length.
         let merged_edge = unsafe { Edge::new_unchecked(parent, index) };
         (merged_edge, freed_page)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::string::String;
+
+    use super::KeySearch;
+
+    #[test]
+    fn key_types_pick_their_search() {
+        assert!(matches!(KeySearch::for_key::<u64>(), KeySearch::Branchless));
+        assert!(matches!(KeySearch::for_key::<u32>(), KeySearch::Branchless));
+        assert!(matches!(
+            KeySearch::for_key::<(u64, u64)>(),
+            KeySearch::Branchless
+        ));
+        assert!(matches!(
+            KeySearch::for_key::<String>(),
+            KeySearch::NarrowThenScan
+        ));
+        assert!(matches!(
+            KeySearch::for_key::<[u8; 32]>(),
+            KeySearch::NarrowThenScan
+        ));
+        // The documented misfire: a borrowed string looks like plain data.
+        assert!(matches!(
+            KeySearch::for_key::<&str>(),
+            KeySearch::Branchless
+        ));
     }
 }

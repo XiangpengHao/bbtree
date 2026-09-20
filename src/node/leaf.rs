@@ -26,6 +26,7 @@ impl<'a, K, V> Edge<NodeMut<'a, K, V, Leaf>> {
 mod tests {
     use core::cmp::Ordering;
     use core::panic::AssertUnwindSafe;
+    use std::format;
     use std::panic::catch_unwind;
     use std::string::String;
     use std::vec::Vec;
@@ -79,6 +80,30 @@ mod tests {
         pages.assert_all_released();
     }
 
+    /// The same check for keys that take the narrow-then-scan search.
+    #[test]
+    fn string_search_matches_slice_binary_search() {
+        let pages = TestPages::<String, u64>::new();
+        let mut leaf = Subtree::new_leaf(pages.fresh());
+        let keys: Vec<String> = (0..30).map(|key| format!("{:04}", key * 2)).collect();
+        for (number, key) in keys.iter().enumerate() {
+            push_back(leaf.borrow_mut(), key.clone(), number as u64);
+        }
+        for probe in 0..65 {
+            let probe = format!("{probe:04}");
+            let position = match leaf.borrow().search(probe.as_str()) {
+                SearchResult::Found(kv) => {
+                    assert_eq!(kv.key(), &probe);
+                    Ok(kv.index())
+                }
+                SearchResult::GoDown(edge) => Err(edge.index()),
+            };
+            assert_eq!(position, keys.binary_search(&probe));
+        }
+        leaf.destroy(|page| pages.release(page));
+        pages.assert_all_released();
+    }
+
     #[test]
     fn search_borrows_keys() {
         let pages = TestPages::<String, ()>::new();
@@ -98,24 +123,32 @@ mod tests {
         pages.assert_all_released();
     }
 
-    /// A key whose `Ord` answers at random.
-    struct Chaotic<'r>(&'r TestRng);
+    /// A key whose `Ord` answers at random. `PADDING` picks the search path:
+    /// 0 keeps it small enough for the branchless search, 32 makes it take
+    /// the narrow-then-scan search.
+    struct Chaotic<'r, const PADDING: usize>(&'r TestRng, [u8; PADDING]);
 
-    impl PartialEq for Chaotic<'_> {
+    impl<'r, const PADDING: usize> Chaotic<'r, PADDING> {
+        fn new(rng: &'r TestRng) -> Self {
+            Self(rng, [0; PADDING])
+        }
+    }
+
+    impl<const PADDING: usize> PartialEq for Chaotic<'_, PADDING> {
         fn eq(&self, _: &Self) -> bool {
             self.0.below(2) == 0
         }
     }
 
-    impl Eq for Chaotic<'_> {}
+    impl<const PADDING: usize> Eq for Chaotic<'_, PADDING> {}
 
-    impl PartialOrd for Chaotic<'_> {
+    impl<const PADDING: usize> PartialOrd for Chaotic<'_, PADDING> {
         fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
             Some(self.cmp(other))
         }
     }
 
-    impl Ord for Chaotic<'_> {
+    impl<const PADDING: usize> Ord for Chaotic<'_, PADDING> {
         fn cmp(&self, _: &Self) -> Ordering {
             [Ordering::Less, Ordering::Equal, Ordering::Greater][self.0.below(3)]
         }
@@ -123,13 +156,18 @@ mod tests {
 
     #[test]
     fn search_stays_in_bounds_for_any_ord() {
+        search_stays_in_bounds::<0>();
+        search_stays_in_bounds::<32>();
+    }
+
+    fn search_stays_in_bounds<const PADDING: usize>() {
         let rng = TestRng::new(7);
         let ledger = DropLedger::new();
-        let pages = TestPages::<Chaotic<'_>, Tracked<'_>>::new();
+        let pages = TestPages::<Chaotic<'_, PADDING>, Tracked<'_>>::new();
         let mut leaf = Subtree::new_leaf(pages.fresh());
         let searches = if cfg!(miri) { 60 } else { 1000 };
         for _ in 0..searches {
-            let edge = match leaf.borrow_mut().search(&Chaotic(&rng)) {
+            let edge = match leaf.borrow_mut().search(&Chaotic::new(&rng)) {
                 SearchResult::Found(kv) => {
                     assert!(kv.index() < kv.reborrow().into_node().len());
                     let _ = kv.value().id();
@@ -139,7 +177,7 @@ mod tests {
             };
             assert!(edge.index() <= edge.reborrow().into_node().len());
             if let EdgeRoom::Fits(edge) = edge.check_room() {
-                edge.insert_fit(Chaotic(&rng), ledger.track());
+                edge.insert_fit(Chaotic::new(&rng), ledger.track());
             }
         }
         leaf.destroy(|page| pages.release(page));
@@ -149,13 +187,18 @@ mod tests {
 
     #[test]
     fn a_tree_stays_memory_safe_under_any_ord() {
+        tree_stays_memory_safe::<0>();
+        tree_stays_memory_safe::<32>();
+    }
+
+    fn tree_stays_memory_safe<const PADDING: usize>() {
         let rng = TestRng::new(8);
         let ledger = DropLedger::new();
-        let pages = TestPages::<Chaotic<'_>, Bulky<'_>>::new();
+        let pages = TestPages::<Chaotic<'_, PADDING>, Bulky<'_>>::new();
         let mut tree = TestTree::new(&pages);
         let inserts = if cfg!(miri) { 120 } else { 3000 };
         for _ in 0..inserts {
-            tree.insert(Chaotic(&rng), Bulky::from_tracked(ledger.track()));
+            tree.insert(Chaotic::new(&rng), Bulky::from_tracked(ledger.track()));
         }
         assert!(tree.height() >= 1);
         let ids = tree.entries(|_, value| value.tracked_id());

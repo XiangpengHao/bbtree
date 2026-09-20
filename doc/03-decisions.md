@@ -159,6 +159,40 @@ tail, was prototyped and rejected.
   sorted leaves. It's ~5% faster on inserts, and faster on gets only with
   AVX-512 (167 vs 185 ns); it would be gated on target features.
 
+**D17. B+-tree: values live only in leaves; separators are moved, not copied.** (2026-10-07)
+Supersedes the value area of internal nodes in D12, and settles the
+B-tree-vs-B+-tree proposal.
+
+```
+internal  | len | k0 k1 … →            free              | e0 e1 … e_cap |
+leaf      | len | k0 k1 … →     free     ← … v1 v0 | head |
+```
+
+- Internal nodes hold keys and edges only. **Separator keys are stored
+  physically in internal nodes**, which are the hot part of the tree: an
+  internal-node search compares against keys inline in that node and never
+  follows a pointer into a leaf.
+- Leaves hold keys and values as in D9, plus one key-less **head** value: every
+  leaf except the leftmost stores the value of the separator key just to its
+  left in key order. That key lives in an internal node: the lowest common
+  ancestor of the two leaves.
+- A tree with L leaves has exactly L − 1 separators, one per boundary between
+  neighbouring leaves, so every leaf but the leftmost has exactly one head.
+- **No `K: Clone`.** Each key is stored exactly once, as in std. When a leaf
+  splits, the right half's smallest key moves up as the separator and its
+  value stays behind as the right leaf's head; a merge moves the key back down
+  next to its value. Values never leave leaves.
+- **Lookup always ends at a leaf.** A match on an internal separator continues
+  down the leftmost path of its right subtree to that leaf's head.
+- Why: values only in leaves, as intended from the start (00-init: database
+  B-trees). Internal fanout rises (u64→u64: 42 → 63 children per 1 KB), and
+  large values never sit in internal nodes. Inner nodes are a tiny fraction of
+  the tree, so the extra work on separator hits doesn't matter.
+- Alternative considered: keep every key physically in its leaf and let
+  internal nodes point at it. Rejected because moves inside leaves (shifts,
+  splits, steals) would invalidate those pointers; the structural relation
+  above needs no pointer maintenance.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -208,7 +242,6 @@ requires the token: one check, no duplicates, nothing on the hot path.
   taken in std).
 - **Default allocator:** carve pages from large chunks (≥ 256 KB). Open:
   chunks per map or per allocator instance; when chunks go back to the OS.
-- **B-tree, not B+-tree:** B+-tree separators need `K: Clone`.
 - **Stable-first:** the library builds on stable; nightly only for fuzzing and
   Miri. Without `#[may_dangle]`, our dropck is stricter than std's (a README
   deviation); an optional `nightly` feature restores it.

@@ -1,0 +1,60 @@
+//! bbtree's benchmark suite: `bbtree::BBTreeMap` against std's `BTreeMap`,
+//! hashbrown's `HashMap` and std's `HashMap`, on the key types, value types,
+//! sizes and operations that `doc/02-field_study.md` §6 derives from how Rust
+//! code uses maps.
+//!
+//! - A *workload* is a key kind, a value kind, a size and an operation; a
+//!   *cell* is a workload on one map. Suites are lists of workloads
+//!   (`suites.rs`), and each workload runs on every map.
+//! - The suite runner (`suite_runner.rs`) measures every cell and repetition
+//!   in a fresh child process of the same executable (`cell_runner.rs`), so
+//!   that no cell inherits another one's heap or cache state.
+//! - The binary fixes the global allocator: `bbtree-bench` times cells on
+//!   plain mimalloc, and `bbtree-bench-memory` counts live bytes instead
+//!   (`memory.rs`).
+
+use std::process::ExitCode;
+
+mod cell_runner;
+mod command_line;
+mod keys;
+mod map_adapters;
+mod memory;
+mod operations;
+mod perf_counters;
+mod random;
+mod report;
+mod suite_runner;
+mod suites;
+mod values;
+mod workload;
+
+use cell_runner::CellRun;
+use command_line::Invocation;
+use memory::RunMode;
+use suite_runner::SuiteRunner;
+
+pub use memory::{BaseAllocator, CountingAllocator};
+
+/// Runs either binary's command line. The memory binary passes its global
+/// allocator, whose live-byte count its cells report.
+pub fn run(counting_allocator: Option<&'static CountingAllocator>) -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mode = RunMode::new(counting_allocator);
+    let outcome = match Invocation::parse(&arguments) {
+        Ok(Invocation::Help) => {
+            println!("{}", Invocation::usage());
+            Ok(())
+        }
+        Ok(Invocation::RunSuites(request)) => SuiteRunner::new(request, mode).run(),
+        Ok(Invocation::MeasureCell(request)) => CellRun::new(request, mode).measure_and_report(),
+        Err(message) => Err(format!("{message}\n\n{}", Invocation::usage())),
+    };
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}

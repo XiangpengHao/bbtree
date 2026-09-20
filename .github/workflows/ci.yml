@@ -39,6 +39,42 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  bench:
+    name: bench (fmt + clippy + test + quick run)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bench
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      # Keeps the suite building and running as the library's API changes;
+      # timings on a shared runner mean nothing.
+      - name: Quick run
+        run: |
+          cargo run --release --bin bbtree-bench -- small --quick
+          cargo run --release --bin bbtree-bench-memory -- small --quick
+
   miri:
     name: miri
     runs-on: ubuntu-latest
