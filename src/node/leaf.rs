@@ -33,6 +33,7 @@ mod tests {
     use crate::node::handle::{
         EdgeRoom, ForceResult, Insertion, Leaf, NodeMut, SearchResult, Split, Subtree,
     };
+    use crate::node::layout::NodeLayout;
     use crate::node::page::TestPages;
     use crate::node::test_support::{
         Bulky, CacheLineAligned, DropLedger, PageAligned, TestRng, TestTree, Tracked, TrackedValue,
@@ -381,11 +382,11 @@ mod tests {
     #[test]
     fn split_and_insert_at_every_position() {
         let ledger = DropLedger::new();
-        for position in 0..=12 {
+        for position in 0..=NodeLayout::<Tracked<'_>, Bulky<'_>>::LEAF_CAPACITY {
             split_at::<Bulky<'_>>(&ledger, position);
         }
         if !cfg!(miri) {
-            for position in 0..=85 {
+            for position in 0..=NodeLayout::<Tracked<'_>, Tracked<'_>>::LEAF_CAPACITY {
                 split_at::<Tracked<'_>>(&ledger, position);
             }
         }
@@ -419,7 +420,7 @@ mod tests {
             edge.insert_fit((), ());
             len += 1;
         }
-        assert_eq!(len, 4095);
+        assert_eq!(len, 1023);
         let middle = leaf.borrow_mut().edge_at(len / 2);
         let Insertion::Split(split) = middle.insert((), (), || pages.fresh()) else {
             panic!("a full leaf splits");

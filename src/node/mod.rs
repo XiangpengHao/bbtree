@@ -1,5 +1,5 @@
-//! B-tree nodes: fixed-size, page-aligned pages holding keys and values
-//! (`doc/decisions.md` D6, D7, D9, D11, D12, D13), behind typed, zero-overhead
+//! B-tree nodes: fixed-size, self-aligned 1 KB pages holding keys and values
+//! (`doc/decisions.md` D9, D11, D12, D13, D15), behind typed, zero-overhead
 //! abstractions over all the `unsafe` code (D14).
 //!
 //! A node is a page of `NodeLayout::<K, V>::LAYOUT`. The page says nothing

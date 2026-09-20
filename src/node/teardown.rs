@@ -238,10 +238,10 @@ mod tests {
         let count = if cfg!(miri) { 300 } else { 3000 };
         let mut keys: Vec<u64> = (0..count).collect();
         rng.shuffle(&mut keys);
-        let pages = TestPages::<u64, [u64; 40]>::new();
+        let pages = TestPages::<u64, [u64; 8]>::new();
         let mut tree = TestTree::new(&pages);
         for key in keys {
-            assert!(tree.insert(key, [key; 40]).is_none());
+            assert!(tree.insert(key, [key; 8]).is_none());
         }
         assert!(tree.height() >= 2);
         tree.destroy();

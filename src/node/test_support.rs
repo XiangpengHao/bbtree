@@ -138,12 +138,14 @@ impl Ord for Tracked<'_> {
     }
 }
 
-/// A tracked value padded so that a node with `Tracked` keys and `Bulky`
-/// values holds only 12 entries (D13): tall trees from few entries, which
-/// Miri can afford.
+/// A tracked value padded so that, with `Tracked` keys, 160-byte entries fill
+/// a 2 KB node with exactly 12 entries in both node kinds (D13, D15): tall
+/// trees from few entries, which Miri can afford, and the node shapes the
+/// balancing tests spell out. No entry size gives exactly 12 in both kinds
+/// of a 1 KB node.
 pub(super) struct Bulky<'l> {
     tracked: Tracked<'l>,
-    _padding: [u8; 280],
+    _padding: [u8; 112],
 }
 
 /// A value type that tests make from a [`Tracked`] and tell apart by its id.
@@ -166,7 +168,7 @@ impl<'l> TrackedValue<'l> for Bulky<'l> {
     fn from_tracked(tracked: Tracked<'l>) -> Self {
         Self {
             tracked,
-            _padding: [0; 280],
+            _padding: [0; 112],
         }
     }
 

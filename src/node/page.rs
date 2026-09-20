@@ -23,17 +23,17 @@ pub(crate) struct FreshPage<K, V> {
 }
 
 /// Temporary allocation boundary, until the allocator trait (D8) replaces it:
-/// one global-allocator call per node page. Every node is 4 KB-aligned (D7),
-/// and an aligned allocation per page costs glibc about twice the memory of
-/// the page itself (D8's measurement: 8200 B of RSS per 4 KB node); carving
-/// pages from large chunks, as the allocator trait will, avoids that.
+/// one global-allocator call per node page. Every node is aligned to its own
+/// size, at least 1 KB (D15), and glibc serves such aligned allocations
+/// poorly (D8's measurement: 8200 B of RSS per 4 KB-aligned 4 KB page);
+/// carving pages from large chunks, as the allocator trait will, avoids that.
 impl<K, V> FreshPage<K, V> {
     /// A page from the global allocator.
     ///
     /// Calls [`handle_alloc_error`] if the allocation fails.
     pub(crate) fn allocate() -> Self {
         let layout = NodeLayout::<K, V>::LAYOUT;
-        // SAFETY: `layout` has a non-zero size: nodes are at least 4 KB.
+        // SAFETY: `layout` has a non-zero size: nodes are at least 1 KB.
         let page = unsafe { alloc(layout) };
         let Some(page) = NonNull::new(page) else {
             handle_alloc_error(layout)
@@ -118,7 +118,7 @@ impl<K, V> NodePtr<K, V> {
     pub(super) fn from_fresh_page(page: FreshPage<K, V>) -> Self {
         let page = page.into_raw();
         // SAFETY: the page is at least `NODE_ALIGN`-aligned (checked in
-        // `FreshPage::new`) and at least 4 KB long, so the `u16` header is in
+        // `FreshPage::new`) and at least 1 KB long, so the `u16` header is in
         // bounds and aligned; the page is exclusively ours.
         unsafe { page.cast::<u16>().write(0) };
         Self {
@@ -274,7 +274,7 @@ mod test_pages {
         pub(in crate::node) fn fresh(&self) -> FreshPage<K, V> {
             let page = self.released.borrow_mut().pop().unwrap_or_else(|| {
                 let layout = NodeLayout::<K, V>::LAYOUT;
-                // SAFETY: `layout` has a non-zero size (at least 4 KB).
+                // SAFETY: `layout` has a non-zero size (at least 1 KB).
                 let raw = unsafe { alloc(layout) };
                 let page = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
                 self.allocated.borrow_mut().push(page);
@@ -383,7 +383,7 @@ mod tests {
         let pages = TestPages::<K, V>::new();
         let node = NodePtr::from_fresh_page(pages.fresh());
         let start = node.page.addr().get();
-        assert!(start.is_multiple_of(4096));
+        assert!(start.is_multiple_of(NodeLayout::<K, V>::NODE_ALIGN));
         let page = start..start + NodeLayout::<K, V>::NODE_SIZE;
         let leaf_capacity = NodePtr::<K, V>::capacity(true);
         let internal_capacity = NodePtr::<K, V>::capacity(false);

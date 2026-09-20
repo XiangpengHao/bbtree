@@ -28,6 +28,7 @@
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::hint;
 use core::marker::PhantomData;
 
 use super::page::{FreshPage, NodePtr};
@@ -231,36 +232,71 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
         }
     }
 
+    /// [`Self::search`] with an append fast path for inserts: a key greater
+    /// than the node's last key goes straight to the last edge.
+    ///
+    /// Branchless search pays a chain of dependent loads even when keys
+    /// arrive in order, which a branchy search would predict perfectly. The
+    /// one comparison against the last key is a well-predicted branch for
+    /// ascending inserts, and an independent load (no extra dependency) for
+    /// random ones.
+    pub(crate) fn search_expecting_append<Q>(self, key: &Q) -> SearchResult<Self>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let len = self.len();
+        if len > 0 {
+            // SAFETY: `len - 1 < len`.
+            let last_key = unsafe { self.reborrow().keys().get_unchecked(len - 1) };
+            if last_key.borrow() < key {
+                // SAFETY: `len <= len`.
+                return SearchResult::GoDown(unsafe { Edge::new_unchecked(self, len) });
+            }
+        }
+        self.search(key)
+    }
+
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` the edge
     /// where `key` belongs.
     ///
+    /// Branchless: every search runs the full `log2(len)` steps with no early
+    /// exit, and each step only picks the next `base` with
+    /// `select_unpredictable`, which compiles to a conditional move instead
+    /// of a mispredicted branch. The loop narrows to `base`, the last key not
+    /// greater than `key` (or 0), and one final comparison classifies it.
+    ///
     /// In bounds by construction, whatever `Ord` answers: the loop keeps
-    /// `low + size <= len`, probes only `mid = low + size / 2 < low + size`,
-    /// and shrinks `size` on every step. So `Ok` carries a probed index, which
-    /// is `< len`, and `Err` the final `low`, which is `<= len`.
+    /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
+    /// so `base < len` at the end. `Ok(base)` is then `< len`, and
+    /// `Err(base)`/`Err(base + 1)` are `<= len`.
     fn search_index<Q>(&self, key: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         let keys = self.reborrow().keys();
-        let mut low = 0;
         let mut size = keys.len();
-        while size > 0 {
-            let half = size / 2;
-            let mid = low + half;
-            // SAFETY: `mid < low + size <= keys.len()`.
-            let probe = unsafe { keys.get_unchecked(mid) };
-            match key.cmp(probe.borrow()) {
-                Ordering::Less => size = half,
-                Ordering::Equal => return Ok(mid),
-                Ordering::Greater => {
-                    low = mid + 1;
-                    size -= half + 1;
-                }
-            }
+        if size == 0 {
+            return Err(0);
         }
-        Err(low)
+        let mut base = 0;
+        while size > 1 {
+            let half = size / 2;
+            let mid = base + half;
+            // SAFETY: `mid < base + size <= keys.len()`.
+            let probe = unsafe { keys.get_unchecked(mid) };
+            let probe_is_greater = probe.borrow().cmp(key) == Ordering::Greater;
+            base = hint::select_unpredictable(probe_is_greater, base, mid);
+            size -= half;
+        }
+        // SAFETY: `base < base + size <= keys.len()`, with `size == 1` here.
+        let last_not_greater = unsafe { keys.get_unchecked(base) };
+        match last_not_greater.borrow().cmp(key) {
+            Ordering::Equal => Ok(base),
+            Ordering::Less => Err(base + 1),
+            Ordering::Greater => Err(base),
+        }
     }
 
     fn is_leaf(&self) -> bool {

@@ -31,25 +31,27 @@ use super::page::NodePtr;
 pub(crate) struct NodeLayout<K, V>(PhantomData<fn() -> (K, V)>);
 
 impl<K, V> NodeLayout<K, V> {
-    /// Every node is a multiple of this size and at least this aligned (D6, D7).
-    const PAGE_SIZE: usize = 4096;
+    /// Every node is a multiple of this size and at least this aligned (D15).
+    const BASE_NODE_SIZE: usize = 1024;
 
     /// Every node kind holds at least this many entries (D13); nodes grow by
     /// whole `NODE_ALIGN` steps until it fits.
     const MIN_CAPACITY: usize = 12;
 
     /// Upper bound on any node's capacity, so that an index (`0..=capacity`)
-    /// fits in the 12 low bits that page alignment leaves free. Only binds
-    /// when keys and values are zero-sized.
-    const MAX_CAPACITY: usize = 4095;
+    /// fits in the 10 low bits that 1 KB alignment leaves free. Only binds
+    /// when keys and values are (nearly) zero-sized.
+    const MAX_CAPACITY: usize = 1023;
 
     const EDGE_SIZE: usize = size_of::<NodePtr<K, V>>();
 
     /// Keys start right after the `len: u16` header, rounded up to `K`'s alignment.
     pub(crate) const KEYS_OFFSET: usize = size_of::<u16>().next_multiple_of(align_of::<K>());
 
-    pub(crate) const NODE_ALIGN: usize =
-        Self::max(Self::PAGE_SIZE, Self::max(align_of::<K>(), align_of::<V>()));
+    pub(crate) const NODE_ALIGN: usize = Self::max(
+        Self::BASE_NODE_SIZE,
+        Self::max(align_of::<K>(), align_of::<V>()),
+    );
 
     /// The smallest multiple of `NODE_ALIGN` in which both node kinds hold at
     /// least `MIN_CAPACITY` keys.
@@ -81,7 +83,7 @@ impl<K, V> NodeLayout<K, V> {
         let value_size = size_of::<V>();
 
         assert!(Self::NODE_ALIGN.is_power_of_two());
-        assert!(Self::NODE_SIZE.is_multiple_of(Self::PAGE_SIZE));
+        assert!(Self::NODE_SIZE.is_multiple_of(Self::BASE_NODE_SIZE));
         assert!(Self::NODE_SIZE.is_multiple_of(Self::NODE_ALIGN));
 
         assert!(Self::LEAF_CAPACITY >= Self::MIN_CAPACITY);
@@ -219,8 +221,8 @@ mod tests {
                 NodeLayout::<K, V>::LAYOUT,
                 Layout::from_size_align(self.node_size, NodeLayout::<K, V>::NODE_ALIGN).unwrap()
             );
-            assert!(NodeLayout::<K, V>::NODE_SIZE.is_multiple_of(4096));
-            assert!(NodeLayout::<K, V>::NODE_ALIGN >= 4096);
+            assert!(NodeLayout::<K, V>::NODE_SIZE.is_multiple_of(1024));
+            assert!(NodeLayout::<K, V>::NODE_ALIGN >= 1024);
         }
     }
 
@@ -228,9 +230,9 @@ mod tests {
     fn u64_to_u64_fills_one_page() {
         ExpectedLayout {
             keys_offset: 8,
-            leaf_capacity: 255,
-            internal_capacity: 170,
-            node_size: 4096,
+            leaf_capacity: 63,
+            internal_capacity: 42,
+            node_size: 1024,
         }
         .assert_matches::<u64, u64>();
     }
@@ -239,9 +241,9 @@ mod tests {
     fn set_of_bytes_packs_tightly() {
         ExpectedLayout {
             keys_offset: 2,
-            leaf_capacity: 4094,
-            internal_capacity: 454,
-            node_size: 4096,
+            leaf_capacity: 1022,
+            internal_capacity: 112,
+            node_size: 1024,
         }
         .assert_matches::<u8, ()>();
     }
@@ -250,9 +252,9 @@ mod tests {
     fn zero_sized_keys_and_values_hit_the_capacity_cap() {
         ExpectedLayout {
             keys_offset: 2,
-            leaf_capacity: 4095,
-            internal_capacity: 510,
-            node_size: 4096,
+            leaf_capacity: 1023,
+            internal_capacity: 126,
+            node_size: 1024,
         }
         .assert_matches::<(), ()>();
     }
@@ -272,9 +274,9 @@ mod tests {
     fn over_aligned_keys_shift_the_key_array() {
         ExpectedLayout {
             keys_offset: 64,
-            leaf_capacity: 56,
-            internal_capacity: 50,
-            node_size: 4096,
+            leaf_capacity: 27,
+            internal_capacity: 24,
+            node_size: 2048,
         }
         .assert_matches::<CacheLineAligned, u64>();
     }
@@ -283,35 +285,35 @@ mod tests {
     fn heap_owning_keys_and_values() {
         ExpectedLayout {
             keys_offset: 8,
-            leaf_capacity: 85,
-            internal_capacity: 72,
-            node_size: 4096,
+            leaf_capacity: 21,
+            internal_capacity: 18,
+            node_size: 1024,
         }
         .assert_matches::<String, Vec<u8>>();
     }
 
     /// With `K = u64`, the internal node is the binding kind: 12 entries plus
-    /// 13 edges fit in 4 KB up to `size_of K + size_of V = 332`.
+    /// 13 edges fit in 1 KB up to `size_of K + size_of V = 76`.
     #[test]
     fn largest_entry_that_fits_one_page() {
         ExpectedLayout {
             keys_offset: 8,
-            leaf_capacity: 12,
+            leaf_capacity: 13,
             internal_capacity: 12,
-            node_size: 4096,
+            node_size: 1024,
         }
-        .assert_matches::<u64, [u8; 324]>();
+        .assert_matches::<u64, [u8; 68]>();
     }
 
     #[test]
     fn one_byte_more_needs_two_pages() {
         ExpectedLayout {
             keys_offset: 8,
-            leaf_capacity: 24,
+            leaf_capacity: 26,
             internal_capacity: 23,
-            node_size: 8192,
+            node_size: 2048,
         }
-        .assert_matches::<u64, [u8; 325]>();
+        .assert_matches::<u64, [u8; 69]>();
     }
 
     #[test]

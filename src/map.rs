@@ -1,5 +1,5 @@
 //! [`BBTreeMap`]: an ordered map with the API and behavior of std's
-//! `BTreeMap` (D1), on page-sized nodes without parent pointers (D6, D11).
+//! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15).
 //!
 //! The map owns at most one [`Subtree`]: none until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent

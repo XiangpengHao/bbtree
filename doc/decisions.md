@@ -103,6 +103,62 @@ leaf and an internal node hold ≥ 12 entries, and the node stays 4 KB-aligned
   which is still a multiple of 4 KB.
 - u64→u64 is unaffected: leaf 255, internal 170, 4 KB.
 
+**D15. Nodes are 1 KB, aligned to their own size.** (2026-10-07)
+Supersedes the 4 KB size in D6 and the 4 KB alignment in D7. A node is the
+smallest multiple of 1 KB at which both kinds hold ≥ 12 entries (D13), and it
+is aligned to max(1 KB, align of K, align of V).
+
+- Why: a sweep at 10M u64→u64 entries (mimalloc, branchless search, append
+  fast path) put 1 KB ahead of every other size, and ahead of std on all three
+  workloads:
+
+  | node size | random insert | sequential insert | random get | RSS |
+  |-----------|---------------|-------------------|------------|-----|
+  | 512 B     | 231 ns        | 21.8 ns           | 180 ns     | 247 MB |
+  | **1 KB**  | **207 ns**    | 16.7 ns           | **177 ns** | 237 MB |
+  | 2 KB      | 253 ns        | 15.0 ns           | 216 ns     | 234 MB |
+  | 4 KB      | 366 ns        | 14.3 ns           | 249 ns     | 239 MB |
+  | 8 KB      | 464 ns        | 13.4 ns           | 245 ns     | 503 MB |
+  | std       | 230 ns        | 36.7 ns           | 258 ns     | 314 MB |
+
+  Random inserts get worse with node size because each one shifts about half
+  the node: at 4 KB that pulls 2.2× std's cache lines from DRAM per insert.
+  The 8 KB memory jump is mimalloc's overhead on large aligned blocks.
+- A self-aligned 1 KB node never crosses a 4 KB page, so D7's one-TLB-entry
+  argument still holds.
+- 1 KB alignment leaves 10 free low address bits, so node capacity is capped
+  at 1023.
+- 12 entries fit in 1 KB while `K + V` ≤ ~76 B (the internal node binds);
+  larger entries get 2 KB, 3 KB, … nodes. u64→u64: leaf 63, internal 42.
+- A one-entry map costs 1 KB instead of 4 KB.
+- To revisit after in-node prefetching and with other key/value types.
+
+**D16. Leaves and internal nodes stay sorted.** (2026-10-07)
+Unsorted leaf storage, fully unsorted or as a sorted prefix plus an unsorted
+tail, was prototyped and rejected.
+
+- 10M u64→u64, mimalloc, ns/op (scans in ns per entry or per scan):
+
+  | workload | sorted | sorted prefix + tail | unsorted | std |
+  |---|---|---|---|---|
+  | random insert | 207 | 198 | **176** | 219 |
+  | sequential insert | **16.9** | 19.1 | 25.4 | 37.8 |
+  | random get | **186** | 207 | 198 | 259 |
+  | full scan, random-built (per entry) | **4.3** | 8.7 | 10.6 | 14.3 |
+  | 64-entry range scan | **512** | 932 | 1142 | 1219 |
+
+- Unsorted leaves only win random inserts. A linear scan of a cold leaf pulls
+  every key line from DRAM, so it loses gets, and sorting on read is branchy,
+  so it loses scans.
+- Blocker for D1: std's `iter`, `keys`, `values`, `IntoIterator`, `Debug`,
+  `Hash`, `PartialEq`/`PartialOrd` and `Drop` have no `K: Ord` bound, so they
+  could not produce key order from unsorted leaves without storing a
+  comparator in the map (one more word, plus user code in `Drop`/`Debug`) or
+  a per-leaf permutation (the slotted layout D10 rejected).
+- Possible later: a branch-free linear count instead of binary search inside
+  sorted leaves. It's ~5% faster on inserts, and faster on gets only with
+  AVX-512 (167 vs 185 ns); it would be gated on target features.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -141,8 +197,8 @@ requires the token: one check, no duplicates, nothing on the hot path.
 
 ## Proposed, not decided
 
-- **Path-stack frame** = one word: node address | index in the low 12 bits
-  (D7), using strict-provenance `map_addr`. Caps node capacity at 4095.
+- **Path-stack frame** = one word: node address | index in the low 10 bits
+  (D15), using strict-provenance `map_addr`. Caps node capacity at 1023.
 - **Stack depth `MAX_HEIGHT`:** D13 fixes it. Capacity ≥ 12 means a
   non-root internal node has ≥ 6 children, so the height is ≤ 21. That gives
   ~170 B per stack with one-word entries.

@@ -43,6 +43,7 @@ mod tests {
         EdgeRoom, ForceResult, Immut, Insertion, Internal, Kv, Leaf, LeafOrInternal, NodeMut,
         NodeRef, Split, StealError, Subtree,
     };
+    use crate::node::layout::NodeLayout;
     use crate::node::page::TestPages;
     use crate::node::test_support::{Bulky, DropLedger, TestRng, TestTree, Tracked, TrackedValue};
 
@@ -228,11 +229,11 @@ mod tests {
     #[test]
     fn split_and_insert_at_every_position() {
         let ledger = DropLedger::new();
-        for position in 0..=12 {
+        for position in 0..=NodeLayout::<Tracked<'_>, Bulky<'_>>::INTERNAL_CAPACITY {
             split_at::<Bulky<'_>>(&ledger, position);
         }
         if !cfg!(miri) {
-            for position in 0..=72 {
+            for position in 0..=NodeLayout::<Tracked<'_>, Tracked<'_>>::INTERNAL_CAPACITY {
                 split_at::<Tracked<'_>>(&ledger, position);
             }
         }

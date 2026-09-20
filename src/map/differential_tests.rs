@@ -42,9 +42,10 @@ impl FromNumber for String {
     }
 }
 
-/// With `u64` keys, 12 entries fill a 4 KB node (D13): tall trees from a few
-/// hundred entries.
-type TwelvePerNode = [u64; 40];
+/// With `u64` keys, 72-byte entries fill a 1 KB node with 12 entries in an
+/// internal node and 14 in a leaf (D13, D15): tall trees from a few hundred
+/// entries, with little data per entry for Miri to track.
+type TwelvePerNode = [u64; 8];
 
 impl FromNumber for TwelvePerNode {
     fn from_number(number: usize) -> Self {
@@ -195,9 +196,9 @@ impl Workload {
 fn u64_to_u64_matches_std() {
     let workload = if cfg!(miri) {
         Workload {
-            random_steps: 600,
+            random_steps: 300,
             key_space: 400,
-            ordered_entries: 300,
+            ordered_entries: 150,
             min_sequential_height: 1,
         }
     } else {
@@ -215,9 +216,9 @@ fn u64_to_u64_matches_std() {
 fn string_to_string_matches_std() {
     let workload = if cfg!(miri) {
         Workload {
-            random_steps: 300,
+            random_steps: 150,
             key_space: 150,
-            ordered_entries: 120,
+            ordered_entries: 60,
             min_sequential_height: 1,
         }
     } else {
@@ -234,11 +235,14 @@ fn string_to_string_matches_std() {
 #[test]
 fn twelve_entry_nodes_match_std() {
     let workload = if cfg!(miri) {
+        // Height 2 already has an internal node split into a parent with
+        // room; height 3 only adds depth, which the native run covers.
+        // Ascending inserts leave half-full nodes: height 2 needs about 110.
         Workload {
-            random_steps: 400,
+            random_steps: 300,
             key_space: 300,
-            ordered_entries: 700,
-            min_sequential_height: 3,
+            ordered_entries: 200,
+            min_sequential_height: 2,
         }
     } else {
         Workload {
@@ -264,9 +268,10 @@ fn zero_sized_keys_and_values_match_std() {
     MirroredMaps::<(), ()>::new().run_random_operations(&rng, 100, 1);
     MirroredMaps::<(), u64>::new().run_random_operations(&rng, 100, 1);
     let workload = Workload {
-        random_steps: if cfg!(miri) { 300 } else { 20_000 },
+        random_steps: if cfg!(miri) { 200 } else { 20_000 },
         key_space: 1 << 12,
-        ordered_entries: if cfg!(miri) { 600 } else { 5000 },
+        // Leaves of `u64` keys and `()` values hold 127 entries.
+        ordered_entries: if cfg!(miri) { 150 } else { 5000 },
         min_sequential_height: 1,
     };
     workload.run::<u64, ()>(5);
@@ -288,25 +293,26 @@ fn byte_keys_with_zero_sized_values_match_std() {
 #[test]
 fn over_aligned_values_match_std() {
     Workload {
-        random_steps: if cfg!(miri) { 300 } else { 20_000 },
+        random_steps: if cfg!(miri) { 150 } else { 20_000 },
         key_space: 1 << 12,
-        ordered_entries: if cfg!(miri) { 100 } else { 3000 },
+        ordered_entries: if cfg!(miri) { 60 } else { 3000 },
         min_sequential_height: 1,
     }
     .run::<u64, CacheLineAligned>(7);
     Workload {
-        random_steps: if cfg!(miri) { 100 } else { 2000 },
+        random_steps: if cfg!(miri) { 60 } else { 2000 },
         key_space: 1 << 10,
-        ordered_entries: if cfg!(miri) { 40 } else { 600 },
+        ordered_entries: if cfg!(miri) { 30 } else { 600 },
         min_sequential_height: 1,
     }
     .run::<u64, PageAligned>(8);
 
+    let count = if cfg!(miri) { 30 } else { 100 };
     let mut map = BBTreeMap::new();
-    for key in 0..100_u64 {
+    for key in 0..count {
         map.insert(key, PageAligned::new(key));
     }
-    for key in 0..100 {
+    for key in 0..count {
         let value = map.get(&key).expect("every key is there");
         assert!(ptr::from_ref(value).is_aligned());
         assert_eq!(value.get(), key);

@@ -86,7 +86,7 @@ impl<K: Ord, V> NodeMut<'_, K, V, LeafOrInternal> {
         value: V,
         new_page: &mut impl FnMut() -> FreshPage<K, V>,
     ) -> InsertOutcome<K, V> {
-        match self.search(&key) {
+        match self.search_expecting_append(&key) {
             SearchResult::Found(kv) => {
                 // As in std, the new key is dropped before the value changes:
                 // if its `Drop` panics, the map is unchanged.

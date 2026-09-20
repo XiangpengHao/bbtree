@@ -49,18 +49,19 @@ impl Borrow<usize> for CollidingKey<'_> {
     }
 }
 
-/// A drop-tracked value padded so that, with [`CollidingKey`]s, 12 entries
-/// fill a node (D13): tall trees from few entries, which Miri can afford.
+/// A drop-tracked value padded so that, with [`CollidingKey`]s, 72-byte
+/// entries fill a 1 KB node with 12 entries in an internal node and 14 in a
+/// leaf (D13, D15): tall trees from few entries, which Miri can afford.
 struct PaddedValue<'l> {
     tracked: Tracked<'l>,
-    _padding: [u8; 272],
+    _padding: [u8; 16],
 }
 
 impl<'l> PaddedValue<'l> {
     fn new(tracked: Tracked<'l>) -> Self {
         Self {
             tracked,
-            _padding: [0; 272],
+            _padding: [0; 16],
         }
     }
 
@@ -279,7 +280,8 @@ fn a_panicking_new_key_leaves_both_maps_unchanged() {
 
 #[test]
 fn a_panicking_drop_while_dropping_the_map_matches_std() {
-    // Above 168 entries, 12-entry nodes need a height of at least 2.
+    // Above 194 entries (13 leaves of 14, plus 12 separators), the tree
+    // needs a height of at least 2.
     let count = if cfg!(miri) { 200 } else { 600 };
     let cases = [
         (0, PanickingPart::Key),
@@ -347,9 +349,10 @@ impl Borrow<u64> for BudgetedKey<'_> {
 fn a_panicking_ord_leaves_the_map_unchanged() {
     let budget = Cell::new(usize::MAX);
     let rng = TestRng::new(22);
-    let (count, trials) = if cfg!(miri) { (200, 30) } else { (1000, 1000) };
-    // With 16-byte keys, 312-byte values fill a node with 12 entries (D13).
-    let mut map: BBTreeMap<BudgetedKey<'_>, [u64; 39]> = BBTreeMap::new();
+    let (count, trials) = if cfg!(miri) { (200, 12) } else { (1000, 1000) };
+    // With 16-byte keys, 56-byte values fill a 1 KB node with 12 entries in
+    // an internal node and 14 in a leaf (D13, D15).
+    let mut map: BBTreeMap<BudgetedKey<'_>, [u64; 7]> = BBTreeMap::new();
     let mut model: BTreeMap<u64, u64> = BTreeMap::new();
     for _ in 0..count {
         let number = rng.below(2 * count) as u64;
@@ -358,7 +361,7 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
             budget: &budget,
         };
         assert_eq!(
-            map.insert(key, [number; 39]).map(|value| value[0]),
+            map.insert(key, [number; 7]).map(|value| value[0]),
             model.insert(number, number)
         );
     }
@@ -373,7 +376,7 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         };
         let seed = (count + trial) as u64;
         budget.set(rng.below(20));
-        let inserted = catch_unwind(AssertUnwindSafe(|| map.insert(key, [seed; 39])));
+        let inserted = catch_unwind(AssertUnwindSafe(|| map.insert(key, [seed; 7])));
         budget.set(usize::MAX);
         match inserted {
             Ok(old_value) => {
