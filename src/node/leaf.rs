@@ -80,7 +80,7 @@ mod tests {
         pages.assert_all_released();
     }
 
-    /// The same check for keys that take the narrow-then-scan search.
+    /// The same check for keys that take the plain binary search.
     #[test]
     fn string_search_matches_slice_binary_search() {
         let pages = TestPages::<String, u64>::new();
@@ -125,7 +125,7 @@ mod tests {
 
     /// A key whose `Ord` answers at random. `PADDING` picks the search path:
     /// 0 keeps it small enough for the branchless search, 32 makes it take
-    /// the narrow-then-scan search.
+    /// the plain binary search.
     struct Chaotic<'r, const PADDING: usize>(&'r TestRng, [u8; PADDING]);
 
     impl<'r, const PADDING: usize> Chaotic<'r, PADDING> {
