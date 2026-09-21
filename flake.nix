@@ -41,6 +41,12 @@
             pkgs.cargo-fuzz
             llvmPackages.llvm
             pkgs.cargo-binutils
+            # The bench's `fetch` downloads its datasets with these, and
+            # derives those it may not redistribute with
+            # `bench/tools/bbtree_datasets.py`.
+            pkgs.gh
+            pkgs.zstd
+            pkgs.python3
           ];
           ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
         };

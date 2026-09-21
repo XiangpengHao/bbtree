@@ -31,6 +31,8 @@
 
 - Reason then measure. Don't start with blind sweeping, or brainless micro/premature optimizations. Always first think about what is the bottleneck by profiling and measurements, reason the cost model. Benchmark is the last step, to verify that your reasoning is correct, if not, correct your model and repeat; benchmark is NOT a tool to guide the optimization.
 
+- Nothing may take more than 10 minutes: estimate a benchmark run before starting it, and cut it down if it's longer. Run each cell once; repeat only cells shown to be noisy. Untimed setup (loading datasets, building key pools) runs in parallel; timed regions run single-threaded, one cell at a time.
+
 ## Verification
 
 - Never run Miri (`cargo miri test`, any mode) in a coding session or a subagent. Miri runs in CI only. Local checks are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.

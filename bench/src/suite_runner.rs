@@ -3,6 +3,9 @@
 //!
 //! Repetitions are the outer loop, so a slow drift (temperature, another
 //! process) spreads over all cells instead of piling onto a few.
+//!
+//! Cells whose keys are read from a dataset that is missing don't run; the
+//! report shows them as missing data, and the rest of the suite runs.
 
 use std::fs;
 use std::path::Path;
@@ -10,6 +13,7 @@ use std::process::Command;
 
 use crate::cell_runner::CellMeasurement;
 use crate::command_line::{CellRequest, Named, SuiteRequest};
+use crate::datasets::{DataDirectory, DataFile};
 use crate::map_adapters::MapKind;
 use crate::memory::RunMode;
 use crate::perf_counters::{PerfCounts, PerfStat};
@@ -34,24 +38,32 @@ impl SuiteRunner {
         let rows = self.selected_rows();
         let maps: Vec<MapKind> = (MapKind::ALL.iter().copied())
             .filter(|&map| self.request.filter().admits_map(map))
+            .filter(|map| rows.iter().any(|row| row.suite().maps().contains(map)))
             .collect();
         if rows.is_empty() || maps.is_empty() {
             return Err("no cell matches the filters".to_owned());
         }
-        // Every row on every map, split into the cells that run and the
-        // cells that are `n/a`.
-        let (runnable, not_applicable): (Vec<_>, Vec<_>) = (rows.iter())
+        // Every row on each of its suite's maps, split into the cells that
+        // run, the cells that are `n/a` and the cells whose data is missing.
+        let (applicable, not_applicable): (Vec<_>, Vec<_>) = (rows.iter())
             .flat_map(|&row| {
-                maps.iter()
+                (maps.iter())
+                    .filter(move |map| row.suite().maps().contains(map))
                     .map(move |&map| (row, Cell::new(map, row.workload())))
             })
             .partition(|&(_, cell)| cell.is_applicable());
+        let missing_files = Self::missing_data_files(&applicable);
+        let (runnable, missing_data): (Vec<_>, Vec<_>) =
+            (applicable.into_iter()).partition(|&(_, cell)| {
+                let needed = cell.workload().key().data_files();
+                !needed.iter().any(|file| missing_files.contains(file))
+            });
         if self.request.list_only() {
-            self.print_cells(&runnable, &not_applicable);
+            self.print_cells(&runnable, &not_applicable, &missing_data);
             return Ok(());
         }
 
-        let header = RunHeader::collect(&self.request, self.mode);
+        let mut header = RunHeader::collect(&self.request, self.mode);
         let directory = self.request.output_directory();
         fs::create_dir_all(directory)
             .map_err(|error| format!("creating {}: {error}", directory.display()))?;
@@ -63,9 +75,13 @@ impl SuiteRunner {
         let executable =
             std::env::current_exe().map_err(|error| format!("finding this executable: {error}"))?;
 
-        let mut records: Vec<RunRecord> = (not_applicable.iter())
-            .map(|&(row, cell)| RunRecord::not_applicable(row, cell.map()))
-            .collect();
+        let mut records: Vec<RunRecord> =
+            (not_applicable.iter())
+                .map(|&(row, cell)| RunRecord::not_run(row, cell.map(), RunOutcome::NotApplicable))
+                .chain(missing_data.iter().map(|&(row, cell)| {
+                    RunRecord::not_run(row, cell.map(), RunOutcome::MissingData)
+                }))
+                .collect();
         for record in &records {
             log.append(record)?;
         }
@@ -91,6 +107,7 @@ impl SuiteRunner {
             }
         }
 
+        header.record_end();
         let summary = Summary::new(&header, &rows, &maps, &records, self.mode).markdown();
         let summary_path = directory.join(format!("{file_stem}.md"));
         fs::write(&summary_path, &summary)
@@ -113,19 +130,63 @@ impl SuiteRunner {
         rows
     }
 
-    fn print_cells(&self, runnable: &[(SuiteRow, Cell)], not_applicable: &[(SuiteRow, Cell)]) {
+    /// The data files that `cells` read which aren't there with their
+    /// pinned size, each reported on stderr.
+    fn missing_data_files(cells: &[(SuiteRow, Cell)]) -> Vec<DataFile> {
+        let needed: Vec<DataFile> = (DataFile::ALL.into_iter())
+            .filter(|file| {
+                (cells.iter()).any(|(_, cell)| cell.workload().key().data_files().contains(file))
+            })
+            .collect();
+        if needed.is_empty() {
+            return needed;
+        }
+        let missing = match DataDirectory::from_environment() {
+            Ok(directory) => (needed.into_iter())
+                .filter(|&file| match directory.check_present(file) {
+                    Ok(_) => false,
+                    Err(problem) => {
+                        eprintln!("missing data: {problem}");
+                        true
+                    }
+                })
+                .collect(),
+            Err(problem) => {
+                eprintln!("missing data: {problem}");
+                needed
+            }
+        };
+        if !missing.is_empty() {
+            eprintln!(
+                "the cells that read them don't run; `bbtree-bench verify-data` checks the \
+                 datasets, and `bbtree-bench fetch` downloads them"
+            );
+        }
+        missing
+    }
+
+    fn print_cells(
+        &self,
+        runnable: &[(SuiteRow, Cell)],
+        not_applicable: &[(SuiteRow, Cell)],
+        missing_data: &[(SuiteRow, Cell)],
+    ) {
         for &(row, cell) in runnable {
             println!("{}", Self::cell_label(row, cell));
         }
         for &(row, cell) in not_applicable {
             println!("{} (n/a)", Self::cell_label(row, cell));
         }
+        for &(row, cell) in missing_data {
+            println!("{} (missing data)", Self::cell_label(row, cell));
+        }
         println!(
-            "{} cells × {} repetition(s) = {} processes; {} cells n/a",
+            "{} cells × {} repetition(s) = {} processes; {} cells n/a; {} cells missing data",
             runnable.len(),
             self.request.repetitions(),
             runnable.len() * self.request.repetitions(),
-            not_applicable.len()
+            not_applicable.len(),
+            missing_data.len()
         );
     }
 

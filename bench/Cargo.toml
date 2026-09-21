@@ -11,6 +11,13 @@ bbtree = { path = ".." }
 bytes = "1"
 hashbrown = "0.17"
 mimalloc = "0.1"
+# Runs a cell's untimed setup on all cores; timed regions stay on one thread.
+rayon = "1"
+# Checks the datasets against the manifest (`verify-data`).
+sha2 = "0.10"
+# Holds out a dataset's keys by a hash of their bytes that, unlike std's
+# `DefaultHasher`, is pinned across Rust releases.
+siphasher = "1"
 tikv-jemallocator = { version = "0.7", optional = true }
 
 [features]

@@ -1,8 +1,12 @@
 //! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
 //! only code that moves keys, values and edges around (D9, D12, D14).
+//! [`KeySlots`] moves a node's keys together with their inline keys (D18).
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
+
+use super::inline_keys::InlinedKey;
+use crate::inline_key::InlineWord;
 
 /// The direction in which an array of slots grows from its anchor.
 pub(super) trait Direction {
@@ -184,6 +188,168 @@ impl<T, Dir: Direction> Slots<T, Dir> {
                 self.anchor.add(start)
             } else {
                 self.anchor.sub(end)
+            }
+        }
+    }
+}
+
+/// A node's key slots and, in a node with inline keys, its inline-key slots
+/// beside them (D18), for a map with strategy `S`. Every operation moves a
+/// key and its inline key together, so that inline key `i` is always key
+/// `i`'s; each mirrors the [`Slots`] operation of its name, with the same
+/// contract for both arrays.
+///
+/// A key read out of a node without inline keys comes with the inline key 0,
+/// which no node stores.
+///
+/// Invariant: `inline_keys`, if any, has the capacity of `keys`.
+pub(super) struct KeySlots<K, S> {
+    keys: Slots<K, Up>,
+    inline_keys: Option<Slots<InlineWord, Up>>,
+    _strategy: PhantomData<fn() -> S>,
+}
+
+impl<K, S> Clone for KeySlots<K, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K, S> Copy for KeySlots<K, S> {}
+
+impl<K, S> KeySlots<K, S> {
+    /// # Safety
+    ///
+    /// `inline_keys`, if any, has the capacity of `keys`.
+    pub(super) unsafe fn new(
+        keys: Slots<K, Up>,
+        inline_keys: Option<Slots<InlineWord, Up>>,
+    ) -> Self {
+        debug_assert!(inline_keys.is_none_or(|inline_keys| inline_keys.capacity == keys.capacity));
+        Self {
+            keys,
+            inline_keys,
+            _strategy: PhantomData,
+        }
+    }
+
+    /// The key slots alone, to read keys in place.
+    pub(super) fn keys(self) -> Slots<K, Up> {
+        self.keys
+    }
+
+    /// The inline-key slots alone, to read inline keys in place, if the node
+    /// has them.
+    pub(super) fn inline_keys(self) -> Option<Slots<InlineWord, Up>> {
+        self.inline_keys
+    }
+
+    /// Reads key `index` and its inline key out; the slot holds nothing
+    /// afterwards (its bytes are a stale copy).
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`, and slot `index` is initialized.
+    pub(super) unsafe fn read(self, index: usize) -> InlinedKey<K, S> {
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity
+        // (type invariant).
+        unsafe {
+            let key = self.keys.slot(index).read();
+            let inline_key = match self.inline_keys {
+                Some(inline_keys) => inline_keys.slot(index).read(),
+                None => 0,
+            };
+            InlinedKey::from_parts(key, inline_key)
+        }
+    }
+
+    /// Writes `key` and its inline key into slot `index`.
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`, and slot `index` holds nothing that needs
+    /// dropping: it is overwritten, and is initialized afterwards.
+    pub(super) unsafe fn write(self, index: usize, key: InlinedKey<K, S>) {
+        let (key, inline_key) = key.into_parts();
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity
+        // (type invariant).
+        unsafe {
+            self.keys.slot(index).write(key);
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.slot(index).write(inline_key);
+            }
+        }
+    }
+
+    /// Replaces key `index` and its inline key, and returns the old ones.
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`, and slot `index` is initialized.
+    pub(super) unsafe fn replace(self, index: usize, key: InlinedKey<K, S>) -> InlinedKey<K, S> {
+        // SAFETY: forwarded: slot `index` is read out, then written again.
+        unsafe {
+            let old_key = self.read(index);
+            self.write(index, key);
+            old_key
+        }
+    }
+
+    /// See [`Slots::insert`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::insert`].
+    pub(super) unsafe fn insert(self, index: usize, len: usize, key: InlinedKey<K, S>) {
+        let (key, inline_key) = key.into_parts();
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
+        // are initialized like them (type invariant).
+        unsafe {
+            self.keys.insert(index, len, key);
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.insert(index, len, inline_key);
+            }
+        }
+    }
+
+    /// See [`Slots::remove`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::remove`].
+    pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlinedKey<K, S> {
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
+        // are initialized like them (type invariant).
+        unsafe {
+            let key = self.keys.remove(index, len);
+            let inline_key = match self.inline_keys {
+                Some(inline_keys) => inline_keys.remove(index, len),
+                None => 0,
+            };
+            InlinedKey::from_parts(key, inline_key)
+        }
+    }
+
+    /// See [`Slots::move_run_to`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::move_run_to`], and `dest` is a node of the same map,
+    /// which has inline keys exactly if this one has.
+    pub(super) unsafe fn move_run_to(
+        self,
+        start: usize,
+        count: usize,
+        dest: Self,
+        dest_start: usize,
+    ) {
+        debug_assert_eq!(self.inline_keys.is_some(), dest.inline_keys.is_some());
+        // SAFETY: forwarded; the inline-key slots of both have their keys'
+        // capacity and are initialized like them (type invariant).
+        unsafe {
+            self.keys.move_run_to(start, count, dest.keys, dest_start);
+            if let (Some(source), Some(destination)) = (self.inline_keys, dest.inline_keys) {
+                source.move_run_to(start, count, destination, dest_start);
             }
         }
     }

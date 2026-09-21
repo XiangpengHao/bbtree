@@ -12,15 +12,20 @@
 //! - The binary fixes the global allocator: `bbtree-bench` times cells on
 //!   plain mimalloc, and `bbtree-bench-memory` counts live bytes instead
 //!   (`memory.rs`).
+//! - Some key kinds are read from real-world datasets (`datasets.rs`), which
+//!   live outside the repository: `fetch` downloads them and `verify-data`
+//!   checks them.
 
 use std::process::ExitCode;
 
 mod cell_runner;
 mod command_line;
+mod datasets;
 mod keys;
 mod map_adapters;
 mod memory;
 mod operations;
+mod parallel_setup;
 mod perf_counters;
 mod random;
 mod report;
@@ -31,6 +36,7 @@ mod workload;
 
 use cell_runner::CellRun;
 use command_line::Invocation;
+use datasets::{DataDirectory, DatasetFetch};
 use memory::RunMode;
 use suite_runner::SuiteRunner;
 
@@ -46,6 +52,11 @@ pub fn run(counting_allocator: Option<&'static CountingAllocator>) -> ExitCode {
             println!("{}", Invocation::usage());
             Ok(())
         }
+        Ok(Invocation::VerifyData) => {
+            DataDirectory::from_environment().and_then(|directory| directory.verify())
+        }
+        Ok(Invocation::FetchData) => DataDirectory::from_environment()
+            .and_then(|directory| DatasetFetch::fetch_into(&directory)),
         Ok(Invocation::RunSuites(request)) => SuiteRunner::new(request, mode).run(),
         Ok(Invocation::MeasureCell(request)) => CellRun::new(request, mode).measure_and_report(),
         Err(message) => Err(format!("{message}\n\n{}", Invocation::usage())),

@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::cell_runner::CellMeasurement;
 use crate::command_line::{Named, SuiteRequest};
@@ -15,7 +16,8 @@ use crate::perf_counters::{PerfCounts, PerfEvent};
 use crate::suites::SuiteRow;
 use crate::workload::Scale;
 
-/// Where and how a run's numbers were made.
+/// Where and how a run's numbers were made, and how long it took on how busy
+/// a machine.
 pub(crate) struct RunHeader {
     started_at: String,
     commit: String,
@@ -23,6 +25,16 @@ pub(crate) struct RunHeader {
     allocator: String,
     settings: String,
     command_line: String,
+    started: Instant,
+    load_average_at_start: String,
+    /// Set by `record_end`.
+    end: Option<RunEnd>,
+}
+
+/// When a run ended.
+struct RunEnd {
+    wall_time: Duration,
+    load_average: String,
 }
 
 impl RunHeader {
@@ -48,7 +60,19 @@ impl RunHeader {
                 request.repetitions()
             ),
             command_line: request.command_line().to_owned(),
+            started: Instant::now(),
+            load_average_at_start: Self::load_average(),
+            end: None,
         }
+    }
+
+    /// Records the run's wall time and the load average at its end, once
+    /// every cell has run.
+    pub(crate) fn record_end(&mut self) {
+        self.end = Some(RunEnd {
+            wall_time: self.started.elapsed(),
+            load_average: Self::load_average(),
+        });
     }
 
     /// The start time, safe for file names: `20261007T143810Z`.
@@ -59,16 +83,41 @@ impl RunHeader {
     }
 
     fn markdown(&self) -> String {
-        format!(
+        let mut text = format!(
             "| | |\n|---|---|\n| date | {} |\n| commit | {} |\n| CPU | {} |\n| allocator | {} |\n\
-             | settings | {} |\n| command | `{}` |\n",
+             | settings | {} |\n| command | `{}` |\n\
+             | load average (1, 5, 15 min) at start | {} |\n",
             self.started_at,
             self.commit,
             self.cpu,
             self.allocator,
             self.settings,
-            self.command_line
-        )
+            self.command_line,
+            self.load_average_at_start
+        );
+        if let Some(end) = &self.end {
+            let seconds = end.wall_time.as_secs();
+            let _ = write!(
+                text,
+                "| load average at end | {} |\n| wall time | {} min {:02} s |\n",
+                end.load_average,
+                seconds / 60,
+                seconds % 60
+            );
+        }
+        text
+    }
+
+    /// The load average over the last 1, 5 and 15 minutes, which shows
+    /// whether other work shared the machine.
+    fn load_average() -> String {
+        let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+        let fields: Vec<&str> = text.split_whitespace().take(3).collect();
+        if fields.len() == 3 {
+            fields.join(", ")
+        } else {
+            "unknown".to_owned()
+        }
     }
 
     /// `git rev-parse HEAD` in this repository, marked dirty if anything
@@ -112,6 +161,9 @@ impl RunHeader {
 pub(crate) enum RunOutcome {
     /// The map lacks the operation, so the cell doesn't run.
     NotApplicable,
+    /// A data file the keys are read from is missing or has the wrong size,
+    /// so the cell doesn't run.
+    MissingData,
     Failed(String),
     Measured {
         measurement: CellMeasurement,
@@ -120,10 +172,12 @@ pub(crate) enum RunOutcome {
 }
 
 impl RunOutcome {
+    const MISSING_DATA: &str = "missing data (run verify-data)";
+
     fn summary_value(&self) -> Option<f64> {
         match self {
             Self::Measured { measurement, .. } => Some(measurement.summary_value()),
-            Self::NotApplicable | Self::Failed(_) => None,
+            Self::NotApplicable | Self::MissingData | Self::Failed(_) => None,
         }
     }
 
@@ -131,6 +185,7 @@ impl RunOutcome {
     pub(crate) fn brief(&self) -> String {
         match self {
             Self::NotApplicable => "n/a".to_owned(),
+            Self::MissingData => Self::MISSING_DATA.to_owned(),
             Self::Failed(reason) => format!("FAILED: {reason}"),
             Self::Measured { measurement, .. } => match measurement {
                 CellMeasurement::Timing { .. } => {
@@ -144,8 +199,8 @@ impl RunOutcome {
     }
 }
 
-/// One run of one cell, or the single `n/a` record of a cell that doesn't
-/// run.
+/// One run of one cell, or the single record of a cell that doesn't run:
+/// `n/a`, or missing data.
 pub(crate) struct RunRecord {
     row: SuiteRow,
     map: MapKind,
@@ -154,12 +209,17 @@ pub(crate) struct RunRecord {
 }
 
 impl RunRecord {
-    pub(crate) fn not_applicable(row: SuiteRow, map: MapKind) -> Self {
+    /// The record of a cell that doesn't run, for `outcome`'s reason.
+    pub(crate) fn not_run(row: SuiteRow, map: MapKind, outcome: RunOutcome) -> Self {
+        assert!(
+            matches!(outcome, RunOutcome::NotApplicable | RunOutcome::MissingData),
+            "cells that run have a record per repetition"
+        );
         Self {
             row,
             map,
             repetition: None,
-            outcome: RunOutcome::NotApplicable,
+            outcome,
         }
     }
 
@@ -180,6 +240,7 @@ impl RunRecord {
         let workload = self.row.workload();
         let status = match self.outcome {
             RunOutcome::NotApplicable => "n/a",
+            RunOutcome::MissingData => "missing-data",
             RunOutcome::Failed(_) => "failed",
             RunOutcome::Measured { .. } => "ok",
         };
@@ -455,6 +516,12 @@ impl<'run> Summary<'run> {
             .any(|outcome| matches!(outcome, RunOutcome::NotApplicable))
         {
             return "n/a".to_owned();
+        }
+        if self
+            .outcomes(row, map)
+            .any(|outcome| matches!(outcome, RunOutcome::MissingData))
+        {
+            return RunOutcome::MISSING_DATA.to_owned();
         }
         if self
             .outcomes(row, map)

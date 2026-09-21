@@ -6,8 +6,9 @@ use core::mem::needs_drop;
 
 use super::handle::{ForceResult, LeafOrInternal, NodeKind, NodeMut, Subtree};
 use super::page::PageByKind;
+use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
+impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
     /// Drops every key and value in ascending key order, each key before its
     /// value, as std's `BTreeMap` does (D1), and hands every page to
     /// `release`, sorted by the kind of node it held. A separator's value is
@@ -18,7 +19,7 @@ impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
     /// collections: either way, every key and value is dropped once and every
     /// page released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
-    pub(crate) fn destroy(self, mut release: impl FnMut(PageByKind<K, V>)) {
+    pub(crate) fn destroy(self, mut release: impl FnMut(PageByKind<K, V, S>)) {
         Teardown {
             rest: Some(self.forget_type()),
             release: &mut release,
@@ -31,12 +32,14 @@ impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
 ///
 /// Dropping it takes apart whatever is left: that is how a panicking key or
 /// value `Drop` still leaves nothing behind.
-struct Teardown<'r, K, V, Release: FnMut(PageByKind<K, V>)> {
-    rest: Option<Subtree<K, V>>,
+struct Teardown<'r, K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)> {
+    rest: Option<Subtree<K, V, S>>,
     release: &'r mut Release,
 }
 
-impl<K, V, Release: FnMut(PageByKind<K, V>)> Teardown<'_, K, V, Release> {
+impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
+    Teardown<'_, K, V, S, Release>
+{
     /// Drops the entries of `rest` in ascending order, then releases its
     /// pages.
     ///
@@ -62,7 +65,7 @@ impl<K, V, Release: FnMut(PageByKind<K, V>)> Teardown<'_, K, V, Release> {
     /// the head: the separator's value (D17). User `Drop` code runs only on
     /// keys and values already out of the tree, and while a [`Teardown`] owns
     /// every detached child.
-    fn drop_entries_in_order(node: NodeMut<'_, K, V, LeafOrInternal>, release: &mut Release) {
+    fn drop_entries_in_order(node: NodeMut<'_, K, V, S, LeafOrInternal>, release: &mut Release) {
         match node.force() {
             ForceResult::Leaf(mut leaf) => {
                 if let Some(head) = leaf.reborrow_mut().head() {
@@ -136,7 +139,9 @@ impl<K, V, Release: FnMut(PageByKind<K, V>)> Teardown<'_, K, V, Release> {
     }
 }
 
-impl<K, V, Release: FnMut(PageByKind<K, V>)> Drop for Teardown<'_, K, V, Release> {
+impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)> Drop
+    for Teardown<'_, K, V, S, Release>
+{
     fn drop(&mut self) {
         // Nothing is left unless a panic cut `run` short.
         self.run();
@@ -149,10 +154,9 @@ mod tests {
     use std::panic::catch_unwind;
     use std::vec::Vec;
 
+    use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::node::page::TestPages;
     use crate::node::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
-
-    type BulkyTree<'p, 'l> = TestTree<'p, Bulky<'l>, Tracked<'l>>;
 
     /// What, if anything, panics when dropped.
     #[derive(Clone, Copy)]
@@ -164,20 +168,20 @@ mod tests {
 
     /// A tree of `count` entries inserted in random order. Keys are ordered
     /// by id, so key ids ascend with key order.
-    fn random_tree<'p, 'l>(
-        pages: &'p TestPages<Bulky<'l>, Tracked<'l>>,
+    fn random_tree<'p, 'l, K: FromTracked<'l> + Ord, S: InlineKeyStrategy<K>>(
+        pages: &'p TestPages<K, Tracked<'l>, S>,
         ledger: &'l DropLedger,
         rng: &TestRng,
         count: usize,
         panicking: PanickingDrop,
-    ) -> BulkyTree<'p, 'l> {
-        let mut entries: Vec<(Bulky<'l>, Tracked<'l>)> = (0..count)
+    ) -> TestTree<'p, K, Tracked<'l>, S> {
+        let mut entries: Vec<(K, Tracked<'l>)> = (0..count)
             .map(|index| match panicking {
                 PanickingDrop::Key(position) if position == index => (
-                    Bulky::from_tracked(ledger.track_panicking_on_drop()),
+                    K::from_tracked(ledger.track_panicking_on_drop()),
                     ledger.track(),
                 ),
-                _ => (Bulky::from_tracked(ledger.track()), ledger.track()),
+                _ => (K::from_tracked(ledger.track()), ledger.track()),
             })
             .collect();
         if let PanickingDrop::Value(position) = panicking {
@@ -191,33 +195,41 @@ mod tests {
         tree
     }
 
+    /// Builds a random tree of `count` entries and destroys it: every entry
+    /// is dropped once, and every page released.
+    fn destroy_random_tree<'l, K: FromTracked<'l> + Ord, S: InlineKeyStrategy<K>>(
+        ledger: &'l DropLedger,
+        rng: &TestRng,
+        count: usize,
+    ) {
+        let pages = TestPages::<K, Tracked<'l>, S>::new();
+        let tree = random_tree(&pages, ledger, rng, count, PanickingDrop::Nothing);
+        assert_eq!(tree.entries(|_, _| ()).len(), count);
+        assert!(pages.in_use() >= 1);
+        tree.destroy();
+        pages.assert_all_released();
+        ledger.assert_all_dropped_once();
+    }
+
     #[test]
     fn destroy_drops_every_entry_and_releases_every_page() {
         let rng = TestRng::new(9);
         let largest = if cfg!(miri) { 150 } else { 3000 };
         for count in [0, 1, 12, 13, 100, largest] {
-            let ledger = DropLedger::new();
-            let pages = TestPages::new();
-            let tree = random_tree(&pages, &ledger, &rng, count, PanickingDrop::Nothing);
-            assert_eq!(tree.entries(|_, _| ()).len(), count);
-            assert!(pages.in_use() >= 1);
-            tree.destroy();
-            pages.assert_all_released();
-            ledger.assert_all_dropped_once();
+            destroy_random_tree::<Bulky<'_>, Auto>(&DropLedger::new(), &rng, count);
+            destroy_random_tree::<Tracked<'_>, WithInlineKey>(&DropLedger::new(), &rng, count);
         }
     }
 
-    #[test]
-    fn destroy_drops_entries_in_ascending_order() {
-        let ledger = DropLedger::new();
-        let pages = TestPages::new();
-        let tree = random_tree(
-            &pages,
-            &ledger,
-            &TestRng::new(10),
-            300,
-            PanickingDrop::Nothing,
-        );
+    /// Builds a random tree of `count` entries, at least 2 levels high, and
+    /// checks that destroying it drops its entries in ascending order.
+    fn destroy_in_order<'l, K: FromTracked<'l> + Ord, S: InlineKeyStrategy<K>>(
+        ledger: &'l DropLedger,
+        count: usize,
+    ) {
+        let pages = TestPages::<K, Tracked<'l>, S>::new();
+        let rng = TestRng::new(10);
+        let tree = random_tree(&pages, ledger, &rng, count, PanickingDrop::Nothing);
         assert!(tree.height() >= 2);
         let entry_ids: Vec<usize> = tree
             .entries(|key, value| [key.tracked_id(), value.id()])
@@ -229,11 +241,19 @@ mod tests {
     }
 
     #[test]
+    fn destroy_drops_entries_in_ascending_order() {
+        destroy_in_order::<Bulky<'_>, Auto>(&DropLedger::new(), 300);
+        // 25 entries in a leaf with inline keys: height 2 takes more. The
+        // tree is the same under Miri, so the native run checks its height.
+        destroy_in_order::<Tracked<'_>, WithInlineKey>(&DropLedger::new(), 800);
+    }
+
+    #[test]
     fn destroy_keeps_ascending_order_after_a_panicking_drop() {
         let rng = TestRng::new(13);
         for position in [0, 123, 299] {
             let ledger = DropLedger::new();
-            let pages = TestPages::new();
+            let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
             let tree = random_tree(&pages, &ledger, &rng, 300, PanickingDrop::Key(position));
             assert!(tree.height() >= 2);
             let entry_ids: Vec<usize> = tree
@@ -276,7 +296,7 @@ mod tests {
         for position in positions {
             for panicking in [PanickingDrop::Key(position), PanickingDrop::Value(position)] {
                 let ledger = DropLedger::new();
-                let pages = TestPages::new();
+                let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
                 let tree = random_tree(&pages, &ledger, &rng, count, panicking);
                 assert!(tree.height() >= 1);
                 let unwound = catch_unwind(AssertUnwindSafe(|| tree.destroy()));
@@ -290,7 +310,7 @@ mod tests {
     #[test]
     fn released_pages_build_the_next_tree() {
         let ledger = DropLedger::new();
-        let pages = TestPages::new();
+        let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
         let rng = TestRng::new(12);
         let tree = random_tree(&pages, &ledger, &rng, 100, PanickingDrop::Nothing);
         let allocated = pages.allocated_count();

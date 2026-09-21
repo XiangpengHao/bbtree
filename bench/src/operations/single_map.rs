@@ -11,32 +11,70 @@ use super::{Operation, PreparedCell, Stopwatch};
 use crate::command_line::Named;
 use crate::keys::{BenchKey, KeyMaker};
 use crate::map_adapters::MapUnderTest;
+use crate::parallel_setup::ParallelSetup;
 use crate::random::{RandomStream, SeededRng};
 use crate::values::{BenchValue, ValueMaker};
 
+/// A one-map cell's keys: those the map holds, and those that lookups that
+/// miss probe with.
+pub(crate) struct SingleMapKeys<K> {
+    /// Distinct.
+    present: Vec<K>,
+    /// Distinct, none of them in `present`, and spread over its key range.
+    absent: Vec<K>,
+}
+
+impl<K: BenchKey> SingleMapKeys<K> {
+    pub(crate) fn new(present: Vec<K>, absent: Vec<K>) -> Self {
+        Self { present, absent }
+    }
+
+    /// `entries` generated keys at even indices, and keys at odd indices for
+    /// misses: as many as `miss_limit` or the entries, whichever is fewer,
+    /// spread over the range.
+    pub(crate) fn generated(mut keys: KeyMaker<K>, entries: usize, miss_limit: usize) -> Self {
+        let present = (0..entries as u64)
+            .map(|index| keys.key(2 * index))
+            .collect();
+        let miss_count = miss_limit.min(entries);
+        let stride = entries / miss_count;
+        let absent = (0..miss_count)
+            .map(|position| keys.key(2 * (position * stride) as u64 + 1))
+            .collect();
+        Self { present, absent }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn present(&self) -> &[K] {
+        &self.present
+    }
+
+    #[cfg(test)]
+    pub(crate) fn absent(&self) -> &[K] {
+        &self.absent
+    }
+}
+
 pub(crate) struct SingleMapCell<K, V> {
-    keys: KeyMaker<K>,
-    values: ValueMaker<V>,
     /// The map's keys, distinct, in random insertion order.
     present: Vec<K>,
+    /// Keys that the map doesn't hold, which lookups that miss probe with.
+    absent: Vec<K>,
+    values: ValueMaker<V>,
     budget: usize,
 }
 
 impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
-    pub(crate) fn new(
-        mut keys: KeyMaker<K>,
-        values: ValueMaker<V>,
-        entries: usize,
-        budget: usize,
-    ) -> Self {
-        let mut present: Vec<K> = (0..entries as u64)
-            .map(|index| keys.key(2 * index))
-            .collect();
+    pub(crate) fn new(keys: SingleMapKeys<K>, values: ValueMaker<V>, budget: usize) -> Self {
+        let SingleMapKeys {
+            mut present,
+            absent,
+        } = keys;
         SeededRng::new(RandomStream::InsertionOrder).shuffle(&mut present);
         Self {
-            keys,
-            values,
             present,
+            absent,
+            values,
             budget,
         }
     }
@@ -52,14 +90,14 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
 
     /// Fresh entries, in insertion order.
     fn entries_in_insertion_order(&self) -> Vec<(K, V)> {
-        (self.present.iter().enumerate())
-            .map(|(index, key)| (key.clone(), self.values.value(index as u64)))
-            .collect()
+        ParallelSetup::map(&self.present, |index, key| {
+            (key.clone(), self.values.value(index as u64))
+        })
     }
 
     fn entries_in_key_order(&self) -> Vec<(K, V)> {
         let mut entries = self.entries_in_insertion_order();
-        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        ParallelSetup::sort_unstable_by(&mut entries, |(left, _), (right, _)| left.cmp(right));
         entries
     }
 
@@ -89,30 +127,16 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
     fn present_sample(&self) -> Vec<K> {
         let count = self.budget.min(self.entry_count());
         let stride = self.entry_count() / count;
-        self.present
-            .iter()
-            .step_by(stride)
-            .take(count)
-            .cloned()
-            .collect()
-    }
-
-    /// Up to `budget` keys that the map doesn't hold, spread over its key
-    /// range.
-    fn absent_sample(&mut self) -> Vec<K> {
-        let count = self.budget.min(self.entry_count());
-        let stride = self.entry_count() / count;
-        (0..count)
-            .map(|position| self.keys.key(2 * (position * stride) as u64 + 1))
-            .collect()
+        let sample: Vec<&K> = self.present.iter().step_by(stride).take(count).collect();
+        ParallelSetup::map(&sample, |_, &key| key.clone())
     }
 
     /// The keys range scans may start at: those with at least
     /// `RANGE_SCAN_LENGTH` − 1 keys after them, so that every scan visits
     /// the full length.
     fn range_starts(&self) -> Vec<K> {
-        let mut starts = self.present.clone();
-        starts.sort_unstable();
+        let mut starts = ParallelSetup::cloned(&self.present);
+        ParallelSetup::sort_unstable_by(&mut starts, K::cmp);
         let start_count = starts
             .len()
             .saturating_sub(Operation::RANGE_SCAN_LENGTH - 1);
@@ -191,7 +215,7 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
         let mut rng = SeededRng::new(RandomStream::RemovalOrder);
         for _ in 0..self.rounds() {
             let mut map: M = self.built_map();
-            let mut removal_order = self.present.clone();
+            let mut removal_order = ParallelSetup::cloned(&self.present);
             rng.shuffle(&mut removal_order);
             let removed = stopwatch.time(|| {
                 (removal_order.iter())
@@ -206,8 +230,8 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
     fn time_upserts<M: MapUnderTest<K, V>>(&self, stopwatch: &mut Stopwatch) -> usize {
         let mut rng = SeededRng::new(RandomStream::InsertionOrder);
         for _ in 0..self.rounds() {
-            let mut upserted_keys: Vec<K> =
-                self.present.iter().chain(&self.present).cloned().collect();
+            let mut upserted_keys = ParallelSetup::cloned(&self.present);
+            upserted_keys.extend(ParallelSetup::cloned(&self.present));
             rng.shuffle(&mut upserted_keys);
             let map: M = stopwatch.time(|| {
                 let mut map = M::new();
@@ -255,8 +279,7 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
                 lookups
             }
             Operation::GetMiss => {
-                let pool = self.absent_sample();
-                let (lookups, hits) = self.time_lookups::<M>(&pool, stopwatch);
+                let (lookups, hits) = self.time_lookups::<M>(&self.absent, stopwatch);
                 assert_eq!(hits, 0, "no get_miss key is in the map");
                 lookups
             }
@@ -265,7 +288,7 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
             Operation::RemoveRandom => self.time_removals::<M>(stopwatch),
             Operation::EntryUpsert => self.time_upserts::<M>(stopwatch),
             Operation::PopFirst => self.time_pops::<M>(stopwatch),
-            Operation::BuildMany | Operation::GetMany => {
+            Operation::BuildMany | Operation::GetMany | Operation::GetManyMiss => {
                 unreachable!("{} runs on many maps", operation.name())
             }
         }

@@ -1,6 +1,6 @@
 //! Test-only helpers: a deterministic PRNG, drop tracking, padded and
-//! over-aligned test types, and trees built through the node API. The map's
-//! tests use the first three too.
+//! over-aligned test types, trees built through the node API, and a check of
+//! inline keys. The map's tests use the first three and the last too.
 
 #![forbid(unsafe_code)]
 
@@ -8,8 +8,12 @@ use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
 use std::vec::Vec;
 
-use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
+use super::handle::{
+    ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeKind, NodeRef, Subtree,
+};
+use super::inline_keys::KeyInliner;
 use super::page::TestPages;
+use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 
 /// A deterministic xorshift64* generator; shared by reference.
 pub(crate) struct TestRng(Cell<u64>);
@@ -139,6 +143,14 @@ impl Ord for Tracked<'_> {
     }
 }
 
+/// The id, which orders like the value: maps with `WithInlineKey` test the
+/// node operations with inline keys on tracked keys.
+impl InlineKey for Tracked<'_> {
+    fn inline_key(&self) -> InlineWord {
+        InlineWord::from(self.id)
+    }
+}
+
 /// A tracked key or value padded to 152 bytes. As keys, with [`Tracked`]
 /// values, they fill a 2 KB node with exactly 12 entries in both node kinds
 /// (D13, D15, D17, D21): tall trees from few entries, which Miri can afford,
@@ -200,7 +212,9 @@ impl<'l> FromTracked<'l> for Bulky<'l> {
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Leaf> {
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
+    NodeRef<Immut<'a>, K, V, S, Leaf>
+{
     /// The `(key id, value id)` of each entry, in order.
     pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
         (0..self.len())
@@ -217,7 +231,9 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Le
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Internal> {
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
+    NodeRef<Immut<'a>, K, V, S, Internal>
+{
     /// The `(key id, value id)` of each separator, in order, its value read
     /// from the head that holds it (D17).
     pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
@@ -231,7 +247,9 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, In
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, LeafOrInternal> {
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
+    NodeRef<Immut<'a>, K, V, S, LeafOrInternal>
+{
     /// The `(key id, value id)` of every entry of the subtree, in order; see
     /// [`NodeRef::for_each_entry`].
     pub(super) fn subtree_tracked_ids(self) -> Vec<(usize, usize)> {
@@ -253,7 +271,19 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Le
     }
 }
 
-impl<'a, K: 'a, V: 'a> NodeRef<Immut<'a>, K, V, LeafOrInternal> {
+impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, LeafOrInternal> {
+    /// Panics unless every node of the subtree has the inline keys of its
+    /// keys, in order, and a prefix length of 0, or has neither (D18); see
+    /// [`NodeRef::assert_inline_keys_match`].
+    pub(crate) fn assert_subtree_inline_keys_match(self) {
+        self.assert_inline_keys_match();
+        if let ForceResult::Internal(internal) = self.force() {
+            for index in 0..=internal.len() {
+                (internal.edge_at(index).descend()).assert_subtree_inline_keys_match();
+            }
+        }
+    }
+
     /// Calls `entry` on every entry of the subtree in key order: each leaf's
     /// keys and values, and each separator's key with its value from the head
     /// that holds it (D17). A head in the subtree's leftmost leaf belongs to
@@ -277,6 +307,25 @@ impl<'a, K: 'a, V: 'a> NodeRef<Immut<'a>, K, V, LeafOrInternal> {
                 }
             }
         }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'_>, K, V, S, Kind> {
+    /// Panics unless the node has inline keys exactly if its map's strategy
+    /// gives its keys some, and then has its keys' inline keys, in order, and
+    /// a prefix length of 0 (D18, 05-fence-key.md).
+    pub(crate) fn assert_inline_keys_match(self) {
+        let expected: Option<Vec<InlineWord>> = KeyInliner::<K>::resolve::<S>().map(|inliner| {
+            (self.keys().iter())
+                .map(|key| inliner.inline_key(key))
+                .collect()
+        });
+        assert_eq!(
+            self.inline_keys(),
+            expected.as_deref(),
+            "the inline keys are not the keys'"
+        );
+        assert_eq!(self.prefix_len(), expected.map(|_| 0));
     }
 }
 
@@ -314,28 +363,28 @@ impl PageAligned {
 /// A tree built through the node API with the map's insert (search down,
 /// insert into the leaf, and split full nodes on the way back up), over
 /// pages from a [`TestPages`] pool.
-pub(super) struct TestTree<'p, K, V> {
+pub(super) struct TestTree<'p, K, V, S: InlineKeyStrategy<K> = Auto> {
     /// `None` only while the root is being replaced.
-    root: Option<Subtree<K, V>>,
-    pages: &'p TestPages<K, V>,
+    root: Option<Subtree<K, V, S>>,
+    pages: &'p TestPages<K, V, S>,
 }
 
-impl<'p, K, V> TestTree<'p, K, V> {
+impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// A tree with an empty leaf as its root.
-    pub(super) fn new(pages: &'p TestPages<K, V>) -> Self {
+    pub(super) fn new(pages: &'p TestPages<K, V, S>) -> Self {
         Self {
             root: Some(Subtree::new_leaf(pages.fresh()).forget_type()),
             pages,
         }
     }
 
-    pub(super) fn root(&self) -> &Subtree<K, V> {
+    pub(super) fn root(&self) -> &Subtree<K, V, S> {
         self.root
             .as_ref()
             .expect("the root is always there between calls")
     }
 
-    pub(super) fn root_mut(&mut self) -> &mut Subtree<K, V> {
+    pub(super) fn root_mut(&mut self) -> &mut Subtree<K, V, S> {
         self.root
             .as_mut()
             .expect("the root is always there between calls")
@@ -385,7 +434,7 @@ impl<'p, K, V> TestTree<'p, K, V> {
     }
 }
 
-impl<K: Ord, V> TestTree<'_, K, V> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
     /// Inserts `key`/`value`, or replaces the value of an equal key and
     /// returns the old one, as the map does.
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -404,17 +453,23 @@ mod tests {
     fn bulky_key_nodes_hold_twelve_entries() {
         assert_eq!(size_of::<Tracked<'_>>(), 16);
         assert_eq!(size_of::<Bulky<'_>>(), 152);
-        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::LEAF_CAPACITY, 12);
-        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY, 12);
-        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::LEAF_SIZE, 2048);
-        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_SIZE, 2048);
+        let leaf = NodeLayout::<Bulky<'_>, Tracked<'_>>::PLAIN_LEAF;
+        let internal = NodeLayout::<Bulky<'_>, Tracked<'_>>::PLAIN_INTERNAL;
+        assert_eq!((leaf.keys.capacity, leaf.page.size()), (12, 2048));
+        assert_eq!((internal.keys.capacity, internal.page.size()), (12, 2048));
     }
 
     #[test]
     fn over_aligned_types_keep_their_value() {
         assert_eq!(CacheLineAligned::new(7).get(), 7);
         assert_eq!(PageAligned::new(9).get(), 9);
-        assert_eq!(NodeLayout::<u64, PageAligned>::LEAF_ALIGN, 8192);
-        assert_eq!(NodeLayout::<u64, PageAligned>::INTERNAL_ALIGN, 1024);
+        assert_eq!(
+            NodeLayout::<u64, PageAligned>::PLAIN_LEAF.page.align(),
+            8192
+        );
+        assert_eq!(
+            NodeLayout::<u64, PageAligned>::PLAIN_INTERNAL.page.align(),
+            1024
+        );
     }
 }

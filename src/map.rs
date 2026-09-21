@@ -6,6 +6,9 @@
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
 //! whose call stack is the path back up for splits (`insert.rs`); looking up
 //! is a loop down from the root (`lookup.rs`).
+//!
+//! The strategy parameter `S` decides which keys have inline keys (D18,
+//! `inline_key.rs`); every method is the same for every `S`.
 
 #![forbid(unsafe_code)]
 
@@ -13,6 +16,8 @@
 mod differential_tests;
 #[cfg(test)]
 mod drop_tests;
+#[cfg(test)]
+mod inline_key_tests;
 mod insert;
 #[cfg(test)]
 mod invariants;
@@ -21,8 +26,10 @@ mod lookup;
 mod type_tests;
 
 use core::borrow::Borrow;
+use core::mem;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
+use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
 use crate::node::page::{FreshPage, PageByKind};
 
@@ -33,7 +40,15 @@ use crate::node::page::{FreshPage, PageByKind};
 /// relative to other keys while it is in the map; the behavior that results
 /// is unspecified but memory-safe.
 ///
+/// Its nodes store an inline key beside each key, a register-sized summary
+/// that searches compare first, when the strategy `S` gives the key type
+/// one: by default ([`Auto`]), std byte-string keys such as `String` have
+/// them, and other keys don't. [`WithInlineKey`] gives them to any key type
+/// that implements [`InlineKey`]. Either way, every method behaves as std's.
+///
 /// [`std::collections::BTreeMap`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html
+/// [`WithInlineKey`]: crate::WithInlineKey
+/// [`InlineKey`]: crate::InlineKey
 ///
 /// # Examples
 ///
@@ -47,17 +62,51 @@ use crate::node::page::{FreshPage, PageByKind};
 /// assert!(!map.contains_key(&38));
 /// assert_eq!(map.len(), 1);
 /// ```
-pub struct BBTreeMap<K, V> {
-    root: Option<Subtree<K, V>>,
+pub struct BBTreeMap<K, V, S: InlineKeyStrategy<K> = Auto> {
+    root: Option<Subtree<K, V, S>>,
     length: usize,
 }
 
 impl<K, V> BBTreeMap<K, V> {
-    /// Makes a new, empty `BBTreeMap`.
+    /// Makes a new, empty `BBTreeMap`, with the default strategy, [`Auto`].
+    /// For another, see [`BBTreeMap::with_strategy`].
     ///
     /// Does not allocate anything on its own.
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_strategy(Auto)
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+    /// Makes a new, empty `BBTreeMap` with inline-key strategy `strategy`.
+    /// `BBTreeMap::new()` is `BBTreeMap::with_strategy(Auto)`.
+    ///
+    /// Does not allocate anything on its own.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::{BBTreeMap, InlineKey, InlineWord, WithInlineKey};
+    ///
+    /// #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+    /// struct Id([u8; 8]);
+    ///
+    /// impl InlineKey for Id {
+    ///     fn inline_key(&self) -> InlineWord {
+    ///         self.0.inline_key()
+    ///     }
+    /// }
+    ///
+    /// let mut map: BBTreeMap<Id, &str, WithInlineKey> = BBTreeMap::with_strategy(WithInlineKey);
+    /// map.insert(Id(*b"ferris!!"), "crab");
+    /// assert_eq!(map.get(&Id(*b"ferris!!")), Some(&"crab"));
+    /// ```
+    #[must_use]
+    pub const fn with_strategy(strategy: S) -> Self {
+        // Only the strategy's type matters: its value, a unit struct,
+        // carries nothing.
+        mem::forget(strategy);
         Self {
             root: None,
             length: 0,
@@ -153,8 +202,10 @@ impl<K, V> BBTreeMap<K, V> {
     /// old value is returned. The key is not updated, though: the map keeps
     /// its key and drops the given one, before it replaces the value.
     ///
-    /// If `K`'s `Ord` panics, the map is unchanged: every comparison happens
-    /// before the first change.
+    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics, the
+    /// map is unchanged: every call to them happens before the first change.
+    ///
+    /// [`WithInlineKey`]: crate::WithInlineKey
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
     where
         K: Ord,
@@ -171,7 +222,8 @@ impl<K, V> BBTreeMap<K, V> {
 }
 
 impl<K, V> Default for BBTreeMap<K, V> {
-    /// Creates an empty `BBTreeMap`.
+    /// Creates an empty `BBTreeMap`, with the default strategy, as
+    /// [`BBTreeMap::new`] does.
     fn default() -> Self {
         Self::new()
     }
@@ -182,7 +234,7 @@ impl<K, V> Default for BBTreeMap<K, V> {
 ///
 /// Unlike std's map, whose `Drop` marks `K` and `V` `#[may_dangle]` (nightly
 /// only), this one requires the keys and values to strictly outlive the map.
-impl<K, V> Drop for BBTreeMap<K, V> {
+impl<K, V, S: InlineKeyStrategy<K>> Drop for BBTreeMap<K, V, S> {
     fn drop(&mut self) {
         if let Some(root) = self.root.take() {
             root.destroy(PageByKind::deallocate);
@@ -192,8 +244,11 @@ impl<K, V> Drop for BBTreeMap<K, V> {
 
 // Keys and values live in the node pages, so moving the map never moves
 // them: like std's map, it is `Unpin` whatever `K` and `V` are.
-impl<K, V> Unpin for BBTreeMap<K, V> {}
+impl<K, V, S: InlineKeyStrategy<K>> Unpin for BBTreeMap<K, V, S> {}
 
 // std's map is `UnwindSafe` whenever its keys and values are `RefUnwindSafe`,
 // an impl std keeps for compatibility; match it (D1).
-impl<K: RefUnwindSafe, V: RefUnwindSafe> UnwindSafe for BBTreeMap<K, V> {}
+impl<K: RefUnwindSafe, V: RefUnwindSafe, S: InlineKeyStrategy<K>> UnwindSafe
+    for BBTreeMap<K, V, S>
+{
+}

@@ -1,0 +1,4 @@
+# Node handles carry five type parameters (borrow type, key, value, inline-key
+# strategy (D18), node kind): at the default threshold of 250, plain
+# signatures over them count as too complex.
+type-complexity-threshold = 300

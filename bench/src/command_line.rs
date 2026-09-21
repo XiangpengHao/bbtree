@@ -1,8 +1,10 @@
-//! The command line: suite runs with filters, and `measure`, the internal
-//! command that the suite runner starts each child process with.
+//! The command line: suite runs with filters; `verify-data` and `fetch`,
+//! which manage the datasets; and `measure`, the internal command that the
+//! suite runner starts each child process with.
 
 use std::path::PathBuf;
 
+use crate::datasets::DataDirectory;
 use crate::keys::KeyKind;
 use crate::map_adapters::MapKind;
 use crate::operations::Operation;
@@ -41,6 +43,10 @@ pub(crate) trait Named: Copy + PartialEq + 'static {
 
 pub(crate) enum Invocation {
     Help,
+    /// `verify-data`: hashes the datasets against the manifest.
+    VerifyData,
+    /// `fetch`: installs the datasets and verifies them.
+    FetchData,
     RunSuites(SuiteRequest),
     MeasureCell(CellRequest),
 }
@@ -49,10 +55,21 @@ impl Invocation {
     pub(crate) fn parse(arguments: &[String]) -> Result<Self, String> {
         match arguments.first().map(String::as_str) {
             None | Some("-h" | "--help" | "help") => Ok(Self::Help),
+            Some("verify-data") => Self::without_arguments(arguments, Self::VerifyData),
+            Some("fetch") => Self::without_arguments(arguments, Self::FetchData),
             Some(CellRequest::COMMAND) => {
                 CellRequest::parse(&arguments[1..]).map(Self::MeasureCell)
             }
             Some(_) => SuiteRequest::parse(arguments).map(Self::RunSuites),
+        }
+    }
+
+    /// `invocation`, for a command that takes no arguments.
+    fn without_arguments(arguments: &[String], invocation: Self) -> Result<Self, String> {
+        match arguments {
+            [_command] => Ok(invocation),
+            [command, ..] => Err(format!("{command} takes no arguments")),
+            [] => unreachable!("the command is the first argument"),
         }
     }
 
@@ -64,11 +81,22 @@ runs in a fresh process, once per repetition.
 
 usage: bbtree-bench <suite>... [filters] [options]
        bbtree-bench-memory <suite>... [filters] [options]
+       bbtree-bench verify-data
+       bbtree-bench fetch
 
 The memory binary reports the memory held by the maps that build operations
 make, instead of time.
 
 suites: {suites}, or all
+
+Real-world key kinds read their datasets from ${data_variable}, or else
+$XDG_CACHE_HOME/bbtree-bench, or else ~/.cache/bbtree-bench. Their cells
+check only that each file has its pinned size, and are reported as missing
+data when one doesn't.
+  verify-data  hashes every dataset file against the manifest
+  fetch        downloads the datasets from their GitHub release with gh and
+               zstd, derives Common Crawl's URLs from the crawl's index with
+               python3, then verifies them
 
 filters, comma-separated (default: everything in the suites):
   --map    {maps}
@@ -78,13 +106,15 @@ filters, comma-separated (default: everything in the suites):
   --op     {operations}
 
 options:
-  --reps N   repetitions per cell (default 3, or 1 with --quick)
+  --reps N   repetitions per cell (default 1; more for cells shown to be
+             noisy)
   --quick    10× smaller sizes and operation counts, for CI and development
   --perf     count cycles, instructions, branch misses, L1d misses and DRAM
              fills of the timed regions with `perf stat`
   --list     print the selected cells and exit
   --out DIR  where to write the CSV and the summary (default: bench/results)",
             suites = Suite::all_names(),
+            data_variable = DataDirectory::VARIABLE,
             maps = MapKind::all_names(),
             keys = KeyKind::all_names(),
             values = ValueKind::all_names(),
@@ -164,6 +194,13 @@ impl CellFilter {
             Self::only(&self.sizes, "--size")?,
             Self::only(&self.operations, "--op")?,
         );
+        if !key.sizes().contains(&size) {
+            return Err(format!(
+                "{} keys don't come in size {}",
+                key.name(),
+                size.name()
+            ));
+        }
         if !operation.applies_to(size) {
             return Err(format!(
                 "{} does not apply to size {}",
@@ -230,11 +267,10 @@ impl SuiteRequest {
         if request.suites.is_empty() {
             return Err("name at least one suite, or `all`".to_owned());
         }
-        request.repetitions = match (repetitions, request.scale) {
-            (Some(0), _) => return Err("--reps must be at least 1".to_owned()),
-            (Some(count), _) => count,
-            (None, Scale::Full) => 3,
-            (None, Scale::Quick) => 1,
+        request.repetitions = match repetitions {
+            Some(0) => return Err("--reps must be at least 1".to_owned()),
+            Some(count) => count,
+            None => 1,
         };
         Ok(request)
     }

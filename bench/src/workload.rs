@@ -15,6 +15,9 @@ pub(crate) enum MapSize {
     FourEntryMaps,
     /// 100k maps of 32 entries: JSON objects at p99.
     ThirtyTwoEntryMaps,
+    /// About 1M maps, each holding the keys of one object of real JSON
+    /// documents: the documents' objects, repeated.
+    RealJsonObjects,
     /// One map of 1k entries, like cargo's per-package maps: rebuilt or
     /// reused until the cell has timed enough operations.
     OneThousand,
@@ -22,10 +25,39 @@ pub(crate) enum MapSize {
     OneMillion,
     /// DRAM-resident: memtables and indexes.
     TenMillion,
+    /// One map of every key of a dataset, but those held out for misses.
+    All,
 }
 
 impl Named for MapSize {
     const ALL: &'static [Self] = &[
+        Self::FourEntryMaps,
+        Self::ThirtyTwoEntryMaps,
+        Self::RealJsonObjects,
+        Self::OneThousand,
+        Self::HundredThousand,
+        Self::OneMillion,
+        Self::TenMillion,
+        Self::All,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::FourEntryMaps => "1Mx4",
+            Self::ThirtyTwoEntryMaps => "100kx32",
+            Self::RealJsonObjects => "1Mxreal",
+            Self::OneThousand => "1k",
+            Self::HundredThousand => "100k",
+            Self::OneMillion => "1M",
+            Self::TenMillion => "10M",
+            Self::All => "all",
+        }
+    }
+}
+
+impl MapSize {
+    /// The sizes whose shape is fixed, which are those of generated keys.
+    pub(crate) const FIXED_SHAPES: &'static [Self] = &[
         Self::FourEntryMaps,
         Self::ThirtyTwoEntryMaps,
         Self::OneThousand,
@@ -34,20 +66,13 @@ impl Named for MapSize {
         Self::TenMillion,
     ];
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::FourEntryMaps => "1Mx4",
-            Self::ThirtyTwoEntryMaps => "100kx32",
-            Self::OneThousand => "1k",
-            Self::HundredThousand => "100k",
-            Self::OneMillion => "1M",
-            Self::TenMillion => "10M",
-        }
-    }
-}
+    /// How many maps `1Mxreal` builds, about: its JSON objects repeat until
+    /// there are at least this many.
+    pub(crate) const REAL_JSON_OBJECT_MAPS: usize = 1_000_000;
 
-impl MapSize {
-    pub(crate) fn shape(self, scale: Scale) -> MapShape {
+    /// The shape of the sizes that fix it; `None` for those whose dataset
+    /// does.
+    pub(crate) fn fixed_shape(self, scale: Scale) -> Option<MapShape> {
         let (map_count, entries_per_map) = match self {
             Self::FourEntryMaps => (scale.shrink(1_000_000), 4),
             Self::ThirtyTwoEntryMaps => (scale.shrink(100_000), 32),
@@ -55,15 +80,19 @@ impl MapSize {
             Self::HundredThousand => (1, scale.shrink(100_000)),
             Self::OneMillion => (1, scale.shrink(1_000_000)),
             Self::TenMillion => (1, scale.shrink(10_000_000)),
+            Self::RealJsonObjects | Self::All => return None,
         };
-        MapShape {
+        Some(MapShape {
             map_count,
             entries_per_map,
-        }
+        })
     }
 
     pub(crate) fn has_many_maps(self) -> bool {
-        matches!(self, Self::FourEntryMaps | Self::ThirtyTwoEntryMaps)
+        matches!(
+            self,
+            Self::FourEntryMaps | Self::ThirtyTwoEntryMaps | Self::RealJsonObjects
+        )
     }
 }
 
@@ -85,10 +114,6 @@ impl MapShape {
 
     pub(crate) fn entries_per_map(self) -> usize {
         self.entries_per_map
-    }
-
-    pub(crate) fn total_entries(self) -> usize {
-        self.map_count * self.entries_per_map
     }
 
     /// How many distinct keys a cell of this shape inserts: one map's
@@ -138,8 +163,15 @@ pub(crate) struct Workload {
 impl Workload {
     /// # Panics
     ///
-    /// If the operation doesn't apply to maps of this size.
+    /// If the keys don't come in this size, or the operation doesn't apply
+    /// to maps of this size.
     pub(crate) fn new(key: KeyKind, value: ValueKind, size: MapSize, operation: Operation) -> Self {
+        assert!(
+            key.sizes().contains(&size),
+            "{} keys don't come in size {}",
+            key.name(),
+            size.name()
+        );
         assert!(
             operation.applies_to(size),
             "{} does not apply to size {}",
@@ -217,5 +249,22 @@ impl Cell {
     /// applicable are reported as `n/a`, not run.
     pub(crate) fn is_applicable(self) -> bool {
         self.map.supports(self.workload.operation)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_shapes_are_the_sizes_with_a_shape() {
+        for &size in MapSize::ALL {
+            assert_eq!(
+                size.fixed_shape(Scale::Full).is_some(),
+                MapSize::FIXED_SHAPES.contains(&size),
+                "{}",
+                size.name()
+            );
+        }
     }
 }

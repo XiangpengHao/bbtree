@@ -18,6 +18,10 @@ pub(crate) enum ValueKind {
     Bytes100,
     /// `Box<[u8]>` of 1 KB: a KV record (YCSB).
     Bytes1k,
+    /// `[u8; 100]`: a KV record stored in the map's nodes, not on the heap.
+    Inline100,
+    /// `[u8; 1000]`: a KV record stored in the map's nodes.
+    Inline1k,
 }
 
 impl Named for ValueKind {
@@ -28,6 +32,8 @@ impl Named for ValueKind {
         Self::String,
         Self::Bytes100,
         Self::Bytes1k,
+        Self::Inline100,
+        Self::Inline1k,
     ];
 
     fn name(self) -> &'static str {
@@ -38,12 +44,15 @@ impl Named for ValueKind {
             Self::String => "string",
             Self::Bytes100 => "bytes100",
             Self::Bytes1k => "bytes1k",
+            Self::Inline100 => "inline100",
+            Self::Inline1k => "inline1k",
         }
     }
 }
 
-/// What the benchmark needs from a value type.
-pub(crate) trait BenchValue: Default + 'static {
+/// What the benchmark needs from a value type. Setup makes values on worker
+/// threads (`parallel_setup.rs`).
+pub(crate) trait BenchValue: Default + Send + Sync + 'static {
     /// A cheap read of the value, folded into checksums so that the
     /// optimizer can't skip visiting it.
     fn fingerprint(&self) -> u64;
@@ -97,13 +106,35 @@ impl BenchValue for Box<[u8]> {
     fn bump(&mut self) {}
 }
 
-/// Makes the value of each entry from its index.
+/// `[u8; N]`. A newtype, because std implements `Default`, which
+/// `BenchValue` needs, only for arrays of up to 32 elements; it has the
+/// array's layout.
+#[repr(transparent)]
+pub(crate) struct InlineRecord<const N: usize>([u8; N]);
+
+impl<const N: usize> Default for InlineRecord<N> {
+    fn default() -> Self {
+        Self([0; N])
+    }
+}
+
+impl<const N: usize> BenchValue for InlineRecord<N> {
+    fn fingerprint(&self) -> u64 {
+        u64::from(self.0[0])
+    }
+
+    fn bump(&mut self) {
+        self.0[0] = self.0[0].wrapping_add(1);
+    }
+}
+
+/// Makes the value of each entry from its index, on any thread.
 pub(crate) struct ValueMaker<V> {
-    make: Box<dyn Fn(u64) -> V>,
+    make: Box<dyn Fn(u64) -> V + Send + Sync>,
 }
 
 impl<V> ValueMaker<V> {
-    fn new(make: impl Fn(u64) -> V + 'static) -> Self {
+    fn new(make: impl Fn(u64) -> V + Send + Sync + 'static) -> Self {
         Self {
             make: Box::new(make),
         }
@@ -149,5 +180,11 @@ impl ValueMaker<String> {
 impl ValueMaker<Box<[u8]>> {
     pub(crate) fn byte_records(length: usize) -> Self {
         Self::new(move |index| vec![index.to_le_bytes()[0]; length].into_boxed_slice())
+    }
+}
+
+impl<const N: usize> ValueMaker<InlineRecord<N>> {
+    pub(crate) fn inline_records() -> Self {
+        Self::new(|index| InlineRecord([index.to_le_bytes()[0]; N]))
     }
 }

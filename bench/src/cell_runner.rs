@@ -3,19 +3,24 @@
 //!
 //! The cell's kinds are runtime values; measuring needs them as types. The
 //! dispatch goes key type, then value type, then map type, and each step's
-//! `match` is where a kind maps to its type and its generator.
+//! `match` is where a kind maps to its type and its generator or dataset.
+//! Keys are made or loaded first, before anything is measured.
 
 use std::collections::{BTreeMap, HashMap};
 
 use bbtree::BBTreeMap;
 
 use crate::command_line::{CellRequest, Named};
+use crate::datasets::{DataDirectory, DataFile, JsonObjectCorpus, KeyList};
 use crate::keys::{BenchKey, KeyKind, KeyMaker};
 use crate::map_adapters::{MapKind, MapUnderTest};
 use crate::memory::{ResidentSet, RunMode};
-use crate::operations::{ManyMapsCell, PreparedCell, SingleMapCell, Stopwatch};
+use crate::operations::{
+    ManyMapsCell, ManyMapsKeys, PreparedCell, SingleMapCell, SingleMapKeys, Stopwatch,
+};
 use crate::perf_counters::PerfControl;
-use crate::values::{BenchValue, ValueKind, ValueMaker};
+use crate::values::{BenchValue, InlineRecord, ValueKind, ValueMaker};
+use crate::workload::{MapShape, MapSize};
 
 /// What a child measured.
 #[derive(Clone, Copy, Debug)]
@@ -130,69 +135,117 @@ impl CellRun {
     }
 
     fn with_key_type(&self) -> Result<CellMeasurement, String> {
-        let workload = self.request.cell().workload();
-        match workload.key() {
-            KeyKind::U64Random => self.with_value_type(KeyMaker::random_u64()),
-            KeyKind::U64Sequential => self.with_value_type(KeyMaker::sequential_u64()),
-            KeyKind::U32 => self.with_value_type(KeyMaker::random_u32()),
-            KeyKind::JsonString => self.with_value_type(KeyMaker::json_keys()),
-            KeyKind::CrateString => self.with_value_type(KeyMaker::crate_versions()),
-            KeyKind::PathString => {
-                let shape = workload.size().shape(self.request.scale());
-                self.with_value_type(KeyMaker::registry_paths(shape.distinct_keys()))
+        match self.request.cell().workload().key() {
+            KeyKind::U64Random => self.with_value_type(self.generated_keys(KeyMaker::random_u64())),
+            KeyKind::U64Sequential => {
+                self.with_value_type(self.generated_keys(KeyMaker::sequential_u64()))
             }
-            KeyKind::Hash32 => self.with_value_type(KeyMaker::random_hashes()),
-            KeyKind::Memtable16 => self.with_value_type(KeyMaker::memtable(16)),
-            KeyKind::Memtable24 => self.with_value_type(KeyMaker::memtable(24)),
+            KeyKind::U32 => self.with_value_type(self.generated_keys(KeyMaker::random_u32())),
+            KeyKind::JsonString => self.with_value_type(self.generated_keys(KeyMaker::json_keys())),
+            KeyKind::CrateString => {
+                self.with_value_type(self.generated_keys(KeyMaker::crate_versions()))
+            }
+            KeyKind::PathString => {
+                let paths = KeyMaker::registry_paths(self.fixed_shape().distinct_keys());
+                self.with_value_type(self.generated_keys(paths))
+            }
+            KeyKind::Hash32 => self.with_value_type(self.generated_keys(KeyMaker::random_hashes())),
+            KeyKind::Memtable16 => {
+                self.with_value_type(self.generated_keys(KeyMaker::memtable(16)))
+            }
+            KeyKind::Memtable24 => {
+                self.with_value_type(self.generated_keys(KeyMaker::memtable(24)))
+            }
+            KeyKind::CrateNames => self.with_value_type(self.key_list_keys(DataFile::CrateNames)?),
+            KeyKind::KernelPaths => {
+                self.with_value_type(self.key_list_keys(DataFile::KernelPaths)?)
+            }
+            KeyKind::WikiTitles => self.with_value_type(self.key_list_keys(DataFile::WikiTitles)?),
+            KeyKind::Urls => self.with_value_type(self.key_list_keys(DataFile::CommonCrawlUrls)?),
+            KeyKind::Addresses => self.with_value_type(self.key_list_keys(DataFile::BanAddresses)?),
+            KeyKind::GeoNames => self.with_value_type(self.key_list_keys(DataFile::GeoNames)?),
+            KeyKind::DblpTitles => self.with_value_type(self.key_list_keys(DataFile::DblpTitles)?),
+            KeyKind::JsonObjectKeys => self.with_value_type(self.json_object_keys()?),
         }
     }
 
-    fn with_value_type<K: BenchKey>(&self, keys: KeyMaker<K>) -> Result<CellMeasurement, String> {
+    fn size(&self) -> MapSize {
+        self.request.cell().workload().size()
+    }
+
+    /// The shape of a cell whose keys are generated, which is fixed.
+    fn fixed_shape(&self) -> MapShape {
+        (self.size().fixed_shape(self.request.scale()))
+            .expect("generated keys come in sizes whose shape is fixed")
+    }
+
+    fn generated_keys<K: BenchKey>(&self, keys: KeyMaker<K>) -> CellKeys<K> {
+        let shape = self.fixed_shape();
+        if self.size().has_many_maps() {
+            CellKeys::ManyMaps(ManyMapsKeys::generated(keys, shape))
+        } else {
+            let miss_limit = self.request.scale().operation_budget();
+            CellKeys::SingleMap(SingleMapKeys::generated(
+                keys,
+                shape.entries_per_map(),
+                miss_limit,
+            ))
+        }
+    }
+
+    fn key_list_keys(&self, file: DataFile) -> Result<CellKeys<String>, String> {
+        let key_list = KeyList::load(&DataDirectory::from_environment()?, file)?;
+        let keys = key_list.single_map_keys(self.size(), self.request.scale())?;
+        Ok(CellKeys::SingleMap(keys))
+    }
+
+    fn json_object_keys(&self) -> Result<CellKeys<String>, String> {
+        let corpus = JsonObjectCorpus::load(&DataDirectory::from_environment()?)?;
+        let map_count = (self.request.scale()).shrink(MapSize::REAL_JSON_OBJECT_MAPS);
+        Ok(CellKeys::ManyMaps(corpus.repeated_to(map_count)))
+    }
+
+    fn with_value_type<K: BenchKey>(&self, keys: CellKeys<K>) -> Result<CellMeasurement, String> {
         match self.request.cell().workload().value() {
-            ValueKind::Unit => self.with_map_type(keys, ValueMaker::unit()),
-            ValueKind::U64 => self.with_map_type(keys, ValueMaker::counters()),
-            ValueKind::Struct32 => self.with_map_type(keys, ValueMaker::structs()),
-            ValueKind::String => self.with_map_type(keys, ValueMaker::short_strings()),
-            ValueKind::Bytes100 => self.with_map_type(keys, ValueMaker::byte_records(100)),
-            ValueKind::Bytes1k => self.with_map_type(keys, ValueMaker::byte_records(1024)),
+            ValueKind::Unit => self.with_prepared_cell(keys, ValueMaker::unit()),
+            ValueKind::U64 => self.with_prepared_cell(keys, ValueMaker::counters()),
+            ValueKind::Struct32 => self.with_prepared_cell(keys, ValueMaker::structs()),
+            ValueKind::String => self.with_prepared_cell(keys, ValueMaker::short_strings()),
+            ValueKind::Bytes100 => self.with_prepared_cell(keys, ValueMaker::byte_records(100)),
+            ValueKind::Bytes1k => self.with_prepared_cell(keys, ValueMaker::byte_records(1024)),
+            ValueKind::Inline100 => {
+                self.with_prepared_cell(keys, ValueMaker::<InlineRecord<100>>::inline_records())
+            }
+            ValueKind::Inline1k => {
+                self.with_prepared_cell(keys, ValueMaker::<InlineRecord<1000>>::inline_records())
+            }
+        }
+    }
+
+    /// Puts the keys and values in the cell that times them.
+    fn with_prepared_cell<K: BenchKey, V: BenchValue>(
+        &self,
+        keys: CellKeys<K>,
+        values: ValueMaker<V>,
+    ) -> Result<CellMeasurement, String> {
+        match keys {
+            CellKeys::SingleMap(keys) => {
+                let budget = self.request.scale().operation_budget();
+                self.with_map_type(SingleMapCell::new(keys, values, budget))
+            }
+            CellKeys::ManyMaps(keys) => self.with_map_type(ManyMapsCell::new(keys, values)),
         }
     }
 
     fn with_map_type<K: BenchKey, V: BenchValue>(
         &self,
-        keys: KeyMaker<K>,
-        values: ValueMaker<V>,
+        prepared: impl PreparedCell<K, V>,
     ) -> Result<CellMeasurement, String> {
         match self.request.cell().map() {
-            MapKind::BBTree => self.with_prepared_cell::<BBTreeMap<K, V>, K, V>(keys, values),
-            MapKind::StdBTree => self.with_prepared_cell::<BTreeMap<K, V>, K, V>(keys, values),
-            MapKind::Hashbrown => {
-                self.with_prepared_cell::<hashbrown::HashMap<K, V>, K, V>(keys, values)
-            }
-            MapKind::StdHash => self.with_prepared_cell::<HashMap<K, V>, K, V>(keys, values),
-        }
-    }
-
-    /// Generates the cell's inputs, before anything is measured.
-    fn with_prepared_cell<M, K, V>(
-        &self,
-        keys: KeyMaker<K>,
-        values: ValueMaker<V>,
-    ) -> Result<CellMeasurement, String>
-    where
-        M: MapUnderTest<K, V>,
-        K: BenchKey,
-        V: BenchValue,
-    {
-        let scale = self.request.scale();
-        let size = self.request.cell().workload().size();
-        let shape = size.shape(scale);
-        if size.has_many_maps() {
-            self.measure::<M, K, V>(ManyMapsCell::new(keys, values, shape))
-        } else {
-            let entries = shape.entries_per_map();
-            let budget = scale.operation_budget();
-            self.measure::<M, K, V>(SingleMapCell::new(keys, values, entries, budget))
+            MapKind::BBTree => self.measure::<BBTreeMap<K, V>, K, V>(prepared),
+            MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
+            MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
+            MapKind::StdHash => self.measure::<HashMap<K, V>, K, V>(prepared),
         }
     }
 
@@ -235,4 +288,10 @@ impl CellRun {
             }
         }
     }
+}
+
+/// A cell's keys, made or loaded: those of one map, or of many tiny maps.
+enum CellKeys<K> {
+    SingleMap(SingleMapKeys<K>),
+    ManyMaps(ManyMapsKeys<K>),
 }

@@ -3,11 +3,16 @@
 //! D12, D13, D15, D17, D21), behind typed, zero-overhead abstractions over all
 //! the `unsafe` code (D14).
 //!
-//! A leaf is a page of `NodeLayout::<K, V>::LEAF_LAYOUT`, sized by its keys
-//! and values, and an internal node a page of `INTERNAL_LAYOUT`, sized by its
+//! A leaf is a page of a `NodeLayout::<K, V>` leaf layout, sized by its keys
+//! and values, and an internal node a page of an internal layout, sized by its
 //! keys alone (D21). The page says nothing about its kind or its parent: the
 //! height tells the kind, and navigation will use path stacks instead of
 //! parent pointers.
+//!
+//! Every node type also carries the map's inline-key strategy `S` (D18). If
+//! it gives the keys inline keys, every node stores them in a dense array
+//! beside the keys, and searches run over that array first
+//! (`inline_keys.rs`); otherwise nothing changes, at no cost.
 //!
 //! The tree is a B+-tree whose keys are each stored once (D17): values live
 //! only in leaves, and a separator key, moved up into an internal node, keeps
@@ -25,6 +30,7 @@
 //! other module is `#![forbid(unsafe_code)]` and builds on their safe API.
 
 pub(crate) mod handle;
+pub(crate) mod inline_keys;
 mod internal;
 mod layout;
 mod leaf;

@@ -5,14 +5,16 @@
 #![forbid(unsafe_code)]
 
 use super::handle::{Edge, EdgeRoom, Insertion, Internal, NodeMut, Subtree};
+use super::inline_keys::InlinedKey;
 use super::page::FreshPage;
+use crate::inline_key::InlineKeyStrategy;
 
-impl<'a, K, V> Edge<NodeMut<'a, K, V, Internal>> {
-    /// Inserts separator `key` at this edge with `right_child` as the edge to
-    /// its right, splitting the node first if it is full, with the right half
-    /// in a page from `new_page`. This is how a child's split lands in its
-    /// parent; the separator's value is already in `right_child`, as the head
-    /// of its leftmost leaf (D17).
+impl<'a, K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'a, K, V, S, Internal>> {
+    /// Inserts separator `key`, with its inline key, at this edge with
+    /// `right_child` as the edge to its right, splitting the node first if it
+    /// is full, with the right half in a page from `new_page`. This is how a
+    /// child's split lands in its parent; the separator's value is already in
+    /// `right_child`, as the head of its leftmost leaf (D17).
     ///
     /// # Panics
     ///
@@ -20,10 +22,10 @@ impl<'a, K, V> Edge<NodeMut<'a, K, V, Internal>> {
     /// unchanged then.
     pub(crate) fn insert(
         self,
-        key: K,
-        right_child: Subtree<K, V>,
-        new_page: impl FnOnce() -> FreshPage<K, V, Internal>,
-    ) -> Insertion<'a, K, V, Internal> {
+        key: InlinedKey<K, S>,
+        right_child: Subtree<K, V, S>,
+        new_page: impl FnOnce() -> FreshPage<K, V, S, Internal>,
+    ) -> Insertion<'a, K, V, S, Internal> {
         match self.check_room() {
             EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(key, right_child)),
             EdgeRoom::Full(edge) => {
@@ -39,36 +41,37 @@ mod tests {
     use std::panic::catch_unwind;
     use std::vec::Vec;
 
+    use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::node::handle::{
         EdgeRoom, ForceResult, Immut, Insertion, Internal, Kv, Leaf, LeafOrInternal, NodeMut,
         NodeRef, Split, StealError, Subtree,
     };
-    use crate::node::layout::NodeLayout;
-    use crate::node::page::TestPages;
+    use crate::node::inline_keys::InlinedKey;
+    use crate::node::page::{NodePtr, TestPages};
     use crate::node::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 
     /// A leaf holding one tracked entry, named by the id of its key.
-    fn named_leaf<'l, K: FromTracked<'l>>(
-        pages: &TestPages<K, Tracked<'l>>,
+    fn named_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        pages: &TestPages<K, Tracked<'l>, S>,
         ledger: &'l DropLedger,
-    ) -> (Subtree<K, Tracked<'l>, Leaf>, usize) {
+    ) -> (Subtree<K, Tracked<'l>, S, Leaf>, usize) {
         let mut leaf = Subtree::new_leaf(pages.fresh());
         let key = K::from_tracked(ledger.track());
         let name = key.tracked_id();
         let EdgeRoom::Fits(edge) = leaf.borrow_mut().first_edge().check_room() else {
             panic!("an empty leaf has room");
         };
-        edge.insert_fit(key, ledger.track());
+        edge.insert_fit(InlinedKey::new(key), ledger.track());
         (leaf, name)
     }
 
     /// A named leaf for the right of a separator, with a head to hold the
     /// separator's value (D17). Returns the leaf, its name, and the id of its
     /// head.
-    fn child_leaf<'l, K: FromTracked<'l>>(
-        pages: &TestPages<K, Tracked<'l>>,
+    fn child_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        pages: &TestPages<K, Tracked<'l>, S>,
         ledger: &'l DropLedger,
-    ) -> (Subtree<K, Tracked<'l>>, usize, usize) {
+    ) -> (Subtree<K, Tracked<'l>, S>, usize, usize) {
         let (mut leaf, name) = named_leaf(pages, ledger);
         let head = ledger.track();
         let head_id = head.id();
@@ -77,8 +80,8 @@ mod tests {
     }
 
     /// The names of the leaf children of an internal node, in order.
-    fn child_names<'l, K: FromTracked<'l>, V>(
-        node: NodeRef<Immut<'_>, K, V, Internal>,
+    fn child_names<'l, K: FromTracked<'l>, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'_>, K, V, S, Internal>,
     ) -> Vec<usize> {
         (0..=node.len())
             .map(|index| node.edge_at(index).descend().keys()[0].tracked_id())
@@ -86,7 +89,7 @@ mod tests {
     }
 
     /// The root of a tree that must be internal.
-    fn internal_root<K, V>(tree: &mut Subtree<K, V>) -> NodeMut<'_, K, V, Internal> {
+    fn internal_root<K, V, S>(tree: &mut Subtree<K, V, S>) -> NodeMut<'_, K, V, S, Internal> {
         match tree.borrow_mut().force() {
             ForceResult::Internal(root) => root,
             ForceResult::Leaf(_) => panic!("the root is a leaf"),
@@ -95,10 +98,10 @@ mod tests {
 
     /// A root with no keys above one named leaf, the leftmost, which has no
     /// head; and the leaf's name.
-    fn root_above_one_leaf<'l, K: FromTracked<'l>>(
-        pages: &TestPages<K, Tracked<'l>>,
+    fn root_above_one_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        pages: &TestPages<K, Tracked<'l>, S>,
         ledger: &'l DropLedger,
-    ) -> (Subtree<K, Tracked<'l>>, usize) {
+    ) -> (Subtree<K, Tracked<'l>, S>, usize) {
         let (leaf, name) = named_leaf(pages, ledger);
         let mut tree = leaf.forget_type();
         tree.push_internal_level(pages.fresh());
@@ -107,9 +110,13 @@ mod tests {
 
     /// Random operations on one internal node with leaf children, checked
     /// against a model of its separators, with their values from the
-    /// children's heads, and of its children's names.
-    fn random_operations<'l, K: FromTracked<'l>>(ledger: &'l DropLedger, steps: usize) {
-        let pages = TestPages::<K, Tracked<'l>>::new();
+    /// children's heads, and of its children's names; and its inline keys, if
+    /// it has them, against its keys.
+    fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        ledger: &'l DropLedger,
+        steps: usize,
+    ) {
+        let pages = TestPages::<K, Tracked<'l>, S>::new();
         let rng = TestRng::new(2);
         let (mut tree, first_name) = root_above_one_leaf(&pages, ledger);
         let mut separators: Vec<(usize, usize)> = Vec::new();
@@ -126,7 +133,7 @@ mod tests {
                         let key = K::from_tracked(ledger.track());
                         separators.insert(index, (key.tracked_id(), head_id));
                         children.insert(index + 1, name);
-                        assert_eq!(edge.insert_fit(key, child).index(), index);
+                        assert_eq!(edge.insert_fit(InlinedKey::new(key), child).index(), index);
                     }
                 }
                 4 | 5 if len > 0 => {
@@ -149,7 +156,9 @@ mod tests {
                     let index = rng.below(len);
                     let key = K::from_tracked(ledger.track());
                     let new_id = key.tracked_id();
-                    let old_key = internal_root(&mut tree).kv_at(index).replace_key(key);
+                    let old_key = internal_root(&mut tree)
+                        .kv_at(index)
+                        .replace_key(InlinedKey::new(key));
                     assert_eq!(old_key.tracked_id(), separators[index].0);
                     separators[index].0 = new_id;
                 }
@@ -202,6 +211,7 @@ mod tests {
             };
             assert_eq!(root.tracked_ids(), separators);
             assert_eq!(child_names(root), children);
+            root.assert_inline_keys_match();
         }
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
@@ -211,16 +221,21 @@ mod tests {
     fn random_operations_match_a_model() {
         let ledger = DropLedger::new();
         let steps = if cfg!(miri) { 200 } else { 10_000 };
-        random_operations::<Bulky<'_>>(&ledger, steps);
-        random_operations::<Tracked<'_>>(&ledger, steps);
+        random_operations::<Bulky<'_>, Auto>(&ledger, steps);
+        random_operations::<Tracked<'_>, Auto>(&ledger, steps);
+        random_operations::<Tracked<'_>, WithInlineKey>(&ledger, steps);
         ledger.assert_all_dropped_once();
     }
 
     /// Builds a full internal node with named leaf children, inserts one more
     /// separator and child at `position`, and checks the split against the
-    /// model: keys and edges move, and every separator keeps its value.
-    fn split_at<'l, K: FromTracked<'l>>(ledger: &'l DropLedger, position: usize) {
-        let pages = TestPages::<K, Tracked<'l>>::new();
+    /// model: keys, with their inline keys, and edges move, and every
+    /// separator keeps its value.
+    fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        ledger: &'l DropLedger,
+        position: usize,
+    ) {
+        let pages = TestPages::<K, Tracked<'l>, S>::new();
         let (mut tree, first_name) = root_above_one_leaf(&pages, ledger);
         let mut separators = Vec::new();
         let mut children = std::vec![first_name];
@@ -229,7 +244,7 @@ mod tests {
             let key = K::from_tracked(ledger.track());
             separators.push((key.tracked_id(), head_id));
             children.push(name);
-            edge.insert_fit(key, child);
+            edge.insert_fit(InlinedKey::new(key), child);
         }
         let (child, name, head_id) = child_leaf(&pages, ledger);
         let key = K::from_tracked(ledger.track());
@@ -241,14 +256,14 @@ mod tests {
             left,
             separator,
             right,
-        }) = edge.insert(key, child, || pages.fresh())
+        }) = edge.insert(InlinedKey::new(key), child, || pages.fresh())
         else {
             panic!("a full node splits");
         };
         let separator_value = right.borrow().first_edge().descend().leftmost_head_id();
         let mut halves = left.reborrow().tracked_ids();
         halves.push((
-            separator.tracked_id(),
+            separator.key().tracked_id(),
             separator_value.expect("the right half's leftmost leaf has a head"),
         ));
         halves.extend(right.borrow().tracked_ids());
@@ -258,6 +273,8 @@ mod tests {
         assert_eq!(halves_children, children);
         assert!(left.len().abs_diff(right.borrow().len()) <= 2);
         assert_eq!((left.height(), right.height()), (1, 1));
+        left.reborrow().assert_inline_keys_match();
+        right.borrow().assert_inline_keys_match();
         drop(separator);
         right.destroy(|page| pages.release(page));
         tree.destroy(|page| pages.release(page));
@@ -266,14 +283,16 @@ mod tests {
 
     #[test]
     fn split_and_insert_at_every_position() {
-        let ledger = DropLedger::new();
-        for position in 0..=NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY {
-            split_at::<Bulky<'_>>(&ledger, position);
-        }
-        if !cfg!(miri) {
-            for position in 0..=NodeLayout::<Tracked<'_>, Tracked<'_>>::INTERNAL_CAPACITY {
-                split_at::<Tracked<'_>>(&ledger, position);
+        fn every_position<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(ledger: &'l DropLedger) {
+            for position in 0..=NodePtr::<K, Tracked<'l>, S>::capacity(false) {
+                split_at::<K, S>(ledger, position);
             }
+        }
+        let ledger = DropLedger::new();
+        every_position::<Bulky<'_>, Auto>(&ledger);
+        if !cfg!(miri) {
+            every_position::<Tracked<'_>, Auto>(&ledger);
+            every_position::<Tracked<'_>, WithInlineKey>(&ledger);
         }
         ledger.assert_all_dropped_once();
     }
@@ -293,7 +312,7 @@ mod tests {
         let EdgeRoom::Fits(edge) = internal_root(&mut tree).first_edge().check_room() else {
             panic!("a root without keys has room");
         };
-        let key = ledger.track();
+        let key = InlinedKey::new(ledger.track());
         let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(key, too_tall)));
         assert!(rejected.is_err());
         let root = tree.borrow();
@@ -317,7 +336,7 @@ mod tests {
         let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() else {
             panic!("a root without keys has room");
         };
-        edge.insert_fit(ledger.track(), headless.forget_type());
+        edge.insert_fit(InlinedKey::new(ledger.track()), headless.forget_type());
         let separator = internal_root(&mut tree).kv_at(0);
         let context = catch_unwind(AssertUnwindSafe(|| separator.into_balancing_context()));
         assert!(context.is_err());
@@ -338,7 +357,7 @@ mod tests {
             let EdgeRoom::Fits(edge) = leaf.last_edge().check_room() else {
                 panic!("the leaf has room");
             };
-            edge.insert_fit(ledger.track(), ledger.track());
+            edge.insert_fit(InlinedKey::new(ledger.track()), ledger.track());
         }
         let ids = tree.borrow().subtree_tracked_ids();
 
@@ -386,15 +405,17 @@ mod tests {
         tree
     }
 
-    fn entry_ids(tree: &BulkyTree<'_, '_>) -> Vec<(usize, usize)> {
+    fn entry_ids<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+        tree: &TestTree<'_, K, Tracked<'l>, S>,
+    ) -> Vec<(usize, usize)> {
         tree.entries(|key, value| (key.tracked_id(), value.id()))
     }
 
     /// The child of the root at `index`, which must be a leaf.
-    fn leaf_child<'t, K, V>(
-        tree: &'t mut TestTree<'_, K, V>,
+    fn leaf_child<'t, K, V, S: InlineKeyStrategy<K>>(
+        tree: &'t mut TestTree<'_, K, V, S>,
         index: usize,
-    ) -> NodeMut<'t, K, V, Leaf> {
+    ) -> NodeMut<'t, K, V, S, Leaf> {
         let ForceResult::Leaf(leaf) = internal_root(tree.root_mut())
             .edge_at(index)
             .descend()
@@ -559,7 +580,7 @@ mod tests {
             let context = internal_root(tree.root_mut())
                 .kv_at(0)
                 .into_balancing_context();
-            let capacity = NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY;
+            let capacity = NodePtr::<Bulky<'_>, Tracked<'_>, Auto>::capacity(false);
             if context.left_child_len() + 1 + context.right_child_len() <= capacity {
                 break;
             }
@@ -593,10 +614,10 @@ mod tests {
 
     /// A random key/value of a random internal node, if the walk down meets
     /// one with keys.
-    fn random_internal_kv<'t, K, V>(
-        mut node: NodeMut<'t, K, V, LeafOrInternal>,
+    fn random_internal_kv<'t, K, V, S: InlineKeyStrategy<K>>(
+        mut node: NodeMut<'t, K, V, S, LeafOrInternal>,
         rng: &TestRng,
-    ) -> Option<Kv<NodeMut<'t, K, V, Internal>>> {
+    ) -> Option<Kv<NodeMut<'t, K, V, S, Internal>>> {
         loop {
             let ForceResult::Internal(internal) = node.force() else {
                 return None;
@@ -610,8 +631,8 @@ mod tests {
     }
 
     /// Removes a random entry of a random leaf, if the leaf has one.
-    fn remove_random_leaf_entry<K, V>(
-        mut node: NodeMut<'_, K, V, LeafOrInternal>,
+    fn remove_random_leaf_entry<K, V, S: InlineKeyStrategy<K>>(
+        mut node: NodeMut<'_, K, V, S, LeafOrInternal>,
         rng: &TestRng,
     ) -> Option<(K, V)> {
         loop {
@@ -628,17 +649,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn random_balancing_keeps_every_entry_in_order() {
-        let ledger = DropLedger::new();
-        let pages = TestPages::new();
-        let rng = TestRng::new(5);
+    /// Random removals, steals and merges anywhere in a tree, checked against
+    /// a model of its entries, and its inline keys, if it has them, against
+    /// its keys.
+    fn random_balancing<'l, K: FromTracked<'l> + Ord, S: InlineKeyStrategy<K>>(
+        ledger: &'l DropLedger,
+        seed: u64,
+    ) {
+        let pages = TestPages::<K, Tracked<'l>, S>::new();
+        let rng = TestRng::new(seed);
         let count = if cfg!(miri) { 80 } else { 800 };
         let mut keys = ledger.track_many(count);
         rng.shuffle(&mut keys);
         let mut tree = TestTree::new(&pages);
         for key in keys {
-            tree.insert(Bulky::from_tracked(key), ledger.track());
+            tree.insert(K::from_tracked(key), ledger.track());
         }
         let mut model = entry_ids(&tree);
 
@@ -652,6 +677,8 @@ mod tests {
                     model.retain(|&entry| entry != (key.tracked_id(), value.id()));
                 }
             } else if let Some(kv) = random_internal_kv(tree.root_mut().borrow_mut(), &rng) {
+                let children_are_leaves = kv.reborrow().into_node().height() == 1;
+                let children_capacity = NodePtr::<K, Tracked<'l>, S>::capacity(children_are_leaves);
                 let mut context = match kv.into_balancing_context().can_merge() {
                     Ok(mergeable) if rng.below(2) == 0 => {
                         let (_, page) = mergeable.merge();
@@ -675,13 +702,14 @@ mod tests {
                         refusals += 1;
                     }
                     Err(StealError::ReceiverFull) => {
-                        assert_eq!(receiver_len, 12);
+                        assert_eq!(receiver_len, children_capacity);
                         refusals += 1;
                     }
                 }
             }
             tree.pop_empty_roots();
             assert_eq!(entry_ids(&tree), model);
+            tree.root().borrow().assert_subtree_inline_keys_match();
         }
         assert!(
             merges > 0 && steals > 0,
@@ -690,6 +718,13 @@ mod tests {
 
         tree.destroy();
         pages.assert_all_released();
+    }
+
+    #[test]
+    fn random_balancing_keeps_every_entry_in_order() {
+        let ledger = DropLedger::new();
+        random_balancing::<Bulky<'_>, Auto>(&ledger, 5);
+        random_balancing::<Tracked<'_>, WithInlineKey>(&ledger, 6);
         ledger.assert_all_dropped_once();
     }
 }

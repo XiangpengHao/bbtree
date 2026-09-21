@@ -12,6 +12,7 @@ use std::string::String;
 use std::sync::MutexGuard;
 
 use super::BBTreeMap;
+use crate::inline_key::WithInlineKey;
 
 /// Which auto traits a type implements.
 #[derive(Debug, PartialEq, Eq)]
@@ -122,6 +123,15 @@ fn auto_traits_match_std() {
         &'static mut u8 => u8,
         u8 => &'static mut u8,
     );
+    // The strategy is only a marker: it changes no auto trait.
+    assert_eq!(
+        auto_traits!(BBTreeMap<String, Rc<u8>, WithInlineKey>),
+        auto_traits!(BTreeMap<String, Rc<u8>>)
+    );
+    assert_eq!(
+        auto_traits!(BBTreeMap<String, Cell<u8>, WithInlineKey>),
+        auto_traits!(BTreeMap<String, Cell<u8>>)
+    );
 }
 
 /// Compiles only if the map is covariant in its keys and values, as std's
@@ -150,6 +160,7 @@ fn three_words_like_std() {
         size_of::<BBTreeMap<u64, u64>>(),
         size_of::<BTreeMap<u64, u64>>()
     );
+    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 24);
 }
 
 #[test]

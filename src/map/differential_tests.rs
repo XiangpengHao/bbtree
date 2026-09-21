@@ -1,10 +1,12 @@
 //! Differential tests: the map against std's `BTreeMap`, fed the same
 //! operations, for ordinary, heap-owning, wide, zero-sized and over-aligned
 //! keys and values, including every key that ends up as a separator in an
-//! internal node, with its value in a leaf's head (D17).
+//! internal node, with its value in a leaf's head (D17). The tests of inline
+//! keys (`inline_key_tests.rs`) use the same harness.
 
 #![forbid(unsafe_code)]
 
+use core::borrow::Borrow;
 use core::fmt::Debug;
 use core::ptr;
 use std::collections::BTreeMap;
@@ -13,11 +15,12 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::BBTreeMap;
+use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::test_support::{CacheLineAligned, PageAligned, TestRng};
 
 /// A key or value made from a number. Different numbers make different
 /// values as far as the type allows, and keys from ascending numbers ascend.
-trait FromNumber {
+pub(super) trait FromNumber {
     fn from_number(number: usize) -> Self;
 }
 
@@ -67,22 +70,40 @@ impl FromNumber for PageAligned {
     }
 }
 
-/// Our map and std's, fed the same operations: every answer must match.
-struct MirroredMaps<K, V> {
-    ours: BBTreeMap<K, V>,
+/// Our map, with inline-key strategy `S`, and std's, fed the same
+/// operations: every answer must match.
+pub(super) struct MirroredMaps<K, V, S: InlineKeyStrategy<K> = Auto> {
+    ours: BBTreeMap<K, V, S>,
     theirs: BTreeMap<K, V>,
 }
 
-impl<K, V> MirroredMaps<K, V>
+impl<K, V, S> MirroredMaps<K, V, S>
 where
     K: Ord + Clone + Debug + FromNumber,
     V: Clone + PartialEq + Debug + FromNumber,
+    S: InlineKeyStrategy<K> + Default,
 {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            ours: BBTreeMap::new(),
+            ours: BBTreeMap::with_strategy(S::default()),
             theirs: BTreeMap::new(),
         }
+    }
+
+    /// Looks `key` up by a borrowed form of the keys in both maps.
+    pub(super) fn get_borrowed<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        assert_eq!(self.ours.get(key), self.theirs.get(key));
+        assert_eq!(self.ours.get_key_value(key), self.theirs.get_key_value(key));
+        assert_eq!(self.ours.contains_key(key), self.theirs.contains_key(key));
+    }
+
+    /// The keys in both maps, in order.
+    pub(super) fn keys(&self) -> impl Iterator<Item = &K> {
+        self.theirs.keys()
     }
 
     fn insert(&mut self, key: K, value: V) {
@@ -115,7 +136,7 @@ where
     }
 
     /// Checks the map's invariants, and that it holds exactly std's entries.
-    fn assert_same_entries(&self) {
+    pub(super) fn assert_same_entries(&self) {
         self.ours.check_invariants();
         self.assert_same_len();
         for (key, value) in &self.theirs {
@@ -141,7 +162,7 @@ where
     }
 
     /// `steps` random operations on keys made from `0..key_space`.
-    fn run_random_operations(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
+    pub(super) fn run_random_operations(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
         for _ in 0..steps {
             let key = K::from_number(rng.below(key_space));
             match rng.below(8) {
@@ -173,34 +194,35 @@ where
 
 /// How much work one key and value type gets: large natively, small under
 /// Miri.
-struct Workload {
-    random_steps: usize,
-    key_space: usize,
-    ordered_entries: usize,
+pub(super) struct Workload {
+    pub(super) random_steps: usize,
+    pub(super) key_space: usize,
+    pub(super) ordered_entries: usize,
     /// The height ascending and descending inserts must reach. They leave
     /// the nodes they split about half full, so their height is predictable;
     /// shuffled inserts fill nodes fuller and may stay a level lower.
-    min_sequential_height: usize,
+    pub(super) min_sequential_height: usize,
 }
 
 impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
-    /// each on a fresh pair of maps, and each followed by overwriting every
-    /// separator's value.
-    fn run<K, V>(&self, seed: u64)
+    /// each on a fresh pair of maps whose ours has strategy `S`, and each
+    /// followed by overwriting every separator's value.
+    pub(super) fn run<K, V, S>(&self, seed: u64)
     where
         K: Ord + Clone + Debug + FromNumber,
         V: Clone + PartialEq + Debug + FromNumber,
+        S: InlineKeyStrategy<K> + Default,
     {
         let rng = TestRng::new(seed);
-        let mut maps = MirroredMaps::<K, V>::new();
+        let mut maps = MirroredMaps::<K, V, S>::new();
         maps.run_random_operations(&rng, self.random_steps, self.key_space);
         maps.overwrite_separators(&rng);
 
         let evens = || (0..self.ordered_entries).map(|index| 2 * index);
         let sequential_orders: [Vec<usize>; 2] = [evens().collect(), evens().rev().collect()];
         for numbers in sequential_orders {
-            let mut maps = MirroredMaps::<K, V>::new();
+            let mut maps = MirroredMaps::<K, V, S>::new();
             maps.insert_evens_in_order(numbers);
             let height = maps.ours.height();
             assert!(
@@ -212,7 +234,7 @@ impl Workload {
         }
         let mut shuffled: Vec<usize> = evens().collect();
         rng.shuffle(&mut shuffled);
-        let mut maps = MirroredMaps::<K, V>::new();
+        let mut maps = MirroredMaps::<K, V, S>::new();
         maps.insert_evens_in_order(shuffled);
         maps.overwrite_separators(&rng);
     }
@@ -235,7 +257,7 @@ fn u64_to_u64_matches_std() {
             min_sequential_height: 2,
         }
     };
-    workload.run::<u64, u64>(1);
+    workload.run::<u64, u64, Auto>(1);
 }
 
 #[test]
@@ -255,7 +277,7 @@ fn string_to_string_matches_std() {
             min_sequential_height: 2,
         }
     };
-    workload.run::<String, String>(2);
+    workload.run::<String, String, Auto>(2);
 }
 
 #[test]
@@ -278,7 +300,7 @@ fn wide_keys_match_std() {
             min_sequential_height: 3,
         }
     };
-    workload.run::<WideKey, u64>(3);
+    workload.run::<WideKey, u64, Auto>(3);
 }
 
 #[test]
@@ -300,7 +322,7 @@ fn zero_sized_keys_and_values_match_std() {
         ordered_entries: if cfg!(miri) { 150 } else { 5000 },
         min_sequential_height: 1,
     };
-    workload.run::<u64, ()>(5);
+    workload.run::<u64, (), Auto>(5);
 }
 
 #[test]
@@ -324,14 +346,14 @@ fn over_aligned_values_match_std() {
         ordered_entries: if cfg!(miri) { 60 } else { 3000 },
         min_sequential_height: 1,
     }
-    .run::<u64, CacheLineAligned>(7);
+    .run::<u64, CacheLineAligned, Auto>(7);
     Workload {
         random_steps: if cfg!(miri) { 60 } else { 2000 },
         key_space: 1 << 10,
         ordered_entries: if cfg!(miri) { 30 } else { 600 },
         min_sequential_height: 1,
     }
-    .run::<u64, PageAligned>(8);
+    .run::<u64, PageAligned, Auto>(8);
 
     let count = if cfg!(miri) { 30 } else { 100 };
     let mut map = BBTreeMap::new();

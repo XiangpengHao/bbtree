@@ -42,11 +42,14 @@ touching the heap**.
   search strategy follows the inline key, not `K`. On a tie, the remaining range
   of equal inline keys is searched on full keys. Branchless binary search or a
   linear scan of the dense array is open (Q6).
-- **Node prefetch** (in progress) covers the inline-key array as part of the
-  node's key area.
+- **Node prefetch** covers the header, the inline-key array and the key area by
+  capacity (D20). Prefetching only the inline array is not enough: every hit on
+  a key longer than the inline width, and every tie, reads a key line, which
+  then sits on the critical path. Measured on wiki titles at 10M, `get_hit`:
+  878 ns with the inline array only, 704 ns with the key area too.
 - **Both leaves and internal nodes carry inline keys.** Every lookup searches
-  both, and in both each probe would otherwise read the heap. Confirm by
-  measurement (Q3).
+  both, and in both each probe would otherwise read the heap. Measured: both
+  benefit (Q3).
 - **Moving the array.** Insert, remove, split and merge move it together with
   the keys, through `Slots` (D14).
 - **Cost:** 8 B per entry at the starting width. `String`→`u64` leaf capacity
@@ -100,9 +103,16 @@ struct UserName(String);
 impl InlineKey for UserName {
     fn inline_key(&self) -> InlineWord { self.0.inline_key() }
 }
-let plain: BBTreeMap<UserName, u64> = BBTreeMap::new();                      // no inline keys
-let opted_in: BBTreeMap<UserName, u64, Global, WithInlineKey> = BBTreeMap::new();  // inline keys
+let plain: BBTreeMap<UserName, u64> = BBTreeMap::new();                     // no inline keys
+let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
+    BBTreeMap::with_strategy(WithInlineKey);                                 // inline keys
 ```
+
+Opting in goes through `with_strategy`, not an annotated `new()`: a `new()`
+generic over `S` breaks plain `BBTreeMap::new()` with "type annotations
+needed", because default type parameters don't drive inference. `new()` stays
+`Auto`-only, as std's is `Global`-only. Until the allocator parameter lands, the
+strategy is the third parameter.
 
 How `Auto` recognizes std types inside the tree. `type_id_of` is `TypeId`
 with lifetimes erased (dtolnay's `typeid` trick, vendored):
@@ -158,7 +168,8 @@ fat element:     | hdr | (i0,k0) (i1,k1) … (i24,k24) | free | … v1 v0 | head
 Both cost 8 bytes per entry. The parallel array wins on what the search
 touches:
 
-- **Search lines:** 4 instead of 13, and node prefetch needs only those 4.
+- **Search lines:** 4 instead of 13 while inline keys decide. Prefetch still
+  covers the key lines, which hits and ties read (section 3).
 - **Search loop:** runs over a dense `[u64]`, which can be vectorized.
 - **Hot set:** internal nodes keep only inline-key arrays and edges hot, about 4×
   less, so more upper levels stay in L1/L2.
@@ -178,10 +189,19 @@ wins only for heavily tied keys, where the inline key decides nothing anyway
 **Q2. Keys with long shared prefixes.** Handled by per-node prefix stripping;
 see 05-fence-key.md.
 
-**Q3. Confirm that both node kinds benefit.** Expected: yes, since each
-search probe reads the heap in either kind. Measure the gain for leaves and for
-internal nodes separately, against the per-entry cost (for `String` → `u64`,
-leaf capacity 31 → 25 at 8 bytes, 31 → 21 at 16).
+**Q3. (resolved) Both node kinds benefit; internal nodes most.** Wiki titles
+at 10M, `get_hit`, one run each with `--perf` (counters are reliable, times ±15%):
+
+| build | ns | instructions | DRAM fills |
+|---|---|---|---|
+| no inline keys | 1073 | 1158 | 83.5 |
+| inline keys | 704 | 803 | 42.2 |
+| inline keys in internal nodes only | 748 | 997 | 46.2 |
+
+- **Split of the gain:** of the 369 ns saved, about 325 come from internal
+  nodes and 44 from leaves.
+- **Cost:** 68.8 → 80.5 bytes per entry (+17%). Nodes hold 25 entries instead
+  of 31, so a 10M map is one level taller (4 → 5).
 
 **Q4. (resolved) No length in the inline key.** The inline key is the prefix
 only.
@@ -231,7 +251,12 @@ scan?** At 8 bytes, a node's inline keys are about 200 B in 4 cache lines.
     and 10M;
   - no regression on integer keys;
   - memory per entry reported alongside.
-- **Paths** are expected to stay near parity until prefix stripping (05-fence-key.md).
+- **Paths** were expected to stay near parity until prefix stripping
+  (05-fence-key.md). Measured: they regress, to 1.2–1.7× std's time.
+  - **Cause:** when every inline key in a node ties, the inline search is pure
+    overhead, about 100 instructions per level, before the full-key search.
+  - **Result so far:** before the prefetch fix, `str-json` and `str-16` gets
+    ran at 0.61–0.74× std's time at 1M and 10M.
 
 ## TODO
 

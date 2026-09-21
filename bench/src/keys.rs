@@ -1,4 +1,5 @@
-//! Key kinds (doc/02-field_study.md §6) and their deterministic generators.
+//! Key kinds (doc/02-field_study.md §6) and their deterministic generators,
+//! and the key kinds read from real-world datasets (`datasets.rs`).
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -7,7 +8,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use bytes::Bytes;
 
 use crate::command_line::Named;
+use crate::datasets::DataFile;
 use crate::random::{RandomStream, SeededRng};
+use crate::workload::MapSize;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KeyKind {
@@ -30,6 +33,33 @@ pub(crate) enum KeyKind {
     Memtable16,
     /// LSM memtable keys with 24-byte user keys.
     Memtable24,
+    /// `String`s: every crate name on crates.io (median 12 B, 36% of sorted
+    /// neighbours share their first 8 bytes).
+    CrateNames,
+    /// `String`s: the file paths of the Linux source tree (median 36 B, 99%
+    /// of sorted neighbours share their first 8 bytes).
+    KernelPaths,
+    /// `String`s: English Wikipedia's article titles (median 18 B, 19M of
+    /// them).
+    WikiTitles,
+    /// `String`s: the URLs of pages in a Common Crawl crawl, kept as crawled
+    /// (`https://www.example.com/...`): long keys behind long shared
+    /// prefixes. TODO(phase 2): statistics.
+    Urls,
+    /// `String`s: every French address, as the Base Adresse Nationale's
+    /// geocoder labels them (`83bis Chemin du Peuple 01330
+    /// Ambérieux-en-Dombes`; median 39 B, 97% of sorted neighbours share
+    /// their first 8 bytes, 26M of them).
+    Addresses,
+    /// `String`s: the names of GeoNames' places. TODO(phase 2): statistics.
+    GeoNames,
+    /// `String`s: the titles of computer science publications in dblp
+    /// (median 78 B, 87% of sorted neighbours share their first 8 bytes,
+    /// 8.4M of them).
+    DblpTitles,
+    /// `String`s: the keys of the objects of real JSON documents, each
+    /// object a tiny map (median 2 keys of 8 B).
+    JsonObjectKeys,
 }
 
 impl Named for KeyKind {
@@ -43,6 +73,14 @@ impl Named for KeyKind {
         Self::Hash32,
         Self::Memtable16,
         Self::Memtable24,
+        Self::CrateNames,
+        Self::KernelPaths,
+        Self::WikiTitles,
+        Self::Urls,
+        Self::Addresses,
+        Self::GeoNames,
+        Self::DblpTitles,
+        Self::JsonObjectKeys,
     ];
 
     fn name(self) -> &'static str {
@@ -56,12 +94,72 @@ impl Named for KeyKind {
             Self::Hash32 => "hash32",
             Self::Memtable16 => "memtable16",
             Self::Memtable24 => "memtable24",
+            Self::CrateNames => "crate-names",
+            Self::KernelPaths => "kernel-paths",
+            Self::WikiTitles => "wiki-titles",
+            Self::Urls => "urls",
+            Self::Addresses => "addresses",
+            Self::GeoNames => "geonames",
+            Self::DblpTitles => "dblp-titles",
+            Self::JsonObjectKeys => "json-keys",
         }
     }
 }
 
-/// What the benchmark needs from a key type.
-pub(crate) trait BenchKey: Ord + Hash + Clone + 'static {
+impl KeyKind {
+    /// The data files the keys are read from: none for generated keys.
+    pub(crate) fn data_files(self) -> &'static [DataFile] {
+        match self {
+            Self::U64Random
+            | Self::U64Sequential
+            | Self::U32
+            | Self::JsonString
+            | Self::CrateString
+            | Self::PathString
+            | Self::Hash32
+            | Self::Memtable16
+            | Self::Memtable24 => &[],
+            Self::CrateNames => &[DataFile::CrateNames],
+            Self::KernelPaths => &[DataFile::KernelPaths],
+            Self::WikiTitles => &[DataFile::WikiTitles],
+            Self::Urls => &[DataFile::CommonCrawlUrls],
+            Self::Addresses => &[DataFile::BanAddresses],
+            Self::GeoNames => &[DataFile::GeoNames],
+            Self::DblpTitles => &[DataFile::DblpTitles],
+            Self::JsonObjectKeys => &[DataFile::JsonObjectKeys, DataFile::JsonKeyVocabulary],
+        }
+    }
+
+    pub(crate) fn is_generated(self) -> bool {
+        self.data_files().is_empty()
+    }
+
+    /// The sizes the keys come in. Generated keys come in every size whose
+    /// shape is fixed, and JSON objects in their own shape. The small
+    /// datasets' keys come in `all` and the fixed sizes they have enough keys
+    /// for. The large ones' come in 1M and 10M, or `all` instead of 10M when
+    /// they hold fewer keys than that.
+    pub(crate) fn sizes(self) -> &'static [MapSize] {
+        match self {
+            Self::CrateNames => &[MapSize::OneThousand, MapSize::HundredThousand, MapSize::All],
+            Self::KernelPaths => &[MapSize::OneThousand, MapSize::All],
+            Self::WikiTitles | Self::Urls | Self::Addresses => {
+                &[MapSize::OneMillion, MapSize::TenMillion]
+            }
+            // TODO(phase 2): GeoNames' count decides whether 10M or `all`.
+            Self::GeoNames | Self::DblpTitles => &[MapSize::OneMillion, MapSize::All],
+            Self::JsonObjectKeys => &[MapSize::RealJsonObjects],
+            generated => {
+                assert!(generated.is_generated(), "{} has no sizes", self.name());
+                MapSize::FIXED_SHAPES
+            }
+        }
+    }
+}
+
+/// What the benchmark needs from a key type. Setup shares keys with, and
+/// sends them between, its worker threads (`parallel_setup.rs`).
+pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
     /// A cheap read of the key, folded into checksums so that the optimizer
     /// can't skip visiting it.
     fn fingerprint(&self) -> u64;

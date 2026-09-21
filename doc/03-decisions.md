@@ -204,8 +204,11 @@ Design in 04-inline-key.md.
     identity (option (d)).
 - **In types:** `BBTreeMap<K, V, A = Global, S = Auto>`. Existing code is
   unchanged and gets inline keys for std string keys. Other key types opt in with a
-  one-line impl plus `S = WithInlineKey` on the map type; there is no separate
-  alias type.
+  one-line impl plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()` stays
+  `Auto`-only, since a generic `new()` breaks inference. There is no separate
+  alias type. Until the allocator parameter lands, `S` is the third parameter.
+- **Lint:** node handles carry five type parameters, so `clippy.toml` raises
+  `type-complexity-threshold` to 300.
 - **Width:** inline keys start at 8 bytes (`InlineWord = u64`). The width is
   one constant, to revisit on real keys (04-inline-key.md Q7). At 8 bytes, real
   neighbours tie 24–70% of the time; at 16 bytes, 1–20%.

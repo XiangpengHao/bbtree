@@ -11,6 +11,12 @@ The fraction of sorted neighbours sharing their first 8 bytes is 36% for crate
 names, 44% for Wikipedia titles at 1M (65% at 10M) and 99% for Linux paths
 (04-inline-key.md, Q7).
 
+Ties cost more than a heap read. When every inline key in a node ties, the
+inline search decides nothing and costs about 100 instructions per level before
+the full-key search starts. With 8-byte inline keys, paths run at 1.2–1.7× std's
+time (04-inline-key.md, section 5). There is no separate guard for nodes whose
+inline keys all tie: prefix stripping removes the cause.
+
 ## Idea: the separators are the fences
 
 Every node has bounds `[low, high)`: the separators bounding it in its

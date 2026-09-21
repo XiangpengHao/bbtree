@@ -3,26 +3,34 @@
 
 use crate::command_line::{CellFilter, Named};
 use crate::keys::KeyKind;
+use crate::map_adapters::MapKind;
 use crate::operations::Operation;
 use crate::values::ValueKind;
 use crate::workload::{MapSize, Workload};
 
+/// A suite runs within 10 minutes at full scale, one repetition, on the
+/// benchmark machine (Ryzen 9 9900X).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Suite {
     /// `u64 → u64` at 10M, every operation.
     Headline,
-    /// Each key kind → `u64`, at 1M, and the fixed-size keys and JSON keys
-    /// at 10M too: inserts and lookups.
+    /// Each generated key kind → `u64`, at 1M, and the fixed-size keys and
+    /// JSON keys at 10M too: inserts and lookups.
     Keys,
+    /// Each large real-world key set → `u64`, at 1M and 10M (`all` for sets
+    /// of fewer keys), on the ordered maps: inserts and lookups.
+    RealKeys,
     /// `u64` → each value kind, at 1M: inserts and lookups.
     Values,
-    /// Many tiny JSON-object-like maps: JSON keys → 32-byte structs.
+    /// Many tiny JSON-object-like maps: JSON keys → 32-byte structs, in
+    /// maps of generated keys and in the objects of real JSON documents.
     Tiny,
     /// LSM memtables: `(Bytes, u64)` → 100-byte records, at 1M.
     Memtable,
     /// `u64` and JSON-key sets, at 1M.
     Sets,
-    /// `u64 → u64` and `String → u64` at 1k, every operation.
+    /// `u64 → u64` and `String → u64` at 1k, every operation; and crate names
+    /// and kernel paths → `u64` at 1k: inserts and lookups.
     Small,
 }
 
@@ -30,6 +38,7 @@ impl Named for Suite {
     const ALL: &'static [Self] = &[
         Self::Headline,
         Self::Keys,
+        Self::RealKeys,
         Self::Values,
         Self::Tiny,
         Self::Memtable,
@@ -41,6 +50,7 @@ impl Named for Suite {
         match self {
             Self::Headline => "headline",
             Self::Keys => "keys",
+            Self::RealKeys => "realkeys",
             Self::Values => "values",
             Self::Tiny => "tiny",
             Self::Memtable => "memtable",
@@ -64,8 +74,40 @@ impl Suite {
         KeyKind::JsonString,
     ];
 
+    /// The key kinds read from large datasets of one key per line: those of
+    /// the string-index literature (LITS, HOPE, HOT), but Wikipedia's titles
+    /// of today.
+    const REAL_KEYS: [KeyKind; 5] = [
+        KeyKind::WikiTitles,
+        KeyKind::Urls,
+        KeyKind::Addresses,
+        KeyKind::GeoNames,
+        KeyKind::DblpTitles,
+    ];
+
+    /// The maps the suite's workloads run on. The real-keys suite compares
+    /// the ordered maps only: at 10M entries of long strings, building each
+    /// map takes seconds, and the hash maps wouldn't fit its time budget.
+    pub(crate) fn maps(self) -> &'static [MapKind] {
+        match self {
+            Self::RealKeys => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::Headline
+            | Self::Keys
+            | Self::Values
+            | Self::Tiny
+            | Self::Memtable
+            | Self::Sets
+            | Self::Small => MapKind::ALL,
+        }
+    }
+
     pub(crate) fn workloads(self) -> Vec<Workload> {
         let inserts_and_lookups = [Operation::InsertRandom, Operation::GetHit];
+        let inserts_hits_and_misses = [
+            Operation::InsertRandom,
+            Operation::GetHit,
+            Operation::GetMiss,
+        ];
         match self {
             Self::Headline => Workload::product(
                 &[KeyKind::U64Random],
@@ -74,18 +116,24 @@ impl Suite {
                 Operation::ON_ONE_MAP,
             ),
             Self::Keys => (KeyKind::ALL.iter())
+                .filter(|key| key.is_generated())
                 .flat_map(|&key| {
                     let sizes: &[MapSize] = if Self::KEYS_AT_TEN_MILLION.contains(&key) {
                         &[MapSize::OneMillion, MapSize::TenMillion]
                     } else {
                         &[MapSize::OneMillion]
                     };
-                    let lookups = [
-                        Operation::InsertRandom,
-                        Operation::GetHit,
-                        Operation::GetMiss,
-                    ];
-                    Workload::product(&[key], &[ValueKind::U64], sizes, &lookups)
+                    Workload::product(&[key], &[ValueKind::U64], sizes, &inserts_hits_and_misses)
+                })
+                .collect(),
+            Self::RealKeys => (Self::REAL_KEYS.iter())
+                .flat_map(|&key| {
+                    Workload::product(
+                        &[key],
+                        &[ValueKind::U64],
+                        key.sizes(),
+                        &inserts_hits_and_misses,
+                    )
                 })
                 .collect(),
             Self::Values => Workload::product(
@@ -94,12 +142,21 @@ impl Suite {
                 &[MapSize::OneMillion],
                 &inserts_and_lookups,
             ),
-            Self::Tiny => Workload::product(
-                &[KeyKind::JsonString],
-                &[ValueKind::Struct32],
-                &[MapSize::FourEntryMaps, MapSize::ThirtyTwoEntryMaps],
-                Operation::ON_MANY_MAPS,
-            ),
+            Self::Tiny => {
+                let mut workloads = Workload::product(
+                    &[KeyKind::JsonString],
+                    &[ValueKind::Struct32],
+                    &[MapSize::FourEntryMaps, MapSize::ThirtyTwoEntryMaps],
+                    &[Operation::BuildMany, Operation::GetMany, Operation::Iterate],
+                );
+                workloads.extend(Workload::product(
+                    &[KeyKind::JsonObjectKeys],
+                    &[ValueKind::Struct32],
+                    &[MapSize::RealJsonObjects],
+                    Operation::ON_MANY_MAPS,
+                ));
+                workloads
+            }
             Self::Memtable => Workload::product(
                 &[KeyKind::Memtable16, KeyKind::Memtable24],
                 &[ValueKind::Bytes100],
@@ -116,12 +173,21 @@ impl Suite {
                 &[MapSize::OneMillion],
                 &inserts_and_lookups,
             ),
-            Self::Small => Workload::product(
-                &[KeyKind::U64Random, KeyKind::CrateString],
-                &[ValueKind::U64],
-                &[MapSize::OneThousand],
-                Operation::ON_ONE_MAP,
-            ),
+            Self::Small => {
+                let mut workloads = Workload::product(
+                    &[KeyKind::U64Random, KeyKind::CrateString],
+                    &[ValueKind::U64],
+                    &[MapSize::OneThousand],
+                    Operation::ON_ONE_MAP,
+                );
+                workloads.extend(Workload::product(
+                    &[KeyKind::CrateNames, KeyKind::KernelPaths],
+                    &[ValueKind::U64],
+                    &[MapSize::OneThousand],
+                    &inserts_hits_and_misses,
+                ));
+                workloads
+            }
         }
     }
 }

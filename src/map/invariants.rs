@@ -5,11 +5,12 @@
 
 use std::vec::Vec;
 
+use crate::inline_key::InlineKeyStrategy;
 use crate::node::handle::{ForceResult, Immut, LeafOrInternal, NodeRef};
 
 use super::BBTreeMap;
 
-impl<K: Ord, V> BBTreeMap<K, V> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Panics unless the map is a well-formed B+-tree of `len()` entries
     /// (D17):
     ///
@@ -25,7 +26,10 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     ///   just left of it, and the leftmost has none: a tree of `L` leaves
     ///   has `L - 1` separators and as many heads;
     /// - `len()` is the number of entries, each counted once: leaf entries
-    ///   and separators, whose values are the heads.
+    ///   and separators, whose values are the heads;
+    /// - if the strategy gives the keys inline keys, every node holds those
+    ///   of its keys, in order, and a prefix length of 0; otherwise none
+    ///   (D18).
     pub(super) fn check_invariants(&self) {
         let Some(root) = &self.root else {
             assert_eq!(self.length, 0, "a map without a root has entries");
@@ -68,7 +72,7 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     }
 
     fn collect_separator_keys<'a>(
-        node: NodeRef<Immut<'a>, K, V, LeafOrInternal>,
+        node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
         keys: &mut Vec<&'a K>,
     ) {
         if let ForceResult::Internal(internal) = node.force() {
@@ -132,12 +136,13 @@ struct InOrderWalk<'a, K> {
 }
 
 impl<'a, K: Ord> InOrderWalk<'a, K> {
-    fn check_subtree<V>(
+    fn check_subtree<V, S: InlineKeyStrategy<K>>(
         &mut self,
-        node: NodeRef<Immut<'a>, K, V, LeafOrInternal>,
+        node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
         bounds: KeyBounds<'a, K>,
         depth: usize,
     ) {
+        node.assert_inline_keys_match();
         let keys = node.keys();
         if depth > 0 {
             assert!(

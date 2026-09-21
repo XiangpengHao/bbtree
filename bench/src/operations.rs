@@ -15,8 +15,8 @@ use crate::perf_counters::PerfControl;
 use crate::values::BenchValue;
 use crate::workload::MapSize;
 
-pub(crate) use many_maps::ManyMapsCell;
-pub(crate) use single_map::SingleMapCell;
+pub(crate) use many_maps::{ManyMapsCell, ManyMapsKeys, PicksPerMap};
+pub(crate) use single_map::{SingleMapCell, SingleMapKeys};
 
 /// What a cell does. Time is reported per operation, which is one call of
 /// the map's API unless noted.
@@ -44,11 +44,16 @@ pub(crate) enum Operation {
     /// `FromIterator` from entries sorted by key. Per entry.
     BulkBuild,
     /// Builds many tiny maps, all kept alive, inserting each map's keys in
-    /// random order. Per insert.
+    /// its own order: random for generated maps, document order for JSON
+    /// objects. Per insert.
     BuildMany,
     /// Looks up every key of every tiny map, visiting the maps in random
     /// order.
     GetMany,
+    /// Looks up, in every tiny map, as many keys that it lacks as it holds,
+    /// visiting the maps in random order. The keys are the other maps', so
+    /// they mix like those of `GetMany`.
+    GetManyMiss,
 }
 
 impl Named for Operation {
@@ -65,6 +70,7 @@ impl Named for Operation {
         Self::BulkBuild,
         Self::BuildMany,
         Self::GetMany,
+        Self::GetManyMiss,
     ];
 
     fn name(self) -> &'static str {
@@ -81,6 +87,7 @@ impl Named for Operation {
             Self::BulkBuild => "bulk_build",
             Self::BuildMany => "build_many",
             Self::GetMany => "get_many",
+            Self::GetManyMiss => "get_many_miss",
         }
     }
 }
@@ -102,8 +109,12 @@ impl Operation {
 
     /// The operations on many tiny maps: build them, then read them as a
     /// deserializer's caller or a serializer would.
-    pub(crate) const ON_MANY_MAPS: &'static [Self] =
-        &[Self::BuildMany, Self::GetMany, Self::Iterate];
+    pub(crate) const ON_MANY_MAPS: &'static [Self] = &[
+        Self::BuildMany,
+        Self::GetMany,
+        Self::GetManyMiss,
+        Self::Iterate,
+    ];
 
     const RANGE_SCAN_LENGTH: usize = 64;
 

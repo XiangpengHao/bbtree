@@ -7,8 +7,9 @@
 use super::handle::{
     ForceResult, Head, Immut, Internal, Kv, Leaf, LeafOrInternal, NodeMut, NodeRef,
 };
+use crate::inline_key::InlineKeyStrategy;
 
-impl<BorrowType, K, V> Kv<NodeRef<BorrowType, K, V, Internal>> {
+impl<BorrowType, K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<BorrowType, K, V, S, Internal>> {
     /// The head that holds this separator's value: that of the leftmost leaf
     /// under the edge right of it, reached through first edges.
     ///
@@ -16,7 +17,7 @@ impl<BorrowType, K, V> Kv<NodeRef<BorrowType, K, V, Internal>> {
     ///
     /// If that leaf has no head, which never happens in a tree built by the
     /// node operations: every leaf but the tree's leftmost has one.
-    pub(crate) fn into_value_head(self) -> Head<NodeRef<BorrowType, K, V, Leaf>> {
+    pub(crate) fn into_value_head(self) -> Head<NodeRef<BorrowType, K, V, S, Leaf>> {
         let mut node = self.right_edge().descend();
         loop {
             match node.force() {
@@ -31,7 +32,7 @@ impl<BorrowType, K, V> Kv<NodeRef<BorrowType, K, V, Internal>> {
     }
 }
 
-impl<'a, K, V> Kv<NodeRef<Immut<'a>, K, V, LeafOrInternal>> {
+impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Immut<'a>, K, V, S, LeafOrInternal>> {
     /// The key and its value: side by side in a leaf, or for a separator, the
     /// key here and the value in a head below.
     pub(crate) fn into_key_value(self) -> (&'a K, &'a V) {
@@ -42,7 +43,7 @@ impl<'a, K, V> Kv<NodeRef<Immut<'a>, K, V, LeafOrInternal>> {
     }
 }
 
-impl<'a, K, V> Kv<NodeMut<'a, K, V, LeafOrInternal>> {
+impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, LeafOrInternal>> {
     /// The value: beside the key in a leaf, or for a separator, in a head
     /// below.
     pub(crate) fn into_value_mut(self) -> &'a mut V {
@@ -60,9 +61,11 @@ mod tests {
     use std::panic::catch_unwind;
     use std::vec::Vec;
 
+    use crate::inline_key::Auto;
     use crate::node::handle::{
         EdgeRoom, ForceResult, Immut, Internal, Kv, LeafOrInternal, NodeRef, SearchResult, Subtree,
     };
+    use crate::node::inline_keys::{InlinedKey, SearchKey};
     use crate::node::page::TestPages;
     use crate::node::test_support::{DropLedger, TestRng, TestTree, Tracked};
 
@@ -73,8 +76,8 @@ mod tests {
     /// Every separator of the subtree under `node`, at any height, and the
     /// number of its leaves.
     fn separators_and_leaves<'a, K, V>(
-        node: NodeRef<Immut<'a>, K, V, LeafOrInternal>,
-        separators: &mut Vec<Kv<NodeRef<Immut<'a>, K, V, Internal>>>,
+        node: NodeRef<Immut<'a>, K, V, Auto, LeafOrInternal>,
+        separators: &mut Vec<Kv<NodeRef<Immut<'a>, K, V, Auto, Internal>>>,
     ) -> usize {
         match node.force() {
             ForceResult::Leaf(_) => 1,
@@ -93,11 +96,12 @@ mod tests {
 
     /// The key/value a search from `node` down finds for `key`, if any.
     fn search_tree<'a, K: Ord, V>(
-        mut node: NodeRef<Immut<'a>, K, V, LeafOrInternal>,
+        mut node: NodeRef<Immut<'a>, K, V, Auto, LeafOrInternal>,
         key: &K,
-    ) -> Option<Kv<NodeRef<Immut<'a>, K, V, LeafOrInternal>>> {
+    ) -> Option<Kv<NodeRef<Immut<'a>, K, V, Auto, LeafOrInternal>>> {
+        let key = SearchKey::new(key);
         loop {
-            node = match node.search(key) {
+            node = match node.search(&key) {
                 SearchResult::Found(kv) => return Some(kv),
                 SearchResult::GoDown(edge) => match edge.force() {
                     ForceResult::Leaf(_) => return None,
@@ -184,7 +188,7 @@ mod tests {
             panic!("a new root has room");
         };
         let headless = Subtree::new_leaf(pages.fresh()).forget_type();
-        edge.insert_fit(ledger.track(), headless);
+        edge.insert_fit(InlinedKey::new(ledger.track()), headless);
         let ForceResult::Internal(root) = tree.borrow().force() else {
             panic!("the root is internal");
         };
