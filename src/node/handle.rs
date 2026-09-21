@@ -14,17 +14,21 @@
 //!    written only from a [`Subtree`] of that height (checked off the hot
 //!    path), or moved between siblings, and taking one out gives the
 //!    `Subtree` back.
-//! 3. **Positions are proofs.** An [`Edge`] has `index <= len` and a [`Kv`]
-//!    has `index < len`. Each owns its node handle, so `len` can't change
-//!    under it.
+//! 3. **Positions are proofs.** An [`Edge`] has `index <= len`, a [`Kv`]
+//!    has `index < len`, and a [`Head`] is in a leaf that has a head. Each
+//!    owns its node handle, so neither `len` nor the head can change under
+//!    it.
 //! 4. **Tokens are proofs.** A [`FittingEdge`] is in a node with
 //!    `len < capacity`, a [`FullEdge`] in a node with `len == capacity`, and a
 //!    [`Mergeable`] context fits both children and their separator in one node.
+//! 5. **Heads are flagged.** A leaf's head slot is initialized exactly when its
+//!    header says the leaf has a head; every operation that fills or empties
+//!    the slot updates the header with it (D17).
 //!
 //! Every fact is established once, by a check the B-tree makes anyway (the
 //! search, the insert-or-split decision, the merge decision) or by a checked
-//! index constructor off the hot path. The operations that need it take the
-//! proof and check nothing.
+//! constructor off the hot path. The operations that need it take the proof
+//! and check nothing.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -32,7 +36,8 @@ use core::hint;
 use core::marker::PhantomData;
 use core::mem;
 
-use super::page::{FreshPage, NodePtr};
+use super::layout::NodeLayout;
+use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
 use super::slots::{Down, Slots, Up};
 
 /// Node kind: a leaf, at height 0.
@@ -93,9 +98,11 @@ pub(crate) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 ///
 /// Invariant:
 /// - `node` holds a well-formed node at `height`, of kind `Kind` (a leaf at
-///   height 0, an internal node above): `len` is at most its capacity, keys
-///   and values `0..len` are initialized, and if it is internal, edges
-///   `0..=len` are too, each the root of a distinct well-formed subtree at
+///   height 0, an internal node above): `len` is at most its capacity and
+///   keys `0..len` are initialized. A leaf's values `0..len` are initialized
+///   too, and so is its head exactly when its header says it has one. An
+///   internal node holds no values (D17); its edges `0..=len` are
+///   initialized, each the root of a distinct well-formed subtree at
 ///   `height - 1` that the node owns.
 /// - With `Immut<'a>`, the subtree stays allocated and unchanged for `'a`.
 /// - With `Mut<'a, K, V>`, the subtree stays allocated for `'a` and nothing
@@ -164,6 +171,11 @@ pub(crate) type NodeByKind<BorrowType, K, V> =
 /// An edge sorted by its node's kind.
 pub(crate) type EdgeByKind<BorrowType, K, V> =
     ForceResult<Edge<NodeRef<BorrowType, K, V, Leaf>>, Edge<NodeRef<BorrowType, K, V, Internal>>>;
+
+/// A key sorted by its node's kind: beside its value in a leaf, or a
+/// separator in an internal node.
+pub(crate) type KvByKind<BorrowType, K, V> =
+    ForceResult<Kv<NodeRef<BorrowType, K, V, Leaf>>, Kv<NodeRef<BorrowType, K, V, Internal>>>;
 
 impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
     /// # Safety
@@ -252,6 +264,16 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        self.prefetch_keys();
+        self.search_prefetched(key)
+    }
+
+    /// [`Self::search`] once [`Self::prefetch_keys`] has run.
+    fn search_prefetched<Q>(self, key: &Q) -> SearchResult<Self>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         match self.search_index(key) {
             // SAFETY: `search_index` returns `Ok(index)` with `index < len`.
             Ok(index) => SearchResult::Found(unsafe { Kv::new_unchecked(self, index) }),
@@ -273,6 +295,7 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        self.prefetch_keys();
         let len = self.len();
         if len > 0 {
             // SAFETY: `len - 1 < len`.
@@ -282,7 +305,37 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
                 return SearchResult::GoDown(unsafe { Edge::new_unchecked(self, len) });
             }
         }
-        self.search(key)
+        self.search_prefetched(key)
+    }
+
+    /// Starts loading every cache line of the node's key slots, up to the
+    /// capacity: one software prefetch per 64-byte line. Every search calls
+    /// it before reading anything of the node.
+    ///
+    /// A search of a large node probes keys in an order that the data
+    /// decides, so without it each probe waits for the previous probe's cache
+    /// miss; with it, the misses overlap. It covers the capacity, which the
+    /// node kind fixes, rather than `len`: reading `len` first would make the
+    /// prefetches wait for the header's miss.
+    fn prefetch_keys(&self) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use core::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+
+            const CACHE_LINE_SIZE: usize = 64;
+            let keys_offset = NodeLayout::<K, V>::KEYS_OFFSET;
+            let first_line = keys_offset - keys_offset % CACHE_LINE_SIZE;
+            let keys_end = keys_offset + self.capacity() * mem::size_of::<K>();
+            let page = self.node.page_start();
+            for line in (first_line..keys_end).step_by(CACHE_LINE_SIZE) {
+                // SAFETY: the intrinsic needs the `sse` target feature, which
+                // every x86_64 target has. A prefetch is only a hint: it never
+                // faults and, to the language, accesses no memory (Miri runs
+                // it as a no-op), so any address would do; this one is inside
+                // the node's page anyway.
+                unsafe { _mm_prefetch::<_MM_HINT_T0>(page.wrapping_add(line).cast()) };
+            }
+        }
     }
 
     /// How this node's keys are searched, fixed per key type at compile time.
@@ -385,19 +438,36 @@ impl<BorrowType, K, V, Kind: NodeKind> NodeRef<BorrowType, K, V, Kind> {
     }
 
     fn key_slots(&self) -> Slots<K, Up> {
-        // SAFETY: the node is allocated (invariant 1).
+        // SAFETY: the node is allocated, and is a leaf exactly if `is_leaf`
+        // says so (invariant 1).
         unsafe { self.node.key_slots(self.is_leaf()) }
+    }
+}
+
+impl<BorrowType, K, V> NodeRef<BorrowType, K, V, Leaf> {
+    /// The leaf's head, or `None` if it has none: in a tree built by the node
+    /// operations, only the leftmost leaf has none (D17).
+    pub(crate) fn head(self) -> Option<Head<Self>> {
+        // SAFETY: the node is allocated and its header written (invariant 1).
+        let has_head = unsafe { self.node.has_head() };
+        has_head.then_some(Head { leaf: self })
     }
 
     fn value_slots(&self) -> Slots<V, Down> {
-        // SAFETY: the node is allocated (invariant 1).
-        unsafe { self.node.value_slots(self.is_leaf()) }
+        // SAFETY: the node is an allocated leaf (invariant 1).
+        unsafe { self.node.value_slots() }
+    }
+
+    /// Slot 0 is the head, slot `i + 1` value `i`.
+    fn head_and_value_slots(&self) -> Slots<V, Down> {
+        // SAFETY: the node is an allocated leaf (invariant 1).
+        unsafe { self.node.head_and_value_slots() }
     }
 }
 
 impl<BorrowType, K, V> NodeRef<BorrowType, K, V, Internal> {
     fn edge_slots(&self) -> Slots<NodePtr<K, V>, Up> {
-        // SAFETY: the node is allocated (invariant 1).
+        // SAFETY: the node is an allocated internal node (invariant 1).
         unsafe { self.node.edge_slots() }
     }
 }
@@ -436,14 +506,34 @@ impl<K, V, Kind: NodeKind> NodeMut<'_, K, V, Kind> {
 
     /// # Safety
     ///
-    /// `len` is at most the capacity, and keys and values `0..len` (and in an
-    /// internal node, edges `0..=len`) are initialized by the time the node is
-    /// used again.
+    /// `len` is at most the capacity, and keys `0..len` (and in a leaf, values
+    /// `0..len`; in an internal node, edges `0..=len`) are initialized by the
+    /// time the node is used again.
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
+    }
+}
+
+impl<K, V> NodeMut<'_, K, V, Leaf> {
+    /// Makes `value` the leaf's head, and returns the old head if it had one.
+    /// Keeping heads where separators expect them is the caller's business.
+    pub(crate) fn replace_head(&mut self, value: V) -> Option<V> {
+        let head = self.head_and_value_slots();
+        // SAFETY: this handle is exclusive (invariant 1). Head slot 0 is
+        // initialized exactly when the header says so (invariant 5): then it
+        // is replaced, otherwise written and flagged.
+        unsafe {
+            if self.node.has_head() {
+                Some(head.slot(0).replace(value))
+            } else {
+                head.slot(0).write(value);
+                self.node.set_has_head(true);
+                None
+            }
+        }
     }
 }
 
@@ -472,7 +562,9 @@ pub(crate) struct Edge<Node> {
     index: usize,
 }
 
-/// A key/value pair of a node: index `0..len`.
+/// A key of a node, with its value: index `0..len`. In a leaf, the value
+/// sits beside the key. In an internal node, the key is a separator, and its
+/// value is the head of the leftmost leaf right of it (D17).
 ///
 /// Invariant: `index < node.len()`; see [`Edge`].
 #[derive(Clone, Copy)]
@@ -481,9 +573,17 @@ pub(crate) struct Kv<Node> {
     index: usize,
 }
 
+/// A leaf's head: the value of the separator key just left of the leaf in
+/// key order, which lives in an internal node (D17).
+///
+/// Invariant: the leaf has a head. Holding the leaf handle keeps it there.
+pub(crate) struct Head<Node> {
+    leaf: Node,
+}
+
 /// The result of [`NodeRef::search`].
 pub(crate) enum SearchResult<Node> {
-    /// The key/value whose key equals the searched key.
+    /// The key equal to the searched key.
     Found(Kv<Node>),
     /// The edge where the searched key belongs.
     GoDown(Edge<Node>),
@@ -616,15 +716,55 @@ impl<BorrowType, K, V, Kind: NodeKind> Kv<NodeRef<BorrowType, K, V, Kind>> {
     }
 
     pub(crate) fn key(&self) -> &K {
-        self.reborrow().into_key_value().0
+        self.reborrow().into_key()
+    }
+}
+
+impl<BorrowType, K, V> Kv<NodeRef<BorrowType, K, V, LeafOrInternal>> {
+    /// Finds out the node's kind; see [`NodeRef::force`].
+    pub(crate) fn force(self) -> KvByKind<BorrowType, K, V> {
+        // SAFETY: the same index in the same node.
+        unsafe {
+            match self.node.force() {
+                ForceResult::Leaf(node) => ForceResult::Leaf(Kv::new_unchecked(node, self.index)),
+                ForceResult::Internal(node) => {
+                    ForceResult::Internal(Kv::new_unchecked(node, self.index))
+                }
+            }
+        }
+    }
+}
+
+impl<'a, K, V, Kind: NodeKind> Kv<NodeRef<Immut<'a>, K, V, Kind>> {
+    pub(crate) fn into_key(self) -> &'a K {
+        // SAFETY: `index < len`, so key `index` is initialized, and it stays
+        // unchanged for `'a` (invariants 1 and 3).
+        unsafe { self.node.key_slots().slot(self.index).as_ref() }
+    }
+}
+
+impl<K, V, Kind: NodeKind> Kv<NodeMut<'_, K, V, Kind>> {
+    pub(crate) fn reborrow_mut(&mut self) -> Kv<NodeMut<'_, K, V, Kind>> {
+        // SAFETY: the same index in the same node.
+        unsafe { Kv::new_unchecked(self.node.reborrow_mut(), self.index) }
     }
 
+    /// Replaces the key, returning the old one. Keeping the keys in order is
+    /// the caller's business.
+    pub(crate) fn replace_key(&mut self, key: K) -> K {
+        // SAFETY: `index < len`, so key `index` is initialized, and this
+        // handle is exclusive.
+        unsafe { self.node.key_slots().slot(self.index).replace(key) }
+    }
+}
+
+impl<BorrowType, K, V> Kv<NodeRef<BorrowType, K, V, Leaf>> {
     pub(crate) fn value(&self) -> &V {
         self.reborrow().into_key_value().1
     }
 }
 
-impl<'a, K, V, Kind: NodeKind> Kv<NodeRef<Immut<'a>, K, V, Kind>> {
+impl<'a, K, V> Kv<NodeRef<Immut<'a>, K, V, Leaf>> {
     pub(crate) fn into_key_value(self) -> (&'a K, &'a V) {
         // SAFETY: `index < len`, so key and value `index` are initialized, and
         // they stay unchanged for `'a` (invariants 1 and 3).
@@ -637,12 +777,7 @@ impl<'a, K, V, Kind: NodeKind> Kv<NodeRef<Immut<'a>, K, V, Kind>> {
     }
 }
 
-impl<'a, K, V, Kind: NodeKind> Kv<NodeMut<'a, K, V, Kind>> {
-    pub(crate) fn reborrow_mut(&mut self) -> Kv<NodeMut<'_, K, V, Kind>> {
-        // SAFETY: the same index in the same node.
-        unsafe { Kv::new_unchecked(self.node.reborrow_mut(), self.index) }
-    }
-
+impl<'a, K, V> Kv<NodeMut<'a, K, V, Leaf>> {
     pub(crate) fn value_mut(&mut self) -> &mut V {
         self.reborrow_mut().into_value_mut()
     }
@@ -665,9 +800,7 @@ impl<'a, K, V, Kind: NodeKind> Kv<NodeMut<'a, K, V, Kind>> {
             )
         }
     }
-}
 
-impl<'a, K, V> Kv<NodeMut<'a, K, V, Leaf>> {
     /// Removes this key/value, shifting later ones left, and returns it with
     /// the edge where it was.
     pub(crate) fn remove(self) -> ((K, V), EdgeMut<'a, K, V, Leaf>) {
@@ -688,32 +821,35 @@ impl<'a, K, V> Kv<NodeMut<'a, K, V, Leaf>> {
 }
 
 impl<'a, K, V> Kv<NodeMut<'a, K, V, Internal>> {
-    /// Removes this key/value and the edge to its right, shifting later ones
-    /// left, and returns both: the edge as the subtree it led to.
-    pub(crate) fn remove_with_right_child(self) -> ((K, V), Subtree<K, V>) {
+    /// Removes this separator and the edge to its right, shifting later keys
+    /// and edges left, and returns both: the edge as the subtree it led to,
+    /// whose leftmost leaf holds the separator's value as its head (D17).
+    pub(crate) fn remove_with_right_child(self) -> (K, Subtree<K, V>) {
         let Self {
             node: mut parent,
             index,
         } = self;
         let len = parent.len();
-        // SAFETY: `index < len`, so key/value `index` and edge `index + 1` are
-        // initialized; afterwards keys and values `0..len - 1` and edges
-        // `0..len` are. The edge was the root of a well-formed subtree one
-        // level down that the node owned, and the returned `Subtree` owns now
-        // (invariant 2).
+        // SAFETY: `index < len`, so key `index` and edge `index + 1` are
+        // initialized; afterwards keys `0..len - 1` and edges `0..len` are.
+        // The edge was the root of a well-formed subtree one level down that
+        // the node owned, and the returned `Subtree` owns now (invariant 2).
         unsafe {
             let key = parent.key_slots().remove(index, len);
-            let value = parent.value_slots().remove(index, len);
             let child = parent.edge_slots().remove(index + 1, len + 1);
             parent.set_len(len - 1);
-            (
-                (key, value),
-                Subtree::from_raw_parts(child, parent.height - 1),
-            )
+            (key, Subtree::from_raw_parts(child, parent.height - 1))
         }
     }
 
-    /// The balancing context of this key/value and the two children around it.
+    /// The balancing context of this separator and the two children around
+    /// it.
+    ///
+    /// # Panics
+    ///
+    /// If the children are leaves and the right one has no head to hold the
+    /// separator's value, which never happens in a tree built by the node
+    /// operations (D17).
     pub(crate) fn into_balancing_context(self) -> BalancingContext<'a, K, V> {
         let child_height = self.node.height - 1;
         // SAFETY: `index < len`, so edges `index` and `index + 1` are
@@ -723,7 +859,7 @@ impl<'a, K, V> Kv<NodeMut<'a, K, V, Internal>> {
         // the parent's, as long as the context doesn't change those two edges
         // while the children are in use: only `merge` changes one, and it
         // consumes the context.
-        unsafe {
+        let context = unsafe {
             let edges = self.node.edge_slots();
             let left_child = edges.slot(self.index).read();
             let right_child = edges.slot(self.index + 1).read();
@@ -732,6 +868,43 @@ impl<'a, K, V> Kv<NodeMut<'a, K, V, Internal>> {
                 right_child: NodeRef::from_raw_parts(right_child, child_height),
                 parent: self,
             }
+        };
+        if let ForceResult::Leaf(right_leaf) = context.right_child.reborrow().force() {
+            assert!(
+                right_leaf.head().is_some(),
+                "the leaf right of a separator has no head"
+            );
+        }
+        context
+    }
+}
+
+impl<'a, K, V> Head<NodeRef<Immut<'a>, K, V, Leaf>> {
+    pub(crate) fn into_value(self) -> &'a V {
+        // SAFETY: the head is initialized (invariants 3 and 5) and stays
+        // unchanged for `'a` (invariant 1).
+        unsafe { self.leaf.head_and_value_slots().slot(0).as_ref() }
+    }
+}
+
+impl<'a, K, V> Head<NodeMut<'a, K, V, Leaf>> {
+    pub(crate) fn into_value_mut(self) -> &'a mut V {
+        // SAFETY: the head is initialized (invariants 3 and 5); the exclusive
+        // access for `'a` that `self` gives up goes to the reference.
+        unsafe { self.leaf.head_and_value_slots().slot(0).as_mut() }
+    }
+
+    /// Takes the head out of the leaf, which then has none, and returns it
+    /// with the leaf.
+    pub(crate) fn remove(self) -> (V, NodeMut<'a, K, V, Leaf>) {
+        let Self { leaf } = self;
+        // SAFETY: the head is initialized (invariants 3 and 5) and is read
+        // out, and the header then says the leaf has none; this handle is
+        // exclusive.
+        unsafe {
+            let value = leaf.head_and_value_slots().slot(0).read();
+            leaf.node.set_has_head(false);
+            (value, leaf)
         }
     }
 }
@@ -783,9 +956,10 @@ impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Leaf>> {
 }
 
 impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Internal>> {
-    /// Inserts `key`/`value` at this edge with `right_child` as the edge to
-    /// its right, shifting later entries and edges right, and returns its
-    /// position.
+    /// Inserts separator `key` at this edge with `right_child` as the edge to
+    /// its right, shifting later keys and edges right, and returns its
+    /// position. The separator's value is the head of `right_child`'s
+    /// leftmost leaf (D17).
     ///
     /// # Panics
     ///
@@ -794,12 +968,11 @@ impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Internal>> {
     pub(crate) fn insert_fit(
         self,
         key: K,
-        value: V,
         right_child: Subtree<K, V>,
     ) -> Kv<NodeMut<'a, K, V, Internal>> {
         self.0.node.assert_child_level(&right_child);
         // SAFETY: checked just above.
-        unsafe { self.insert_fit_unchecked(key, value, right_child) }
+        unsafe { self.insert_fit_unchecked(key, right_child) }
     }
 
     /// # Safety
@@ -808,7 +981,6 @@ impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Internal>> {
     unsafe fn insert_fit_unchecked(
         self,
         key: K,
-        value: V,
         right_child: Subtree<K, V>,
     ) -> Kv<NodeMut<'a, K, V, Internal>> {
         let Edge {
@@ -817,13 +989,12 @@ impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Internal>> {
         } = self.0;
         let len = parent.len();
         // SAFETY: `index <= len < capacity` (invariants 3 and 4), so
-        // `index + 1 <= len + 1 < capacity + 1`; keys and values `0..len` and
-        // edges `0..=len` are initialized, and one more of each afterwards. The
-        // new edge is the root of a well-formed subtree one level down (the
+        // `index + 1 <= len + 1 < capacity + 1`; keys `0..len` and edges
+        // `0..=len` are initialized, and one more of each afterwards. The new
+        // edge is the root of a well-formed subtree one level down (the
         // caller), owned by the `Subtree` given up here (invariant 2).
         unsafe {
             parent.key_slots().insert(index, len, key);
-            parent.value_slots().insert(index, len, value);
             parent
                 .edge_slots()
                 .insert(index + 1, len + 1, right_child.node);
@@ -834,11 +1005,12 @@ impl<'a, K, V> FittingEdge<NodeMut<'a, K, V, Internal>> {
 }
 
 /// A full node split in two: the node keeps its lower entries as `left`,
-/// `separator` is the entry for the parent, and `right` is a new node at the
-/// same height with the upper entries.
+/// `separator` is the key for the parent, and `right` is a new node at the
+/// same height with the upper entries. The separator's value is the head of
+/// `right`'s leftmost leaf: in a leaf split, of `right` itself (D17).
 pub(crate) struct Split<'a, K, V, Kind> {
     pub(crate) left: NodeMut<'a, K, V, Kind>,
-    pub(crate) separator: (K, V),
+    pub(crate) separator: K,
     pub(crate) right: Subtree<K, V, Kind>,
 }
 
@@ -859,10 +1031,11 @@ enum InsertionSide {
 
 impl<'a, K, V> FullEdge<NodeMut<'a, K, V, Leaf>> {
     /// Splits the full leaf and inserts `key`/`value` on the side where this
-    /// edge ended up.
+    /// edge ended up. The separator's value becomes the right leaf's head,
+    /// and the left leaf keeps its own head, if any (D17).
     pub(crate) fn split_and_insert(
         self,
-        right_page: FreshPage<K, V>,
+        right_page: FreshPage<K, V, Leaf>,
         key: K,
         value: V,
     ) -> Split<'a, K, V, Leaf> {
@@ -874,9 +1047,9 @@ impl<'a, K, V> FullEdge<NodeMut<'a, K, V, Leaf>> {
 }
 
 impl<'a, K, V> FullEdge<NodeMut<'a, K, V, Internal>> {
-    /// Splits the full internal node and inserts `key`/`value`, with
+    /// Splits the full internal node and inserts separator `key`, with
     /// `right_child` as the edge to its right, on the side where this edge
-    /// ended up.
+    /// ended up. Keys and edges move; no leaf changes.
     ///
     /// # Panics
     ///
@@ -884,9 +1057,8 @@ impl<'a, K, V> FullEdge<NodeMut<'a, K, V, Internal>> {
     /// unchanged then.
     pub(crate) fn split_and_insert(
         self,
-        right_page: FreshPage<K, V>,
+        right_page: FreshPage<K, V, Internal>,
         key: K,
-        value: V,
         right_child: Subtree<K, V>,
     ) -> Split<'a, K, V, Internal> {
         self.0.node.assert_child_level(&right_child);
@@ -897,7 +1069,7 @@ impl<'a, K, V> FullEdge<NodeMut<'a, K, V, Internal>> {
         unsafe {
             split
                 .fitting_edge(side)
-                .insert_fit_unchecked(key, value, right_child);
+                .insert_fit_unchecked(key, right_child);
         }
         split
     }
@@ -912,13 +1084,20 @@ impl<'a, K, V, Kind: NodeKind> FullEdge<NodeMut<'a, K, V, Kind>> {
         capacity / 2
     }
 
-    /// Splits the full node around the entry `separator_index` picks, and
+    /// Splits the full node around the key `separator_index` picks, and
     /// tells where the new entry goes: left if this edge is left of the
     /// separator, right otherwise. Both sides have room.
+    ///
+    /// The separator key moves up. In a leaf, its value stays behind as the
+    /// head of the right leaf (D17). The right half goes into `right_page`,
+    /// a page for the same kind of node as this one.
     fn split_in_middle(
         self,
-        right_page: FreshPage<K, V>,
-    ) -> (Split<'a, K, V, Kind>, InsertionSide) {
+        right_page: FreshPage<K, V, Kind>,
+    ) -> (Split<'a, K, V, Kind>, InsertionSide)
+    where
+        Kind: PageKind,
+    {
         let Edge {
             node: mut left,
             index,
@@ -930,12 +1109,15 @@ impl<'a, K, V, Kind: NodeKind> FullEdge<NodeMut<'a, K, V, Kind>> {
         let right_len = len - separator_index - 1;
         let right = NodePtr::from_fresh_page(right_page);
         // SAFETY: `separator_index < len == capacity` (invariant 4 and the
-        // policy). Keys and values `separator_index + 1..len` (and in an
-        // internal node, edges `separator_index + 1..=len`) are initialized
-        // and move to the start of `right`, a fresh page of the same kind.
-        // Key/value `separator_index` is then the last initialized one on the
-        // left and is read out, leaving `separator_index` entries and one more
-        // edge there.
+        // policy). Keys `separator_index + 1..len` are initialized and move to
+        // the start of `right`, a fresh page of the same kind (both are
+        // `Kind`), so `is_leaf` says the kind of both nodes. In a leaf,
+        // values `separator_index..len` move to the head and values
+        // `0..right_len` of `right`, which then has a head (invariant 5); in
+        // an internal node, edges `separator_index + 1..=len` move to edges
+        // `0..=right_len`. Key `separator_index` is then the last initialized
+        // one on the left and is read out, leaving `separator_index` keys (and
+        // values, or one more edge) there; the left leaf's head is untouched.
         let separator = unsafe {
             left.key_slots().move_run_to(
                 separator_index + 1,
@@ -943,13 +1125,15 @@ impl<'a, K, V, Kind: NodeKind> FullEdge<NodeMut<'a, K, V, Kind>> {
                 right.key_slots(is_leaf),
                 0,
             );
-            left.value_slots().move_run_to(
-                separator_index + 1,
-                right_len,
-                right.value_slots(is_leaf),
-                0,
-            );
-            if !is_leaf {
+            if is_leaf {
+                left.node.value_slots().move_run_to(
+                    separator_index,
+                    right_len + 1,
+                    right.head_and_value_slots(),
+                    0,
+                );
+                right.set_has_head(true);
+            } else {
                 left.node.edge_slots().move_run_to(
                     separator_index + 1,
                     right_len + 1,
@@ -958,15 +1142,12 @@ impl<'a, K, V, Kind: NodeKind> FullEdge<NodeMut<'a, K, V, Kind>> {
                 );
             }
             right.set_len(right_len);
-            let separator = (
-                left.key_slots().slot(separator_index).read(),
-                left.value_slots().slot(separator_index).read(),
-            );
+            let separator = left.key_slots().slot(separator_index).read();
             left.set_len(separator_index);
             separator
         };
         // SAFETY: `right` now holds a well-formed node of the same kind and
-        // height as `left`: its entries, and in an internal node its edges,
+        // height as `left`: its keys, values and head, or keys and edges,
         // came from `left`.
         let right = unsafe { Subtree::from_raw_parts(right, left.height) };
         let side = if index <= separator_index {
@@ -1071,19 +1252,23 @@ impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
 }
 
 impl<K, V> Subtree<K, V, Leaf> {
-    /// A new, empty leaf.
-    pub(crate) fn new_leaf(page: FreshPage<K, V>) -> Self {
+    /// A new, empty leaf, without a head.
+    pub(crate) fn new_leaf(page: FreshPage<K, V, Leaf>) -> Self {
         // SAFETY: an empty leaf is complete, and the page is owned by the
         // subtree from now on.
         unsafe { Self::from_raw_parts(NodePtr::from_fresh_page(page), 0) }
     }
 
-    /// Releases the page of an empty leaf. Were the leaf to hold entries,
-    /// they would be leaked.
-    pub(crate) fn into_page(self) -> FreshPage<K, V> {
+    /// Releases the page of an empty leaf without a head. Were the leaf to
+    /// hold entries or a head, they would be leaked.
+    pub(crate) fn into_page(self) -> FreshPage<K, V, Leaf> {
         debug_assert_eq!(self.borrow().len(), 0, "releasing a leaf with entries");
-        // SAFETY: the subtree owned the page, and consuming it leaves nothing
-        // that reaches the node (type invariant).
+        debug_assert!(
+            self.borrow().head().is_none(),
+            "releasing a leaf with a head"
+        );
+        // SAFETY: the node is a leaf; the subtree owned the page, and
+        // consuming it leaves nothing that reaches the node (type invariant).
         unsafe { self.node.into_fresh_page() }
     }
 }
@@ -1091,13 +1276,13 @@ impl<K, V> Subtree<K, V, Leaf> {
 impl<K, V> Subtree<K, V, Internal> {
     /// Removes the root, which must hold no keys, and returns its only child
     /// as the new tree along with the root's page. Were the root to hold keys,
-    /// they, their values and the other children would be leaked.
-    pub(crate) fn pop_internal_level(self) -> (Subtree<K, V>, FreshPage<K, V>) {
+    /// they and the other children would be leaked.
+    pub(crate) fn pop_internal_level(self) -> (Subtree<K, V>, FreshPage<K, V, Internal>) {
         debug_assert_eq!(self.borrow().len(), 0, "popping a root with keys");
         // SAFETY: the root is internal, so edge 0 is initialized: the root of a
         // well-formed subtree one level down that the root owned, and the
         // returned `Subtree` owns now (invariant 2). Consuming `self` leaves
-        // nothing that reaches the root's page.
+        // nothing that reaches the root's page, an internal node's.
         unsafe {
             let child = self.node.edge_slots().slot(0).read();
             (
@@ -1125,12 +1310,13 @@ impl<K, V> Subtree<K, V> {
     /// only child, and returns the new root.
     pub(crate) fn push_internal_level(
         &mut self,
-        page: FreshPage<K, V>,
+        page: FreshPage<K, V, Internal>,
     ) -> NodeMut<'_, K, V, Internal> {
         let root = NodePtr::from_fresh_page(page);
-        // SAFETY: the new root's page is allocated. Its edge 0 becomes the old
-        // root, a well-formed subtree one level down, which the new root owns
-        // from now on (invariant 2); with no keys, that is its only edge.
+        // SAFETY: the new root's page is allocated for an internal node. Its
+        // edge 0 becomes the old root, a well-formed subtree one level down,
+        // which the new root owns from now on (invariant 2); with no keys,
+        // that is its only edge.
         unsafe { root.edge_slots().slot(0).write(self.node) };
         self.node = root;
         self.height += 1;
@@ -1140,11 +1326,12 @@ impl<K, V> Subtree<K, V> {
     }
 }
 
-/// A key/value of an internal node and the two children around it, ready to
+/// A separator of an internal node and the two children around it, ready to
 /// be merged or to move an entry from one child to the other.
 ///
 /// Invariant: `left_child` and `right_child` are the children at the edges
-/// left and right of `parent`.
+/// left and right of `parent`. If they are leaves, the right one has a head,
+/// which holds the separator's value (D17).
 pub(crate) struct BalancingContext<'a, K, V> {
     parent: Kv<NodeMut<'a, K, V, Internal>>,
     left_child: NodeMut<'a, K, V, LeafOrInternal>,
@@ -1152,7 +1339,7 @@ pub(crate) struct BalancingContext<'a, K, V> {
 }
 
 /// A [`BalancingContext`] whose children fit in one node together with the
-/// parent's key/value. Made only by [`BalancingContext::can_merge`].
+/// parent's separator. Made only by [`BalancingContext::can_merge`].
 pub(crate) struct Mergeable<'a, K, V>(BalancingContext<'a, K, V>);
 
 /// Why a steal moved nothing.
@@ -1185,7 +1372,7 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
         self.right_child
     }
 
-    /// The merge decision: whether both children and the parent's key/value
+    /// The merge decision: whether both children and the parent's separator
     /// fit in one node; `Err(self)` if not.
     pub(crate) fn can_merge(self) -> Result<Mergeable<'a, K, V>, Self> {
         let merged_len = self.left_child.len() + 1 + self.right_child.len();
@@ -1196,10 +1383,14 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
         }
     }
 
-    /// Rotates one entry rightwards: the left child's last key/value goes up
-    /// into the parent and the parent's goes down to the front of the right
-    /// child. For internal children, the left child's last edge becomes the
-    /// right child's first.
+    /// Rotates one entry rightwards: the left child's last key goes up into
+    /// the parent, and the parent's separator comes down to the front of the
+    /// right child.
+    ///
+    /// Between leaves, the value rotates through the right child's head: the
+    /// left child's last value becomes the head, and the old head joins the
+    /// separator that came down (D17). Between internal children, the left
+    /// child's last edge becomes the right child's first.
     pub(crate) fn steal_left(&mut self) -> Result<(), StealError> {
         let left_len = self.left_child.len();
         let right_len = self.right_child.len();
@@ -1211,43 +1402,47 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
         }
         let is_leaf = self.left_child.is_leaf();
         let parent = &mut self.parent;
-        // SAFETY: checked just above: the left child has an entry
-        // `left_len - 1` (and an edge `left_len`) to give, and the right child
-        // has room for one more entry (and edge). The parent's key/value is
-        // initialized (invariant 3). Each child keeps entries `0..len` and
-        // edges `0..=len` initialized, and the moved edge stays one level
-        // below the children, which are at the same height (invariant 2).
+        // SAFETY: checked just above: the left child has a key `left_len - 1`
+        // (with a value, or an edge `left_len`) to give, and the right child
+        // has room for one more key (and value or edge). Both children are at
+        // the same height, so `is_leaf` says the kind of both. The parent's
+        // separator is initialized (invariant 3). Between leaves, the right
+        // child has a head (the context's invariant), so its head-and-value
+        // slots `0..=right_len` are initialized, and inserting at slot 0
+        // shifts the old head into value 0, beside the separator now at key
+        // 0; the right child keeps a head. Each child keeps keys `0..len`, and values
+        // `0..len` or edges `0..=len`, initialized, and the moved edge stays
+        // one level below the children, which are at the same height
+        // (invariant 2).
         unsafe {
             let key = self.left_child.key_slots().remove(left_len - 1, left_len);
-            let value = self.left_child.value_slots().remove(left_len - 1, left_len);
-            let edge = (!is_leaf).then(|| {
-                self.left_child
-                    .node
-                    .edge_slots()
-                    .remove(left_len, left_len + 1)
-            });
-            self.left_child.set_len(left_len - 1);
-
-            let key = parent.node.key_slots().slot(parent.index).replace(key);
-            let value = parent.node.value_slots().slot(parent.index).replace(value);
-
-            self.right_child.key_slots().insert(0, right_len, key);
-            self.right_child.value_slots().insert(0, right_len, value);
-            if let Some(edge) = edge {
-                self.right_child
-                    .node
-                    .edge_slots()
-                    .insert(0, right_len + 1, edge);
+            let separator = parent.node.key_slots().slot(parent.index).replace(key);
+            self.right_child.key_slots().insert(0, right_len, separator);
+            if is_leaf {
+                let left_values = self.left_child.node.value_slots();
+                let right_head_and_values = self.right_child.node.head_and_value_slots();
+                let value = left_values.remove(left_len - 1, left_len);
+                right_head_and_values.insert(0, right_len + 1, value);
+            } else {
+                let left_edges = self.left_child.node.edge_slots();
+                let right_edges = self.right_child.node.edge_slots();
+                let edge = left_edges.remove(left_len, left_len + 1);
+                right_edges.insert(0, right_len + 1, edge);
             }
+            self.left_child.set_len(left_len - 1);
             self.right_child.set_len(right_len + 1);
         }
         Ok(())
     }
 
-    /// Rotates one entry leftwards: the right child's first key/value goes up
-    /// into the parent and the parent's goes down to the end of the left
-    /// child. For internal children, the right child's first edge becomes the
-    /// left child's last.
+    /// Rotates one entry leftwards: the right child's first key goes up into
+    /// the parent, and the parent's separator comes down to the end of the
+    /// left child.
+    ///
+    /// Between leaves, the value rotates through the right child's head: the
+    /// old head joins the separator that came down, and the value of the key
+    /// that went up becomes the head (D17). Between internal children, the
+    /// right child's first edge becomes the left child's last.
     pub(crate) fn steal_right(&mut self) -> Result<(), StealError> {
         let left_len = self.left_child.len();
         let right_len = self.right_child.len();
@@ -1259,30 +1454,29 @@ impl<'a, K, V> BalancingContext<'a, K, V> {
         }
         let is_leaf = self.left_child.is_leaf();
         let parent = &mut self.parent;
-        // SAFETY: as in `steal_left`, mirrored: the right child gives entry
-        // and edge 0, and the left child has room at entry `left_len` and
-        // edge `left_len + 1`.
+        // SAFETY: as in `steal_left`, mirrored: the right child gives key 0
+        // (and edge 0, or its head, after which value 0 is its head), and
+        // the left child has room at key and value `left_len`, or edge
+        // `left_len + 1`. The left child's head is untouched.
         unsafe {
             let key = self.right_child.key_slots().remove(0, right_len);
-            let value = self.right_child.value_slots().remove(0, right_len);
-            let edge =
-                (!is_leaf).then(|| self.right_child.node.edge_slots().remove(0, right_len + 1));
-            self.right_child.set_len(right_len - 1);
-
-            let key = parent.node.key_slots().slot(parent.index).replace(key);
-            let value = parent.node.value_slots().slot(parent.index).replace(value);
-
-            self.left_child.key_slots().insert(left_len, left_len, key);
+            let separator = parent.node.key_slots().slot(parent.index).replace(key);
             self.left_child
-                .value_slots()
-                .insert(left_len, left_len, value);
-            if let Some(edge) = edge {
-                self.left_child
-                    .node
-                    .edge_slots()
-                    .insert(left_len + 1, left_len + 1, edge);
+                .key_slots()
+                .insert(left_len, left_len, separator);
+            if is_leaf {
+                let right_head_and_values = self.right_child.node.head_and_value_slots();
+                let left_values = self.left_child.node.value_slots();
+                let head = right_head_and_values.remove(0, right_len + 1);
+                left_values.insert(left_len, left_len, head);
+            } else {
+                let right_edges = self.right_child.node.edge_slots();
+                let left_edges = self.left_child.node.edge_slots();
+                let edge = right_edges.remove(0, right_len + 1);
+                left_edges.insert(left_len + 1, left_len + 1, edge);
             }
             self.left_child.set_len(left_len + 1);
+            self.right_child.set_len(right_len - 1);
         }
         Ok(())
     }
@@ -1294,11 +1488,15 @@ impl<'a, K, V> Mergeable<'a, K, V> {
         self.0
     }
 
-    /// Moves the parent's key/value and all of the right child into the left
-    /// child, and removes that key/value and the edge to the right child from
+    /// Moves the parent's separator and all of the right child into the left
+    /// child, and removes the separator and the edge to the right child from
     /// the parent. Returns the parent's edge to the merged child, and the
-    /// right child's emptied page.
-    pub(crate) fn merge(self) -> (EdgeMut<'a, K, V, Internal>, FreshPage<K, V>) {
+    /// right child's emptied page, sorted by the children's kind.
+    ///
+    /// Between leaves, the separator rejoins its value, the right child's
+    /// head, as an ordinary entry, and the left child keeps its own head, if
+    /// any (D17).
+    pub(crate) fn merge(self) -> (EdgeMut<'a, K, V, Internal>, PageByKind<K, V>) {
         let BalancingContext {
             parent: Kv {
                 node: mut parent,
@@ -1313,44 +1511,49 @@ impl<'a, K, V> Mergeable<'a, K, V> {
         let merged_len = left_len + 1 + right_len;
         let is_leaf = left_child.is_leaf();
         // SAFETY:
-        // - Parent: `index < parent_len` (invariant 3). Key/value `index` and
-        //   edge `index + 1`, the right child, come out; the parent keeps keys
-        //   and values `0..parent_len - 1` and edges `0..parent_len`.
-        // - Left child: `merged_len <= capacity` (invariant 4). The parent's
-        //   key/value goes into slot `left_len`, the right child's entries
-        //   `0..right_len` into `left_len + 1..merged_len`, and for internal
-        //   children, its edges `0..=right_len` into
-        //   `left_len + 1..=merged_len`, all from a distinct page and one level
-        //   below, like the left child's own edges.
+        // - Parent: `index < parent_len` (invariant 3). Key `index` and edge
+        //   `index + 1`, the right child, come out; the parent keeps keys
+        //   `0..parent_len - 1` and edges `0..parent_len`.
+        // - Left child: `merged_len <= capacity` (invariant 4). The separator
+        //   goes into key slot `left_len`, and the right child's keys
+        //   `0..right_len` into `left_len + 1..merged_len`. Between leaves,
+        //   the right child's head and values `0..right_len`, all initialized
+        //   (the context's invariant), go into values `left_len..merged_len`,
+        //   the head beside the separator. Between internal children, the
+        //   right child's edges `0..=right_len` go into
+        //   `left_len + 1..=merged_len`, all from a distinct page and one
+        //   level below, like the left child's own edges.
+        // - Both children are at the same height, so `is_leaf` says the kind
+        //   of both, and their pages are released as that kind's.
         // - Right child: everything moved out, and its edge is gone from the
         //   parent, so nothing reaches its page anymore (invariant 2).
         let freed_page = unsafe {
-            let key = parent.key_slots().remove(index, parent_len);
-            let value = parent.value_slots().remove(index, parent_len);
+            let separator = parent.key_slots().remove(index, parent_len);
             parent.edge_slots().remove(index + 1, parent_len + 1);
             parent.set_len(parent_len - 1);
 
-            left_child.key_slots().slot(left_len).write(key);
-            left_child.value_slots().slot(left_len).write(value);
+            left_child.key_slots().slot(left_len).write(separator);
             right_child
                 .key_slots()
                 .move_run_to(0, right_len, left_child.key_slots(), left_len + 1);
-            right_child.value_slots().move_run_to(
-                0,
-                right_len,
-                left_child.value_slots(),
-                left_len + 1,
-            );
-            if !is_leaf {
+            left_child.set_len(merged_len);
+            if is_leaf {
+                right_child.node.head_and_value_slots().move_run_to(
+                    0,
+                    right_len + 1,
+                    left_child.node.value_slots(),
+                    left_len,
+                );
+                ForceResult::Leaf(right_child.node.into_fresh_page())
+            } else {
                 right_child.node.edge_slots().move_run_to(
                     0,
                     right_len + 1,
                     left_child.node.edge_slots(),
                     left_len + 1,
                 );
+                ForceResult::Internal(right_child.node.into_fresh_page())
             }
-            left_child.set_len(merged_len);
-            right_child.node.into_fresh_page()
         };
         // SAFETY: `index <= parent_len - 1`, the parent's new length.
         let merged_edge = unsafe { Edge::new_unchecked(parent, index) };

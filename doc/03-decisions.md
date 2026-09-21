@@ -193,6 +193,57 @@ leaf      | len | k0 k1 … →     free     ← … v1 v0 | head |
   splits, steals) would invalidate those pointers; the structural relation
   above needs no pointer maintenance.
 
+**D18. Inline keys: a defaulted strategy parameter that recognizes std types.** (2026-10-07)
+Design in 04-inline-key.md.
+
+- **Two parts:**
+  - a public `InlineKey` trait anyone can implement, newtypes included (option
+    (b));
+  - a default strategy that gives std byte-string keys (`String`, `str`,
+    `Vec<u8>`, `Box<str>`, …) inline keys automatically, by compile-time type
+    identity (option (d)).
+- **In types:** `BBTreeMap<K, V, A = Global, S = Auto>`. Existing code is
+  unchanged and gets inline keys for std string keys. Other key types opt in with a
+  one-line impl plus `S = WithInlineKey` on the map type; there is no separate
+  alias type.
+- **Width:** inline keys start at 8 bytes (`InlineWord = u64`). The width is
+  one constant, to revisit on real keys (04-inline-key.md Q7). At 8 bytes, real
+  neighbours tie 24–70% of the time; at 16 bytes, 1–20%.
+- **Why not a plain trait with a default:** "default for every type, override for
+  `String`" needs specialization, which is nightly-only and years from stable.
+- **TODO:** when specialization is stable, switch to it, and drop the std-type
+  list and `WithInlineKey` (tracked in 04-inline-key.md).
+
+**D19. In-node search depends on the key type.** (2026-10-07)
+- **Keys with no drop glue and ≤ 16 bytes** (integers, `char`, small tuples):
+  branchless binary search.
+- **Everything else** (`String`, `Vec`, `Box`, large arrays): plain binary
+  search that stops early. No linear scan for them.
+- Chosen at compile time (`needs_drop`, `size_of`), at no run-time cost. Known
+  misfire: `&str` and `&[u8]` look like plain data.
+- Why: on keys whose comparison reads the heap, the branchless chain serializes
+  every heap miss. Plain binary search was 10–35% faster than branchless on
+  them, with integers unchanged.
+
+**D20. Node prefetch.** (2026-10-07)
+When a search enters a node, it prefetches the node's whole key area, sized by
+capacity, not `len`, so it never waits on the header miss.
+- Interleaved A/B on the B+-tree, bbtree only, median ns:
+  - u64 10M: get_hit 208 → 163, insert 191 → 167;
+  - hash32 1M: get 340 → 277;
+  - str-json 1M: get 492 → 474.
+- Sizing it by `len` didn't help.
+- `String` keys gain little: their cost is the heap reads behind the keys,
+  which inline keys address (04-inline-key.md).
+
+**D21. Node size per kind.** (2026-10-07)
+- **Internal node size** depends only on the key: the smallest multiple of
+  1 KB holding ≥ 12 keys and 13 edges.
+- **Leaf node size** depends on key and value: ≥ 12 entries plus the head.
+- Supersedes the shared node size. Under D17 internal nodes hold no values, so
+  a shared size made internal nodes of large-value maps huge (u64 →
+  `[u8; 1000]`: 13 KB, ~800 keys).
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

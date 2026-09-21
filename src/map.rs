@@ -1,5 +1,6 @@
 //! [`BBTreeMap`]: an ordered map with the API and behavior of std's
-//! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15).
+//! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15), as a
+//! B+-tree that stores each key once (D17).
 //!
 //! The map owns at most one [`Subtree`]: none until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
@@ -22,8 +23,8 @@ mod type_tests;
 use core::borrow::Borrow;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
-use crate::node::handle::{Kv, Subtree};
-use crate::node::page::FreshPage;
+use crate::node::handle::Subtree;
+use crate::node::page::{FreshPage, PageByKind};
 
 /// An ordered map based on a B-tree with page-sized nodes: a drop-in
 /// replacement for [`std::collections::BTreeMap`].
@@ -85,9 +86,35 @@ impl<K, V> BBTreeMap<K, V> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
+        self.get_key_value(key).map(|(_, value)| value)
+    }
+
+    /// Returns the key-value pair corresponding to the supplied key: the key
+    /// as stored in the map, which may differ from `key` while comparing
+    /// equal to it.
+    ///
+    /// The supplied key may be any borrowed form of the map's key type, but
+    /// the ordering on the borrowed form *must* match the ordering on the key
+    /// type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "a");
+    /// assert_eq!(map.get_key_value(&1), Some((&1, &"a")));
+    /// assert_eq!(map.get_key_value(&2), None);
+    /// ```
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
         let root = self.root.as_ref()?.borrow();
         let kv = root.search_tree(key)?;
-        Some(kv.into_key_value().1)
+        Some(kv.into_key_value())
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -114,7 +141,8 @@ impl<K, V> BBTreeMap<K, V> {
         Q: Ord + ?Sized,
     {
         let root = self.root.as_mut()?.borrow_mut();
-        root.search_tree(key).map(Kv::into_value_mut)
+        let kv = root.search_tree(key)?;
+        Some(kv.into_value_mut())
     }
 
     /// Inserts a key-value pair into the map.
@@ -134,7 +162,7 @@ impl<K, V> BBTreeMap<K, V> {
         let root = self
             .root
             .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
-        let old_value = root.insert(key, value, FreshPage::allocate);
+        let old_value = root.insert(key, value, FreshPage::allocate, FreshPage::allocate);
         if old_value.is_none() {
             self.length += 1;
         }
@@ -157,7 +185,7 @@ impl<K, V> Default for BBTreeMap<K, V> {
 impl<K, V> Drop for BBTreeMap<K, V> {
     fn drop(&mut self) {
         if let Some(root) = self.root.take() {
-            root.destroy(FreshPage::deallocate);
+            root.destroy(PageByKind::deallocate);
         }
     }
 }

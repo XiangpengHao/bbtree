@@ -8,10 +8,11 @@ use super::handle::{Edge, EdgeRoom, Insertion, Internal, NodeMut, Subtree};
 use super::page::FreshPage;
 
 impl<'a, K, V> Edge<NodeMut<'a, K, V, Internal>> {
-    /// Inserts `key`/`value` at this edge with `right_child` as the edge to
+    /// Inserts separator `key` at this edge with `right_child` as the edge to
     /// its right, splitting the node first if it is full, with the right half
     /// in a page from `new_page`. This is how a child's split lands in its
-    /// parent.
+    /// parent; the separator's value is already in `right_child`, as the head
+    /// of its leftmost leaf (D17).
     ///
     /// # Panics
     ///
@@ -20,14 +21,13 @@ impl<'a, K, V> Edge<NodeMut<'a, K, V, Internal>> {
     pub(crate) fn insert(
         self,
         key: K,
-        value: V,
         right_child: Subtree<K, V>,
-        new_page: impl FnOnce() -> FreshPage<K, V>,
+        new_page: impl FnOnce() -> FreshPage<K, V, Internal>,
     ) -> Insertion<'a, K, V, Internal> {
         match self.check_room() {
-            EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(key, value, right_child)),
+            EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(key, right_child)),
             EdgeRoom::Full(edge) => {
-                Insertion::Split(edge.split_and_insert(new_page(), key, value, right_child))
+                Insertion::Split(edge.split_and_insert(new_page(), key, right_child))
             }
         }
     }
@@ -45,27 +45,43 @@ mod tests {
     };
     use crate::node::layout::NodeLayout;
     use crate::node::page::TestPages;
-    use crate::node::test_support::{Bulky, DropLedger, TestRng, TestTree, Tracked, TrackedValue};
+    use crate::node::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 
     /// A leaf holding one tracked entry, named by the id of its key.
-    fn child_leaf<'l, V: TrackedValue<'l>>(
-        pages: &TestPages<Tracked<'l>, V>,
+    fn named_leaf<'l, K: FromTracked<'l>>(
+        pages: &TestPages<K, Tracked<'l>>,
         ledger: &'l DropLedger,
-    ) -> (Subtree<Tracked<'l>, V>, usize) {
+    ) -> (Subtree<K, Tracked<'l>, Leaf>, usize) {
         let mut leaf = Subtree::new_leaf(pages.fresh());
-        let key = ledger.track();
-        let id = key.id();
+        let key = K::from_tracked(ledger.track());
+        let name = key.tracked_id();
         let EdgeRoom::Fits(edge) = leaf.borrow_mut().first_edge().check_room() else {
             panic!("an empty leaf has room");
         };
-        edge.insert_fit(key, V::from_tracked(ledger.track()));
-        (leaf.forget_type(), id)
+        edge.insert_fit(key, ledger.track());
+        (leaf, name)
+    }
+
+    /// A named leaf for the right of a separator, with a head to hold the
+    /// separator's value (D17). Returns the leaf, its name, and the id of its
+    /// head.
+    fn child_leaf<'l, K: FromTracked<'l>>(
+        pages: &TestPages<K, Tracked<'l>>,
+        ledger: &'l DropLedger,
+    ) -> (Subtree<K, Tracked<'l>>, usize, usize) {
+        let (mut leaf, name) = named_leaf(pages, ledger);
+        let head = ledger.track();
+        let head_id = head.id();
+        assert!(leaf.borrow_mut().replace_head(head).is_none());
+        (leaf.forget_type(), name, head_id)
     }
 
     /// The names of the leaf children of an internal node, in order.
-    fn child_ids<'l, V>(node: NodeRef<Immut<'_>, Tracked<'l>, V, Internal>) -> Vec<usize> {
+    fn child_names<'l, K: FromTracked<'l>, V>(
+        node: NodeRef<Immut<'_>, K, V, Internal>,
+    ) -> Vec<usize> {
         (0..=node.len())
-            .map(|index| node.edge_at(index).descend().keys()[0].id())
+            .map(|index| node.edge_at(index).descend().keys()[0].tracked_id())
             .collect()
     }
 
@@ -77,70 +93,74 @@ mod tests {
         }
     }
 
-    /// A root with no keys above one named leaf, and the leaf's name.
-    fn root_above_one_leaf<'l, V: TrackedValue<'l>>(
-        pages: &TestPages<Tracked<'l>, V>,
+    /// A root with no keys above one named leaf, the leftmost, which has no
+    /// head; and the leaf's name.
+    fn root_above_one_leaf<'l, K: FromTracked<'l>>(
+        pages: &TestPages<K, Tracked<'l>>,
         ledger: &'l DropLedger,
-    ) -> (Subtree<Tracked<'l>, V>, usize) {
-        let (mut tree, id) = child_leaf(pages, ledger);
+    ) -> (Subtree<K, Tracked<'l>>, usize) {
+        let (leaf, name) = named_leaf(pages, ledger);
+        let mut tree = leaf.forget_type();
         tree.push_internal_level(pages.fresh());
-        (tree, id)
+        (tree, name)
     }
 
     /// Random operations on one internal node with leaf children, checked
-    /// against a model of its entries and of its children's names.
-    fn random_operations<'l, V: TrackedValue<'l>>(ledger: &'l DropLedger, steps: usize) {
-        let pages = TestPages::<Tracked<'l>, V>::new();
+    /// against a model of its separators, with their values from the
+    /// children's heads, and of its children's names.
+    fn random_operations<'l, K: FromTracked<'l>>(ledger: &'l DropLedger, steps: usize) {
+        let pages = TestPages::<K, Tracked<'l>>::new();
         let rng = TestRng::new(2);
-        let (mut tree, first_id) = root_above_one_leaf(&pages, ledger);
-        let mut entries: Vec<(usize, usize)> = Vec::new();
-        let mut children = std::vec![first_id];
+        let (mut tree, first_name) = root_above_one_leaf(&pages, ledger);
+        let mut separators: Vec<(usize, usize)> = Vec::new();
+        let mut children = std::vec![first_name];
 
         for _ in 0..steps {
-            let len = entries.len();
+            let len = separators.len();
             match rng.below(10) {
                 0..=3 => {
                     let index = rng.below(len + 1);
                     let edge = internal_root(&mut tree).edge_at(index);
                     if let EdgeRoom::Fits(edge) = edge.check_room() {
-                        let (child, child_id) = child_leaf(&pages, ledger);
-                        let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-                        entries.insert(index, (key.id(), value.tracked_id()));
-                        children.insert(index + 1, child_id);
-                        assert_eq!(edge.insert_fit(key, value, child).index(), index);
+                        let (child, name, head_id) = child_leaf(&pages, ledger);
+                        let key = K::from_tracked(ledger.track());
+                        separators.insert(index, (key.tracked_id(), head_id));
+                        children.insert(index + 1, name);
+                        assert_eq!(edge.insert_fit(key, child).index(), index);
                     }
                 }
                 4 | 5 if len > 0 => {
                     let index = rng.below(len);
-                    let ((key, value), child) = internal_root(&mut tree)
+                    let (key, child) = internal_root(&mut tree)
                         .kv_at(index)
                         .remove_with_right_child();
-                    assert_eq!((key.id(), value.tracked_id()), entries.remove(index));
+                    let head_id = child.borrow().leftmost_head_id();
+                    assert_eq!(
+                        (key.tracked_id(), head_id.expect("the child has a head")),
+                        separators.remove(index)
+                    );
                     assert_eq!(child.height(), 0);
-                    assert_eq!(child.borrow().keys()[0].id(), children.remove(index + 1));
+                    let name = child.borrow().keys()[0].tracked_id();
+                    assert_eq!(name, children.remove(index + 1));
+                    drop(key);
                     child.destroy(|page| pages.release(page));
                 }
                 6 if len > 0 => {
                     let index = rng.below(len);
-                    let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-                    let new_ids = (key.id(), value.tracked_id());
-                    let (old_key, old_value) = internal_root(&mut tree)
-                        .kv_at(index)
-                        .replace_key_value(key, value);
-                    assert_eq!((old_key.id(), old_value.tracked_id()), entries[index]);
-                    entries[index] = new_ids;
+                    let key = K::from_tracked(ledger.track());
+                    let new_id = key.tracked_id();
+                    let old_key = internal_root(&mut tree).kv_at(index).replace_key(key);
+                    assert_eq!(old_key.tracked_id(), separators[index].0);
+                    separators[index].0 = new_id;
                 }
-                7 => {
-                    let index = rng.below(len + 1);
-                    let child = internal_root(&mut tree).edge_at(index).descend();
-                    assert_eq!(child.height(), 0);
-                    let ForceResult::Leaf(child) = child.force() else {
-                        panic!("the children are leaves");
-                    };
-                    let mut kv = child.first_kv().expect("each child holds its name");
-                    assert_eq!(kv.key().id(), children[index]);
-                    let value = V::from_tracked(ledger.track());
-                    drop(core::mem::replace(kv.value_mut(), value));
+                7 if len > 0 => {
+                    let index = rng.below(len);
+                    let value = ledger.track();
+                    let new_id = value.id();
+                    let head = internal_root(&mut tree).kv_at(index).into_value_head();
+                    let old_value = core::mem::replace(head.into_value_mut(), value);
+                    assert_eq!(old_value.id(), separators[index].1);
+                    separators[index].1 = new_id;
                 }
                 8 => {
                     let root = tree.borrow();
@@ -150,16 +170,29 @@ mod tests {
                     let index = rng.below(len + 1);
                     match root.edge_at(index).left_kv() {
                         Ok(kv) => {
-                            assert_eq!(kv.right_edge().descend().keys()[0].id(), children[index])
+                            let child = kv.right_edge().descend();
+                            assert_eq!(child.keys()[0].tracked_id(), children[index]);
                         }
                         Err(edge) => assert_eq!(edge.index(), 0),
                     }
                     match root.edge_at(index).right_kv() {
                         Ok(kv) => {
-                            assert_eq!(kv.left_edge().descend().keys()[0].id(), children[index])
+                            let child = kv.left_edge().descend();
+                            assert_eq!(child.keys()[0].tracked_id(), children[index]);
                         }
                         Err(edge) => assert_eq!(edge.index(), len),
                     }
+                }
+                9 => {
+                    let index = rng.below(len + 1);
+                    let child = internal_root(&mut tree).edge_at(index).descend();
+                    assert_eq!(child.height(), 0);
+                    let ForceResult::Leaf(child) = child.force() else {
+                        panic!("the children are leaves");
+                    };
+                    let mut kv = child.first_kv().expect("each child holds its name");
+                    assert_eq!(kv.key().tracked_id(), children[index]);
+                    drop(core::mem::replace(kv.value_mut(), ledger.track()));
                 }
                 _ => {}
             }
@@ -167,15 +200,15 @@ mod tests {
             let ForceResult::Internal(root) = root.force() else {
                 panic!("the root is internal");
             };
-            assert_eq!(root.tracked_ids(), entries);
-            assert_eq!(child_ids(root), children);
+            assert_eq!(root.tracked_ids(), separators);
+            assert_eq!(child_names(root), children);
         }
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
     }
 
     #[test]
-    fn random_operations_match_a_vec_model() {
+    fn random_operations_match_a_model() {
         let ledger = DropLedger::new();
         let steps = if cfg!(miri) { 200 } else { 10_000 };
         random_operations::<Bulky<'_>>(&ledger, steps);
@@ -184,39 +217,44 @@ mod tests {
     }
 
     /// Builds a full internal node with named leaf children, inserts one more
-    /// entry and child at `position`, and checks the split against the model.
-    fn split_at<'l, V: TrackedValue<'l>>(ledger: &'l DropLedger, position: usize) {
-        let pages = TestPages::<Tracked<'l>, V>::new();
-        let (mut tree, first_id) = root_above_one_leaf(&pages, ledger);
-        let mut entries = Vec::new();
-        let mut children = std::vec![first_id];
+    /// separator and child at `position`, and checks the split against the
+    /// model: keys and edges move, and every separator keeps its value.
+    fn split_at<'l, K: FromTracked<'l>>(ledger: &'l DropLedger, position: usize) {
+        let pages = TestPages::<K, Tracked<'l>>::new();
+        let (mut tree, first_name) = root_above_one_leaf(&pages, ledger);
+        let mut separators = Vec::new();
+        let mut children = std::vec![first_name];
         while let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() {
-            let (child, child_id) = child_leaf(&pages, ledger);
-            let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-            entries.push((key.id(), value.tracked_id()));
-            children.push(child_id);
-            edge.insert_fit(key, value, child);
+            let (child, name, head_id) = child_leaf(&pages, ledger);
+            let key = K::from_tracked(ledger.track());
+            separators.push((key.tracked_id(), head_id));
+            children.push(name);
+            edge.insert_fit(key, child);
         }
-        let (child, child_id) = child_leaf(&pages, ledger);
-        let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-        entries.insert(position, (key.id(), value.tracked_id()));
-        children.insert(position + 1, child_id);
+        let (child, name, head_id) = child_leaf(&pages, ledger);
+        let key = K::from_tracked(ledger.track());
+        separators.insert(position, (key.tracked_id(), head_id));
+        children.insert(position + 1, name);
 
         let edge = internal_root(&mut tree).edge_at(position);
         let Insertion::Split(Split {
             left,
             separator,
             right,
-        }) = edge.insert(key, value, child, || pages.fresh())
+        }) = edge.insert(key, child, || pages.fresh())
         else {
             panic!("a full node splits");
         };
+        let separator_value = right.borrow().first_edge().descend().leftmost_head_id();
         let mut halves = left.reborrow().tracked_ids();
-        halves.push((separator.0.id(), separator.1.tracked_id()));
+        halves.push((
+            separator.tracked_id(),
+            separator_value.expect("the right half's leftmost leaf has a head"),
+        ));
         halves.extend(right.borrow().tracked_ids());
-        assert_eq!(halves, entries);
-        let mut halves_children = child_ids(left.reborrow());
-        halves_children.extend(child_ids(right.borrow()));
+        assert_eq!(halves, separators);
+        let mut halves_children = child_names(left.reborrow());
+        halves_children.extend(child_names(right.borrow()));
         assert_eq!(halves_children, children);
         assert!(left.len().abs_diff(right.borrow().len()) <= 2);
         assert_eq!((left.height(), right.height()), (1, 1));
@@ -229,7 +267,7 @@ mod tests {
     #[test]
     fn split_and_insert_at_every_position() {
         let ledger = DropLedger::new();
-        for position in 0..=NodeLayout::<Tracked<'_>, Bulky<'_>>::INTERNAL_CAPACITY {
+        for position in 0..=NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY {
             split_at::<Bulky<'_>>(&ledger, position);
         }
         if !cfg!(miri) {
@@ -248,24 +286,44 @@ mod tests {
     fn insert_rejects_a_child_of_the_wrong_height() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-        let (mut tree, first_id) = root_above_one_leaf(&pages, &ledger);
-        let (mut too_tall, _) = child_leaf(&pages, &ledger);
+        let (mut tree, first_name) = root_above_one_leaf(&pages, &ledger);
+        let (mut too_tall, _, _) = child_leaf(&pages, &ledger);
         too_tall.push_internal_level(pages.fresh());
 
         let EdgeRoom::Fits(edge) = internal_root(&mut tree).first_edge().check_room() else {
             panic!("a root without keys has room");
         };
-        let (key, value) = (ledger.track(), ledger.track());
-        let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(key, value, too_tall)));
+        let key = ledger.track();
+        let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(key, too_tall)));
         assert!(rejected.is_err());
         let root = tree.borrow();
         let ForceResult::Internal(root) = root.force() else {
             panic!("the root is internal");
         };
         assert_eq!(root.len(), 0);
-        assert_eq!(child_ids(root), [first_id]);
+        assert_eq!(child_names(root), [first_name]);
         tree.destroy(|page| pages.release(page));
         assert_eq!(pages.in_use(), 2, "only the rejected child is leaked");
+    }
+
+    /// A separator over a leaf without a head is a broken tree: balancing it
+    /// panics instead of moving an empty head slot.
+    #[test]
+    fn balancing_refuses_a_headless_right_leaf() {
+        let ledger = DropLedger::new();
+        let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
+        let (mut tree, _) = root_above_one_leaf(&pages, &ledger);
+        let (headless, _) = named_leaf(&pages, &ledger);
+        let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() else {
+            panic!("a root without keys has room");
+        };
+        edge.insert_fit(ledger.track(), headless.forget_type());
+        let separator = internal_root(&mut tree).kv_at(0);
+        let context = catch_unwind(AssertUnwindSafe(|| separator.into_balancing_context()));
+        assert!(context.is_err());
+        tree.destroy(|page| pages.release(page));
+        pages.assert_all_released();
+        ledger.assert_all_dropped_once();
     }
 
     #[test]
@@ -282,7 +340,7 @@ mod tests {
             };
             edge.insert_fit(ledger.track(), ledger.track());
         }
-        let ids = tree.borrow().tracked_ids();
+        let ids = tree.borrow().subtree_tracked_ids();
 
         for height in 1..=3 {
             let root = tree.push_internal_level(pages.fresh());
@@ -295,7 +353,7 @@ mod tests {
             node = internal.first_edge().descend();
         }
         assert_eq!(node.height(), 0);
-        assert_eq!(node.tracked_ids(), ids);
+        assert_eq!(node.subtree_tracked_ids(), ids);
 
         for height in (0..3).rev() {
             let ForceResult::Internal(root) = tree.force() else {
@@ -306,29 +364,30 @@ mod tests {
             tree = only_child;
             assert_eq!(tree.height(), height);
         }
-        assert_eq!(tree.borrow().tracked_ids(), ids);
+        assert_eq!(tree.borrow().subtree_tracked_ids(), ids);
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
         ledger.assert_all_dropped_once();
     }
 
-    type BulkyTree<'p, 'l> = TestTree<'p, Tracked<'l>, Bulky<'l>>;
+    /// Bulky keys: 12 entries in either kind of node.
+    type BulkyTree<'p, 'l> = TestTree<'p, Bulky<'l>, Tracked<'l>>;
 
     /// A tree of `count` entries with ascending keys.
     fn ascending_tree<'p, 'l>(
-        pages: &'p TestPages<Tracked<'l>, Bulky<'l>>,
+        pages: &'p TestPages<Bulky<'l>, Tracked<'l>>,
         ledger: &'l DropLedger,
         count: usize,
     ) -> BulkyTree<'p, 'l> {
         let mut tree = TestTree::new(pages);
         for key in ledger.track_many(count) {
-            tree.insert(key, Bulky::from_tracked(ledger.track()));
+            tree.insert(Bulky::from_tracked(key), ledger.track());
         }
         tree
     }
 
     fn entry_ids(tree: &BulkyTree<'_, '_>) -> Vec<(usize, usize)> {
-        tree.entries(|key, value| (key.id(), value.tracked_id()))
+        tree.entries(|key, value| (key.tracked_id(), value.id()))
     }
 
     /// The child of the root at `index`, which must be a leaf.
@@ -350,7 +409,8 @@ mod tests {
     fn steals_and_merges_of_leaves() {
         let ledger = DropLedger::new();
         let pages = TestPages::new();
-        // 13 entries in 12-entry leaves: one split, two leaves of 6.
+        // 13 entries in 12-entry leaves: one split, two leaves of 6 around
+        // a separator, whose value is the right leaf's head.
         let mut tree = ascending_tree(&pages, &ledger, 13);
         let mut model = entry_ids(&tree);
         assert_eq!(tree.height(), 1);
@@ -376,11 +436,16 @@ mod tests {
             (context.left_child_len(), context.right_child_len()),
             (7, 5)
         );
-        assert_eq!(context.into_parent().key().id(), model[7].0);
+        assert_eq!(context.into_parent().key().tracked_id(), model[7].0);
         assert_eq!(entry_ids(&tree), model);
+        assert_eq!(leaf_child(&mut tree, 0).reborrow().head_id(), None);
+        assert_eq!(
+            leaf_child(&mut tree, 1).reborrow().head_id(),
+            Some(model[7].1)
+        );
 
         let ((key, value), _) = leaf_child(&mut tree, 0).kv_at(3).remove();
-        assert_eq!((key.id(), value.tracked_id()), model.remove(3));
+        assert_eq!((key.tracked_id(), value.id()), model.remove(3));
         drop((key, value));
         let context = internal_root(tree.root_mut())
             .kv_at(0)
@@ -397,6 +462,10 @@ mod tests {
             panic!("the child is a leaf");
         };
         assert_eq!(merged_leaf.len(), 12);
+        assert!(
+            merged_leaf.head().is_none(),
+            "the leftmost leaf has no head"
+        );
         tree.pop_empty_roots();
         assert_eq!(tree.height(), 0);
         assert_eq!(entry_ids(&tree), model);
@@ -490,16 +559,19 @@ mod tests {
             let context = internal_root(tree.root_mut())
                 .kv_at(0)
                 .into_balancing_context();
-            if context.left_child_len() + 1 + context.right_child_len() <= 12 {
+            let capacity = NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY;
+            if context.left_child_len() + 1 + context.right_child_len() <= capacity {
                 break;
             }
             let ForceResult::Internal(left) = context.into_left_child().force() else {
                 panic!("the children are internal");
             };
-            let ((key, value), grandchild) = left.kv_at(0).remove_with_right_child();
-            let mut removed = std::vec![(key.id(), value.tracked_id())];
-            removed.extend(grandchild.borrow().tracked_ids());
+            let (key, grandchild) = left.kv_at(0).remove_with_right_child();
+            let value_id = grandchild.borrow().leftmost_head_id();
+            let mut removed = std::vec![(key.tracked_id(), value_id.expect("a head"))];
+            removed.extend(grandchild.borrow().subtree_tracked_ids());
             model.retain(|entry| !removed.contains(entry));
+            drop(key);
             grandchild.destroy(|page| pages.release(page));
         }
         let context = internal_root(tree.root_mut())
@@ -566,7 +638,7 @@ mod tests {
         rng.shuffle(&mut keys);
         let mut tree = TestTree::new(&pages);
         for key in keys {
-            tree.insert(key, Bulky::from_tracked(ledger.track()));
+            tree.insert(Bulky::from_tracked(key), ledger.track());
         }
         let mut model = entry_ids(&tree);
 
@@ -577,7 +649,7 @@ mod tests {
                 if let Some((key, value)) =
                     remove_random_leaf_entry(tree.root_mut().borrow_mut(), &rng)
                 {
-                    model.retain(|&entry| entry != (key.id(), value.tracked_id()));
+                    model.retain(|&entry| entry != (key.tracked_id(), value.id()));
                 }
             } else if let Some(kv) = random_internal_kv(tree.root_mut().borrow_mut(), &rng) {
                 let mut context = match kv.into_balancing_context().can_merge() {

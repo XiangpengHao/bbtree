@@ -8,7 +8,7 @@ use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
 use std::vec::Vec;
 
-use super::handle::{ForceResult, Immut, LeafOrInternal, NodeKind, NodeRef, Subtree};
+use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
 use super::page::TestPages;
 
 /// A deterministic xorshift64* generator; shared by reference.
@@ -79,11 +79,11 @@ impl DropLedger {
 
     fn track_with(&self, panics_on_drop: bool) -> Tracked<'_> {
         let mut alive = self.alive.borrow_mut();
-        let id = alive.len();
+        let id = u32::try_from(alive.len()).expect("fewer than 2^32 tracked values");
         alive.push(true);
         Tracked {
-            id,
             ledger: self,
+            id,
             panics_on_drop,
         }
     }
@@ -96,22 +96,23 @@ impl DropLedger {
     }
 }
 
-/// A value whose drop is recorded in a [`DropLedger`]. Ordered by id.
+/// A value whose drop is recorded in a [`DropLedger`]. Ordered by id. 16
+/// bytes, small enough to pad into node shapes that tests spell out.
 pub(crate) struct Tracked<'l> {
-    id: usize,
     ledger: &'l DropLedger,
+    id: u32,
     panics_on_drop: bool,
 }
 
 impl Tracked<'_> {
     pub(crate) fn id(&self) -> usize {
-        self.id
+        self.id as usize
     }
 }
 
 impl Drop for Tracked<'_> {
     fn drop(&mut self) {
-        self.ledger.record_drop(self.id);
+        self.ledger.record_drop(self.id());
         if self.panics_on_drop {
             panic!("tracked value {} panics on drop, as asked", self.id);
         }
@@ -138,23 +139,45 @@ impl Ord for Tracked<'_> {
     }
 }
 
-/// A tracked value padded so that, with `Tracked` keys, 160-byte entries fill
-/// a 2 KB node with exactly 12 entries in both node kinds (D13, D15): tall
-/// trees from few entries, which Miri can afford, and the node shapes the
-/// balancing tests spell out. No entry size gives exactly 12 in both kinds
-/// of a 1 KB node.
+/// A tracked key or value padded to 152 bytes. As keys, with [`Tracked`]
+/// values, they fill a 2 KB node with exactly 12 entries in both node kinds
+/// (D13, D15, D17, D21): tall trees from few entries, which Miri can afford,
+/// and the node shapes the balancing tests spell out. No key size gives
+/// exactly 12 in both kinds of a 1 KB node. As values, they test large values in
+/// leaves. Ordered by id.
 pub(super) struct Bulky<'l> {
     tracked: Tracked<'l>,
-    _padding: [u8; 112],
+    _padding: [u8; 136],
 }
 
-/// A value type that tests make from a [`Tracked`] and tell apart by its id.
-pub(crate) trait TrackedValue<'l> {
+impl PartialEq for Bulky<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.tracked == other.tracked
+    }
+}
+
+impl Eq for Bulky<'_> {}
+
+impl PartialOrd for Bulky<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Bulky<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.tracked.cmp(&other.tracked)
+    }
+}
+
+/// A key or value type that tests make from a [`Tracked`] and tell apart by
+/// its id.
+pub(crate) trait FromTracked<'l> {
     fn from_tracked(tracked: Tracked<'l>) -> Self;
     fn tracked_id(&self) -> usize;
 }
 
-impl<'l> TrackedValue<'l> for Tracked<'l> {
+impl<'l> FromTracked<'l> for Tracked<'l> {
     fn from_tracked(tracked: Tracked<'l>) -> Self {
         tracked
     }
@@ -164,11 +187,11 @@ impl<'l> TrackedValue<'l> for Tracked<'l> {
     }
 }
 
-impl<'l> TrackedValue<'l> for Bulky<'l> {
+impl<'l> FromTracked<'l> for Bulky<'l> {
     fn from_tracked(tracked: Tracked<'l>) -> Self {
         Self {
             tracked,
-            _padding: [0; 112],
+            _padding: [0; 136],
         }
     }
 
@@ -177,15 +200,83 @@ impl<'l> TrackedValue<'l> for Bulky<'l> {
     }
 }
 
-impl<'a, 'l, V: TrackedValue<'l>, Kind: NodeKind> NodeRef<Immut<'a>, Tracked<'l>, V, Kind> {
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Leaf> {
     /// The `(key id, value id)` of each entry, in order.
     pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
         (0..self.len())
             .map(|index| {
                 let (key, value) = self.kv_at(index).into_key_value();
-                (key.id(), value.tracked_id())
+                (key.tracked_id(), value.tracked_id())
             })
             .collect()
+    }
+
+    /// The id of the head, if the leaf has one.
+    pub(super) fn head_id(self) -> Option<usize> {
+        self.head().map(|head| head.into_value().tracked_id())
+    }
+}
+
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, Internal> {
+    /// The `(key id, value id)` of each separator, in order, its value read
+    /// from the head that holds it (D17).
+    pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
+        (0..self.len())
+            .map(|index| {
+                let separator = self.kv_at(index);
+                let value = separator.into_value_head().into_value();
+                (separator.into_key().tracked_id(), value.tracked_id())
+            })
+            .collect()
+    }
+}
+
+impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>> NodeRef<Immut<'a>, K, V, LeafOrInternal> {
+    /// The `(key id, value id)` of every entry of the subtree, in order; see
+    /// [`NodeRef::for_each_entry`].
+    pub(super) fn subtree_tracked_ids(self) -> Vec<(usize, usize)> {
+        let mut ids = Vec::new();
+        self.for_each_entry(&mut |key, value| ids.push((key.tracked_id(), value.tracked_id())));
+        ids
+    }
+
+    /// The id of the head of the subtree's leftmost leaf, if it has one: the
+    /// value of the separator just left of the subtree (D17).
+    pub(super) fn leftmost_head_id(self) -> Option<usize> {
+        let mut node = self;
+        loop {
+            match node.force() {
+                ForceResult::Leaf(leaf) => return leaf.head_id(),
+                ForceResult::Internal(internal) => node = internal.first_edge().descend(),
+            }
+        }
+    }
+}
+
+impl<'a, K: 'a, V: 'a> NodeRef<Immut<'a>, K, V, LeafOrInternal> {
+    /// Calls `entry` on every entry of the subtree in key order: each leaf's
+    /// keys and values, and each separator's key with its value from the head
+    /// that holds it (D17). A head in the subtree's leftmost leaf belongs to
+    /// a separator outside the subtree, and is skipped.
+    pub(super) fn for_each_entry(self, entry: &mut impl FnMut(&'a K, &'a V)) {
+        match self.force() {
+            ForceResult::Leaf(leaf) => {
+                for index in 0..leaf.len() {
+                    let (key, value) = leaf.kv_at(index).into_key_value();
+                    entry(key, value);
+                }
+            }
+            ForceResult::Internal(internal) => {
+                for index in 0..=internal.len() {
+                    internal.edge_at(index).descend().for_each_entry(entry);
+                    if index < internal.len() {
+                        let separator = internal.kv_at(index);
+                        let value = separator.into_value_head().into_value();
+                        entry(separator.into_key(), value);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -204,8 +295,8 @@ impl CacheLineAligned {
     }
 }
 
-/// A `u64` aligned to two pages, which makes nodes 8 KB-aligned and 112 KB
-/// long (D13).
+/// A `u64` aligned to two pages. As values, they make leaves 8 KB-aligned
+/// and 112 KB long (D13), and leave internal nodes at 1 KB (D21).
 #[repr(align(8192))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PageAligned(u64);
@@ -257,7 +348,7 @@ impl<'p, K, V> TestTree<'p, K, V> {
     /// One `entry(key, value)` per entry, in order.
     pub(super) fn entries<T>(&self, mut entry: impl FnMut(&K, &V) -> T) -> Vec<T> {
         let mut entries = Vec::new();
-        Self::visit(self.root().borrow(), &mut |key, value| {
+        self.root().borrow().for_each_entry(&mut |key, value| {
             entries.push(entry(key, value));
         });
         entries
@@ -292,32 +383,6 @@ impl<'p, K, V> TestTree<'p, K, V> {
         let root = self.root.take().expect("the root is always there");
         root.destroy(|page| pages.release(page));
     }
-
-    fn visit<'a>(
-        node: NodeRef<Immut<'a>, K, V, LeafOrInternal>,
-        entry: &mut impl FnMut(&'a K, &'a V),
-    ) where
-        K: 'a,
-        V: 'a,
-    {
-        match node.force() {
-            ForceResult::Leaf(leaf) => {
-                for index in 0..leaf.len() {
-                    let (key, value) = leaf.kv_at(index).into_key_value();
-                    entry(key, value);
-                }
-            }
-            ForceResult::Internal(internal) => {
-                for index in 0..=internal.len() {
-                    Self::visit(internal.edge_at(index).descend(), entry);
-                    if index < internal.len() {
-                        let (key, value) = internal.kv_at(index).into_key_value();
-                        entry(key, value);
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl<K: Ord, V> TestTree<'_, K, V> {
@@ -325,7 +390,8 @@ impl<K: Ord, V> TestTree<'_, K, V> {
     /// returns the old one, as the map does.
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
         let pages = self.pages;
-        self.root_mut().insert(key, value, || pages.fresh())
+        self.root_mut()
+            .insert(key, value, || pages.fresh(), || pages.fresh())
     }
 }
 
@@ -335,15 +401,20 @@ mod tests {
     use crate::node::layout::NodeLayout;
 
     #[test]
-    fn bulky_nodes_hold_twelve_entries() {
-        assert_eq!(NodeLayout::<Tracked<'_>, Bulky<'_>>::LEAF_CAPACITY, 12);
-        assert_eq!(NodeLayout::<Tracked<'_>, Bulky<'_>>::INTERNAL_CAPACITY, 12);
+    fn bulky_key_nodes_hold_twelve_entries() {
+        assert_eq!(size_of::<Tracked<'_>>(), 16);
+        assert_eq!(size_of::<Bulky<'_>>(), 152);
+        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::LEAF_CAPACITY, 12);
+        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_CAPACITY, 12);
+        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::LEAF_SIZE, 2048);
+        assert_eq!(NodeLayout::<Bulky<'_>, Tracked<'_>>::INTERNAL_SIZE, 2048);
     }
 
     #[test]
     fn over_aligned_types_keep_their_value() {
         assert_eq!(CacheLineAligned::new(7).get(), 7);
         assert_eq!(PageAligned::new(9).get(), 9);
-        assert_eq!(NodeLayout::<u64, PageAligned>::NODE_ALIGN, 8192);
+        assert_eq!(NodeLayout::<u64, PageAligned>::LEAF_ALIGN, 8192);
+        assert_eq!(NodeLayout::<u64, PageAligned>::INTERNAL_ALIGN, 1024);
     }
 }

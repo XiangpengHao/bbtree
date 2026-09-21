@@ -1,6 +1,7 @@
 //! Differential tests: the map against std's `BTreeMap`, fed the same
-//! operations, for ordinary, heap-owning, bulky, zero-sized and over-aligned
-//! keys and values.
+//! operations, for ordinary, heap-owning, wide, zero-sized and over-aligned
+//! keys and values, including every key that ends up as a separator in an
+//! internal node, with its value in a leaf's head (D17).
 
 #![forbid(unsafe_code)]
 
@@ -42,12 +43,13 @@ impl FromNumber for String {
     }
 }
 
-/// With `u64` keys, 72-byte entries fill a 1 KB node with 12 entries in an
-/// internal node and 14 in a leaf (D13, D15): tall trees from a few hundred
-/// entries, with little data per entry for Miri to track.
-type TwelvePerNode = [u64; 8];
+/// With `u64` values, 64-byte keys fill a 1 KB node with 14 entries in both
+/// kinds (D13, D15, D17): tall trees from a few hundred entries, with little
+/// data per entry for Miri to track. Arrays order lexicographically, so keys
+/// ascend with their first element.
+type WideKey = [u64; 8];
 
-impl FromNumber for TwelvePerNode {
+impl FromNumber for WideKey {
     fn from_number(number: usize) -> Self {
         core::array::from_fn(|index| (number as u64).wrapping_mul(41) + index as u64)
     }
@@ -91,6 +93,7 @@ where
 
     fn get(&self, key: &K) {
         assert_eq!(self.ours.get(key), self.theirs.get(key));
+        assert_eq!(self.ours.get_key_value(key), self.theirs.get_key_value(key));
         assert_eq!(self.ours.contains_key(key), self.theirs.contains_key(key));
     }
 
@@ -116,8 +119,25 @@ where
         self.ours.check_invariants();
         self.assert_same_len();
         for (key, value) in &self.theirs {
-            assert_eq!(self.ours.get(key), Some(value));
+            assert_eq!(self.ours.get_key_value(key), Some((key, value)));
         }
+    }
+
+    /// Gives every key that lives in an internal node a new value, through
+    /// `insert` or `get_mut` at random: each time, the value replaced is a
+    /// leaf's head (D17).
+    fn overwrite_separators(&mut self, rng: &TestRng) {
+        let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
+        assert_eq!(separators.is_empty(), self.ours.height() == 0);
+        for key in separators {
+            let value = V::from_number(rng.below(1 << 30));
+            if rng.below(2) == 0 {
+                self.insert(key, value);
+            } else {
+                self.update(&key, value);
+            }
+        }
+        self.assert_same_entries();
     }
 
     /// `steps` random operations on keys made from `0..key_space`.
@@ -165,14 +185,17 @@ struct Workload {
 
 impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
-    /// each on a fresh pair of maps.
+    /// each on a fresh pair of maps, and each followed by overwriting every
+    /// separator's value.
     fn run<K, V>(&self, seed: u64)
     where
         K: Ord + Clone + Debug + FromNumber,
         V: Clone + PartialEq + Debug + FromNumber,
     {
         let rng = TestRng::new(seed);
-        MirroredMaps::<K, V>::new().run_random_operations(&rng, self.random_steps, self.key_space);
+        let mut maps = MirroredMaps::<K, V>::new();
+        maps.run_random_operations(&rng, self.random_steps, self.key_space);
+        maps.overwrite_separators(&rng);
 
         let evens = || (0..self.ordered_entries).map(|index| 2 * index);
         let sequential_orders: [Vec<usize>; 2] = [evens().collect(), evens().rev().collect()];
@@ -185,10 +208,13 @@ impl Workload {
                 "height {height} is below {}",
                 self.min_sequential_height
             );
+            maps.overwrite_separators(&rng);
         }
         let mut shuffled: Vec<usize> = evens().collect();
         rng.shuffle(&mut shuffled);
-        MirroredMaps::<K, V>::new().insert_evens_in_order(shuffled);
+        let mut maps = MirroredMaps::<K, V>::new();
+        maps.insert_evens_in_order(shuffled);
+        maps.overwrite_separators(&rng);
     }
 }
 
@@ -233,11 +259,11 @@ fn string_to_string_matches_std() {
 }
 
 #[test]
-fn twelve_entry_nodes_match_std() {
+fn wide_keys_match_std() {
     let workload = if cfg!(miri) {
         // Height 2 already has an internal node split into a parent with
         // room; height 3 only adds depth, which the native run covers.
-        // Ascending inserts leave half-full nodes: height 2 needs about 110.
+        // Ascending inserts leave half-full nodes: height 2 needs about 130.
         Workload {
             random_steps: 300,
             key_space: 300,
@@ -252,7 +278,7 @@ fn twelve_entry_nodes_match_std() {
             min_sequential_height: 3,
         }
     };
-    workload.run::<u64, TwelvePerNode>(3);
+    workload.run::<WideKey, u64>(3);
 }
 
 #[test]

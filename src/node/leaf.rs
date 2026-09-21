@@ -13,7 +13,7 @@ impl<'a, K, V> Edge<NodeMut<'a, K, V, Leaf>> {
         self,
         key: K,
         value: V,
-        new_page: impl FnOnce() -> FreshPage<K, V>,
+        new_page: impl FnOnce() -> FreshPage<K, V, Leaf>,
     ) -> Insertion<'a, K, V, Leaf> {
         match self.check_room() {
             EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(key, value)),
@@ -32,12 +32,13 @@ mod tests {
     use std::vec::Vec;
 
     use crate::node::handle::{
-        EdgeRoom, ForceResult, Insertion, Leaf, NodeMut, SearchResult, Split, Subtree,
+        EdgeRoom, ForceResult, Immut, Insertion, Leaf, NodeMut, NodeRef, SearchResult, Split,
+        Subtree,
     };
     use crate::node::layout::NodeLayout;
     use crate::node::page::TestPages;
     use crate::node::test_support::{
-        Bulky, CacheLineAligned, DropLedger, PageAligned, TestRng, TestTree, Tracked, TrackedValue,
+        Bulky, CacheLineAligned, DropLedger, FromTracked, PageAligned, TestRng, TestTree, Tracked,
     };
 
     /// Appends an entry to a leaf that has room.
@@ -53,6 +54,14 @@ mod tests {
     /// The root of a tree that must be a leaf.
     fn root_leaf<K, V>(tree: &mut Subtree<K, V>) -> NodeMut<'_, K, V, Leaf> {
         match tree.borrow_mut().force() {
+            ForceResult::Leaf(leaf) => leaf,
+            ForceResult::Internal(_) => panic!("the root is internal"),
+        }
+    }
+
+    /// Shared access to the root of a tree that must be a leaf.
+    fn root_leaf_ref<K, V>(tree: &Subtree<K, V>) -> NodeRef<Immut<'_>, K, V, Leaf> {
+        match tree.borrow().force() {
             ForceResult::Leaf(leaf) => leaf,
             ForceResult::Internal(_) => panic!("the root is internal"),
         }
@@ -208,42 +217,72 @@ mod tests {
         ledger.assert_all_dropped_once();
     }
 
-    /// Random operations on one leaf, checked against a `Vec` after each.
-    /// A split of the full leaf is put back together through a parent.
-    /// Returns how many times the leaf split.
-    fn random_operations<'l, V: TrackedValue<'l>>(ledger: &'l DropLedger, steps: usize) -> usize {
+    /// What one leaf should hold: the ids of its entries in order, and of its
+    /// head, if any.
+    struct LeafModel {
+        entries: Vec<(usize, usize)>,
+        head: Option<usize>,
+    }
+
+    impl LeafModel {
+        fn assert_matches<'l, V: FromTracked<'l>>(
+            &self,
+            leaf: NodeRef<Immut<'_>, Tracked<'l>, V, Leaf>,
+        ) {
+            assert_eq!(leaf.tracked_ids(), self.entries);
+            assert_eq!(leaf.head_id(), self.head);
+        }
+
+        /// Checks the halves of a split of the modelled leaf: the left keeps
+        /// the head, the separator's value is the right half's head, and the
+        /// halves differ by at most two entries.
+        fn assert_split_halves<'l, V: FromTracked<'l>>(
+            &self,
+            split: &Split<'_, Tracked<'l>, V, Leaf>,
+        ) {
+            let right = split.right.borrow();
+            let separator_value = right.head_id().expect("the right half has a head");
+            let mut halves = split.left.reborrow().tracked_ids();
+            halves.push((split.separator.id(), separator_value));
+            halves.extend(right.tracked_ids());
+            assert_eq!(halves, self.entries);
+            assert_eq!(split.left.reborrow().head_id(), self.head);
+            assert!(split.left.len().abs_diff(right.len()) <= 2);
+            assert_eq!(right.height(), 0);
+        }
+    }
+
+    /// Random operations on one leaf, its head included, checked against a
+    /// model after each. A split of the full leaf is put back together
+    /// through a parent. Returns how many times the leaf split.
+    fn random_operations<'l, V: FromTracked<'l>>(ledger: &'l DropLedger, steps: usize) -> usize {
         let pages = TestPages::<Tracked<'l>, V>::new();
         let rng = TestRng::new(1);
         let mut tree = Subtree::new_leaf(pages.fresh()).forget_type();
-        let mut model: Vec<(usize, usize)> = Vec::new();
+        let mut model = LeafModel {
+            entries: Vec::new(),
+            head: None,
+        };
         let mut splits = 0;
 
         for _ in 0..steps {
-            let len = model.len();
-            match rng.below(10) {
+            let len = model.entries.len();
+            match rng.below(11) {
                 0..=3 => {
                     let index = rng.below(len + 1);
                     let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-                    model.insert(index, (key.id(), value.tracked_id()));
+                    model.entries.insert(index, (key.id(), value.tracked_id()));
                     let edge = root_leaf(&mut tree).edge_at(index);
                     match edge.insert(key, value, || pages.fresh()) {
                         Insertion::Fit(kv) => assert_eq!(kv.index(), index),
-                        Insertion::Split(Split {
-                            left,
-                            separator,
-                            right,
-                        }) => {
-                            let mut halves = left.reborrow().tracked_ids();
-                            halves.push((separator.0.id(), separator.1.tracked_id()));
-                            halves.extend(right.borrow().tracked_ids());
-                            assert_eq!(halves, model);
-                            assert!(left.len().abs_diff(right.borrow().len()) <= 2);
+                        Insertion::Split(split) => {
+                            model.assert_split_halves(&split);
                             let parts = SplitLeaf {
-                                separator,
-                                right,
-                                left_len: left.len(),
+                                separator: split.separator,
+                                right: split.right,
+                                left_len: split.left.len(),
                             };
-                            tree = parts.reassemble(tree, &pages, &rng, &mut model);
+                            tree = parts.reassemble(tree, &pages, &rng, &mut model.entries);
                             splits += 1;
                         }
                     }
@@ -251,7 +290,7 @@ mod tests {
                 4 | 5 if len > 0 => {
                     let index = rng.below(len);
                     let ((key, value), edge) = root_leaf(&mut tree).kv_at(index).remove();
-                    assert_eq!((key.id(), value.tracked_id()), model.remove(index));
+                    assert_eq!((key.id(), value.tracked_id()), model.entries.remove(index));
                     assert_eq!(edge.index(), index);
                 }
                 6 if len > 0 => {
@@ -261,13 +300,13 @@ mod tests {
                     let (old_key, old_value) = root_leaf(&mut tree)
                         .kv_at(index)
                         .replace_key_value(key, value);
-                    assert_eq!((old_key.id(), old_value.tracked_id()), model[index]);
-                    model[index] = new_ids;
+                    assert_eq!((old_key.id(), old_value.tracked_id()), model.entries[index]);
+                    model.entries[index] = new_ids;
                 }
                 7 if len > 0 => {
                     let index = rng.below(len);
                     let value = V::from_tracked(ledger.track());
-                    model[index].1 = value.tracked_id();
+                    model.entries[index].1 = value.tracked_id();
                     let mut kv = root_leaf(&mut tree).kv_at(index);
                     let old_value = if rng.below(2) == 0 {
                         core::mem::replace(kv.value_mut(), value)
@@ -277,18 +316,15 @@ mod tests {
                     drop(old_value);
                 }
                 8 => {
-                    let leaf = tree.borrow();
-                    let ForceResult::Leaf(leaf) = leaf.force() else {
-                        panic!("the root is a leaf")
-                    };
+                    let leaf = root_leaf_ref(&tree);
                     let index = rng.below(len + 1);
                     match leaf.edge_at(index).left_kv() {
-                        Ok(kv) => assert_eq!(kv.key().id(), model[index - 1].0),
+                        Ok(kv) => assert_eq!(kv.key().id(), model.entries[index - 1].0),
                         Err(edge) => assert_eq!(edge.index(), 0),
                     }
                     match leaf.edge_at(index).right_kv() {
                         Ok(kv) => {
-                            assert_eq!(kv.key().id(), model[index].0);
+                            assert_eq!(kv.key().id(), model.entries[index].0);
                             assert_eq!(kv.left_edge().index(), index);
                             assert_eq!(kv.right_edge().index(), index + 1);
                         }
@@ -299,9 +335,26 @@ mod tests {
                     assert_eq!(leaf.first_kv().map(|kv| kv.index()), (len > 0).then_some(0));
                     assert_eq!(leaf.last_kv().map(|kv| kv.index()), len.checked_sub(1));
                 }
+                9 => {
+                    let mut leaf = root_leaf(&mut tree);
+                    match (model.head, rng.below(2)) {
+                        (Some(head_id), 0) => {
+                            let head = leaf.head().expect("the model says there is a head");
+                            let (value, _) = head.remove();
+                            assert_eq!(value.tracked_id(), head_id);
+                            model.head = None;
+                        }
+                        (old_head, _) => {
+                            let value = V::from_tracked(ledger.track());
+                            model.head = Some(value.tracked_id());
+                            let replaced = leaf.replace_head(value);
+                            assert_eq!(replaced.map(|value| value.tracked_id()), old_head);
+                        }
+                    }
+                }
                 _ => {}
             }
-            assert_eq!(tree.borrow().tracked_ids(), model);
+            model.assert_matches(root_leaf_ref(&tree));
         }
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
@@ -309,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn random_operations_match_a_vec_model() {
+    fn random_operations_match_a_model() {
         let ledger = DropLedger::new();
         let (bulky_steps, tracked_steps) = if cfg!(miri) {
             (200, 200)
@@ -324,21 +377,23 @@ mod tests {
 
     /// The parts of a root leaf that split, besides the leaf itself.
     struct SplitLeaf<K, V> {
-        separator: (K, V),
+        separator: K,
         right: Subtree<K, V, Leaf>,
         left_len: usize,
     }
 
-    impl<'l, V: TrackedValue<'l>> SplitLeaf<Tracked<'l>, V> {
+    impl<'l, V: FromTracked<'l>> SplitLeaf<Tracked<'l>, V> {
         /// Puts the split root leaf `tree` back together in one leaf: hangs
-        /// both halves under a new root, removes one random entry so that
-        /// they fit, merges them and pops the root. `model` loses the entry.
+        /// both halves under a new root, removes one random entry other than
+        /// the separator so that they fit, merges them, which brings the
+        /// separator back beside its value, and pops the root. `entries`
+        /// loses the removed entry.
         fn reassemble(
             self,
             mut tree: Subtree<Tracked<'l>, V>,
             pages: &TestPages<Tracked<'l>, V>,
             rng: &TestRng,
-            model: &mut Vec<(usize, usize)>,
+            entries: &mut Vec<(usize, usize)>,
         ) -> Subtree<Tracked<'l>, V> {
             let root = tree.push_internal_level(pages.fresh());
             assert_eq!(root.len(), 0);
@@ -346,10 +401,10 @@ mod tests {
                 panic!("a new root has room");
             };
             let mut root = edge
-                .insert_fit(self.separator.0, self.separator.1, self.right.forget_type())
+                .insert_fit(self.separator, self.right.forget_type())
                 .into_node();
 
-            let right_len = model.len() - self.left_len - 1;
+            let right_len = entries.len() - self.left_len - 1;
             let in_left = self.left_len > 0 && (right_len == 0 || rng.below(2) == 0);
             let child = root.reborrow_mut().edge_at(usize::from(!in_left)).descend();
             let ForceResult::Leaf(child) = child.force() else {
@@ -363,12 +418,12 @@ mod tests {
             } else {
                 self.left_len + 1 + index
             };
-            assert_eq!((key.id(), value), model.remove(model_index));
+            assert_eq!((key.id(), value), entries.remove(model_index));
 
             let context = root.kv_at(0).into_balancing_context();
             assert_eq!(
                 context.left_child_len() + 1 + context.right_child_len(),
-                model.len()
+                entries.len()
             );
             let Ok(mergeable) = context.can_merge() else {
                 panic!("the halves fit again");
@@ -388,34 +443,38 @@ mod tests {
         }
     }
 
-    /// Builds a full leaf of tracked entries, inserts one more at `position`,
-    /// and checks the split against the model.
-    fn split_at<'l, V: TrackedValue<'l>>(ledger: &'l DropLedger, position: usize) {
+    /// Builds a full leaf of tracked entries, with a head if `with_head`,
+    /// inserts one more at `position`, and checks the split against the
+    /// model.
+    fn split_at<'l, V: FromTracked<'l>>(ledger: &'l DropLedger, position: usize, with_head: bool) {
         let pages = TestPages::<Tracked<'l>, V>::new();
         let mut leaf = Subtree::new_leaf(pages.fresh());
-        let mut model = Vec::new();
+        let mut model = LeafModel {
+            entries: Vec::new(),
+            head: None,
+        };
+        if with_head {
+            let value = V::from_tracked(ledger.track());
+            model.head = Some(value.tracked_id());
+            assert!(leaf.borrow_mut().replace_head(value).is_none());
+        }
         while let EdgeRoom::Fits(edge) = leaf.borrow_mut().last_edge().check_room() {
             let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-            model.push((key.id(), value.tracked_id()));
+            model.entries.push((key.id(), value.tracked_id()));
             edge.insert_fit(key, value);
         }
         let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
-        model.insert(position, (key.id(), value.tracked_id()));
+        model
+            .entries
+            .insert(position, (key.id(), value.tracked_id()));
         let edge = leaf.borrow_mut().edge_at(position);
-        let Insertion::Split(Split {
-            left,
-            separator,
-            right,
-        }) = edge.insert(key, value, || pages.fresh())
-        else {
+        let Insertion::Split(split) = edge.insert(key, value, || pages.fresh()) else {
             panic!("a full leaf splits");
         };
-        let mut halves = left.reborrow().tracked_ids();
-        halves.push((separator.0.id(), separator.1.tracked_id()));
-        halves.extend(right.borrow().tracked_ids());
-        assert_eq!(halves, model);
-        assert!(left.len().abs_diff(right.borrow().len()) <= 2);
-        assert_eq!(right.height(), 0);
+        model.assert_split_halves(&split);
+        let Split {
+            separator, right, ..
+        } = split;
         drop(separator);
         right.destroy(|page| pages.release(page));
         leaf.destroy(|page| pages.release(page));
@@ -426,11 +485,12 @@ mod tests {
     fn split_and_insert_at_every_position() {
         let ledger = DropLedger::new();
         for position in 0..=NodeLayout::<Tracked<'_>, Bulky<'_>>::LEAF_CAPACITY {
-            split_at::<Bulky<'_>>(&ledger, position);
+            split_at::<Bulky<'_>>(&ledger, position, position % 2 == 0);
         }
         if !cfg!(miri) {
             for position in 0..=NodeLayout::<Tracked<'_>, Tracked<'_>>::LEAF_CAPACITY {
-                split_at::<Tracked<'_>>(&ledger, position);
+                split_at::<Tracked<'_>>(&ledger, position, false);
+                split_at::<Tracked<'_>>(&ledger, position, true);
             }
         }
         ledger.assert_all_dropped_once();
@@ -469,6 +529,7 @@ mod tests {
             panic!("a full leaf splits");
         };
         assert_eq!(split.left.len() + 1 + split.right.borrow().len(), len + 1);
+        assert!(split.right.borrow().head().is_some());
         split.right.destroy(|page| pages.release(page));
         assert!(matches!(leaf.borrow().search(&()), SearchResult::Found(_)));
         leaf.destroy(|page| pages.release(page));

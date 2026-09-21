@@ -1,6 +1,7 @@
 //! Drop and panic tests: every key and value is dropped exactly once, and in
 //! the same order as by std's `BTreeMap`, including replaced and panicking
-//! ones; and a panicking `Ord` leaves the map unchanged.
+//! ones and separators, whose values live in leaf heads (D17); and a
+//! panicking `Ord` leaves the map unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -17,10 +18,28 @@ use crate::node::test_support::{DropLedger, TestRng, Tracked};
 
 /// A drop-tracked key ordered by `order` alone: keys of the same order
 /// collide in a map but stay apart in the ledger.
+///
+/// Padded to 64 bytes so that, with [`Tracked`] values, a 1 KB node holds 12
+/// entries in a leaf and 14 in an internal node (D13, D15, D17): tall trees
+/// from few entries, which Miri can afford.
 struct CollidingKey<'l> {
     order: usize,
-    #[expect(dead_code, reason = "never read: its drop is what the ledger records")]
     tracked: Tracked<'l>,
+    _padding: [u8; 40],
+}
+
+impl<'l> CollidingKey<'l> {
+    fn new(order: usize, tracked: Tracked<'l>) -> Self {
+        Self {
+            order,
+            tracked,
+            _padding: [0; 40],
+        }
+    }
+
+    fn id(&self) -> usize {
+        self.tracked.id()
+    }
 }
 
 impl PartialEq for CollidingKey<'_> {
@@ -46,27 +65,6 @@ impl Ord for CollidingKey<'_> {
 impl Borrow<usize> for CollidingKey<'_> {
     fn borrow(&self) -> &usize {
         &self.order
-    }
-}
-
-/// A drop-tracked value padded so that, with [`CollidingKey`]s, 72-byte
-/// entries fill a 1 KB node with 12 entries in an internal node and 14 in a
-/// leaf (D13, D15): tall trees from few entries, which Miri can afford.
-struct PaddedValue<'l> {
-    tracked: Tracked<'l>,
-    _padding: [u8; 16],
-}
-
-impl<'l> PaddedValue<'l> {
-    fn new(tracked: Tracked<'l>) -> Self {
-        Self {
-            tracked,
-            _padding: [0; 16],
-        }
-    }
-
-    fn id(&self) -> usize {
-        self.tracked.id()
     }
 }
 
@@ -111,8 +109,8 @@ enum PanickingPart {
     Value,
 }
 
-type TrackedMap<'l> = BBTreeMap<CollidingKey<'l>, PaddedValue<'l>>;
-type StdTrackedMap<'l> = BTreeMap<CollidingKey<'l>, PaddedValue<'l>>;
+type TrackedMap<'l> = BBTreeMap<CollidingKey<'l>, Tracked<'l>>;
+type StdTrackedMap<'l> = BTreeMap<CollidingKey<'l>, Tracked<'l>>;
 
 /// Our map and std's, fed the same operations on entries from
 /// [`LockstepLedgers`].
@@ -138,19 +136,13 @@ impl<'l> TrackedMaps<'l> {
         let (our_key, their_key) = self.ledgers.track(panicking == PanickingPart::Key);
         let (our_value, their_value) = self.ledgers.track(panicking == PanickingPart::Value);
         let ours = catch_unwind(AssertUnwindSafe(|| {
-            let key = CollidingKey {
-                order,
-                tracked: our_key,
-            };
-            let old_value = self.ours.insert(key, PaddedValue::new(our_value));
+            let key = CollidingKey::new(order, our_key);
+            let old_value = self.ours.insert(key, our_value);
             old_value.map(|old_value| old_value.id())
         }));
         let theirs = catch_unwind(AssertUnwindSafe(|| {
-            let key = CollidingKey {
-                order,
-                tracked: their_key,
-            };
-            let old_value = self.theirs.insert(key, PaddedValue::new(their_value));
+            let key = CollidingKey::new(order, their_key);
+            let old_value = self.theirs.insert(key, their_value);
             old_value.map(|old_value| old_value.id())
         }));
         let (ours, theirs) = (ours.ok(), theirs.ok());
@@ -165,16 +157,21 @@ impl<'l> TrackedMaps<'l> {
         match (self.ours.get_mut(&order), self.theirs.get_mut(&order)) {
             (Some(ours), Some(theirs)) => {
                 assert_eq!(ours.id(), theirs.id());
-                *ours = PaddedValue::new(our_value);
-                *theirs = PaddedValue::new(their_value);
+                *ours = our_value;
+                *theirs = their_value;
             }
             (ours, theirs) => assert_eq!(ours.is_some(), theirs.is_some()),
         }
     }
 
+    /// Looks up key `order` in both maps: the same key, by its tracked id,
+    /// and the same value.
     fn get(&self, order: usize) {
-        let ours = self.ours.get(&order).map(PaddedValue::id);
-        assert_eq!(ours, self.theirs.get(&order).map(PaddedValue::id));
+        let ours = self.ours.get(&order).map(Tracked::id);
+        assert_eq!(ours, self.theirs.get(&order).map(Tracked::id));
+        let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
+        let ours = self.ours.get_key_value(&order).map(ids);
+        assert_eq!(ours, self.theirs.get_key_value(&order).map(ids));
         assert_eq!(
             self.ours.contains_key(&order),
             self.theirs.contains_key(&order)
@@ -230,18 +227,12 @@ fn replacing_keeps_the_old_key_and_drops_each_once() {
     let mut map = BBTreeMap::new();
     let (old_key, old_value) = (ledger.track(), ledger.track());
     let (old_key_id, old_value_id) = (old_key.id(), old_value.id());
-    let old_key = CollidingKey {
-        order: 7,
-        tracked: old_key,
-    };
+    let old_key = CollidingKey::new(7, old_key);
     assert!(map.insert(old_key, old_value).is_none());
 
     let (new_key, new_value) = (ledger.track(), ledger.track());
     let (new_key_id, new_value_id) = (new_key.id(), new_value.id());
-    let new_key = CollidingKey {
-        order: 7,
-        tracked: new_key,
-    };
+    let new_key = CollidingKey::new(7, new_key);
     let replaced = map.insert(new_key, new_value).expect("key 7 is there");
     assert_eq!(replaced.id(), old_value_id);
     assert_eq!(
@@ -250,6 +241,10 @@ fn replacing_keeps_the_old_key_and_drops_each_once() {
         "only the new key is gone"
     );
     assert_eq!(map.get(&7_usize).map(Tracked::id), Some(new_value_id));
+    let ids = map
+        .get_key_value(&7_usize)
+        .map(|(key, value)| (key.id(), value.id()));
+    assert_eq!(ids, Some((old_key_id, new_value_id)));
     assert_eq!(map.len(), 1);
 
     drop(replaced);
@@ -259,6 +254,36 @@ fn replacing_keeps_the_old_key_and_drops_each_once() {
         [new_key_id, old_value_id, old_key_id, new_value_id]
     );
     ledger.assert_all_dropped_once();
+}
+
+/// Inserting the key of a separator replaces its value, a leaf's head, and
+/// keeps the old key in its internal node, as std keeps its key (D17).
+#[test]
+fn replacing_separators_matches_std() {
+    let ledgers = LockstepLedgers::new();
+    let mut maps = TrackedMaps::new(&ledgers);
+    let count = if cfg!(miri) { 200 } else { 2000 };
+    let mut orders: Vec<usize> = (0..count).collect();
+    TestRng::new(23).shuffle(&mut orders);
+    for &order in &orders {
+        assert!(!maps.insert(order, PanickingPart::Neither));
+    }
+    assert!(maps.ours.height() >= 2);
+    let separators: Vec<usize> = maps
+        .ours
+        .separator_keys()
+        .iter()
+        .map(|key| key.order)
+        .collect();
+    assert!(!separators.is_empty());
+    for order in separators {
+        assert!(!maps.insert(order, PanickingPart::Neither));
+        maps.update(order);
+        maps.get(order);
+        ledgers.assert_same_drops_so_far();
+    }
+    maps.ours.check_invariants();
+    assert!(!maps.drop_both());
 }
 
 #[test]
@@ -280,7 +305,7 @@ fn a_panicking_new_key_leaves_both_maps_unchanged() {
 
 #[test]
 fn a_panicking_drop_while_dropping_the_map_matches_std() {
-    // Above 194 entries (13 leaves of 14, plus 12 separators), the tree
+    // Above 194 entries (15 leaves of 12, plus 14 separators), the tree
     // needs a height of at least 2.
     let count = if cfg!(miri) { 200 } else { 600 };
     let cases = [
@@ -311,9 +336,23 @@ fn a_panicking_drop_while_dropping_the_map_matches_std() {
 }
 
 /// A key whose comparisons spend a shared budget, and panic once it is spent.
+///
+/// Padded to 72 bytes so that, with `u64` values, a 1 KB node holds 12
+/// entries in both kinds (D13, D15, D17): tall trees from few entries.
 struct BudgetedKey<'b> {
     number: u64,
     budget: &'b Cell<usize>,
+    _padding: [u8; 56],
+}
+
+impl<'b> BudgetedKey<'b> {
+    fn new(number: u64, budget: &'b Cell<usize>) -> Self {
+        Self {
+            number,
+            budget,
+            _padding: [0; 56],
+        }
+    }
 }
 
 impl PartialEq for BudgetedKey<'_> {
@@ -350,38 +389,26 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
     let budget = Cell::new(usize::MAX);
     let rng = TestRng::new(22);
     let (count, trials) = if cfg!(miri) { (200, 12) } else { (1000, 1000) };
-    // With 16-byte keys, 56-byte values fill a 1 KB node with 12 entries in
-    // an internal node and 14 in a leaf (D13, D15).
-    let mut map: BBTreeMap<BudgetedKey<'_>, [u64; 7]> = BBTreeMap::new();
+    let mut map: BBTreeMap<BudgetedKey<'_>, u64> = BBTreeMap::new();
     let mut model: BTreeMap<u64, u64> = BTreeMap::new();
     for _ in 0..count {
         let number = rng.below(2 * count) as u64;
-        let key = BudgetedKey {
-            number,
-            budget: &budget,
-        };
-        assert_eq!(
-            map.insert(key, [number; 7]).map(|value| value[0]),
-            model.insert(number, number)
-        );
+        let key = BudgetedKey::new(number, &budget);
+        assert_eq!(map.insert(key, number), model.insert(number, number));
     }
     assert!(map.height() >= 2);
 
     let (mut panicked, mut completed) = (0, 0);
     for trial in 0..trials {
         let number = rng.below(2 * count) as u64;
-        let key = BudgetedKey {
-            number,
-            budget: &budget,
-        };
+        let key = BudgetedKey::new(number, &budget);
         let seed = (count + trial) as u64;
         budget.set(rng.below(20));
-        let inserted = catch_unwind(AssertUnwindSafe(|| map.insert(key, [seed; 7])));
+        let inserted = catch_unwind(AssertUnwindSafe(|| map.insert(key, seed)));
         budget.set(usize::MAX);
         match inserted {
             Ok(old_value) => {
                 completed += 1;
-                let old_value = old_value.map(|value| value[0]);
                 assert_eq!(old_value, model.insert(number, seed));
             }
             Err(_) => panicked += 1,
@@ -389,7 +416,7 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         map.check_invariants();
         assert_eq!(map.len(), model.len());
         for (number, &seed) in &model {
-            assert_eq!(map.get(number).map(|value| value[0]), Some(seed));
+            assert_eq!(map.get(number), Some(&seed));
         }
     }
     assert!(

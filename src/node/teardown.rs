@@ -5,19 +5,20 @@
 use core::mem::needs_drop;
 
 use super::handle::{ForceResult, LeafOrInternal, NodeKind, NodeMut, Subtree};
-use super::page::FreshPage;
+use super::page::PageByKind;
 
 impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
     /// Drops every key and value in ascending key order, each key before its
     /// value, as std's `BTreeMap` does (D1), and hands every page to
-    /// `release`.
+    /// `release`, sorted by the kind of node it held. A separator's value is
+    /// its right leaf's head (D17), dropped right after the separator.
     ///
     /// If a key's or value's `Drop` panics, the rest of the tree is still
     /// taken apart, in the same order, before the panic goes on, as in std's
     /// collections: either way, every key and value is dropped once and every
     /// page released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
-    pub(crate) fn destroy(self, mut release: impl FnMut(FreshPage<K, V>)) {
+    pub(crate) fn destroy(self, mut release: impl FnMut(PageByKind<K, V>)) {
         Teardown {
             rest: Some(self.forget_type()),
             release: &mut release,
@@ -30,12 +31,12 @@ impl<K, V, Kind: NodeKind> Subtree<K, V, Kind> {
 ///
 /// Dropping it takes apart whatever is left: that is how a panicking key or
 /// value `Drop` still leaves nothing behind.
-struct Teardown<'r, K, V, Release: FnMut(FreshPage<K, V>)> {
+struct Teardown<'r, K, V, Release: FnMut(PageByKind<K, V>)> {
     rest: Option<Subtree<K, V>>,
     release: &'r mut Release,
 }
 
-impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
+impl<K, V, Release: FnMut(PageByKind<K, V>)> Teardown<'_, K, V, Release> {
     /// Drops the entries of `rest` in ascending order, then releases its
     /// pages.
     ///
@@ -56,12 +57,18 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
     /// empty and still linked through their first edges.
     ///
     /// The first child is emptied in place; each later child comes out with
-    /// the key/value left of it, which is dropped before the child is taken
-    /// apart. User `Drop` code runs only on entries already out of the tree,
-    /// and while a [`Teardown`] owns every detached child.
+    /// the separator left of it, whose key is dropped before the child is
+    /// taken apart. The child's teardown starts at its leftmost leaf, with
+    /// the head: the separator's value (D17). User `Drop` code runs only on
+    /// keys and values already out of the tree, and while a [`Teardown`] owns
+    /// every detached child.
     fn drop_entries_in_order(node: NodeMut<'_, K, V, LeafOrInternal>, release: &mut Release) {
         match node.force() {
             ForceResult::Leaf(mut leaf) => {
+                if let Some(head) = leaf.reborrow_mut().head() {
+                    let (value, _) = head.remove();
+                    drop(value);
+                }
                 while let Some(first) = leaf.reborrow_mut().first_kv() {
                     let (key_value, _) = first.remove();
                     drop(key_value);
@@ -71,12 +78,12 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
                 let first_child = internal.reborrow_mut().first_edge().descend();
                 Self::drop_entries_in_order(first_child, release);
                 while let Some(first) = internal.reborrow_mut().first_kv() {
-                    let (key_value, right_child) = first.remove_with_right_child();
+                    let (separator, right_child) = first.remove_with_right_child();
                     let mut right_child = Teardown {
                         rest: Some(right_child),
                         release: &mut *release,
                     };
-                    drop(key_value);
+                    drop(separator);
                     right_child.run();
                 }
             }
@@ -85,9 +92,10 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
 
     /// Removes the root's entries from last to first, taking apart the child
     /// right of each, then releases the root and goes on with its only child.
+    /// A leaf gives up its head last.
     ///
-    /// Any entry still in the tree has no drop glue (see [`Self::run`]), so
-    /// dropping it here does nothing.
+    /// Any key or value still in the tree has no drop glue (see
+    /// [`Self::run`]), so dropping it here does nothing.
     fn release_pages(&mut self) {
         while let Some(subtree) = self.rest.take() {
             match subtree.force() {
@@ -97,13 +105,20 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
                         self.rest = Some(leaf.forget_type());
                         drop(key_value);
                     }
-                    None => (self.release)(leaf.into_page()),
+                    None => match leaf.borrow_mut().head() {
+                        Some(head) => {
+                            let (value, _) = head.remove();
+                            self.rest = Some(leaf.forget_type());
+                            drop(value);
+                        }
+                        None => (self.release)(leaf.into_page().into()),
+                    },
                 },
                 ForceResult::Internal(mut internal) => match internal.borrow_mut().last_kv() {
                     Some(last) => {
-                        let (key_value, right_child) = last.remove_with_right_child();
+                        let (separator, right_child) = last.remove_with_right_child();
                         self.rest = Some(internal.forget_type());
-                        drop(key_value);
+                        drop(separator);
                         Teardown {
                             rest: Some(right_child),
                             release: &mut *self.release,
@@ -113,7 +128,7 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
                     None => {
                         let (only_child, page) = internal.pop_internal_level();
                         self.rest = Some(only_child);
-                        (self.release)(page);
+                        (self.release)(page.into());
                     }
                 },
             }
@@ -121,7 +136,7 @@ impl<K, V, Release: FnMut(FreshPage<K, V>)> Teardown<'_, K, V, Release> {
     }
 }
 
-impl<K, V, Release: FnMut(FreshPage<K, V>)> Drop for Teardown<'_, K, V, Release> {
+impl<K, V, Release: FnMut(PageByKind<K, V>)> Drop for Teardown<'_, K, V, Release> {
     fn drop(&mut self) {
         // Nothing is left unless a panic cut `run` short.
         self.run();
@@ -135,9 +150,9 @@ mod tests {
     use std::vec::Vec;
 
     use crate::node::page::TestPages;
-    use crate::node::test_support::{Bulky, DropLedger, TestRng, TestTree, Tracked, TrackedValue};
+    use crate::node::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 
-    type BulkyTree<'p, 'l> = TestTree<'p, Tracked<'l>, Bulky<'l>>;
+    type BulkyTree<'p, 'l> = TestTree<'p, Bulky<'l>, Tracked<'l>>;
 
     /// What, if anything, panics when dropped.
     #[derive(Clone, Copy)]
@@ -150,23 +165,23 @@ mod tests {
     /// A tree of `count` entries inserted in random order. Keys are ordered
     /// by id, so key ids ascend with key order.
     fn random_tree<'p, 'l>(
-        pages: &'p TestPages<Tracked<'l>, Bulky<'l>>,
+        pages: &'p TestPages<Bulky<'l>, Tracked<'l>>,
         ledger: &'l DropLedger,
         rng: &TestRng,
         count: usize,
         panicking: PanickingDrop,
     ) -> BulkyTree<'p, 'l> {
-        let mut entries: Vec<(Tracked<'l>, Bulky<'l>)> = (0..count)
+        let mut entries: Vec<(Bulky<'l>, Tracked<'l>)> = (0..count)
             .map(|index| match panicking {
                 PanickingDrop::Key(position) if position == index => (
-                    ledger.track_panicking_on_drop(),
-                    Bulky::from_tracked(ledger.track()),
+                    Bulky::from_tracked(ledger.track_panicking_on_drop()),
+                    ledger.track(),
                 ),
-                _ => (ledger.track(), Bulky::from_tracked(ledger.track())),
+                _ => (Bulky::from_tracked(ledger.track()), ledger.track()),
             })
             .collect();
         if let PanickingDrop::Value(position) = panicking {
-            entries[position].1 = Bulky::from_tracked(ledger.track_panicking_on_drop());
+            entries[position].1 = ledger.track_panicking_on_drop();
         }
         rng.shuffle(&mut entries);
         let mut tree = TestTree::new(pages);
@@ -205,7 +220,7 @@ mod tests {
         );
         assert!(tree.height() >= 2);
         let entry_ids: Vec<usize> = tree
-            .entries(|key, value| [key.id(), value.tracked_id()])
+            .entries(|key, value| [key.tracked_id(), value.id()])
             .concat();
         tree.destroy();
         assert_eq!(ledger.drop_order(), entry_ids);
@@ -222,7 +237,7 @@ mod tests {
             let tree = random_tree(&pages, &ledger, &rng, 300, PanickingDrop::Key(position));
             assert!(tree.height() >= 2);
             let entry_ids: Vec<usize> = tree
-                .entries(|key, value| [key.id(), value.tracked_id()])
+                .entries(|key, value| [key.tracked_id(), value.id()])
                 .concat();
             let unwound = catch_unwind(AssertUnwindSafe(|| tree.destroy()));
             assert!(unwound.is_err());
@@ -238,10 +253,11 @@ mod tests {
         let count = if cfg!(miri) { 300 } else { 3000 };
         let mut keys: Vec<u64> = (0..count).collect();
         rng.shuffle(&mut keys);
-        let pages = TestPages::<u64, [u64; 8]>::new();
+        // 64-byte keys: 14 entries per node of either kind, so a tall tree.
+        let pages = TestPages::<[u64; 8], u64>::new();
         let mut tree = TestTree::new(&pages);
         for key in keys {
-            assert!(tree.insert(key, [key; 8]).is_none());
+            assert!(tree.insert([key; 8], key).is_none());
         }
         assert!(tree.height() >= 2);
         tree.destroy();
