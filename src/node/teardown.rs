@@ -44,9 +44,9 @@ impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
     /// pages.
     ///
     /// Entries without drop glue skip the in-order pass: the order of their
-    /// drops is unobservable, and removing every entry from the front of its
-    /// node shifts the rest of the node each time, which the release pass,
-    /// removing from the back, avoids.
+    /// drops is unobservable, and taking separators out from the front of an
+    /// internal node shifts the rest of the node each time, which the release
+    /// pass, taking them from the back, avoids.
     fn run(&mut self) {
         if (needs_drop::<K>() || needs_drop::<V>())
             && let Some(tree) = &mut self.rest
@@ -67,16 +67,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
     /// every detached child.
     fn drop_entries_in_order(node: NodeMut<'_, K, V, S, LeafOrInternal>, release: &mut Release) {
         match node.force() {
-            ForceResult::Leaf(mut leaf) => {
-                if let Some(head) = leaf.reborrow_mut().head() {
-                    let (value, _) = head.remove();
-                    drop(value);
-                }
-                while let Some(first) = leaf.reborrow_mut().first_kv() {
-                    let (key_value, _) = first.remove();
-                    drop(key_value);
-                }
-            }
+            ForceResult::Leaf(mut leaf) => leaf.drop_entries(),
             ForceResult::Internal(mut internal) => {
                 let first_child = internal.reborrow_mut().first_edge().descend();
                 Self::drop_entries_in_order(first_child, release);
@@ -93,30 +84,19 @@ impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
         }
     }
 
-    /// Removes the root's entries from last to first, taking apart the child
-    /// right of each, then releases the root and goes on with its only child.
-    /// A leaf gives up its head last.
+    /// Removes the root's separators from last to first, taking apart the
+    /// child right of each, then releases the root and goes on with its only
+    /// child; a leaf is emptied and released.
     ///
     /// Any key or value still in the tree has no drop glue (see
     /// [`Self::run`]), so dropping it here does nothing.
     fn release_pages(&mut self) {
         while let Some(subtree) = self.rest.take() {
             match subtree.force() {
-                ForceResult::Leaf(mut leaf) => match leaf.borrow_mut().last_kv() {
-                    Some(last) => {
-                        let (key_value, _) = last.remove();
-                        self.rest = Some(leaf.forget_type());
-                        drop(key_value);
-                    }
-                    None => match leaf.borrow_mut().head() {
-                        Some(head) => {
-                            let (value, _) = head.remove();
-                            self.rest = Some(leaf.forget_type());
-                            drop(value);
-                        }
-                        None => (self.release)(leaf.into_page().into()),
-                    },
-                },
+                ForceResult::Leaf(mut leaf) => {
+                    leaf.borrow_mut().drop_entries();
+                    (self.release)(leaf.into_page().into());
+                }
                 ForceResult::Internal(mut internal) => match internal.borrow_mut().last_kv() {
                     Some(last) => {
                         let (separator, right_child) = last.remove_with_right_child();
@@ -182,12 +162,13 @@ mod tests {
                     K::from_tracked(ledger.track_panicking_on_drop()),
                     ledger.track(),
                 ),
+                PanickingDrop::Value(position) if position == index => (
+                    K::from_tracked(ledger.track()),
+                    ledger.track_panicking_on_drop(),
+                ),
                 _ => (K::from_tracked(ledger.track()), ledger.track()),
             })
             .collect();
-        if let PanickingDrop::Value(position) = panicking {
-            entries[position].1 = ledger.track_panicking_on_drop();
-        }
         rng.shuffle(&mut entries);
         let mut tree = TestTree::new(pages);
         for (key, value) in entries {
@@ -253,18 +234,20 @@ mod tests {
     fn destroy_keeps_ascending_order_after_a_panicking_drop() {
         let rng = TestRng::new(13);
         for position in [0, 123, 299] {
-            let ledger = DropLedger::new();
-            let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
-            let tree = random_tree(&pages, &ledger, &rng, 300, PanickingDrop::Key(position));
-            assert!(tree.height() >= 2);
-            let entry_ids: Vec<usize> = tree
-                .entries(|key, value| [key.tracked_id(), value.id()])
-                .concat();
-            let unwound = catch_unwind(AssertUnwindSafe(|| tree.destroy()));
-            assert!(unwound.is_err());
-            assert_eq!(ledger.drop_order(), entry_ids);
-            pages.assert_all_released();
-            ledger.assert_all_dropped_once();
+            for panicking in [PanickingDrop::Key(position), PanickingDrop::Value(position)] {
+                let ledger = DropLedger::new();
+                let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
+                let tree = random_tree(&pages, &ledger, &rng, 300, panicking);
+                assert!(tree.height() >= 2);
+                let entry_ids: Vec<usize> = tree
+                    .entries(|key, value| [key.tracked_id(), value.id()])
+                    .concat();
+                let unwound = catch_unwind(AssertUnwindSafe(|| tree.destroy()));
+                assert!(unwound.is_err());
+                assert_eq!(ledger.drop_order(), entry_ids);
+                pages.assert_all_released();
+                ledger.assert_all_dropped_once();
+            }
         }
     }
 

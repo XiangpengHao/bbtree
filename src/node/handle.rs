@@ -796,6 +796,89 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Leaf> {
             }
         }
     }
+
+    /// Empties the leaf: drops its head, then every key and value in
+    /// ascending order, each key before its value, where they lie. Removing
+    /// them one by one from the front would shift the rest of the leaf each
+    /// time; here nothing moves.
+    ///
+    /// If one of their `Drop`s panics, the rest are still dropped, in the
+    /// same order, before the panic goes on; a second panic aborts, as any
+    /// panic during unwinding does. Either way the leaf is left empty,
+    /// without a head.
+    pub(crate) fn drop_entries(&mut self) {
+        let len = self.len();
+        let has_head = self.reborrow().head().is_some();
+        // SAFETY: this handle is exclusive (invariant 1). An empty leaf
+        // without a head is well-formed, and `entries` takes over the head
+        // and keys and values `0..len` before any of them is dropped.
+        unsafe {
+            self.set_len(0);
+            self.node.set_has_head(false);
+        }
+        let mut entries = LeafEntriesToDrop {
+            keys: self.key_slots().keys(),
+            head_and_values: self.head_and_value_slots(),
+            has_head,
+            next: 0,
+            len,
+        };
+        // A panicking `Drop` unwinds through `entries`, whose own `Drop` goes
+        // on with the rest.
+        entries.drop_rest();
+    }
+}
+
+/// The head and entries of a leaf that has given them up but still holds
+/// them in its slots, being dropped in place by
+/// [`NodeMut::drop_entries`]; whatever is left when this goes out of scope,
+/// as a panicking `Drop` makes it, is dropped then.
+///
+/// Invariant: the head slot (slot 0 of `head_and_values`) holds a value
+/// exactly if `has_head`, and keys and values `next..len` are initialized;
+/// nothing else reads or drops them, and their page stays allocated while
+/// this lives.
+struct LeafEntriesToDrop<K, V> {
+    keys: Slots<K, Up>,
+    head_and_values: Slots<V, Down>,
+    has_head: bool,
+    next: usize,
+    len: usize,
+}
+
+impl<K, V> LeafEntriesToDrop<K, V> {
+    /// Drops the head, then each key before its value, in ascending order.
+    /// Each is taken out of `self` before its `Drop` runs, so a panic leaves
+    /// `self` holding exactly the ones not yet dropped.
+    fn drop_rest(&mut self) {
+        if mem::take(&mut self.has_head) {
+            // SAFETY: the head slot held a value (type invariant), which
+            // `has_head` no longer claims, so it is read out once.
+            drop(unsafe { self.head_and_values.slot(0).read() });
+        }
+        while self.next < self.len {
+            let index = self.next;
+            self.next += 1;
+            // SAFETY: `index < len <= capacity`, and key and value `index`
+            // were initialized (type invariant); `next` has moved past them,
+            // so they are read out once. Value `index` is head-and-value
+            // slot `index + 1`. Dropping the pair drops the key, then the
+            // value, even if the key's `Drop` panics.
+            let key_value = unsafe {
+                (
+                    self.keys.slot(index).read(),
+                    self.head_and_values.slot(index + 1).read(),
+                )
+            };
+            drop(key_value);
+        }
+    }
+}
+
+impl<K, V> Drop for LeafEntriesToDrop<K, V> {
+    fn drop(&mut self) {
+        self.drop_rest();
+    }
 }
 
 impl<K, V, S> NodeMut<'_, K, V, S, Internal> {
