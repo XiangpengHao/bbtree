@@ -323,6 +323,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// Turns a fresh page into an empty node of the page's kind: no keys
     /// and, for a leaf, no head. An internal node still needs its first edge
     /// written.
+    ///
+    /// With inline keys, it also zeroes every inline-key slot up to the
+    /// capacity, so that searches may read the slots past `len` (handle.rs,
+    /// invariant 6).
     pub(super) fn from_fresh_page<Kind: PageKind>(page: FreshPage<K, V, S, Kind>) -> Self {
         let page = page.into_raw();
         let common = NodeHeader {
@@ -331,8 +335,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         };
         // SAFETY: the page is aligned to its layout (checked in
         // `FreshPage::new`), whose alignment either header's divides, and the
-        // header of its layout fits before its keys and inline keys (layout
-        // invariants); the page is exclusively ours.
+        // header of its layout fits before its keys and inline keys, whose
+        // `capacity` slots lie in the page, aligned (layout invariants); the
+        // page is exclusively ours.
         unsafe {
             if Self::has_inline_keys() {
                 page.cast::<InlineKeyNodeHeader>()
@@ -340,6 +345,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                         common,
                         prefix_len: 0,
                     });
+                let area = Self::key_area(Kind::IS_LEAF);
+                if let Some(offset) = area.inline_keys_offset {
+                    let slots = page.byte_add(offset).cast::<InlineWord>();
+                    slots.write_bytes(0, area.capacity);
+                }
             } else {
                 page.cast::<NodeHeader>().write(common);
             }
@@ -555,9 +565,11 @@ mod type_identity {
     /// How a recognized byte string holds its bytes.
     #[derive(Clone, Copy)]
     enum ByteStringType {
-        /// The value is its bytes: `str`, `[u8]`, `[u8; 16]`, `[u8; 20]` and
-        /// `[u8; 32]`.
+        /// The value is its bytes: `str` and `[u8]`.
         InPlace,
+        /// The value is its bytes, as many as every value of the type has:
+        /// `[u8; 16]`, `[u8; 20]` and `[u8; 32]`.
+        Array,
         String,
         ByteVec,
         BoxedStr,
@@ -573,13 +585,13 @@ mod type_identity {
         /// monomorphization.
         #[inline(always)]
         pub(in crate::node) fn recognize() -> Option<Self> {
-            let representation = if ErasedTypeId::is::<T, str>()
-                || ErasedTypeId::is::<T, [u8]>()
-                || ErasedTypeId::is::<T, [u8; 16]>()
+            let representation = if ErasedTypeId::is::<T, str>() || ErasedTypeId::is::<T, [u8]>() {
+                ByteStringType::InPlace
+            } else if ErasedTypeId::is::<T, [u8; 16]>()
                 || ErasedTypeId::is::<T, [u8; 20]>()
                 || ErasedTypeId::is::<T, [u8; 32]>()
             {
-                ByteStringType::InPlace
+                ByteStringType::Array
             } else if ErasedTypeId::is::<T, String>() {
                 ByteStringType::String
             } else if ErasedTypeId::is::<T, Vec<u8>>() {
@@ -601,6 +613,13 @@ mod type_identity {
             })
         }
 
+        /// Whether `T` is a byte array, whose values all have the same
+        /// length, a constant. Folds to a constant after monomorphization.
+        #[inline(always)]
+        pub(in crate::node) fn is_array(self) -> bool {
+            matches!(self.representation, ByteStringType::Array)
+        }
+
         /// The bytes of `value`. Their length comes from `value` itself: for
         /// the types that hold their bytes elsewhere, from its length field,
         /// without reading what it points to.
@@ -617,7 +636,9 @@ mod type_identity {
             // only if `'b: 'v`.
             unsafe {
                 match self.representation {
-                    ByteStringType::InPlace => slice::from_raw_parts(value.cast::<u8>(), size),
+                    ByteStringType::InPlace | ByteStringType::Array => {
+                        slice::from_raw_parts(value.cast::<u8>(), size)
+                    }
                     ByteStringType::String => (&*value.cast::<String>()).as_bytes(),
                     ByteStringType::ByteVec => (&*value.cast::<Vec<u8>>()).as_slice(),
                     ByteStringType::BoxedStr => (&*value.cast::<Box<str>>()).as_bytes(),

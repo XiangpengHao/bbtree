@@ -40,13 +40,19 @@ touching the heap**.
   comparison.
 - **Search runs over the inline keys,** which compare in a register, so the
   search strategy follows the inline key, not `K`. On a tie, the remaining range
-  of equal inline keys is searched on full keys. Branchless binary search or a
-  linear scan of the dense array is open (Q6).
+  of equal inline keys is searched on full keys. The run is found by a linear
+  count over every slot with AVX-512, a branchless binary search otherwise
+  (Q6).
 - **Node prefetch** covers the header, the inline-key array and the key area by
   capacity (D20). Prefetching only the inline array is not enough: every hit on
   a key longer than the inline width, and every tie, reads a key line, which
   then sits on the critical path. Measured on wiki titles at 10M, `get_hit`:
   878 ns with the inline array only, 704 ns with the key area too.
+  - **Rechecked by node kind** (2026-10-08, 1M entries, AVX-512 build, one
+    run each). Leaves prefetching only their inline keys: misses 4–25%
+    faster, hits 5–34% slower, inserts 10–22% slower (hash32 worst on hits
+    and inserts, str-json best on misses). Internal nodes prefetching only
+    theirs: within noise. Both kinds keep the full prefetch.
 - **Both leaves and internal nodes carry inline keys.** Every lookup searches
   both, and in both each probe would otherwise read the heap. Measured: both
   benefit (Q3).
@@ -230,16 +236,53 @@ tie. Fraction of sorted neighbours sharing the first 8 / 16 bytes
   44% at 1M and 65% at 10M.
 - **Paths:** see 05-fence-key.md.
 
-**Q6. Search over the inline-key array: branchless binary search or linear
-scan?** At 8 bytes, a node's inline keys are about 200 B in 4 cache lines.
-- **Linear scan:** a branch-free count of inline keys below the target has no
-  dependency chain and vectorizes (8 `u64` per AVX-512 compare, about 4
-  iterations for 25 keys).
-- **Binary search:** about 5 dependent steps over lines that prefetch already
-  brought in.
-- **Prior data point:** in the unsorted-leaf experiment, a linear count over
-  sorted `u64` leaves was faster than binary search on inserts. On gets it was
-  faster only with AVX-512. Decide by measurement.
+**Q6. (resolved) Search over the inline-key array: a linear count with
+AVX-512, a branchless binary search otherwise.**
+- **The count:** one pass over every slot up to the capacity counts the
+  inline keys below the target and those equal to it, masked by `len`, so
+  the run is `below..below + equal`. Its trip count is a constant per node
+  kind, so for 21 slots each count compiles to three AVX-512 compares and
+  no loop, branch or dependent load. It reads slots past `len`,
+  so a new node zeroes its inline-key array.
+- **The search:** a branchless binary search for the run's start, then a
+  scan for its end. The scan replaced a second binary search, whose exit
+  depended on where the first one ended: on hits it mispredicted about 0.5
+  times per lookup, late, as the leaf arrived from DRAM, which flushed the
+  next lookup's overlapped work (LBR and cycle profiles, hash32 at 1M).
+- **Measured** (2026-10-08, 1M entries, bbtree, one run each), `get_hit`
+  ns before → after:
+
+  | build | hash32 | str-json | str-16 | wiki titles |
+  |---|---|---|---|---|
+  | AVX-512 (count) | 227 → 157 | 302 → 233 | 339 → 243 | 365 → 303 |
+  | baseline x86-64 (search) | 231 → 167 | 302 → 254 | 325 → 270 | 370 → 330 |
+
+  Misses and inserts stayed within noise (±5%) on baseline, and stayed
+  within noise or gained up to 10% with AVX-512.
+- **Why the split:** each way trades extra work against mispredicts, and
+  which wins depends on what the CPU can compare in vectors. Hash32
+  `get_hit` at 1M, instructions / mispredicts / ns per lookup:
+
+  | way | AVX-512 | baseline x86-64 |
+  |---|---|---|
+  | count | 441 / 0.07 / 157 | 1477 / 0.07 / 246 |
+  | early-exit scan | 565 / 6.3 / 179 | 565 / 6.3 / 178 |
+  | binary search, then scan | not measured | 476 / 1.9 / 167 |
+
+  - **The early-exit scan** (stop at the first inline key not below the
+    target) is scalar, so it costs the same in both builds: it mispredicts
+    about once per node, where it stops. With AVX-512 it is 6–18% slower
+    than the count on every get.
+  - **The count** never mispredicts, and with AVX-512 its work is three
+    compares. Baseline x86-64 has no 64-bit vector compare, so there it is
+    an emulated sequence, about 200 more instructions per node: gets 7–54%
+    slower than before it.
+  - **The search** probes about 5 of 21 slots, without the emulation, and
+    mispredicts less than the scan: the fastest of the three without
+    AVX-512.
+- **Open: AVX2.** It has only a signed 64-bit vector compare, so the count
+  needs a fix-up per compare; one run of count against search was mixed,
+  which is not enough to settle it. It takes the search for now.
 
 ## 5. How we'll know it worked
 
@@ -276,5 +319,7 @@ scan?** At 8 bytes, a node's inline keys are about 200 B in 4 cache lines.
       ([rust-lang/rust#31844](https://github.com/rust-lang/rust/issues/31844));
     - the next-generation trait solver it depends on.
   - **Last checked:** 2026-10-07. Design work only; stabilization in later years.
+- [ ] **AVX2: count or search?** It takes the search; one run was mixed
+  (Q6). Settle it if AVX2 builds matter.
 - [ ] **Long shared prefixes:** per-node prefix stripping, designed in
   05-fence-key.md.

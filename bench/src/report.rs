@@ -23,6 +23,7 @@ pub(crate) struct RunHeader {
     commit: String,
     cpu: String,
     allocator: String,
+    vector_extensions: &'static str,
     settings: String,
     command_line: String,
     started: Instant,
@@ -54,6 +55,7 @@ impl RunHeader {
             commit: Self::git_commit(),
             cpu: Self::cpu_model(),
             allocator: mode.allocator_description(),
+            vector_extensions: Self::vector_extensions(),
             settings: format!(
                 "{} mode, {scale}, {} repetition(s) per cell{perf}",
                 mode.name(),
@@ -63,6 +65,18 @@ impl RunHeader {
             started: Instant::now(),
             load_average_at_start: Self::load_average(),
             end: None,
+        }
+    }
+
+    /// The widest vector extension the binary was built for, which the
+    /// maps' searches may use: `.cargo/config.toml` builds for the host CPU.
+    fn vector_extensions() -> &'static str {
+        if cfg!(target_feature = "avx512f") {
+            "AVX-512"
+        } else if cfg!(target_feature = "avx2") {
+            "AVX2"
+        } else {
+            "SSE2 (x86-64 baseline)"
         }
     }
 
@@ -85,12 +99,13 @@ impl RunHeader {
     fn markdown(&self) -> String {
         let mut text = format!(
             "| | |\n|---|---|\n| date | {} |\n| commit | {} |\n| CPU | {} |\n| allocator | {} |\n\
-             | settings | {} |\n| command | `{}` |\n\
+             | vector extensions | {} |\n| settings | {} |\n| command | `{}` |\n\
              | load average (1, 5, 15 min) at start | {} |\n",
             self.started_at,
             self.commit,
             self.cpu,
             self.allocator,
+            self.vector_extensions,
             self.settings,
             self.command_line,
             self.load_average_at_start

@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
@@ -241,6 +242,66 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
         KeyInliner::resolve::<S>()
             .is_some_and(|inliner| inliner.whole_len(stored) == Some(whole_len))
     }
+
+    /// How this key orders against `stored`, a key whose inline key equals
+    /// this key's: equal if their lengths tell ([`Self::is_equal_by_length`]);
+    /// for byte arrays, word by word ([`EqualLengthBytes`]), with no call to
+    /// `memcmp`; otherwise by `Q`'s `Ord`. Byte arrays order like their
+    /// bytes, as every std byte string does.
+    #[inline]
+    pub(super) fn cmp_tied(&self, stored: &K) -> Ordering
+    where
+        K: Borrow<Q>,
+        Q: Ord,
+    {
+        if self.is_equal_by_length(stored) {
+            return Ordering::Equal;
+        }
+        if let Some(KeyInliner::ByteString(stored_bytes)) = KeyInliner::<K>::resolve::<S>()
+            && let Some(search_bytes) = ByteString::<Q>::recognize()
+            && stored_bytes.is_array()
+            && search_bytes.is_array()
+            && let Some(bytes) =
+                EqualLengthBytes::new(search_bytes.bytes(self.key), stored_bytes.bytes(stored))
+        {
+            return bytes.cmp();
+        }
+        self.key.cmp(stored.borrow())
+    }
+}
+
+/// Two byte strings of the same length, compared a word at a time: their
+/// whole 8-byte words as big-endian `u64`s, then the bytes left over,
+/// zero-padded into one more. For byte arrays, whose length is a constant,
+/// the compiler unrolls the loop into one compare per word, with no call to
+/// `memcmp`, which std's comparison of byte slices makes.
+struct EqualLengthBytes<'a> {
+    left: &'a [u8],
+    right: &'a [u8],
+}
+
+impl<'a> EqualLengthBytes<'a> {
+    /// The pair, if `left` and `right` have the same length.
+    #[inline]
+    fn new(left: &'a [u8], right: &'a [u8]) -> Option<Self> {
+        (left.len() == right.len()).then_some(Self { left, right })
+    }
+
+    /// Orders `left` against `right` like `<[u8]>::cmp`. The bytes after
+    /// the whole words, fewer than 8 and as many on both sides, order like
+    /// their inline keys, which are those bytes zero-padded.
+    #[inline]
+    fn cmp(self) -> Ordering {
+        let (left_words, left_tail) = self.left.as_chunks::<8>();
+        let (right_words, right_tail) = self.right.as_chunks::<8>();
+        for (left_word, right_word) in left_words.iter().zip(right_words) {
+            let order = u64::from_be_bytes(*left_word).cmp(&u64::from_be_bytes(*right_word));
+            if order.is_ne() {
+                return order;
+            }
+        }
+        left_tail.inline_key().cmp(&right_tail.inline_key())
+    }
 }
 
 #[cfg(test)]
@@ -250,8 +311,9 @@ mod tests {
     use std::string::String;
     use std::vec::Vec;
 
-    use super::{InlinedKey, KeyInliner, SearchKey};
+    use super::{EqualLengthBytes, InlinedKey, KeyInliner, SearchKey};
     use crate::inline_key::{Auto, InlineKey, InlineWord, WithInlineKey};
+    use crate::node::test_support::TestRng;
 
     /// A newtype with its own inline key, which looks up by `str` too.
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -366,5 +428,39 @@ mod tests {
 
         let plain: InlinedKey<u64, Auto> = InlinedKey::new(7);
         assert_eq!(plain.into_parts(), (7, 0));
+    }
+
+    /// Word by word, byte strings of the same length order like their
+    /// bytes, whichever word or tail byte they first differ in, and equal
+    /// ones are equal; strings of different lengths aren't paired.
+    #[test]
+    fn equal_length_bytes_order_like_slices() {
+        let rng = TestRng::new(43);
+        for len in [0, 3, 8, 16, 20, 32] {
+            for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
+                let left: Vec<u8> = (0..len).map(|_| [0, 1, 0xff][rng.below(3)]).collect();
+                let mut right = left.clone();
+                if len > 0 && rng.below(2) == 0 {
+                    right[rng.below(len)] = [0, 1, 0xff][rng.below(3)];
+                }
+                let bytes = EqualLengthBytes::new(&left, &right).unwrap();
+                assert_eq!(bytes.cmp(), left.cmp(&right), "{left:?} vs {right:?}");
+            }
+        }
+        assert!(EqualLengthBytes::new(&[1, 2], &[1, 2, 3]).is_none());
+    }
+
+    /// Byte-array keys compare word by word, and agree with their `Ord`.
+    #[test]
+    fn tied_byte_arrays_compare_like_their_ord() {
+        let rng = TestRng::new(44);
+        for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
+            let mut search = [7_u8; 20];
+            let mut stored = search;
+            search[rng.below(20)] = rng.below(256) as u8;
+            stored[rng.below(20)] = rng.below(256) as u8;
+            let key: SearchKey<'_, [u8; 20], Auto, [u8; 20]> = SearchKey::new(&search);
+            assert_eq!(key.cmp_tied(&stored), search.cmp(&stored));
+        }
     }
 }
