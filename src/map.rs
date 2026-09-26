@@ -19,6 +19,7 @@
 mod differential_tests;
 #[cfg(test)]
 mod drop_tests;
+mod entry;
 mod from_entries;
 #[cfg(test)]
 mod inline_key_tests;
@@ -29,6 +30,7 @@ mod invariants;
 mod iter;
 mod iter_mut;
 mod lookup;
+mod position;
 mod remove;
 #[cfg(test)]
 mod type_tests;
@@ -45,6 +47,7 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
 use crate::node::page::{FreshPage, PageByKind};
 
+pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use into_iter::{IntoIter, IntoKeys, IntoValues};
 pub use iter::{Iter, Keys, Range, Values};
 pub use iter_mut::{IterMut, RangeMut, ValuesMut};

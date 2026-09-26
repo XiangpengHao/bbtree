@@ -47,3 +47,5 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - We want to measure memory usage, latency, and latency variance.
 
+- When we say drop-in replacement, we're going to replace every std BTree in top 100 crates on crates.io, run their test cases, and confirm they all compile and pass.
+

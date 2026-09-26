@@ -13,8 +13,8 @@ use std::string::String;
 use std::sync::MutexGuard;
 
 use super::{
-    BBTreeMap, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, Range, RangeMut, Values,
-    ValuesMut,
+    BBTreeMap, Entry, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, OccupiedEntry, Range,
+    RangeMut, VacantEntry, Values, ValuesMut,
 };
 use crate::inline_key::WithInlineKey;
 
@@ -126,6 +126,27 @@ macro_rules! assert_auto_traits_match_std {
             auto_traits!(ValuesMut<'static, $key, $value>),
             auto_traits!(btree_map::ValuesMut<'static, $key, $value>),
             "ValuesMut over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(Entry<'static, $key, $value>),
+            auto_traits!(btree_map::Entry<'static, $key, $value>),
+            "Entry in a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(OccupiedEntry<'static, $key, $value>),
+            auto_traits!(btree_map::OccupiedEntry<'static, $key, $value>),
+            "OccupiedEntry in a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(VacantEntry<'static, $key, $value>),
+            auto_traits!(btree_map::VacantEntry<'static, $key, $value>),
+            "VacantEntry in a map from {} to {}",
             stringify!($key),
             stringify!($value),
         );

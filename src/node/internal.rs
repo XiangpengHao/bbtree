@@ -256,6 +256,7 @@ mod tests {
             left,
             separator,
             right,
+            ..
         }) = edge.insert(InlinedKey::new(key), child, || pages.fresh())
         else {
             panic!("a full node splits");

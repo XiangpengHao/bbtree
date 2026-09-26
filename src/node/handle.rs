@@ -1356,11 +1356,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
 /// `separator` is the key for the parent, with the inline key it had, and
 /// `right` is a new node at the same height with the upper entries. The
 /// separator's value is the head of `right`'s leftmost leaf: in a leaf
-/// split, of `right` itself (D17).
+/// split, of `right` itself (D17). `inserted` tells where the new entry
+/// went.
 pub(crate) struct Split<'a, K, V, S, Kind> {
     pub(crate) left: NodeMut<'a, K, V, S, Kind>,
     pub(crate) separator: InlinedKey<K, S>,
     pub(crate) right: Subtree<K, V, S, Kind>,
+    pub(crate) inserted: InsertionSide,
 }
 
 /// What inserting into one node did.
@@ -1372,10 +1374,24 @@ pub(crate) enum Insertion<'a, K, V, S, Kind> {
     Split(Split<'a, K, V, S, Kind>),
 }
 
-/// Where a split leaves the position for the new entry.
-enum InsertionSide {
+/// The half of a split that takes the new entry, and its index there: of the
+/// edge where it goes, until it is inserted, and of its key after.
+#[derive(Clone, Copy)]
+pub(crate) enum InsertionSide {
     Left(usize),
     Right(usize),
+}
+
+impl InsertionSide {
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Left(index) | Self::Right(index) => index,
+        }
+    }
+
+    pub(crate) fn is_right(self) -> bool {
+        matches!(self, Self::Right(_))
+    }
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Leaf>> {
@@ -1388,9 +1404,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Leaf>> {
         key: InlinedKey<K, S>,
         value: V,
     ) -> Split<'a, K, V, S, Leaf> {
-        let (mut split, side) = self.split_in_middle(right_page);
-        // SAFETY: `side` comes from the split that made `split`.
-        unsafe { split.fitting_edge(side) }.insert_fit(key, value);
+        let mut split = self.split_in_middle(right_page);
+        // SAFETY: `split` was just made, and neither half changed since.
+        unsafe { split.fitting_edge() }.insert_fit(key, value);
         split
     }
 }
@@ -1411,14 +1427,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>>
         right_child: Subtree<K, V, S>,
     ) -> Split<'a, K, V, S, Internal> {
         self.0.node.assert_child_level(&right_child);
-        let (mut split, side) = self.split_in_middle(right_page);
-        // SAFETY: `side` comes from the split that made `split`, and both
+        let mut split = self.split_in_middle(right_page);
+        // SAFETY: `split` was just made, and neither half changed since; both
         // halves are at the original height, checked against `right_child`
         // above.
         unsafe {
-            split
-                .fitting_edge(side)
-                .insert_fit_unchecked(key, right_child);
+            split.fitting_edge().insert_fit_unchecked(key, right_child);
         }
         split
     }
@@ -1440,10 +1454,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> FullEdge<NodeMut<'a, K, 
     /// The separator key moves up, with its inline key. In a leaf, its value
     /// stays behind as the head of the right leaf (D17). The right half goes
     /// into `right_page`, a page for the same kind of node as this one.
-    fn split_in_middle(
-        self,
-        right_page: FreshPage<K, V, S, Kind>,
-    ) -> (Split<'a, K, V, S, Kind>, InsertionSide)
+    fn split_in_middle(self, right_page: FreshPage<K, V, S, Kind>) -> Split<'a, K, V, S, Kind>
     where
         Kind: PageKind,
     {
@@ -1501,19 +1512,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> FullEdge<NodeMut<'a, K, 
         // height as `left`: its keys, inline keys, values and head, or keys,
         // inline keys and edges, came from `left`.
         let right = unsafe { Subtree::from_raw_parts(right, left.height) };
-        let side = if index <= separator_index {
+        let inserted = if index <= separator_index {
             InsertionSide::Left(index)
         } else {
             InsertionSide::Right(index - separator_index - 1)
         };
-        (
-            Split {
-                left,
-                separator,
-                right,
-            },
-            side,
-        )
+        Split {
+            left,
+            separator,
+            right,
+            inserted,
+        }
     }
 }
 
@@ -1522,12 +1531,9 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Split<'_, K, V, S, Kind> {
     ///
     /// # Safety
     ///
-    /// `side` comes from the `split_in_middle` that made `self`, and neither
-    /// half changed since.
-    unsafe fn fitting_edge(
-        &mut self,
-        side: InsertionSide,
-    ) -> FittingEdge<NodeMut<'_, K, V, S, Kind>> {
+    /// Neither half changed since the split that made `self`.
+    unsafe fn fitting_edge(&mut self) -> FittingEdge<NodeMut<'_, K, V, S, Kind>> {
+        let side = self.inserted;
         // SAFETY: a full node of `capacity` entries split around one leaves
         // `separator_index < capacity` on the left and
         // `capacity - separator_index - 1 < capacity` on the right, so both

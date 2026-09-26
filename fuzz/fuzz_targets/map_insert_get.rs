@@ -4,11 +4,12 @@
 
 #![no_main]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::fmt::Debug;
 use std::ops::Bound;
 
 use bbtree::BBTreeMap;
+use bbtree::bbtree_map::Entry;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 use libfuzzer_sys::fuzz_target;
 
@@ -116,6 +117,19 @@ enum MapOperation {
     IterateMut {
         ends: Ends,
         amount: u16,
+    },
+    /// One use of the entry API, picked by `choice`, writing `value` through
+    /// whatever reference it hands back.
+    Entry {
+        key: InputKey,
+        choice: u8,
+        value: u16,
+    },
+    /// The first or last entry, read, changed or removed.
+    EndEntry {
+        last: bool,
+        remove: bool,
+        value: u16,
     },
     /// Replaces both maps by their clones.
     Clone,
@@ -272,6 +286,71 @@ impl<V: FuzzValue> MirroredMaps<V> {
             MapOperation::Iterate { ends } => {
                 assert_eq!(self.ours.iter().len(), self.theirs.iter().len());
                 Self::assert_same_walk(self.ours.iter(), self.theirs.iter(), ends);
+            }
+            MapOperation::Entry { key, choice, value } => {
+                let key = key.map_key();
+                let (ours, theirs) = (self.ours.entry(key), self.theirs.entry(key));
+                assert_eq!(ours.key(), theirs.key());
+                match (ours, theirs, choice % 4) {
+                    (ours, theirs, 0) => {
+                        let (ours, theirs) = (
+                            ours.or_insert(V::from_input(value)),
+                            theirs.or_insert(V::from_input(value)),
+                        );
+                        assert_eq!(ours, theirs);
+                        ours.bump(1);
+                        theirs.bump(1);
+                    }
+                    (ours, theirs, 1) => {
+                        let ours = ours
+                            .and_modify(|value| value.bump(2))
+                            .or_insert(V::from_input(value));
+                        let theirs = theirs
+                            .and_modify(|value| value.bump(2))
+                            .or_insert(V::from_input(value));
+                        assert_eq!(ours, theirs);
+                    }
+                    (Entry::Occupied(ours), btree_map::Entry::Occupied(theirs), 2) => {
+                        assert_eq!(ours.remove_entry(), theirs.remove_entry());
+                    }
+                    (Entry::Occupied(mut ours), btree_map::Entry::Occupied(mut theirs), _) => {
+                        assert_eq!(
+                            ours.insert(V::from_input(value)),
+                            theirs.insert(V::from_input(value))
+                        );
+                    }
+                    (Entry::Vacant(ours), btree_map::Entry::Vacant(theirs), _) => {
+                        let (ours, theirs) = (
+                            ours.insert_entry(V::from_input(value)),
+                            theirs.insert_entry(V::from_input(value)),
+                        );
+                        assert_eq!((ours.key(), ours.get()), (theirs.key(), theirs.get()));
+                    }
+                    _ => panic!("one entry is occupied, the other vacant"),
+                }
+            }
+            MapOperation::EndEntry {
+                last,
+                remove,
+                value,
+            } => {
+                let (ours, theirs) = if last {
+                    (self.ours.last_entry(), self.theirs.last_entry())
+                } else {
+                    (self.ours.first_entry(), self.theirs.first_entry())
+                };
+                match (ours, theirs) {
+                    (Some(ours), Some(theirs)) if remove => {
+                        assert_eq!(ours.remove_entry(), theirs.remove_entry())
+                    }
+                    (Some(mut ours), Some(mut theirs)) => {
+                        assert_eq!(
+                            ours.insert(V::from_input(value)),
+                            theirs.insert(V::from_input(value))
+                        );
+                    }
+                    (ours, theirs) => assert_eq!(ours.is_none(), theirs.is_none()),
+                }
             }
             MapOperation::Clone => {
                 self.ours = self.ours.clone();

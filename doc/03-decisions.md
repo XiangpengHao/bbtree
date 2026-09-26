@@ -330,6 +330,28 @@ not decided".
   forwarding conflicts per scan, from adapters such as `take` moving the
   freshly positioned `Range`.
 
+**D24. Entries remember a position: edge indexes from the root.** (2026-10-08)
+
+- `entry` searches once, calling every `Ord` the entry will need, and
+  remembers the path to the key, or to the leaf edge where it goes, as edge
+  indexes. Everything an entry does afterward follows that path down again,
+  comparing no keys, as std's entries compare none after `entry`.
+- **Removing** through an occupied entry runs the usual removal recursion
+  (D22) with the position as its target, separators included (D17).
+- **Inserting** through a vacant entry runs the insert recursion with the
+  position as its target. On the way back up, each level records the index
+  leading to the new entry: a split reports the half that took it, and a
+  level that took a split child's separator leads to the new entry by the
+  edge left of it, or right of it if the entry went to the child's right
+  half. The entry then follows the new path down to hand out the value.
+  Plain `insert` records nothing: the recording is a generic parameter that
+  compiles away for it.
+- No `unsafe`: following a path again costs a walk down instead of keeping
+  node handles, which would need std's dormant references.
+- Measured, one run each (ns per call): `entry(k).or_default()` counting,
+  10M u64→u64: 164 vs std's 239; 1k u64→u64: 31.2 vs 31.5; 1k 16-byte
+  strings: 42.6 vs 57.5.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

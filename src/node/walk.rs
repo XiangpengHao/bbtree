@@ -57,7 +57,7 @@ use crate::inline_key::InlineKeyStrategy;
 /// internal node has at least 3 children (D13, D22) and a leaf takes at
 /// least 1 KB (D15), so a tree one level taller would need more than 2^64
 /// bytes of leaves.
-const MAX_HEIGHT: usize = 34;
+pub(crate) const MAX_HEIGHT: usize = 34;
 
 /// A handle to a tree's root, which a walk starts from.
 pub(crate) type Root<B, K, V, S> = NodeRef<B, K, V, S, LeafOrInternal>;

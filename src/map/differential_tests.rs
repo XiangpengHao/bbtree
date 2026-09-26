@@ -18,14 +18,14 @@ use core::ops::Bound;
 use core::panic::AssertUnwindSafe;
 use core::ptr;
 use std::boxed::Box;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::format;
 use std::hash::DefaultHasher;
 use std::panic::catch_unwind;
 use std::string::String;
 use std::vec::Vec;
 
-use super::BBTreeMap;
+use super::{BBTreeMap, Entry, OccupiedEntry};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::test_support::{CacheLineAligned, PageAligned, TestRng};
 
@@ -375,6 +375,118 @@ where
         }
     }
 
+    /// One random use of the entry API for `key`, alike on both maps: both
+    /// entries are occupied or both vacant, print the same, and hand out
+    /// the same values, which then get the same new value through the
+    /// references handed out.
+    fn use_entry(&mut self, rng: &TestRng, key: K) {
+        let value = V::from_number(rng.below(1 << 30));
+        let new_value = V::from_number(rng.below(1 << 30));
+        let (ours, theirs) = (self.ours.entry(key.clone()), self.theirs.entry(key.clone()));
+        assert_eq!(ours.key(), theirs.key());
+        assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+        if rng.below(2) == 0 {
+            let (ours, theirs) = match rng.below(5) {
+                0 => (ours.or_insert(value.clone()), theirs.or_insert(value)),
+                1 => (
+                    ours.or_insert_with(|| value.clone()),
+                    theirs.or_insert_with(|| value),
+                ),
+                2 => {
+                    let ours = ours.or_insert_with_key(|entry_key| {
+                        assert!(*entry_key == key);
+                        value.clone()
+                    });
+                    (ours, theirs.or_insert_with_key(|_| value))
+                }
+                3 => {
+                    let modified = new_value.clone();
+                    let ours = ours.and_modify(|value| *value = modified);
+                    let theirs = theirs.and_modify(|value| *value = new_value.clone());
+                    (ours.or_insert(value.clone()), theirs.or_insert(value))
+                }
+                _ => {
+                    let (ours, theirs) =
+                        (ours.insert_entry(value.clone()), theirs.insert_entry(value));
+                    Self::assert_same_occupied(&ours, &theirs);
+                    (ours.into_mut(), theirs.into_mut())
+                }
+            };
+            assert_eq!(ours, theirs);
+            *ours = new_value.clone();
+            *theirs = new_value;
+        } else {
+            match (ours, theirs) {
+                (Entry::Occupied(mut ours), btree_map::Entry::Occupied(mut theirs)) => {
+                    Self::assert_same_occupied(&ours, &theirs);
+                    match rng.below(5) {
+                        0 => assert_eq!(ours.remove_entry(), theirs.remove_entry()),
+                        1 => assert_eq!(ours.remove(), theirs.remove()),
+                        2 => assert_eq!(ours.insert(value.clone()), theirs.insert(value)),
+                        3 => {
+                            *ours.get_mut() = value.clone();
+                            *theirs.get_mut() = value;
+                            Self::assert_same_occupied(&ours, &theirs);
+                        }
+                        _ => {
+                            let (ours, theirs) = (ours.into_mut(), theirs.into_mut());
+                            assert_eq!(ours, theirs);
+                            *ours = value.clone();
+                            *theirs = value;
+                        }
+                    }
+                }
+                (Entry::Vacant(ours), btree_map::Entry::Vacant(theirs)) => match rng.below(3) {
+                    0 => {
+                        let (ours, theirs) = (ours.insert(value.clone()), theirs.insert(value));
+                        assert_eq!(ours, theirs);
+                        *ours = new_value.clone();
+                        *theirs = new_value;
+                    }
+                    1 => {
+                        let (ours, theirs) =
+                            (ours.insert_entry(value.clone()), theirs.insert_entry(value));
+                        Self::assert_same_occupied(&ours, &theirs);
+                    }
+                    _ => assert_eq!(ours.into_key(), theirs.into_key()),
+                },
+                _ => panic!("one entry is occupied, the other vacant"),
+            }
+        }
+        self.assert_same_len();
+    }
+
+    /// The first or the last entry of both maps, read, changed or removed.
+    fn use_end_entry(&mut self, rng: &TestRng) {
+        let last = rng.below(2) == 0;
+        let (ours, theirs) = if last {
+            (self.ours.last_entry(), self.theirs.last_entry())
+        } else {
+            (self.ours.first_entry(), self.theirs.first_entry())
+        };
+        match (ours, theirs) {
+            (Some(mut ours), Some(mut theirs)) => {
+                Self::assert_same_occupied(&ours, &theirs);
+                if rng.below(2) == 0 {
+                    assert_eq!(ours.remove_entry(), theirs.remove_entry());
+                } else {
+                    let value = V::from_number(rng.below(1 << 30));
+                    assert_eq!(ours.insert(value.clone()), theirs.insert(value));
+                }
+            }
+            (ours, theirs) => assert_eq!(ours.is_none(), theirs.is_none()),
+        }
+        self.assert_same_len();
+    }
+
+    fn assert_same_occupied(
+        ours: &OccupiedEntry<'_, K, V, S>,
+        theirs: &btree_map::OccupiedEntry<'_, K, V>,
+    ) {
+        assert_eq!((ours.key(), ours.get()), (theirs.key(), theirs.get()));
+        assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+    }
+
     /// Extends both maps with the same few entries, some of them with keys
     /// already there.
     fn extend(&mut self, rng: &TestRng, key_space: usize) {
@@ -497,15 +609,17 @@ where
     pub(super) fn run_random_operations(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
         for _ in 0..steps {
             let key = K::from_number(rng.below(key_space));
-            match rng.below(16) {
+            match rng.below(20) {
                 0..=5 => self.insert(key, V::from_number(rng.below(1 << 30))),
-                6 => self.extend(rng, key_space),
-                7 | 8 => self.get(&key),
-                9 => self.update(&key, V::from_number(rng.below(1 << 30))),
-                10 | 11 => self.remove(&key),
-                12 => self.remove_entry(&key),
-                13 => self.pop_first(),
-                14 => self.pop_last(),
+                6..=8 => self.use_entry(rng, key),
+                9 => self.use_end_entry(rng),
+                10 => self.extend(rng, key_space),
+                11 | 12 => self.get(&key),
+                13 => self.update(&key, V::from_number(rng.below(1 << 30))),
+                14 | 15 => self.remove(&key),
+                16 => self.remove_entry(&key),
+                17 => self.pop_first(),
+                18 => self.pop_last(),
                 _ => self.first_and_last(),
             }
         }
@@ -554,7 +668,18 @@ where
         for number in numbers {
             assert!(number.is_multiple_of(2));
             largest = largest.max(number);
-            self.insert(K::from_number(number), V::from_number(number));
+            if number.is_multiple_of(4) {
+                self.insert(K::from_number(number), V::from_number(number));
+            } else {
+                // Through a vacant entry, writing through the reference it
+                // hands back: that must be the new entry's, wherever the
+                // splits took it.
+                let key = K::from_number(number);
+                let ours = self.ours.entry(key.clone()).or_insert(V::from_number(0));
+                *ours = V::from_number(number);
+                *self.theirs.entry(key).or_insert(V::from_number(0)) = V::from_number(number);
+                self.assert_same_len();
+            }
         }
         self.assert_same_entries();
         for number in 0..=largest + 1 {

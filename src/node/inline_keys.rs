@@ -167,11 +167,11 @@ impl<K, S> InlinedKey<K, S> {
         (self.key, self.inline_key)
     }
 
-    pub(super) fn key(&self) -> &K {
+    pub(crate) fn key(&self) -> &K {
         &self.key
     }
 
-    pub(super) fn into_key(self) -> K {
+    pub(crate) fn into_key(self) -> K {
         self.key
     }
 }

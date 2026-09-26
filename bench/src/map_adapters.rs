@@ -131,7 +131,7 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
 
 impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
     /// Not written yet.
-    const UNSUPPORTED: &'static [Operation] = &[Operation::EntryUpsert];
+    const UNSUPPORTED: &'static [Operation] = &[];
 
     fn new() -> Self {
         BBTreeMap::new()
@@ -167,6 +167,10 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
 
     fn from_sorted_entries(entries: Vec<(K, V)>) -> Self {
         entries.into_iter().collect()
+    }
+
+    fn bump_count(&mut self, key: K) {
+        self.entry(key).or_default().bump();
     }
 }
 

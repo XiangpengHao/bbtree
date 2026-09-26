@@ -16,6 +16,7 @@
 
 use core::borrow::Borrow;
 
+use super::position::Position;
 use crate::inline_key::InlineKeyStrategy;
 use crate::node::handle::{
     Edge, ForceResult, Internal, Kv, Leaf, LeafOrInternal, NodeMut, SearchResult, Subtree,
@@ -41,6 +42,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         Q: Ord + ?Sized,
     {
         self.remove(&SearchKey::new(key), release)
+    }
+
+    /// Removes the entry at `position`, which a search found, and returns
+    /// it, comparing no keys; frees pages as [`Self::remove_entry`] does.
+    pub(super) fn remove_at(
+        &mut self,
+        position: &Position,
+        release: impl FnMut(PageByKind<K, V, S>),
+    ) -> (K, V) {
+        self.remove(position, release)
+            .expect("a position found in the tree holds an entry")
     }
 
     /// Removes the entry with the smallest key and returns it, or `None` if
@@ -109,6 +121,28 @@ where
         node: NodeMut<'a, K, V, S, Internal>,
     ) -> SearchResult<NodeMut<'a, K, V, S, Internal>> {
         node.search(self)
+    }
+}
+
+/// The entry at a position a search found, by the position's indexes,
+/// comparing no keys.
+impl<K, S: InlineKeyStrategy<K>> RemovalTarget<K, S> for Position {
+    fn find_in_leaf<'a, V>(
+        &self,
+        leaf: NodeMut<'a, K, V, S, Leaf>,
+    ) -> Option<Kv<NodeMut<'a, K, V, S, Leaf>>> {
+        Some(leaf.kv_at(self.index_at(0)))
+    }
+
+    fn find_in_internal<'a, V>(
+        &self,
+        node: NodeMut<'a, K, V, S, Internal>,
+    ) -> SearchResult<NodeMut<'a, K, V, S, Internal>> {
+        if node.height() == self.height() {
+            SearchResult::Found(node.kv_at(self.index_at(self.height())))
+        } else {
+            SearchResult::GoDown(self.edge_in(node))
+        }
     }
 }
 

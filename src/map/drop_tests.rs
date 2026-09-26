@@ -9,11 +9,11 @@ use core::borrow::Borrow;
 use core::cell::Cell;
 use core::cmp::Ordering;
 use core::panic::AssertUnwindSafe;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::panic::catch_unwind;
 use std::vec::Vec;
 
-use super::BBTreeMap;
+use super::{BBTreeMap, Entry};
 use crate::node::test_support::{DropLedger, TestRng, Tracked};
 
 /// A drop-tracked key ordered by `order` alone: keys of the same order
@@ -188,6 +188,44 @@ impl<'l> TrackedMaps<'l> {
             (self.ours.pop_first(), self.theirs.pop_first())
         };
         assert_eq!(ours.map(ids), theirs.map(ids));
+        assert_eq!(self.ours.len(), self.theirs.len());
+    }
+
+    /// One use of the entry API for key `order` in both maps, picked by
+    /// `choice`: the same entries come back, by tracked ids, and the new key
+    /// and value made for it are dropped alike when unused.
+    fn use_entry(&mut self, order: usize, choice: usize) {
+        let (our_key, their_key) = self.ledgers.track(false);
+        let (our_value, their_value) = self.ledgers.track(false);
+        let ours = self.ours.entry(CollidingKey::new(order, our_key));
+        let theirs = self.theirs.entry(CollidingKey::new(order, their_key));
+        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
+        match (ours, theirs, choice % 4) {
+            (ours, theirs, 0) => {
+                assert_eq!(
+                    ours.or_insert(our_value).id(),
+                    theirs.or_insert(their_value).id()
+                );
+            }
+            (Entry::Occupied(ours), btree_map::Entry::Occupied(theirs), 1) => {
+                assert_eq!(ids(ours.remove_entry()), ids(theirs.remove_entry()));
+            }
+            (Entry::Occupied(mut ours), btree_map::Entry::Occupied(mut theirs), _) => {
+                assert_eq!(ours.insert(our_value).id(), theirs.insert(their_value).id());
+            }
+            (Entry::Vacant(ours), btree_map::Entry::Vacant(theirs), 1) => {
+                assert_eq!(ours.into_key().id(), theirs.into_key().id());
+            }
+            (Entry::Vacant(ours), btree_map::Entry::Vacant(theirs), _) => {
+                let ours = ours.insert_entry(our_value);
+                let theirs = theirs.insert_entry(their_value);
+                assert_eq!(
+                    (ours.key().id(), ours.get().id()),
+                    (theirs.key().id(), theirs.get().id())
+                );
+            }
+            _ => panic!("one entry is occupied, the other vacant"),
+        }
         assert_eq!(self.ours.len(), self.theirs.len());
     }
 
@@ -490,6 +528,32 @@ fn a_panicking_clone_drops_the_partial_copy() {
     ledger.assert_all_dropped_once();
 }
 
+/// The entry API keeps, hands back and drops keys and values as std's does:
+/// an occupied entry drops the key it was asked for, `or_insert` its unused
+/// default, and removing through an entry hands back the stored key.
+#[test]
+fn entries_drop_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(27);
+    let mut maps = TrackedMaps::new(&ledgers);
+    let (steps, key_space) = if cfg!(miri) {
+        (600, 300)
+    } else {
+        (20_000, 3000)
+    };
+    for _ in 0..steps {
+        let order = rng.below(key_space);
+        match rng.below(3) {
+            0 => assert!(!maps.insert(order, PanickingPart::Neither)),
+            _ => maps.use_entry(order, rng.below(4)),
+        }
+        ledgers.assert_same_drops_so_far();
+    }
+    assert!(maps.ours.height() >= 2);
+    maps.ours.check_invariants();
+    assert!(!maps.drop_both());
+}
+
 #[test]
 fn replacing_keeps_the_old_key_and_drops_each_once() {
     let ledger = DropLedger::new();
@@ -703,25 +767,31 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         let number = rng.below(2 * count) as u64;
         let key = BudgetedKey::new(number, &budget);
         let seed = (count + trial) as u64;
-        let inserting = rng.below(2) == 0;
+        let operation = rng.below(3);
         budget.set(rng.below(20));
         // A removal by `BudgetedKey`, not by `u64`, so that its `Ord` runs.
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            if inserting {
-                map.insert(key, seed)
-            } else {
-                map.remove(&key)
-            }
+        // An entry compares keys only in `entry`, so the insert through it
+        // can't panic.
+        let outcome = catch_unwind(AssertUnwindSafe(|| match operation {
+            0 => map.insert(key, seed),
+            1 => map.remove(&key),
+            _ => match map.entry(key) {
+                Entry::Occupied(mut entry) => Some(entry.insert(seed)),
+                Entry::Vacant(entry) => {
+                    entry.insert(seed);
+                    None
+                }
+            },
         }));
         budget.set(usize::MAX);
         match outcome {
-            Ok(old_value) if inserting => {
-                completed += 1;
-                assert_eq!(old_value, model.insert(number, seed));
-            }
-            Ok(removed_value) => {
+            Ok(removed_value) if operation == 1 => {
                 completed += 1;
                 assert_eq!(removed_value, model.remove(&number));
+            }
+            Ok(old_value) => {
+                completed += 1;
+                assert_eq!(old_value, model.insert(number, seed));
             }
             Err(_) => panicked += 1,
         }
