@@ -10,6 +10,8 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - High performance is our differentiator; correctness is the long term value proposition.
 
+- Large data first, small data not ugly. People whose data is small don't care about performance, so they won't bother switching to bbtree; only people with sufficiently large data will. So our goal is to make large data very, very efficient, and meanwhile not make small data too ugly: when the two conflict, large data wins, as long as small data stays reasonably close to std.
+
 
 ## Design
 

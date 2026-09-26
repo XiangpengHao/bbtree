@@ -6,13 +6,15 @@
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
 //! whose call stack is the path back up for splits (`insert.rs`), and so is
 //! removing, for merges (`remove.rs`); looking up is a loop down from the
-//! root (`lookup.rs`).
+//! root (`lookup.rs`). Iterating walks between two cursors, each a position
+//! with the path to it (`iter.rs`, `cursor.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
 
 #![forbid(unsafe_code)]
 
+mod cursor;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
@@ -22,18 +24,24 @@ mod inline_key_tests;
 mod insert;
 #[cfg(test)]
 mod invariants;
+mod iter;
 mod lookup;
 mod remove;
 #[cfg(test)]
 mod type_tests;
 
 use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::mem;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
 use crate::node::page::{FreshPage, PageByKind};
+
+pub use iter::{Iter, Keys, Range, Values};
 
 /// An ordered map based on a B-tree with page-sized nodes: a drop-in
 /// replacement for [`std::collections::BTreeMap`].
@@ -407,6 +415,46 @@ impl<K, V> Default for BBTreeMap<K, V> {
     /// [`BBTreeMap::new`] does.
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for BBTreeMap<K, V, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K: PartialEq, V: PartialEq, S: InlineKeyStrategy<K>> PartialEq for BBTreeMap<K, V, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == b)
+    }
+}
+
+impl<K: Eq, V: Eq, S: InlineKeyStrategy<K>> Eq for BBTreeMap<K, V, S> {}
+
+/// Compares the entries in key order, lexicographically, as std's map does.
+impl<K: PartialOrd, V: PartialOrd, S: InlineKeyStrategy<K>> PartialOrd for BBTreeMap<K, V, S> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.iter().partial_cmp(other.iter())
+    }
+}
+
+/// Compares the entries in key order, lexicographically, as std's map does.
+impl<K: Ord, V: Ord, S: InlineKeyStrategy<K>> Ord for BBTreeMap<K, V, S> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.iter().cmp(other.iter())
+    }
+}
+
+/// Hashes the length, then every entry in key order. std's map writes the
+/// length with `Hasher::write_length_prefix`, unstable, whose default is
+/// `write_usize`: the same bytes for every hasher on stable.
+impl<K: Hash, V: Hash, S: InlineKeyStrategy<K>> Hash for BBTreeMap<K, V, S> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(self.len());
+        for entry in self {
+            entry.hash(state);
+        }
     }
 }
 

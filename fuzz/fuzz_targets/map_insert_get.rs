@@ -1,11 +1,12 @@
-//! Differential fuzzing (D5): arbitrary insert, lookup and removal
-//! operations on a `BBTreeMap` and on std's `BTreeMap`, which must answer
-//! every one alike.
+//! Differential fuzzing (D5): arbitrary insert, lookup, removal and
+//! iteration operations on a `BBTreeMap` and on std's `BTreeMap`, which must
+//! answer every one alike.
 
 #![no_main]
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::ops::Bound;
 
 use bbtree::BBTreeMap;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
@@ -27,6 +28,35 @@ impl InputKey {
     /// The key `offset` places after this one, wrapping around the key space.
     fn after(self, offset: u16) -> Self {
         Self(self.0.wrapping_add(offset) % Self::KEY_SPACE)
+    }
+}
+
+/// A range bound from the input.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum InputBound {
+    Included(InputKey),
+    Excluded(InputKey),
+    Unbounded,
+}
+
+impl InputBound {
+    fn map_bound(self) -> Bound<u64> {
+        match self {
+            Self::Included(key) => Bound::Included(key.map_key()),
+            Self::Excluded(key) => Bound::Excluded(key.map_key()),
+            Self::Unbounded => Bound::Unbounded,
+        }
+    }
+}
+
+/// Which end each step of a walk takes from: bit `i % 32` for step `i`, set
+/// for the back.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct Ends(u32);
+
+impl Ends {
+    fn from_back(self, step: usize) -> bool {
+        self.0 >> (step % 32) & 1 == 1
     }
 }
 
@@ -71,6 +101,17 @@ enum MapOperation {
     PopLast,
     FirstAndLast,
     Clear,
+    /// Walks the whole maps from both ends.
+    Iterate {
+        ends: Ends,
+    },
+    /// Walks a range from both ends; bounds out of order, for which both
+    /// maps panic, are skipped.
+    Range {
+        start: InputBound,
+        end: InputBound,
+        ends: Ends,
+    },
 }
 
 /// The value type of the maps under test, made from fuzzer input.
@@ -188,8 +229,52 @@ impl<V: FuzzValue> MirroredMaps<V> {
                 self.ours.clear();
                 self.theirs.clear();
             }
+            MapOperation::Iterate { ends } => {
+                assert_eq!(self.ours.iter().len(), self.theirs.iter().len());
+                Self::assert_same_walk(self.ours.iter(), self.theirs.iter(), ends);
+            }
+            MapOperation::Range { start, end, ends } => {
+                let bounds = (start.map_bound(), end.map_bound());
+                let out_of_order = match bounds {
+                    (Bound::Excluded(start), Bound::Excluded(end)) => start >= end,
+                    (
+                        Bound::Included(start) | Bound::Excluded(start),
+                        Bound::Included(end) | Bound::Excluded(end),
+                    ) => start > end,
+                    _ => false,
+                };
+                if !out_of_order {
+                    Self::assert_same_walk(
+                        self.ours.range(bounds),
+                        self.theirs.range(bounds),
+                        ends,
+                    );
+                }
+            }
         }
         assert_eq!(self.ours.len(), self.theirs.len());
+    }
+
+    /// Takes every item of both iterators, each step from the end `ends`
+    /// picks, checking that they match.
+    fn assert_same_walk<'a>(
+        mut ours: impl DoubleEndedIterator<Item = (&'a u64, &'a V)>,
+        mut theirs: impl DoubleEndedIterator<Item = (&'a u64, &'a V)>,
+        ends: Ends,
+    ) where
+        V: 'a,
+    {
+        for step in 0.. {
+            let (ours_item, theirs_item) = if ends.from_back(step) {
+                (ours.next_back(), theirs.next_back())
+            } else {
+                (ours.next(), theirs.next())
+            };
+            assert_eq!(ours_item, theirs_item);
+            if theirs_item.is_none() {
+                return;
+            }
+        }
     }
 
     fn insert(&mut self, key: u64, value: V) {

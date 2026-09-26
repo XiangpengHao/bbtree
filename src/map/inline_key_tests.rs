@@ -8,9 +8,12 @@
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::ops::Bound;
+use core::panic::AssertUnwindSafe;
 use std::boxed::Box;
 use std::collections::BTreeMap;
 use std::format;
+use std::panic::catch_unwind;
 use std::string::String;
 use std::vec::Vec;
 
@@ -107,6 +110,21 @@ fn string_keys_match_std_by_string_and_by_str() {
         maps.get_borrowed(&key[..9]);
         maps.get_borrowed(format!("{key}\0").as_str());
     }
+    // Ranges by `str`, between bounds that tie with stored keys on their
+    // inline keys.
+    for number in (0..workload.key_space + 2).step_by(97) {
+        let key = ten_digits(number);
+        let (shorter, longer) = (&key[..9], format!("{key}\0"));
+        maps.range_borrowed(
+            &rng,
+            (Bound::Included(shorter), Bound::Excluded(key.as_str())),
+        );
+        maps.range_borrowed(
+            &rng,
+            (Bound::Excluded(shorter), Bound::Included(longer.as_str())),
+        );
+        maps.range_borrowed(&rng, (Bound::Excluded(key.as_str()), Bound::Unbounded));
+    }
     for number in 0..workload.key_space + 2 {
         let key = ten_digits(number);
         maps.remove_borrowed(&key[..9]);
@@ -128,6 +146,19 @@ fn byte_vec_keys_match_std_by_vec_and_by_slice() {
         maps.get_borrowed(key.as_slice());
         maps.get_borrowed(&key[..3]);
         maps.get_borrowed([key.as_slice(), &[0]].concat().as_slice());
+    }
+    for number in (0..workload.key_space + 2).step_by(97) {
+        let key = Vec::from_number(number);
+        let (shorter, longer) = (&key[..3], [key.as_slice(), &[0]].concat());
+        maps.range_borrowed(
+            &rng,
+            (Bound::Included(shorter), Bound::Excluded(key.as_slice())),
+        );
+        maps.range_borrowed(
+            &rng,
+            (Bound::Excluded(shorter), Bound::Included(longer.as_slice())),
+        );
+        maps.range_borrowed(&rng, (Bound::Excluded(key.as_slice()), Bound::Unbounded));
     }
     for number in 0..workload.key_space + 2 {
         let key = Vec::from_number(number);
@@ -271,10 +302,10 @@ impl InlineKey for LyingKey<'_> {
     }
 }
 
-/// Inserts, looks up and removes keys whose inline keys lie, checking only
-/// what any map must do whatever its answers: every value inserted is
-/// dropped once, and the map never holds more entries than were inserted.
-/// Returns whether every answer matched std's.
+/// Inserts, looks up, removes and ranges over keys whose inline keys lie,
+/// checking only what any map must do whatever its answers: every value
+/// inserted is dropped once, and the map never holds more entries than were
+/// inserted. Returns whether every answer matched std's.
 fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
     let rng = TestRng::new(seed);
     let ledger = DropLedger::new();
@@ -312,6 +343,19 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
             _ if rng.below(8) == 0 => {
                 let popped = ours.pop_first().map(|(key, _)| key.number);
                 all_right &= popped == theirs.pop_first().map(|(number, ())| number);
+            }
+            _ if rng.below(8) == 0 => {
+                // The bounds are in order, but inline keys that lie may find
+                // the start after the end, which panics as an ill-defined
+                // `Ord` does.
+                let high = number + rng.below(64);
+                let ranged = catch_unwind(AssertUnwindSafe(|| {
+                    let range = ours.range(key(number)..key(high));
+                    range.map(|(key, _)| key.number).collect::<Vec<u32>>()
+                }));
+                let expected = theirs.range(number as u32..high as u32);
+                let expected: Vec<u32> = expected.map(|(&number, ())| number).collect();
+                all_right &= ranged.is_ok_and(|numbers| numbers == expected);
             }
             _ => {
                 if let Some(value) = ours.get_mut(&key(number)) {

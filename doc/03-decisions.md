@@ -279,6 +279,48 @@ capacity, not `len`, so it never waits on the header miss.
   children, height ≤ 21) becomes height ≤ 34 for 1 KB nodes in a 64-bit
   address space.
 
+**D23. Iteration: a cursor per end, holding its path as edge indexes, with the leaf and its parent cached.** (2026-10-08)
+Supersedes the path-stack frame and `MAX_HEIGHT` bullets under "Proposed,
+not decided".
+
+- **A position is an edge of a leaf.** Past a leaf's last entry, the next
+  one is the separator of the lowest ancestor with a key beyond the path,
+  and its value is the head of the leftmost leaf right of it (D17).
+  Separator keys live only in internal nodes, so crossing a leaf boundary
+  visits an ancestor whatever we do: leaf-to-leaf links would not help.
+  `next()` never calls `Ord` (D11).
+- **Each end stores its leaf, the leaf's parent, and the edge index taken at
+  every level as a `u16`** (a node holds ≤ 1023 keys). The parent answers
+  most boundary crossings; when it runs out, the cursor walks down again
+  from the root by its edge indexes, still without `Ord`.
+- **35 indexes per end:** with D22's 3-child minimum and 1 KB leaves, a tree
+  taller than 34 levels above its leaves would need more than 2^64 bytes.
+- **Sizes:** `Iter` 232 B, `Range` 224 B (std: 72 B, 48 B). A pointer per
+  level would have made `Iter` ~560 B.
+- **Lazy:** an end that has not started starts at the first or last entry
+  on its first move, so iterating from one end never descends the other.
+- **In place:** a cursor is updated field by field, never rebuilt and copied
+  over. A copy reads it with 64-byte loads right after narrow stores, which
+  can't be forwarded: the load waits for the stores to retire, and so for
+  every older cache miss. Over many small maps, that serialized one map's
+  misses behind the previous one's: one forwarding conflict per map,
+  28.2 → 11.5 ns per entry for 1M 4-entry maps once removed.
+- Measured, one run each, mimalloc, Ryzen 9 9900X (ns per entry; per scan
+  for `range64`):
+
+  | workload | bbtree | std |
+  |---|--:|--:|
+  | iterate, 10M u64→u64 | 5.85 | 14.2 |
+  | range64, 10M u64→u64 | 719 | 1163 |
+  | iterate, 1M maps × 4 (`str-json`→`struct32`) | 11.5 | 4.9 |
+  | iterate, 100k maps × 32 | 10.8 | 7.2 |
+  | iterate, 1M real JSON objects | 13.6 | 6.0 |
+
+- **Open:** small maps are 0.43–0.67× std, from instruction count (57 vs 26
+  per entry for 4-entry maps), not stalls. Range scans still take ~18
+  forwarding conflicts per scan, from adapters such as `take` moving the
+  freshly positioned `Range`.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

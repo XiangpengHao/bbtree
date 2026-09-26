@@ -145,6 +145,16 @@ impl<K, V, S, Kind> Clone for NodeRef<Immut<'_>, K, V, S, Kind> {
 
 impl<K, V, S, Kind> Copy for NodeRef<Immut<'_>, K, V, S, Kind> {}
 
+// SAFETY: a shared handle gives only shared access to the keys and values of
+// its subtree for `'a`, as a `&'a (K, V)` would, and nothing else: sending it
+// to another thread shares them with that thread, which `K: Sync` and
+// `V: Sync` allow. The strategy is only a marker.
+unsafe impl<K: Sync, V: Sync, S, Kind> Send for NodeRef<Immut<'_>, K, V, S, Kind> {}
+
+// SAFETY: as for `Send`: sharing a shared handle across threads shares the
+// keys and values, nothing more.
+unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<Immut<'_>, K, V, S, Kind> {}
+
 /// How a node searches its keys when inline keys don't decide (D18). Fixed
 /// per key type at compile time, so the choice costs nothing at run time.
 enum KeySearch {

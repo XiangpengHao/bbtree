@@ -1,17 +1,18 @@
-//! Type-level properties shared with std's `BTreeMap`: auto traits,
-//! variance, size, and a `const` constructor that allocates nothing.
+//! Type-level properties shared with std's `BTreeMap` and its iterators:
+//! auto traits, variance, size, and a `const` constructor that allocates
+//! nothing.
 
 #![forbid(unsafe_code)]
 
 use core::cell::Cell;
 use core::marker::{PhantomData, PhantomPinned};
 use core::panic::{RefUnwindSafe, UnwindSafe};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 use std::rc::Rc;
 use std::string::String;
 use std::sync::MutexGuard;
 
-use super::BBTreeMap;
+use super::{BBTreeMap, Iter, Keys, Range, Values};
 use crate::inline_key::WithInlineKey;
 
 /// Which auto traits a type implements.
@@ -72,8 +73,8 @@ macro_rules! auto_traits {
     };
 }
 
-/// Checks that our map from `$key` to `$value` has the auto traits of
-/// std's, for each pair.
+/// Checks that our map from `$key` to `$value`, and each iterator over it,
+/// has the auto traits of std's, for each pair.
 macro_rules! assert_auto_traits_match_std {
     ($($key:ty => $value:ty),+ $(,)?) => {$(
         assert_eq!(
@@ -82,6 +83,26 @@ macro_rules! assert_auto_traits_match_std {
             "a map from {} to {}",
             stringify!($key),
             stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(Iter<'static, $key, $value>),
+            auto_traits!(btree_map::Iter<'static, $key, $value>),
+            "Iter",
+        );
+        assert_eq!(
+            auto_traits!(Keys<'static, $key, $value>),
+            auto_traits!(btree_map::Keys<'static, $key, $value>),
+            "Keys",
+        );
+        assert_eq!(
+            auto_traits!(Values<'static, $key, $value>),
+            auto_traits!(btree_map::Values<'static, $key, $value>),
+            "Values",
+        );
+        assert_eq!(
+            auto_traits!(Range<'static, $key, $value>),
+            auto_traits!(btree_map::Range<'static, $key, $value>),
+            "Range",
         );
     )+};
 }
@@ -151,6 +172,49 @@ fn covariant_in_keys_and_values() {
     map.insert(local.as_str(), local.as_str());
     assert_eq!(map.get("static"), Some(&"value"));
     assert_eq!(map.get("local"), Some(&"local"));
+}
+
+/// Our iterators over a map whose keys and values live for `'k`.
+type StrIterators<'a, 'k> = (
+    Iter<'a, &'k str, &'k str>,
+    Keys<'a, &'k str, &'k str>,
+    Values<'a, &'k str, &'k str>,
+    Range<'a, &'k str, &'k str>,
+);
+
+/// Compiles only if the iterators are covariant in their keys and values,
+/// as std's are.
+fn shorten_iterator_lifetimes<'a>(iterators: StrIterators<'a, 'static>) -> StrIterators<'a, 'a> {
+    iterators
+}
+
+#[test]
+fn iterators_are_covariant_in_keys_and_values() {
+    let mut map = BBTreeMap::new();
+    map.insert("static", "value");
+    let iterators = (
+        map.iter(),
+        map.keys(),
+        map.values(),
+        map.range::<&str, _>(..),
+    );
+    let (iter, keys, values, range) = shorten_iterator_lifetimes(iterators);
+    assert_eq!(
+        iter.count() + keys.count() + values.count() + range.count(),
+        4
+    );
+}
+
+/// Each end of a walk holds its leaf and the leaf's parent (16 bytes each,
+/// as a handle carries its height) and 35 edge indexes of 2 bytes (D23):
+/// 104 bytes. The whole-map iterator adds the root and a count; std's,
+/// whose nodes point to their parents, needs 72 bytes.
+#[test]
+fn iterator_sizes() {
+    assert_eq!(size_of::<Iter<'_, u64, u64>>(), 232);
+    assert_eq!(size_of::<Keys<'_, u64, u64>>(), 232);
+    assert_eq!(size_of::<Range<'_, u64, u64>>(), 224);
+    assert_eq!(size_of::<btree_map::Iter<'_, u64, u64>>(), 72);
 }
 
 #[test]
