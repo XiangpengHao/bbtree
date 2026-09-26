@@ -40,38 +40,28 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.remove(&RemovalTarget::Key(SearchKey::new(key)), release)
+        self.remove(&SearchKey::new(key), release)
     }
 
     /// Removes the entry with the smallest key and returns it, or `None` if
     /// the tree is empty. Calls no `Ord`; frees pages as
     /// [`Self::remove_entry`] does.
-    pub(crate) fn pop_first(&mut self, release: impl FnMut(PageByKind<K, V, S>)) -> Option<(K, V)>
-    where
-        K: Ord,
-    {
-        self.remove(&RemovalTarget::<K, S, K>::First, release)
+    pub(crate) fn pop_first(&mut self, release: impl FnMut(PageByKind<K, V, S>)) -> Option<(K, V)> {
+        self.remove(&TreeEnd::First, release)
     }
 
     /// Removes the entry with the largest key and returns it, or `None` if
     /// the tree is empty. Calls no `Ord`; frees pages as
     /// [`Self::remove_entry`] does.
-    pub(crate) fn pop_last(&mut self, release: impl FnMut(PageByKind<K, V, S>)) -> Option<(K, V)>
-    where
-        K: Ord,
-    {
-        self.remove(&RemovalTarget::<K, S, K>::Last, release)
+    pub(crate) fn pop_last(&mut self, release: impl FnMut(PageByKind<K, V, S>)) -> Option<(K, V)> {
+        self.remove(&TreeEnd::Last, release)
     }
 
-    fn remove<Q>(
+    fn remove(
         &mut self,
-        target: &RemovalTarget<'_, K, S, Q>,
+        target: &impl RemovalTarget<K, S>,
         mut release: impl FnMut(PageByKind<K, V, S>),
-    ) -> Option<(K, V)>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
+    ) -> Option<(K, V)> {
         let removed = self.borrow_mut().remove_below(target, &mut release)?;
         if self.height() > 0 && Self::borrow(self).len() == 0 {
             release(self.pop_internal_level().into());
@@ -80,10 +70,50 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-/// Which entry a removal takes out of a tree.
-enum RemovalTarget<'q, K, S, Q: ?Sized> {
-    /// The entry whose key equals this one, if there is one.
-    Key(SearchKey<'q, K, S, Q>),
+/// Which entry a removal takes out of a tree: how to find it in each node on
+/// the way down.
+trait RemovalTarget<K, S> {
+    /// The target's key/value in `leaf`, if it is there.
+    fn find_in_leaf<'a, V>(
+        &self,
+        leaf: NodeMut<'a, K, V, S, Leaf>,
+    ) -> Option<Kv<NodeMut<'a, K, V, S, Leaf>>>;
+
+    /// The target's separator in `node`, or the edge to the child that would
+    /// hold the target.
+    fn find_in_internal<'a, V>(
+        &self,
+        node: NodeMut<'a, K, V, S, Internal>,
+    ) -> SearchResult<NodeMut<'a, K, V, S, Internal>>;
+}
+
+/// The entry whose key equals the searched one, if there is one.
+impl<K, S, Q> RemovalTarget<K, S> for SearchKey<'_, K, S, Q>
+where
+    K: Borrow<Q>,
+    S: InlineKeyStrategy<K>,
+    Q: Ord + ?Sized,
+{
+    fn find_in_leaf<'a, V>(
+        &self,
+        leaf: NodeMut<'a, K, V, S, Leaf>,
+    ) -> Option<Kv<NodeMut<'a, K, V, S, Leaf>>> {
+        match leaf.search(self) {
+            SearchResult::Found(kv) => Some(kv),
+            SearchResult::GoDown(_) => None,
+        }
+    }
+
+    fn find_in_internal<'a, V>(
+        &self,
+        node: NodeMut<'a, K, V, S, Internal>,
+    ) -> SearchResult<NodeMut<'a, K, V, S, Internal>> {
+        node.search(self)
+    }
+}
+
+/// An end of the tree, found without comparing keys.
+enum TreeEnd {
     /// The entry with the smallest key: the first of the leftmost leaf,
     /// which has no head (D17).
     First,
@@ -91,33 +121,22 @@ enum RemovalTarget<'q, K, S, Q: ?Sized> {
     Last,
 }
 
-impl<K, S: InlineKeyStrategy<K>, Q: Ord + ?Sized> RemovalTarget<'_, K, S, Q>
-where
-    K: Borrow<Q>,
-{
-    /// The target's key/value in `leaf`, if it is there.
+impl<K, S: InlineKeyStrategy<K>> RemovalTarget<K, S> for TreeEnd {
     fn find_in_leaf<'a, V>(
         &self,
         leaf: NodeMut<'a, K, V, S, Leaf>,
     ) -> Option<Kv<NodeMut<'a, K, V, S, Leaf>>> {
         match self {
-            Self::Key(key) => match leaf.search(key) {
-                SearchResult::Found(kv) => Some(kv),
-                SearchResult::GoDown(_) => None,
-            },
             Self::First => leaf.first_kv(),
             Self::Last => leaf.last_kv(),
         }
     }
 
-    /// The target's separator in `node`, or the edge to the child that would
-    /// hold the target.
     fn find_in_internal<'a, V>(
         &self,
         node: NodeMut<'a, K, V, S, Internal>,
     ) -> SearchResult<NodeMut<'a, K, V, S, Internal>> {
         match self {
-            Self::Key(key) => node.search(key),
             Self::First => SearchResult::GoDown(node.first_edge()),
             Self::Last => SearchResult::GoDown(node.last_edge()),
         }
@@ -128,15 +147,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
     /// Removes the target from the subtree under this node and returns it,
     /// fixing every underfull node below this one on the way back up; this
     /// node itself may be left underfull, for its parent to fix.
-    fn remove_below<Q>(
+    fn remove_below(
         self,
-        target: &RemovalTarget<'_, K, S, Q>,
+        target: &impl RemovalTarget<K, S>,
         release: &mut impl FnMut(PageByKind<K, V, S>),
-    ) -> Option<(K, V)>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
+    ) -> Option<(K, V)> {
         match self.force() {
             ForceResult::Leaf(leaf) => target.find_in_leaf(leaf).map(|kv| kv.remove().0),
             ForceResult::Internal(node) => match target.find_in_internal(node) {

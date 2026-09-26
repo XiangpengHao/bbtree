@@ -13,6 +13,7 @@ use core::any::Any;
 use core::borrow::Borrow;
 use core::fmt::Debug;
 use core::hash::{Hash, Hasher};
+use core::mem;
 use core::ops::Bound;
 use core::panic::AssertUnwindSafe;
 use core::ptr;
@@ -210,36 +211,152 @@ where
         Self::assert_same_items(rng, ours, theirs, steps);
     }
 
-    /// Checks `count` ranges against std's, between random keys made from
-    /// `0..key_space` or separators (D17), with bounds of every kind; half of
-    /// them narrow, so that their ends meet within the walk. The bounds are
-    /// in order: [`Self::range_borrowed`] checks std's panics for those that
-    /// are not.
+    /// Checks `count` ranges against std's, between random bounds in order
+    /// ([`Self::random_range_bounds`]): [`Self::range_borrowed`] checks std's
+    /// panics for those that are not.
     fn assert_same_ranges(&self, rng: &TestRng, count: usize, key_space: usize) {
         let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
+        for _ in 0..count {
+            let (start, end) = Self::random_range_bounds(rng, &separators, key_space);
+            self.range_borrowed(rng, (start.as_ref(), end.as_ref()));
+        }
+    }
+
+    /// Random bounds in order, at keys made from `0..key_space` or at
+    /// `separators` (D17), of every kind; half of them narrow, so that a walk
+    /// between them meets its other end.
+    fn random_range_bounds(
+        rng: &TestRng,
+        separators: &[K],
+        key_space: usize,
+    ) -> (Bound<K>, Bound<K>) {
         let random_key = |number| match separators.len() {
             len if len > 0 && rng.below(3) == 0 => separators[rng.below(len)].clone(),
             _ => K::from_number(number),
         };
-        for _ in 0..count {
-            let low_number = rng.below(key_space);
-            let high_number = if rng.below(2) == 0 {
-                low_number + rng.below(48)
+        let low_number = rng.below(key_space);
+        let high_number = if rng.below(2) == 0 {
+            low_number + rng.below(48)
+        } else {
+            rng.below(key_space)
+        };
+        let (mut low, mut high) = (random_key(low_number), random_key(high_number));
+        if low > high {
+            (low, high) = (high, low);
+        }
+        let mut start = Self::random_bound(rng, low);
+        let end = Self::random_bound(rng, high);
+        if let (Bound::Excluded(start_key), Bound::Excluded(end_key)) = (&start, &end)
+            && start_key == end_key
+        {
+            start = Bound::Included(start_key.clone());
+        }
+        (start, end)
+    }
+
+    /// Takes both maps by value and walks them from both ends at random, by
+    /// `into_iter`, `into_keys` or `into_values`, through about half of
+    /// their entries, then drops what is left of both. A small map's
+    /// iterators print the same first.
+    fn consume(&mut self, rng: &TestRng) {
+        let ours = mem::replace(&mut self.ours, BBTreeMap::with_strategy(S::default()));
+        let theirs = mem::take(&mut self.theirs);
+        let steps = theirs.len() / 2 + 1;
+        match rng.below(3) {
+            0 => {
+                let (ours, theirs) = (ours.into_iter(), theirs.into_iter());
+                if theirs.len() <= 64 {
+                    assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+                }
+                Self::assert_same_items(rng, ours, theirs, steps);
+            }
+            1 => Self::assert_same_items(rng, ours.into_keys(), theirs.into_keys(), steps),
+            _ => Self::assert_same_items(rng, ours.into_values(), theirs.into_values(), steps),
+        }
+    }
+
+    /// Takes entries from both ends of `iter_mut` at random until they meet,
+    /// giving each the same new value in both maps, and printing what is left
+    /// of both while little is.
+    fn mutate_by_iter_mut(&mut self, rng: &TestRng) {
+        let mut ours = self.ours.iter_mut();
+        let mut theirs = self.theirs.iter_mut();
+        loop {
+            assert_eq!(ours.size_hint(), theirs.size_hint());
+            if theirs.len() <= 8 {
+                assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+            }
+            let entries = if rng.below(2) == 0 {
+                (ours.next(), theirs.next())
             } else {
-                rng.below(key_space)
+                (ours.next_back(), theirs.next_back())
             };
-            let (mut low, mut high) = (random_key(low_number), random_key(high_number));
-            if low > high {
-                (low, high) = (high, low);
+            let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
+                assert!(entries.0.is_none() && entries.1.is_none());
+                break;
+            };
+            assert_eq!((our_key, &*our_value), (their_key, &*their_value));
+            let value = V::from_number(rng.below(1 << 30));
+            *our_value = value.clone();
+            *their_value = value;
+        }
+    }
+
+    /// Takes every value out of `values_mut`, from both ends at random,
+    /// before writing to any, so that all are borrowed at once: the walk hands
+    /// out each value once, and no two alias, which Miri checks.
+    fn mutate_all_at_once(&mut self, rng: &TestRng) {
+        let from_back: Vec<bool> = (0..self.theirs.len()).map(|_| rng.below(2) == 0).collect();
+        let mut ours = self.ours.values_mut();
+        let ours: Vec<&mut V> = from_back
+            .iter()
+            .map(|&back| if back { ours.next_back() } else { ours.next() })
+            .collect::<Option<_>>()
+            .expect("as many values as std's");
+        let mut theirs = self.theirs.values_mut();
+        let theirs: Vec<&mut V> = from_back
+            .iter()
+            .map(|&back| {
+                if back {
+                    theirs.next_back()
+                } else {
+                    theirs.next()
+                }
+            })
+            .collect::<Option<_>>()
+            .expect("as many values as the map holds");
+        for (our_value, their_value) in ours.into_iter().zip(theirs) {
+            assert_eq!(our_value, their_value);
+            let value = V::from_number(rng.below(1 << 30));
+            *our_value = value.clone();
+            *their_value = value;
+        }
+    }
+
+    /// Takes entries from both ends of `count` random ranges at random, up
+    /// to 64 per range, giving each the same new value in both maps.
+    fn mutate_ranges(&mut self, rng: &TestRng, count: usize, key_space: usize) {
+        let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
+        for _ in 0..count {
+            let (start, end) = Self::random_range_bounds(rng, &separators, key_space);
+            let bounds = (start.as_ref(), end.as_ref());
+            let mut ours = self.ours.range_mut::<K, _>(bounds);
+            let mut theirs = self.theirs.range_mut::<K, _>(bounds);
+            for _ in 0..64 {
+                let entries = if rng.below(2) == 0 {
+                    (ours.next(), theirs.next())
+                } else {
+                    (ours.next_back(), theirs.next_back())
+                };
+                let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
+                    assert!(entries.0.is_none() && entries.1.is_none());
+                    break;
+                };
+                assert_eq!((our_key, &*our_value), (their_key, &*their_value));
+                let value = V::from_number(rng.below(1 << 30));
+                *our_value = value.clone();
+                *their_value = value;
             }
-            let mut start = Self::random_bound(rng, &low);
-            let end = Self::random_bound(rng, &high);
-            if let (Bound::Excluded(start_key), Bound::Excluded(end_key)) = (start, end)
-                && start_key == end_key
-            {
-                start = Bound::Included(start_key);
-            }
-            self.range_borrowed(rng, (start, end));
         }
     }
 
@@ -253,6 +370,45 @@ where
         assert_eq!(self.ours.get(key), self.theirs.get(key));
         assert_eq!(self.ours.get_key_value(key), self.theirs.get_key_value(key));
         assert_eq!(self.ours.contains_key(key), self.theirs.contains_key(key));
+        if self.theirs.contains_key(key) {
+            assert_eq!(&self.ours[key], &self.theirs[key]);
+        }
+    }
+
+    /// Extends both maps with the same few entries, some of them with keys
+    /// already there.
+    fn extend(&mut self, rng: &TestRng, key_space: usize) {
+        let entries: Vec<(K, V)> = (0..rng.below(8))
+            .map(|_| {
+                let key = K::from_number(rng.below(key_space));
+                (key, V::from_number(rng.below(1 << 30)))
+            })
+            .collect();
+        self.ours.extend(entries.clone());
+        self.theirs.extend(entries);
+        self.assert_same_len();
+    }
+
+    /// Clones both maps and checks the copies: the same entries, and ours
+    /// with the same shape as its source. Then changes the copies, and checks
+    /// that the sources still match: a copy shares nothing.
+    fn assert_clones_match(&self, rng: &TestRng, key_space: usize) {
+        let mut copies = Self {
+            ours: self.ours.clone(),
+            theirs: self.theirs.clone(),
+        };
+        copies.ours.check_invariants();
+        assert!(copies.ours.iter().eq(&copies.theirs));
+        assert_eq!(copies.ours.height(), self.ours.height());
+        assert_eq!(copies.ours.separator_keys(), self.ours.separator_keys());
+        for _ in 0..64 {
+            let key = K::from_number(rng.below(key_space));
+            copies.insert(key, V::from_number(rng.below(1 << 30)));
+            copies.remove(&K::from_number(rng.below(key_space)));
+            copies.pop_first();
+        }
+        assert!(self.ours.iter().eq(&self.theirs));
+        assert!(self.ours.iter().rev().eq(self.theirs.iter().rev()));
     }
 
     /// Replaces the value of `key` through `get_mut`, if the key is there.
@@ -342,7 +498,8 @@ where
         for _ in 0..steps {
             let key = K::from_number(rng.below(key_space));
             match rng.below(16) {
-                0..=6 => self.insert(key, V::from_number(rng.below(1 << 30))),
+                0..=5 => self.insert(key, V::from_number(rng.below(1 << 30))),
+                6 => self.extend(rng, key_space),
                 7 | 8 => self.get(&key),
                 9 => self.update(&key, V::from_number(rng.below(1 << 30))),
                 10 | 11 => self.remove(&key),
@@ -435,9 +592,11 @@ pub(super) struct Workload {
 impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
-    /// followed by overwriting every separator's value, iterating, checking
-    /// ranges and removing every entry. The emptied map of random operations
-    /// then takes more of them, and is cleared.
+    /// followed by overwriting every separator's value, iterating and
+    /// checking ranges. Then each loses its entries: removed in random order
+    /// (after which the map of random operations takes more of them, and is
+    /// cleared), popped from the front or the back, or consumed by an owning
+    /// iterator.
     pub(super) fn run<K, V, S>(&self, seed: u64)
     where
         K: Ord + Clone + Debug + FromNumber,
@@ -448,7 +607,7 @@ impl Workload {
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.run_random_operations(&rng, self.random_steps, self.key_space);
         maps.overwrite_separators(&rng);
-        self.walk(&maps, &rng, self.key_space);
+        self.walk(&mut maps, &rng, self.key_space);
         maps.remove_all(RemovalOrder::Random, &rng, self.key_space);
         maps.run_random_operations(&rng, self.random_steps / 4, self.key_space);
         maps.clear();
@@ -468,7 +627,7 @@ impl Workload {
                 self.min_sequential_height
             );
             maps.overwrite_separators(&rng);
-            self.walk(&maps, &rng, self.ordered_key_space());
+            self.walk(&mut maps, &rng, self.ordered_key_space());
             maps.remove_all(removal_order, &rng, self.ordered_key_space());
         }
         let mut shuffled: Vec<usize> = evens().collect();
@@ -476,8 +635,8 @@ impl Workload {
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.insert_evens_in_order(shuffled);
         maps.overwrite_separators(&rng);
-        self.walk(&maps, &rng, self.ordered_key_space());
-        maps.remove_all(RemovalOrder::Random, &rng, self.ordered_key_space());
+        self.walk(&mut maps, &rng, self.ordered_key_space());
+        maps.consume(&rng);
     }
 
     /// The numbers the ordered inserts make keys from, the odd ones absent.
@@ -485,17 +644,23 @@ impl Workload {
         2 * self.ordered_entries + 2
     }
 
-    /// Iterates over `maps` and checks ranges between keys made from
-    /// `0..key_space`, as many as the workload's size affords.
-    fn walk<K, V, S>(&self, maps: &MirroredMaps<K, V, S>, rng: &TestRng, key_space: usize)
+    /// Iterates over `maps`, shared and mutably, and checks ranges between
+    /// keys made from `0..key_space`, shared and mutably, as many as the
+    /// workload's size affords.
+    fn walk<K, V, S>(&self, maps: &mut MirroredMaps<K, V, S>, rng: &TestRng, key_space: usize)
     where
         K: Ord + Clone + Debug + FromNumber,
         V: Clone + PartialEq + Debug + FromNumber,
         S: InlineKeyStrategy<K> + Default,
     {
         maps.assert_same_iteration(rng);
+        maps.assert_clones_match(rng, key_space);
+        maps.mutate_by_iter_mut(rng);
+        maps.mutate_all_at_once(rng);
         let ranges = (self.random_steps / 2000).clamp(16, 256);
         maps.assert_same_ranges(rng, ranges, key_space);
+        maps.mutate_ranges(rng, ranges, key_space);
+        maps.assert_same_entries();
     }
 }
 
@@ -591,6 +756,41 @@ fn ranges_out_of_order_panic_like_std() {
     for bounds in out_of_order.into_iter().chain(in_order) {
         maps.range_borrowed(&rng, bounds);
     }
+}
+
+/// `collect` and `from` sort the entries, and keep the last of equal keys,
+/// as std's do; a missing key in `Index` panics with std's message.
+#[test]
+fn collecting_and_indexing_match_std() {
+    let rng = TestRng::new(12);
+    let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };
+    for _ in 0..trials {
+        let len = rng.below(max_len);
+        // Values number the entries, which tells which of equal keys stays.
+        let entries: Vec<(u64, usize)> = (0..len)
+            .map(|index| (rng.below(len + 1) as u64, index))
+            .collect();
+        let ours: BBTreeMap<u64, usize> = entries.iter().copied().collect();
+        let theirs: BTreeMap<u64, usize> = entries.iter().copied().collect();
+        ours.check_invariants();
+        assert!(ours.iter().eq(&theirs));
+
+        let mut extended: BBTreeMap<u64, usize> = BBTreeMap::new();
+        extended.extend(entries.iter().map(|(key, value)| (key, value)));
+        let mut std_extended: BTreeMap<u64, usize> = BTreeMap::new();
+        std_extended.extend(entries.iter().map(|(key, value)| (key, value)));
+        assert!(extended.iter().eq(&std_extended));
+    }
+    let array = [(3, 'a'), (1, 'b'), (3, 'c'), (2, 'd'), (1, 'e')];
+    let ours = BBTreeMap::from(array);
+    assert!(ours.iter().eq(&BTreeMap::from(array)));
+    assert_eq!(ours[&3], 'c');
+    assert!(BBTreeMap::<u8, u8>::from([]).is_empty());
+
+    let missing = catch_unwind(AssertUnwindSafe(|| ours[&4]));
+    let std_missing = catch_unwind(AssertUnwindSafe(|| BTreeMap::from(array)[&4]));
+    let message = |payload| String::from(MirroredMaps::<u64, u64>::panic_message(&payload));
+    assert_eq!(missing.map_err(message), std_missing.map_err(message));
 }
 
 /// Equality, ordering, hashing and printing go entry by entry in key order,

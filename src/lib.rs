@@ -15,7 +15,7 @@ mod map;
     not(test),
     expect(
         dead_code,
-        reason = "mutable and owning iteration, entries and fence keys (05-fence-key.md), not yet written, use the rest of the node API"
+        reason = "entries and fence keys (05-fence-key.md), not yet written, and the node tests use the rest of the node API"
     )
 )]
 mod node;
@@ -26,5 +26,8 @@ pub use map::BBTreeMap;
 /// An ordered map based on a B-tree, [`BBTreeMap`], and the types that go
 /// with it: the counterpart of `std::collections::btree_map`.
 pub mod bbtree_map {
-    pub use crate::map::{BBTreeMap, Iter, Keys, Range, Values};
+    pub use crate::map::{
+        BBTreeMap, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, Range, RangeMut, Values,
+        ValuesMut,
+    };
 }

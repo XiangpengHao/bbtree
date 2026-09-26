@@ -47,6 +47,3 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - We want to measure memory usage, latency, and latency variance.
 
-## Rust's btree
-
-- My understanding of Rust's btree is that each node is like a pair of (Vec<K>, Vec<V>), which can be extremely wasteful in terms of memory layout and cache efficiency.

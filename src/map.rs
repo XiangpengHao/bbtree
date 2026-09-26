@@ -6,25 +6,28 @@
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
 //! whose call stack is the path back up for splits (`insert.rs`), and so is
 //! removing, for merges (`remove.rs`); looking up is a loop down from the
-//! root (`lookup.rs`). Iterating walks between two cursors, each a position
-//! with the path to it (`iter.rs`, `cursor.rs`).
+//! root (`lookup.rs`). Iterating walks the tree from both ends at once
+//! (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value pops
+//! the first or last entry, for now (`into_iter.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
 
 #![forbid(unsafe_code)]
 
-mod cursor;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
 mod drop_tests;
+mod from_entries;
 #[cfg(test)]
 mod inline_key_tests;
 mod insert;
+mod into_iter;
 #[cfg(test)]
 mod invariants;
 mod iter;
+mod iter_mut;
 mod lookup;
 mod remove;
 #[cfg(test)]
@@ -35,13 +38,16 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::mem;
+use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
 use crate::node::page::{FreshPage, PageByKind};
 
+pub use into_iter::{IntoIter, IntoKeys, IntoValues};
 pub use iter::{Iter, Keys, Range, Values};
+pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 
 /// An ordered map based on a B-tree with page-sized nodes: a drop-in
 /// replacement for [`std::collections::BTreeMap`].
@@ -241,6 +247,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
+        self.take_first()
+    }
+
+    /// [`Self::pop_first`] without its `Ord` bound, which finding the first
+    /// entry doesn't need: `IntoIter` has none.
+    fn take_first(&mut self) -> Option<(K, V)> {
         let entry = self.root.as_mut()?.pop_first(PageByKind::deallocate)?;
         self.length -= 1;
         Some(entry)
@@ -287,6 +299,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
+        self.take_last()
+    }
+
+    /// [`Self::pop_last`] without its `Ord` bound, as [`Self::take_first`].
+    fn take_last(&mut self) -> Option<(K, V)> {
         let entry = self.root.as_mut()?.pop_last(PageByKind::deallocate)?;
         self.length -= 1;
         Some(entry)
@@ -415,6 +432,35 @@ impl<K, V> Default for BBTreeMap<K, V> {
     /// [`BBTreeMap::new`] does.
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Copies the tree node by node, with its shape, as std's map does: calls
+/// `clone` on every key and value, in key order, and no `Ord`.
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Clone for BBTreeMap<K, V, S> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.as_ref().map(Subtree::clone_tree),
+            length: self.length,
+        }
+    }
+}
+
+impl<K, Q, V, S> Index<&Q> for BBTreeMap<K, V, S>
+where
+    K: Borrow<Q> + Ord,
+    Q: Ord + ?Sized,
+    S: InlineKeyStrategy<K>,
+{
+    type Output = V;
+
+    /// Returns a reference to the value corresponding to the supplied key.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key is not present in the `BBTreeMap`.
+    fn index(&self, key: &Q) -> &V {
+        self.get(key).expect("no entry found for key")
     }
 }
 

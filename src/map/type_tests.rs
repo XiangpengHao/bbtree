@@ -12,7 +12,10 @@ use std::rc::Rc;
 use std::string::String;
 use std::sync::MutexGuard;
 
-use super::{BBTreeMap, Iter, Keys, Range, Values};
+use super::{
+    BBTreeMap, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, Range, RangeMut, Values,
+    ValuesMut,
+};
 use crate::inline_key::WithInlineKey;
 
 /// Which auto traits a type implements.
@@ -87,22 +90,72 @@ macro_rules! assert_auto_traits_match_std {
         assert_eq!(
             auto_traits!(Iter<'static, $key, $value>),
             auto_traits!(btree_map::Iter<'static, $key, $value>),
-            "Iter",
+            "Iter over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
         );
         assert_eq!(
             auto_traits!(Keys<'static, $key, $value>),
             auto_traits!(btree_map::Keys<'static, $key, $value>),
-            "Keys",
+            "Keys over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
         );
         assert_eq!(
             auto_traits!(Values<'static, $key, $value>),
             auto_traits!(btree_map::Values<'static, $key, $value>),
-            "Values",
+            "Values over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
         );
         assert_eq!(
             auto_traits!(Range<'static, $key, $value>),
             auto_traits!(btree_map::Range<'static, $key, $value>),
-            "Range",
+            "Range over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(IterMut<'static, $key, $value>),
+            auto_traits!(btree_map::IterMut<'static, $key, $value>),
+            "IterMut over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(ValuesMut<'static, $key, $value>),
+            auto_traits!(btree_map::ValuesMut<'static, $key, $value>),
+            "ValuesMut over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(IntoIter<$key, $value>),
+            auto_traits!(btree_map::IntoIter<$key, $value>),
+            "IntoIter over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(IntoKeys<$key, $value>),
+            auto_traits!(btree_map::IntoKeys<$key, $value>),
+            "IntoKeys over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(IntoValues<$key, $value>),
+            auto_traits!(btree_map::IntoValues<$key, $value>),
+            "IntoValues over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(RangeMut<'static, $key, $value>),
+            auto_traits!(btree_map::RangeMut<'static, $key, $value>),
+            "RangeMut over a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
         );
     )+};
 }
@@ -214,6 +267,8 @@ fn iterator_sizes() {
     assert_eq!(size_of::<Iter<'_, u64, u64>>(), 232);
     assert_eq!(size_of::<Keys<'_, u64, u64>>(), 232);
     assert_eq!(size_of::<Range<'_, u64, u64>>(), 224);
+    assert_eq!(size_of::<IterMut<'_, u64, u64>>(), 232);
+    assert_eq!(size_of::<RangeMut<'_, u64, u64>>(), 224);
     assert_eq!(size_of::<btree_map::Iter<'_, u64, u64>>(), 72);
 }
 

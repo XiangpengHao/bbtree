@@ -106,9 +106,28 @@ pub(crate) struct Immut<'a>(PhantomData<&'a ()>);
 /// them.
 pub(crate) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 
+/// Borrow type of a [`NodeRef`]: access for `'a` to a node and its subtree
+/// by a walk that hands out each value as `&'a mut V` at most once, while
+/// keys and structure stay shared, as `IterMut` does.
+///
+/// Its handles may be copied, so that both ends of a walk hold some: what
+/// they offer safely only reads the structure and keys. Handing out a value
+/// is unsafe, and the walk vouches that it does so once per value.
+///
+/// Invariant in `K` and `V`, like `&'a mut`.
+pub(crate) struct ValMut<'a, K, V>(PhantomData<&'a mut (K, V)>);
+
+/// A borrow type whose handles may be copied, because nothing they offer
+/// safely changes the tree: [`Immut`] and [`ValMut`].
+pub(crate) trait CopyableBorrow {}
+
+impl CopyableBorrow for Immut<'_> {}
+
+impl<K, V> CopyableBorrow for ValMut<'_, K, V> {}
+
 /// A handle to one node of kind `Kind` at `height`, with the access of
-/// `BorrowType` ([`Immut`] or [`Mut`]), in a map with inline-key strategy
-/// `S` (D18).
+/// `BorrowType` ([`Immut`], [`Mut`] or [`ValMut`]), in a map with inline-key
+/// strategy `S` (D18).
 ///
 /// Invariant:
 /// - `node` holds a well-formed node at `height`, of kind `Kind` (a leaf at
@@ -121,6 +140,11 @@ pub(crate) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 /// - With `Immut<'a>`, the subtree stays allocated and unchanged for `'a`.
 /// - With `Mut<'a, K, V>`, the subtree stays allocated for `'a` and nothing
 ///   else accesses it during `'a`.
+/// - With `ValMut<'a, K, V>`, the subtree stays allocated, and its structure
+///   and keys unchanged, for `'a`; nothing else accesses it during `'a`
+///   except through copies of the handle, which only read the structure and
+///   keys, and through the values they hand out, each at most once, as
+///   `&'a mut V`.
 ///
 /// Handles never lead back up to a parent, so a handle derived from another
 /// one (by `reborrow_mut` or `descend`) is the only way into its subtree while
@@ -137,13 +161,13 @@ pub(crate) type NodeMut<'a, K, V, S, Kind> = NodeRef<Mut<'a, K, V>, K, V, S, Kin
 /// An [`Edge`] of a node with exclusive access.
 pub(crate) type EdgeMut<'a, K, V, S, Kind> = Edge<NodeMut<'a, K, V, S, Kind>>;
 
-impl<K, V, S, Kind> Clone for NodeRef<Immut<'_>, K, V, S, Kind> {
+impl<BorrowType: CopyableBorrow, K, V, S, Kind> Clone for NodeRef<BorrowType, K, V, S, Kind> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K, V, S, Kind> Copy for NodeRef<Immut<'_>, K, V, S, Kind> {}
+impl<BorrowType: CopyableBorrow, K, V, S, Kind> Copy for NodeRef<BorrowType, K, V, S, Kind> {}
 
 // SAFETY: a shared handle gives only shared access to the keys and values of
 // its subtree for `'a`, as a `&'a (K, V)` would, and nothing else: sending it
@@ -154,6 +178,18 @@ unsafe impl<K: Sync, V: Sync, S, Kind> Send for NodeRef<Immut<'_>, K, V, S, Kind
 // SAFETY: as for `Send`: sharing a shared handle across threads shares the
 // keys and values, nothing more.
 unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<Immut<'_>, K, V, S, Kind> {}
+
+// SAFETY: a value-mutating handle stands for an exclusive borrow of the
+// whole tree, as a `&'a mut` would, which it hands out as shared keys and
+// exclusive values: sending it to another thread moves that exclusive access
+// there, which `K: Send` and `V: Send` allow, as for `&mut (K, V)`; the keys
+// it hands out are shared only within the thread that has it. These are
+// std's bounds for its `IterMut`.
+unsafe impl<K: Send, V: Send, S, Kind> Send for NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {}
+
+// SAFETY: through `&` a value-mutating handle only reads the structure, keys
+// and values, which `K: Sync` and `V: Sync` allow sharing.
+unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {}
 
 /// How a node searches its keys when inline keys don't decide (D18). Fixed
 /// per key type at compile time, so the choice costs nothing at run time.
@@ -974,6 +1010,37 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Kv<NodeRef<Immut<'a>, K,
     }
 }
 
+impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind>
+    Kv<NodeRef<ValMut<'a, K, V>, K, V, S, Kind>>
+{
+    pub(crate) fn into_key(self) -> &'a K {
+        // SAFETY: `index < len`, so key `index` is initialized, and it stays
+        // unchanged for `'a`, with no `&mut` to it (invariants 1 and 3).
+        unsafe { self.node.key_slots().keys().slot(self.index).as_ref() }
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<ValMut<'a, K, V>, K, V, S, Leaf>> {
+    /// The key, shared, and the value, exclusive, for `'a`.
+    ///
+    /// # Safety
+    ///
+    /// The value is handed out only this once for `'a`: no other reference
+    /// to it exists, or is made, while the result lives.
+    pub(crate) unsafe fn into_key_value_mut(self) -> (&'a K, &'a mut V) {
+        // SAFETY: `index < len`, so key and value `index` are initialized
+        // (invariants 1 and 3). The key stays unchanged and shared for `'a`;
+        // the value is in a slot apart from every key, and the caller
+        // vouches that this is its only reference.
+        unsafe {
+            (
+                self.node.key_slots().keys().slot(self.index).as_ref(),
+                self.node.value_slots().slot(self.index).as_mut(),
+            )
+        }
+    }
+}
+
 impl<K, V, S, Kind: NodeKind> Kv<NodeMut<'_, K, V, S, Kind>> {
     pub(crate) fn reborrow_mut(&mut self) -> Kv<NodeMut<'_, K, V, S, Kind>> {
         // SAFETY: the same index in the same node.
@@ -1119,6 +1186,21 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<Immut<'a>, K, V, S, Leaf>> 
         // SAFETY: the head is initialized (invariants 3 and 5) and stays
         // unchanged for `'a` (invariant 1).
         unsafe { self.leaf.head_and_value_slots().slot(0).as_ref() }
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<ValMut<'a, K, V>, K, V, S, Leaf>> {
+    /// The head, exclusive for `'a`.
+    ///
+    /// # Safety
+    ///
+    /// The head is handed out only this once for `'a`: no other reference
+    /// to it exists, or is made, while the result lives.
+    pub(crate) unsafe fn into_value_mut(self) -> &'a mut V {
+        // SAFETY: the head is initialized (invariants 3 and 5), in a slot
+        // apart from every key and value, and the caller vouches that this
+        // is its only reference.
+        unsafe { self.leaf.head_and_value_slots().slot(0).as_mut() }
     }
 }
 
@@ -1521,6 +1603,14 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
     pub(crate) fn borrow_mut(&mut self) -> NodeMut<'_, K, V, S, Kind> {
         // SAFETY: the tree is well-formed (type invariant), and `&mut self`
         // gives the handle exclusive access.
+        unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+    }
+
+    /// A handle for a walk that hands out values mutably (see [`ValMut`]).
+    pub(crate) fn borrow_valmut(&mut self) -> NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {
+        // SAFETY: the tree is well-formed (type invariant), and `&mut self`
+        // gives exclusive access, which the handle and its copies only use
+        // as `ValMut` allows.
         unsafe { NodeRef::from_raw_parts(self.node, self.height) }
     }
 }

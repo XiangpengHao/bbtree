@@ -316,6 +316,15 @@ not decided".
   | iterate, 100k maps × 32 | 10.8 | 7.2 |
   | iterate, 1M real JSON objects | 13.6 | 6.0 |
 
+- **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) use a `ValMut`
+  borrow type, as std's do: its handles copy, so both ends hold some, and
+  only read the structure and keys; handing out a value as `&mut V` is
+  unsafe. The walks vouch for handing out each value once: their ends move
+  toward each other, and stop by a count (whole map) or where they meet
+  (range). This is the path module D14 allows `unsafe` in, `node/walk.rs`.
+- **Owning iteration, for now,** pops from either end, rebalancing as it
+  goes (`into_iter.rs`). An owning walk that takes entries out and frees
+  each node once both ends are past it is to replace the pops.
 - **Open:** small maps are 0.43–0.67× std, from instruction count (57 vs 26
   per entry for 4-entry maps), not stalls. Range scans still take ~18
   forwarding conflicts per scan, from adapters such as `take` moving the
@@ -377,3 +386,6 @@ requires the token: one check, no duplicates, nothing on the hot path.
   allocator does.
 - **Fill factor:** right-biased split for appends, redistribution to a sibling
   before splitting, full-node bulk build for `FromIterator`/`append`.
+  `collect` now inserts the sorted entries one by one, which leaves nodes
+  half full: 10M u64→u64, 18.6 vs std's 3.05 ns per entry, and 33.0 vs 18.2
+  bytes per entry (2026-10-08).

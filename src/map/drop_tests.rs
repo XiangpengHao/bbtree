@@ -299,6 +299,197 @@ fn removals_drop_like_std() {
     assert!(!maps.drop_both());
 }
 
+/// Owning iterators hand out entries, and drop the rest when dropped, in the
+/// same order as std's: `into_keys` drops each value as it hands out its
+/// key, and `into_values` each key.
+#[test]
+fn owning_iterators_drop_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(25);
+    let count = if cfg!(miri) { 200 } else { 1000 };
+    for kind in 0..3 {
+        let mut maps = TrackedMaps::new(&ledgers);
+        let mut orders: Vec<usize> = (0..count).collect();
+        rng.shuffle(&mut orders);
+        for order in orders {
+            assert!(!maps.insert(order, PanickingPart::Neither));
+        }
+        assert!(maps.ours.height() >= 2);
+        let TrackedMaps { ours, theirs, .. } = maps;
+        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
+        let mut steps = (0..count / 3).map(|_| rng.below(2) == 0);
+        match kind {
+            0 => {
+                let (mut ours, mut theirs) = (ours.into_iter(), theirs.into_iter());
+                for back in steps.by_ref() {
+                    let (our_entry, their_entry) = if back {
+                        (ours.next_back(), theirs.next_back())
+                    } else {
+                        (ours.next(), theirs.next())
+                    };
+                    assert_eq!(our_entry.map(ids), their_entry.map(ids));
+                    ledgers.assert_same_drops_so_far();
+                }
+                drop(ours);
+                drop(theirs);
+            }
+            1 => {
+                let (mut ours, mut theirs) = (ours.into_keys(), theirs.into_keys());
+                for back in steps.by_ref() {
+                    let (our_key, their_key) = if back {
+                        (ours.next_back(), theirs.next_back())
+                    } else {
+                        (ours.next(), theirs.next())
+                    };
+                    assert_eq!(our_key.map(|key| key.id()), their_key.map(|key| key.id()));
+                    ledgers.assert_same_drops_so_far();
+                }
+                drop(ours);
+                drop(theirs);
+            }
+            _ => {
+                let (mut ours, mut theirs) = (ours.into_values(), theirs.into_values());
+                for back in steps.by_ref() {
+                    let (our_value, their_value) = if back {
+                        (ours.next_back(), theirs.next_back())
+                    } else {
+                        (ours.next(), theirs.next())
+                    };
+                    assert_eq!(
+                        our_value.map(|value| value.id()),
+                        their_value.map(|value| value.id())
+                    );
+                    ledgers.assert_same_drops_so_far();
+                }
+                drop(ours);
+                drop(theirs);
+            }
+        }
+        ledgers.assert_same_drops_so_far();
+    }
+    ledgers.ours.assert_all_dropped_once();
+    ledgers.theirs.assert_all_dropped_once();
+}
+
+/// `collect` keeps the last of each run of equal keys, key and value, and
+/// drops the others in order, as std's does.
+#[test]
+fn collect_keeps_the_last_of_equal_keys_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(26);
+    // Half as many keys as entries: above 194, the tree needs a height of 2.
+    let count = if cfg!(miri) { 600 } else { 3000 };
+    let mut ours_entries = Vec::new();
+    let mut theirs_entries = Vec::new();
+    for _ in 0..count {
+        let order = rng.below(count / 2);
+        let ((our_key, their_key), (our_value, their_value)) =
+            (ledgers.track(false), ledgers.track(false));
+        ours_entries.push((CollidingKey::new(order, our_key), our_value));
+        theirs_entries.push((CollidingKey::new(order, their_key), their_value));
+    }
+    let maps = TrackedMaps {
+        ledgers: &ledgers,
+        ours: ours_entries.into_iter().collect(),
+        theirs: theirs_entries.into_iter().collect(),
+    };
+    ledgers.assert_same_drops_so_far();
+    let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
+    assert!(maps.ours.iter().map(ids).eq(maps.theirs.iter().map(ids)));
+    assert!(maps.ours.height() >= 2);
+    maps.ours.check_invariants();
+    assert!(!maps.drop_both());
+}
+
+/// A drop-tracked key whose `clone` makes a new tracked key, spending a
+/// shared budget, and panics once it is spent. Ordered by `order` alone.
+///
+/// Padded to 64 bytes, as [`CollidingKey`], for tall trees from few entries.
+struct CloningKey<'l> {
+    order: usize,
+    _tracked: Tracked<'l>,
+    ledger: &'l DropLedger,
+    budget: &'l Cell<usize>,
+    _padding: [u8; 24],
+}
+
+impl<'l> CloningKey<'l> {
+    fn new(order: usize, ledger: &'l DropLedger, budget: &'l Cell<usize>) -> Self {
+        Self {
+            order,
+            _tracked: ledger.track(),
+            ledger,
+            budget,
+            _padding: [0; 24],
+        }
+    }
+}
+
+impl Clone for CloningKey<'_> {
+    fn clone(&self) -> Self {
+        let budget = self.budget.get();
+        assert!(budget > 0, "the clone budget is spent");
+        self.budget.set(budget - 1);
+        Self::new(self.order, self.ledger, self.budget)
+    }
+}
+
+impl PartialEq for CloningKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.order == other.order
+    }
+}
+
+impl Eq for CloningKey<'_> {}
+
+impl PartialOrd for CloningKey<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CloningKey<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.order.cmp(&other.order)
+    }
+}
+
+/// A `clone` that panics part of the way through a tall tree drops what it
+/// copied so far, every key once, and leaves the source unchanged.
+#[test]
+fn a_panicking_clone_drops_the_partial_copy() {
+    let ledger = DropLedger::new();
+    let budget = Cell::new(usize::MAX);
+    let count = if cfg!(miri) { 200 } else { 1000 };
+    let mut map = BBTreeMap::new();
+    for order in 0..count {
+        map.insert(CloningKey::new(order, &ledger, &budget), order);
+    }
+    assert!(map.height() >= 2);
+    for clones in [0, 1, count / 3, count - 1] {
+        budget.set(clones);
+        let copy = catch_unwind(AssertUnwindSafe(|| map.clone()));
+        assert!(copy.is_err(), "the copy needs {count} clones");
+        map.check_invariants();
+        assert!(
+            map.iter()
+                .map(|(key, &value)| (key.order, value))
+                .eq((0..count).map(|order| (order, order)))
+        );
+    }
+    budget.set(count);
+    let copy = map.clone();
+    copy.check_invariants();
+    assert!(
+        copy.iter()
+            .map(|(key, &value)| (key.order, value))
+            .eq((0..count).map(|order| (order, order)))
+    );
+    drop(copy);
+    drop(map);
+    ledger.assert_all_dropped_once();
+}
+
 #[test]
 fn replacing_keeps_the_old_key_and_drops_each_once() {
     let ledger = DropLedger::new();

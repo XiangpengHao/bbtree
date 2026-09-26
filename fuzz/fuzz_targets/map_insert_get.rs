@@ -112,16 +112,52 @@ enum MapOperation {
         end: InputBound,
         ends: Ends,
     },
+    /// Walks the whole maps mutably from both ends, bumping every value.
+    IterateMut {
+        ends: Ends,
+        amount: u16,
+    },
+    /// Replaces both maps by their clones.
+    Clone,
+    /// Replaces both maps by maps collected from these entries.
+    Collect {
+        entries: Vec<(InputKey, u16)>,
+    },
+    /// Extends both maps with these entries.
+    Extend {
+        entries: Vec<(InputKey, u16)>,
+    },
+    /// Takes both maps by value and walks `count` entries from both ends,
+    /// then drops the rest: the maps start over empty.
+    IntoIter {
+        ends: Ends,
+        count: u8,
+    },
+    /// Walks a range mutably from both ends, bumping every value; bounds out
+    /// of order are skipped.
+    RangeMut {
+        start: InputBound,
+        end: InputBound,
+        ends: Ends,
+        amount: u16,
+    },
 }
 
 /// The value type of the maps under test, made from fuzzer input.
 trait FuzzValue: Clone + PartialEq + Debug {
     fn from_input(input: u16) -> Self;
+
+    /// Changes the value by `amount`, the same way every time.
+    fn bump(&mut self, amount: u16);
 }
 
 impl FuzzValue for u64 {
     fn from_input(input: u16) -> Self {
         u64::from(input)
+    }
+
+    fn bump(&mut self, amount: u16) {
+        *self = self.wrapping_add(u64::from(amount));
     }
 }
 
@@ -131,6 +167,10 @@ type TwelvePerNode = [u64; 40];
 impl FuzzValue for TwelvePerNode {
     fn from_input(input: u16) -> Self {
         std::array::from_fn(|index| u64::from(input) + index as u64)
+    }
+
+    fn bump(&mut self, amount: u16) {
+        self[0] = self[0].wrapping_add(u64::from(amount));
     }
 }
 
@@ -233,17 +273,67 @@ impl<V: FuzzValue> MirroredMaps<V> {
                 assert_eq!(self.ours.iter().len(), self.theirs.iter().len());
                 Self::assert_same_walk(self.ours.iter(), self.theirs.iter(), ends);
             }
+            MapOperation::Clone => {
+                self.ours = self.ours.clone();
+                self.theirs = self.theirs.clone();
+                self.assert_same_entries();
+            }
+            MapOperation::Collect { ref entries } => {
+                let entries = || {
+                    entries
+                        .iter()
+                        .map(|&(key, value)| (key.map_key(), V::from_input(value)))
+                };
+                self.ours = entries().collect();
+                self.theirs = entries().collect();
+                self.assert_same_entries();
+            }
+            MapOperation::Extend { ref entries } => {
+                let entries = || {
+                    entries
+                        .iter()
+                        .map(|&(key, value)| (key.map_key(), V::from_input(value)))
+                };
+                self.ours.extend(entries());
+                self.theirs.extend(entries());
+            }
+            MapOperation::IntoIter { ends, count } => {
+                let mut ours = std::mem::take(&mut self.ours).into_iter();
+                let mut theirs = std::mem::take(&mut self.theirs).into_iter();
+                for step in 0..usize::from(count) {
+                    assert_eq!(ours.len(), theirs.len());
+                    let entries = if ends.from_back(step) {
+                        (ours.next_back(), theirs.next_back())
+                    } else {
+                        (ours.next(), theirs.next())
+                    };
+                    assert_eq!(entries.0, entries.1);
+                }
+            }
+            MapOperation::IterateMut { ends, amount } => {
+                Self::assert_same_walk_mut(
+                    self.ours.iter_mut(),
+                    self.theirs.iter_mut(),
+                    ends,
+                    amount,
+                );
+            }
+            MapOperation::RangeMut {
+                start,
+                end,
+                ends,
+                amount,
+            } => {
+                let bounds = (start.map_bound(), end.map_bound());
+                if !Self::out_of_order(bounds) {
+                    let (ours, theirs) =
+                        (self.ours.range_mut(bounds), self.theirs.range_mut(bounds));
+                    Self::assert_same_walk_mut(ours, theirs, ends, amount);
+                }
+            }
             MapOperation::Range { start, end, ends } => {
                 let bounds = (start.map_bound(), end.map_bound());
-                let out_of_order = match bounds {
-                    (Bound::Excluded(start), Bound::Excluded(end)) => start >= end,
-                    (
-                        Bound::Included(start) | Bound::Excluded(start),
-                        Bound::Included(end) | Bound::Excluded(end),
-                    ) => start > end,
-                    _ => false,
-                };
-                if !out_of_order {
+                if !Self::out_of_order(bounds) {
                     Self::assert_same_walk(
                         self.ours.range(bounds),
                         self.theirs.range(bounds),
@@ -253,6 +343,44 @@ impl<V: FuzzValue> MirroredMaps<V> {
             }
         }
         assert_eq!(self.ours.len(), self.theirs.len());
+    }
+
+    /// Whether both maps panic for these range bounds.
+    fn out_of_order(bounds: (Bound<u64>, Bound<u64>)) -> bool {
+        match bounds {
+            (Bound::Excluded(start), Bound::Excluded(end)) => start >= end,
+            (
+                Bound::Included(start) | Bound::Excluded(start),
+                Bound::Included(end) | Bound::Excluded(end),
+            ) => start > end,
+            _ => false,
+        }
+    }
+
+    /// Takes every item of both mutable iterators, each step from the end
+    /// `ends` picks, checking that they match and bumping each value.
+    fn assert_same_walk_mut<'a>(
+        mut ours: impl DoubleEndedIterator<Item = (&'a u64, &'a mut V)>,
+        mut theirs: impl DoubleEndedIterator<Item = (&'a u64, &'a mut V)>,
+        ends: Ends,
+        amount: u16,
+    ) where
+        V: 'a,
+    {
+        for step in 0.. {
+            let entries = if ends.from_back(step) {
+                (ours.next_back(), theirs.next_back())
+            } else {
+                (ours.next(), theirs.next())
+            };
+            let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
+                assert!(entries.0.is_none() && entries.1.is_none());
+                return;
+            };
+            assert_eq!((our_key, &*our_value), (their_key, &*their_value));
+            our_value.bump(amount);
+            their_value.bump(amount);
+        }
     }
 
     /// Takes every item of both iterators, each step from the end `ends`

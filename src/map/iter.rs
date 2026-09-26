@@ -1,126 +1,19 @@
 //! Iterating over a map by shared reference: [`Iter`], [`Keys`], [`Values`]
-//! and [`Range`], each a walk between two cursors (`cursor.rs`, D23). The
-//! whole-map iterators know how many entries are left, and stop by that
-//! count; a range stops where its ends meet. Only building a range calls
-//! `Ord`, to find its ends.
+//! and [`Range`], each a walk from both ends (`walk.rs`, D23). The whole-map
+//! iterators know how many entries are left; a range stops where its ends
+//! meet. Only building a range calls `Ord`, to find its ends.
 
 #![forbid(unsafe_code)]
 
 use core::borrow::Borrow;
-use core::cmp::Ordering;
 use core::fmt;
 use core::iter::FusedIterator;
-use core::ops::{Bound, RangeBounds};
+use core::ops::RangeBounds;
 
 use super::BBTreeMap;
-use super::cursor::{KeySide, LeafCursor, Root};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::inline_keys::SearchKey;
-
-/// The entries between two positions of a tree, taken from either end. An
-/// end that has not started starts at the first or last entry of the tree
-/// the first time it moves, so a walk over the whole tree costs nothing until
-/// then, and one end never moves the other.
-struct Walk<'a, K, V, S> {
-    /// `None` for a map without a tree.
-    root: Option<Root<'a, K, V, S>>,
-    front: LeafCursor<'a, K, V, S>,
-    back: LeafCursor<'a, K, V, S>,
-}
-
-impl<K, V, S> Clone for Walk<'_, K, V, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K, V, S> Copy for Walk<'_, K, V, S> {}
-
-impl<'a, K, V, S: InlineKeyStrategy<K>> Walk<'a, K, V, S> {
-    const EMPTY: Self = Self {
-        root: None,
-        front: LeafCursor::UNSTARTED,
-        back: LeafCursor::UNSTARTED,
-    };
-
-    /// Every entry of the tree under `root`.
-    fn whole(root: Root<'a, K, V, S>) -> Self {
-        Self {
-            root: Some(root),
-            front: LeafCursor::UNSTARTED,
-            back: LeafCursor::UNSTARTED,
-        }
-    }
-
-    /// The entries of the tree under `root` within the bounds, with std's
-    /// panics for bounds out of order (D1).
-    ///
-    /// # Panics
-    ///
-    /// If `start > end`, if `start == end` and both are excluded, or if `Ord`
-    /// is so inconsistent that the start is found after the end.
-    fn between<Q>(root: Root<'a, K, V, S>, start: Bound<&Q>, end: Bound<&Q>) -> Self
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        match (start, end) {
-            (Bound::Excluded(start), Bound::Excluded(end)) if start == end => {
-                panic!("range start and end are equal and excluded in BTreeMap")
-            }
-            (
-                Bound::Included(start) | Bound::Excluded(start),
-                Bound::Included(end) | Bound::Excluded(end),
-            ) if start > end => panic!("range start is greater than range end in BTreeMap"),
-            _ => {}
-        }
-        let mut walk = Self::whole(root);
-        match start {
-            Bound::Included(key) => {
-                walk.front
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::Before);
-            }
-            Bound::Excluded(key) => {
-                walk.front
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::After);
-            }
-            Bound::Unbounded => walk.front.move_to_first(root),
-        }
-        match end {
-            Bound::Included(key) => {
-                walk.back
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::After);
-            }
-            Bound::Excluded(key) => {
-                walk.back
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::Before);
-            }
-            Bound::Unbounded => walk.back.move_to_last(root),
-        }
-        if walk.front.cmp_position(&walk.back) == Ordering::Greater {
-            panic!("Ord is ill-defined in BTreeMap range");
-        }
-        walk
-    }
-
-    /// The entry after the front end, which moves past it; `None` at the end
-    /// of the tree. Does not check for the back end.
-    fn next(&mut self) -> Option<(&'a K, &'a V)> {
-        self.front.next(self.root?)
-    }
-
-    /// The entry before the back end, which moves back past it; `None` at the
-    /// start of the tree. Does not check for the front end.
-    fn next_back(&mut self) -> Option<(&'a K, &'a V)> {
-        self.back.next_back(self.root?)
-    }
-
-    /// Whether no entry is left between the ends, for a walk whose ends have
-    /// both started, or that has no tree.
-    fn ends_meet(&self) -> bool {
-        self.root.is_none() || self.front.is_at(&self.back)
-    }
-}
+use crate::node::handle::Immut;
+use crate::node::walk::{FullWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
 ///
@@ -130,24 +23,18 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Walk<'a, K, V, S> {
 /// [`iter`]: BBTreeMap::iter
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct Iter<'a, K: 'a, V: 'a, S = Auto> {
-    walk: Walk<'a, K, V, S>,
-    /// The entries left between the ends.
-    length: usize,
+    walk: FullWalk<Immut<'a>, K, V, S>,
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for Iter<'a, K, V, S> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<(&'a K, &'a V)> {
-        if self.length == 0 {
-            return None;
-        }
-        self.length -= 1;
         self.walk.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.length, Some(self.length))
+        (self.walk.len(), Some(self.walk.len()))
     }
 
     fn last(mut self) -> Option<(&'a K, &'a V)> {
@@ -171,17 +58,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for Iter<'a, K, V, S> {
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> DoubleEndedIterator for Iter<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a V)> {
-        if self.length == 0 {
-            return None;
-        }
-        self.length -= 1;
         self.walk.next_back()
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> ExactSizeIterator for Iter<'_, K, V, S> {
     fn len(&self) -> usize {
-        self.length
+        self.walk.len()
     }
 }
 
@@ -190,8 +73,7 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for Iter<'_, K, V, S> {}
 impl<K, V, S> Clone for Iter<'_, K, V, S> {
     fn clone(&self) -> Self {
         Self {
-            walk: self.walk,
-            length: self.length,
+            walk: self.walk.clone(),
         }
     }
 }
@@ -212,8 +94,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Iter<'_, K, V, S> {
     /// ```
     fn default() -> Self {
         Self {
-            walk: Walk::EMPTY,
-            length: 0,
+            walk: FullWalk::EMPTY,
         }
     }
 }
@@ -381,16 +262,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Values<'_, K, V, S> {
 /// [`range`]: BBTreeMap::range
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct Range<'a, K: 'a, V: 'a, S = Auto> {
-    walk: Walk<'a, K, V, S>,
+    walk: RangeWalk<Immut<'a>, K, V, S>,
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Range<'a, K, V, S> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<(&'a K, &'a V)> {
-        if self.walk.ends_meet() {
-            return None;
-        }
         self.walk.next()
     }
 
@@ -415,9 +293,6 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Range<'a, K, V, S> {
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for Range<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a V)> {
-        if self.walk.ends_meet() {
-            return None;
-        }
         self.walk.next_back()
     }
 }
@@ -426,7 +301,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for Range<'_, K, V, S> {}
 
 impl<K, V, S> Clone for Range<'_, K, V, S> {
     fn clone(&self) -> Self {
-        Self { walk: self.walk }
+        Self {
+            walk: self.walk.clone(),
+        }
     }
 }
 
@@ -445,7 +322,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Range<'_, K, V, S> {
     /// assert_eq!(iter.count(), 0);
     /// ```
     fn default() -> Self {
-        Self { walk: Walk::EMPTY }
+        Self {
+            walk: RangeWalk::EMPTY,
+        }
     }
 }
 
@@ -470,13 +349,9 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, S> {
-        let walk = self
-            .root
-            .as_ref()
-            .map_or(Walk::EMPTY, |root| Walk::whole(root.borrow()));
+        let root = self.root.as_ref().map(|root| root.borrow());
         Iter {
-            walk,
-            length: self.length,
+            walk: FullWalk::new(root, self.length),
         }
     }
 
@@ -554,7 +429,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             return Range::default();
         };
         Range {
-            walk: Walk::between(root.borrow(), range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(root.borrow(), range.start_bound(), range.end_bound()),
         }
     }
 }
