@@ -1,5 +1,6 @@
-//! Differential fuzzing (D5): arbitrary insert and lookup operations on a
-//! `BBTreeMap` and on std's `BTreeMap`, which must answer every one alike.
+//! Differential fuzzing (D5): arbitrary insert, lookup and removal
+//! operations on a `BBTreeMap` and on std's `BTreeMap`, which must answer
+//! every one alike.
 
 #![no_main]
 
@@ -54,6 +55,22 @@ enum MapOperation {
         key: InputKey,
     },
     Len,
+    Remove {
+        key: InputKey,
+    },
+    RemoveEntry {
+        key: InputKey,
+    },
+    /// Removes `count` consecutive keys from `first_key`: trees that shrink
+    /// by many levels from short inputs.
+    RemoveRun {
+        first_key: InputKey,
+        count: u8,
+    },
+    PopFirst,
+    PopLast,
+    FirstAndLast,
+    Clear,
 }
 
 /// The value type of the maps under test, made from fuzzer input.
@@ -143,7 +160,36 @@ impl<V: FuzzValue> MirroredMaps<V> {
                 assert_eq!(self.ours.len(), self.theirs.len());
                 assert_eq!(self.ours.is_empty(), self.theirs.is_empty());
             }
+            MapOperation::Remove { key } => {
+                let key = key.map_key();
+                assert_eq!(self.ours.remove(&key), self.theirs.remove(&key));
+            }
+            MapOperation::RemoveEntry { key } => {
+                let key = key.map_key();
+                assert_eq!(self.ours.remove_entry(&key), self.theirs.remove_entry(&key));
+            }
+            MapOperation::RemoveRun { first_key, count } => {
+                for offset in 0..u16::from(count) {
+                    let key = first_key.after(offset).map_key();
+                    assert_eq!(self.ours.remove(&key), self.theirs.remove(&key));
+                }
+            }
+            MapOperation::PopFirst => {
+                assert_eq!(self.ours.pop_first(), self.theirs.pop_first());
+            }
+            MapOperation::PopLast => {
+                assert_eq!(self.ours.pop_last(), self.theirs.pop_last());
+            }
+            MapOperation::FirstAndLast => {
+                assert_eq!(self.ours.first_key_value(), self.theirs.first_key_value());
+                assert_eq!(self.ours.last_key_value(), self.theirs.last_key_value());
+            }
+            MapOperation::Clear => {
+                self.ours.clear();
+                self.theirs.clear();
+            }
         }
+        assert_eq!(self.ours.len(), self.theirs.len());
     }
 
     fn insert(&mut self, key: u64, value: V) {
@@ -154,6 +200,8 @@ impl<V: FuzzValue> MirroredMaps<V> {
 
     fn assert_same_entries(&self) {
         assert_eq!(self.ours.len(), self.theirs.len());
+        assert_eq!(self.ours.first_key_value(), self.theirs.first_key_value());
+        assert_eq!(self.ours.last_key_value(), self.theirs.last_key_value());
         for (key, value) in &self.theirs {
             assert_eq!(self.ours.get(key), Some(value));
         }

@@ -18,8 +18,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// - every key lies within the separator bounds passed down from its
     ///   parent;
     /// - all leaves are at the same depth;
-    /// - every node below the root holds at least as many keys as a split
-    ///   leaves in a half (nothing removes entries yet);
+    /// - every node below the root holds at least its `min_len` keys, which
+    ///   splits and removals keep (D22);
     /// - the root of a non-empty map holds a key, and so does an internal
     ///   root;
     /// - every leaf but the leftmost has a head, the value of the separator
@@ -146,9 +146,10 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         let keys = node.keys();
         if depth > 0 {
             assert!(
-                keys.len() >= node.min_len_after_split(),
-                "a node below the root has {} keys, fewer than a split leaves",
-                keys.len()
+                !node.is_underfull(),
+                "a node below the root has {} keys, fewer than its minimum of {}",
+                keys.len(),
+                node.min_len()
             );
         }
         for key in keys {

@@ -134,9 +134,7 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
     const UNSUPPORTED: &'static [Operation] = &[
         Operation::Iterate,
         Operation::Range64,
-        Operation::RemoveRandom,
         Operation::EntryUpsert,
-        Operation::PopFirst,
         Operation::BulkBuild,
     ];
 
@@ -154,6 +152,14 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
 
     fn get(&self, key: &K) -> Option<&V> {
         BBTreeMap::get(self, key)
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        BBTreeMap::remove(self, key)
+    }
+
+    fn pop_first(&mut self) -> Option<(K, V)> {
+        BBTreeMap::pop_first(self)
     }
 }
 

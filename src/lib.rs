@@ -15,7 +15,7 @@ mod map;
     not(test),
     expect(
         dead_code,
-        reason = "removal, iteration and fence keys (05-fence-key.md), not yet written, use the rest of the node API"
+        reason = "iteration, entries and fence keys (05-fence-key.md), not yet written, use the rest of the node API"
     )
 )]
 mod node;

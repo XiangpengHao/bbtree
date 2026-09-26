@@ -1,8 +1,9 @@
 //! Differential tests: the map against std's `BTreeMap`, fed the same
 //! operations, for ordinary, heap-owning, wide, zero-sized and over-aligned
 //! keys and values, including every key that ends up as a separator in an
-//! internal node, with its value in a leaf's head (D17). The tests of inline
-//! keys (`inline_key_tests.rs`) use the same harness.
+//! internal node, with its value in a leaf's head (D17), and removals down to
+//! an empty map, which merge nodes and move entries between them (D22). The
+//! tests of inline keys (`inline_key_tests.rs`) use the same harness.
 
 #![forbid(unsafe_code)]
 
@@ -101,6 +102,16 @@ where
         assert_eq!(self.ours.contains_key(key), self.theirs.contains_key(key));
     }
 
+    /// Removes `key` by a borrowed form of the keys from both maps.
+    pub(super) fn remove_borrowed<Q>(&mut self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        assert_eq!(self.ours.remove_entry(key), self.theirs.remove_entry(key));
+        self.assert_same_len();
+    }
+
     /// The keys in both maps, in order.
     pub(super) fn keys(&self) -> impl Iterator<Item = &K> {
         self.theirs.keys()
@@ -128,6 +139,37 @@ where
             }
             (ours, theirs) => assert_eq!(ours, theirs),
         }
+    }
+
+    fn remove(&mut self, key: &K) {
+        assert_eq!(self.ours.remove(key), self.theirs.remove(key));
+        self.assert_same_len();
+    }
+
+    fn remove_entry(&mut self, key: &K) {
+        assert_eq!(self.ours.remove_entry(key), self.theirs.remove_entry(key));
+        self.assert_same_len();
+    }
+
+    fn pop_first(&mut self) {
+        assert_eq!(self.ours.pop_first(), self.theirs.pop_first());
+        self.assert_same_len();
+    }
+
+    fn pop_last(&mut self) {
+        assert_eq!(self.ours.pop_last(), self.theirs.pop_last());
+        self.assert_same_len();
+    }
+
+    fn first_and_last(&self) {
+        assert_eq!(self.ours.first_key_value(), self.theirs.first_key_value());
+        assert_eq!(self.ours.last_key_value(), self.theirs.last_key_value());
+    }
+
+    fn clear(&mut self) {
+        self.ours.clear();
+        self.theirs.clear();
+        self.assert_same_entries();
     }
 
     fn assert_same_len(&self) {
@@ -161,18 +203,56 @@ where
         self.assert_same_entries();
     }
 
-    /// `steps` random operations on keys made from `0..key_space`.
+    /// `steps` random operations on keys made from `0..key_space`. Inserts
+    /// outnumber removals: the map grows to about two thirds of the key
+    /// space.
     pub(super) fn run_random_operations(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
         for _ in 0..steps {
             let key = K::from_number(rng.below(key_space));
-            match rng.below(8) {
-                0..=3 => self.insert(key, V::from_number(rng.below(1 << 30))),
-                4 | 5 => self.get(&key),
-                6 => self.update(&key, V::from_number(rng.below(1 << 30))),
-                _ => self.assert_same_len(),
+            match rng.below(16) {
+                0..=6 => self.insert(key, V::from_number(rng.below(1 << 30))),
+                7 | 8 => self.get(&key),
+                9 => self.update(&key, V::from_number(rng.below(1 << 30))),
+                10 | 11 => self.remove(&key),
+                12 => self.remove_entry(&key),
+                13 => self.pop_first(),
+                14 => self.pop_last(),
+                _ => self.first_and_last(),
             }
         }
         self.assert_same_entries();
+    }
+
+    /// Removes every entry, in `order`, checking the invariants as the map
+    /// shrinks: whenever its height drops, and about 32 times besides.
+    fn remove_all(&mut self, order: RemovalOrder, rng: &TestRng) {
+        let mut keys: Vec<K> = self.theirs.keys().cloned().collect();
+        rng.shuffle(&mut keys);
+        let check_every = (keys.len() / 32).max(1);
+        let mut height = self.ours.height();
+        for (step, key) in keys.iter().enumerate() {
+            match order {
+                RemovalOrder::Ascending => self.pop_first(),
+                RemovalOrder::Descending => self.pop_last(),
+                RemovalOrder::Random => match rng.below(8) {
+                    0 => self.pop_first(),
+                    1 => self.pop_last(),
+                    2 => self.remove_entry(key),
+                    _ => self.remove(key),
+                },
+            }
+            self.first_and_last();
+            if self.ours.height() != height || step % check_every == 0 {
+                height = self.ours.height();
+                self.ours.check_invariants();
+            }
+        }
+        // A pop may have taken a key before its turn, leaving another behind.
+        while !self.theirs.is_empty() {
+            self.pop_first();
+        }
+        self.assert_same_entries();
+        assert_eq!(self.ours.height(), 0);
     }
 
     /// Inserts the keys made from the even `numbers`, in their order, then
@@ -192,6 +272,20 @@ where
     }
 }
 
+/// The order in which [`MirroredMaps::remove_all`] removes entries.
+#[derive(Clone, Copy)]
+enum RemovalOrder {
+    /// By `pop_first`: always from the leftmost leaf, which has no left
+    /// sibling.
+    Ascending,
+    /// By `pop_last`: always from the rightmost leaf, which has no right
+    /// sibling.
+    Descending,
+    /// By key, in random order, through `remove` and `remove_entry`, mixed
+    /// with `pop_first` and `pop_last`: separators too (D17).
+    Random,
+}
+
 /// How much work one key and value type gets: large natively, small under
 /// Miri.
 pub(super) struct Workload {
@@ -207,7 +301,9 @@ pub(super) struct Workload {
 impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
-    /// followed by overwriting every separator's value.
+    /// followed by overwriting every separator's value and removing every
+    /// entry. The emptied map of random operations then takes more of them,
+    /// and is cleared.
     pub(super) fn run<K, V, S>(&self, seed: u64)
     where
         K: Ord + Clone + Debug + FromNumber,
@@ -218,10 +314,16 @@ impl Workload {
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.run_random_operations(&rng, self.random_steps, self.key_space);
         maps.overwrite_separators(&rng);
+        maps.remove_all(RemovalOrder::Random, &rng);
+        maps.run_random_operations(&rng, self.random_steps / 4, self.key_space);
+        maps.clear();
 
         let evens = || (0..self.ordered_entries).map(|index| 2 * index);
-        let sequential_orders: [Vec<usize>; 2] = [evens().collect(), evens().rev().collect()];
-        for numbers in sequential_orders {
+        let sequential_orders: [(Vec<usize>, RemovalOrder); 2] = [
+            (evens().collect(), RemovalOrder::Ascending),
+            (evens().rev().collect(), RemovalOrder::Descending),
+        ];
+        for (numbers, removal_order) in sequential_orders {
             let mut maps = MirroredMaps::<K, V, S>::new();
             maps.insert_evens_in_order(numbers);
             let height = maps.ours.height();
@@ -231,12 +333,14 @@ impl Workload {
                 self.min_sequential_height
             );
             maps.overwrite_separators(&rng);
+            maps.remove_all(removal_order, &rng);
         }
         let mut shuffled: Vec<usize> = evens().collect();
         rng.shuffle(&mut shuffled);
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.insert_evens_in_order(shuffled);
         maps.overwrite_separators(&rng);
+        maps.remove_all(RemovalOrder::Random, &rng);
     }
 }
 
@@ -311,6 +415,10 @@ fn zero_sized_keys_and_values_match_std() {
     assert_eq!(map.len(), 1);
     assert_eq!(map.get(&()), Some(&()));
     map.check_invariants();
+    assert_eq!(map.remove_entry(&()), Some(((), ())));
+    assert_eq!(map.pop_first(), None);
+    assert!(map.is_empty());
+    map.check_invariants();
 
     let rng = TestRng::new(4);
     MirroredMaps::<(), ()>::new().run_random_operations(&rng, 100, 1);
@@ -336,6 +444,7 @@ fn byte_keys_with_zero_sized_values_match_std() {
     }
     maps.assert_same_entries();
     assert_eq!(maps.ours.len(), 256);
+    maps.remove_all(RemovalOrder::Random, &rng);
 }
 
 #[test]

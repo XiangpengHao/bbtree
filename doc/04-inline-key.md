@@ -323,3 +323,6 @@ AVX-512, a branchless binary search otherwise.**
   (Q6). Settle it if AVX2 builds matter.
 - [ ] **Long shared prefixes:** per-node prefix stripping, designed in
   05-fence-key.md.
+
+
+- [ ] With effecive inline keys, we should change the kv layout so that they are side by side?

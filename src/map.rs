@@ -4,8 +4,9 @@
 //!
 //! The map owns at most one [`Subtree`]: none until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
-//! whose call stack is the path back up for splits (`insert.rs`); looking up
-//! is a loop down from the root (`lookup.rs`).
+//! whose call stack is the path back up for splits (`insert.rs`), and so is
+//! removing, for merges (`remove.rs`); looking up is a loop down from the
+//! root (`lookup.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
@@ -22,6 +23,7 @@ mod insert;
 #[cfg(test)]
 mod invariants;
 mod lookup;
+mod remove;
 #[cfg(test)]
 mod type_tests;
 
@@ -125,6 +127,29 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         self.len() == 0
     }
 
+    /// Clears the map, removing all elements.
+    ///
+    /// Drops every key and value in ascending key order, each key before its
+    /// value, as dropping the map does. If one of their `Drop`s panics, the
+    /// rest are still dropped, and the map is left empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut a = BBTreeMap::new();
+    /// a.insert(1, "a");
+    /// a.clear();
+    /// assert!(a.is_empty());
+    /// ```
+    pub fn clear(&mut self) {
+        self.length = 0;
+        if let Some(root) = self.root.take() {
+            root.destroy(PageByKind::deallocate);
+        }
+    }
+
     /// Returns a reference to the value corresponding to the key.
     ///
     /// The key may be any borrowed form of the map's key type, but the
@@ -164,6 +189,99 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let root = self.root.as_ref()?.borrow();
         let kv = root.search_tree(key)?;
         Some(kv.into_key_value())
+    }
+
+    /// Returns the first key-value pair in the map. The key in this pair is
+    /// the minimum key in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// assert_eq!(map.first_key_value(), None);
+    /// map.insert(1, "b");
+    /// map.insert(2, "a");
+    /// assert_eq!(map.first_key_value(), Some((&1, &"b")));
+    /// ```
+    pub fn first_key_value(&self) -> Option<(&K, &V)>
+    where
+        K: Ord,
+    {
+        let kv = self.root.as_ref()?.borrow().first_leaf_kv()?;
+        Some(kv.into_key_value())
+    }
+
+    /// Removes and returns the first element in the map. The key of this
+    /// element is the minimum key that was in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "a");
+    /// map.insert(2, "b");
+    /// assert_eq!(map.pop_first(), Some((1, "a")));
+    /// assert_eq!(map.pop_first(), Some((2, "b")));
+    /// assert_eq!(map.pop_first(), None);
+    /// assert!(map.is_empty());
+    /// ```
+    pub fn pop_first(&mut self) -> Option<(K, V)>
+    where
+        K: Ord,
+    {
+        let entry = self.root.as_mut()?.pop_first(PageByKind::deallocate)?;
+        self.length -= 1;
+        Some(entry)
+    }
+
+    /// Returns the last key-value pair in the map. The key in this pair is
+    /// the maximum key in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "b");
+    /// map.insert(2, "a");
+    /// assert_eq!(map.last_key_value(), Some((&2, &"a")));
+    /// ```
+    pub fn last_key_value(&self) -> Option<(&K, &V)>
+    where
+        K: Ord,
+    {
+        let kv = self.root.as_ref()?.borrow().last_leaf_kv()?;
+        Some(kv.into_key_value())
+    }
+
+    /// Removes and returns the last element in the map. The key of this
+    /// element is the maximum key that was in the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "a");
+    /// map.insert(2, "b");
+    /// assert_eq!(map.pop_last(), Some((2, "b")));
+    /// assert_eq!(map.pop_last(), Some((1, "a")));
+    /// assert_eq!(map.pop_last(), None);
+    /// assert!(map.is_empty());
+    /// ```
+    pub fn pop_last(&mut self) -> Option<(K, V)>
+    where
+        K: Ord,
+    {
+        let entry = self.root.as_mut()?.pop_last(PageByKind::deallocate)?;
+        self.length -= 1;
+        Some(entry)
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -219,6 +337,69 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         }
         old_value
     }
+
+    /// Removes a key from the map, returning the value at the key if the key
+    /// was previously in the map.
+    ///
+    /// The key may be any borrowed form of the map's key type, but the
+    /// ordering on the borrowed form *must* match the ordering on the key
+    /// type.
+    ///
+    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics, the
+    /// map is unchanged: every call to them happens before the first change.
+    ///
+    /// [`WithInlineKey`]: crate::WithInlineKey
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "a");
+    /// assert_eq!(map.remove(&1), Some("a"));
+    /// assert_eq!(map.remove(&1), None);
+    /// ```
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        self.remove_entry(key).map(|(_, value)| value)
+    }
+
+    /// Removes a key from the map, returning the stored key and value if the
+    /// key was previously in the map.
+    ///
+    /// The key may be any borrowed form of the map's key type, but the
+    /// ordering on the borrowed form *must* match the ordering on the key
+    /// type.
+    ///
+    /// Panics in `K`'s `Ord` or `InlineKey` leave the map unchanged, as for
+    /// [`BBTreeMap::remove`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// map.insert(1, "a");
+    /// assert_eq!(map.remove_entry(&1), Some((1, "a")));
+    /// assert_eq!(map.remove_entry(&1), None);
+    /// ```
+    pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        let entry = self
+            .root
+            .as_mut()?
+            .remove_entry(key, PageByKind::deallocate)?;
+        self.length -= 1;
+        Some(entry)
+    }
 }
 
 impl<K, V> Default for BBTreeMap<K, V> {
@@ -236,9 +417,7 @@ impl<K, V> Default for BBTreeMap<K, V> {
 /// only), this one requires the keys and values to strictly outlive the map.
 impl<K, V, S: InlineKeyStrategy<K>> Drop for BBTreeMap<K, V, S> {
     fn drop(&mut self) {
-        if let Some(root) = self.root.take() {
-            root.destroy(PageByKind::deallocate);
-        }
+        self.clear();
     }
 }
 

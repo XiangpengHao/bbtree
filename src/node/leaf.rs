@@ -399,12 +399,24 @@ mod tests {
                 }
                 9 => {
                     let mut leaf = root_leaf(&mut tree);
-                    match (model.head, rng.below(2)) {
+                    match (model.head, rng.below(3)) {
                         (Some(head_id), 0) => {
                             let head = leaf.head().expect("the model says there is a head");
                             let (value, _) = head.remove();
                             assert_eq!(value.tracked_id(), head_id);
                             model.head = None;
+                        }
+                        (Some(head_id), 1) => {
+                            let head = leaf.head().expect("the model says there is a head");
+                            match head.remove_with_first_key() {
+                                Some((value, key)) => {
+                                    assert_eq!(value.tracked_id(), head_id);
+                                    let (first_key_id, first_value_id) = model.entries.remove(0);
+                                    assert_eq!(key.key().id(), first_key_id);
+                                    model.head = Some(first_value_id);
+                                }
+                                None => assert!(model.entries.is_empty()),
+                            }
                         }
                         (old_head, _) => {
                             let value = V::from_tracked(ledger.track());
@@ -502,13 +514,9 @@ mod tests {
             assert_eq!(merged.index(), 0);
             assert_eq!(merged.into_node().len(), 0);
 
-            let ForceResult::Internal(root) = tree.force() else {
-                panic!("the root is internal");
-            };
-            let (leaf, page) = root.pop_internal_level();
-            pages.release(page);
-            assert_eq!(leaf.height(), 0);
-            leaf
+            pages.release(tree.pop_internal_level());
+            assert_eq!(tree.height(), 0);
+            tree
         }
     }
 

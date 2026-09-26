@@ -129,8 +129,9 @@ impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
                         .release_pages();
                     }
                     None => {
-                        let (only_child, page) = internal.pop_internal_level();
-                        self.rest = Some(only_child);
+                        let mut tree = internal.forget_type();
+                        let page = tree.pop_internal_level();
+                        self.rest = Some(tree);
                         (self.release)(page.into());
                     }
                 },

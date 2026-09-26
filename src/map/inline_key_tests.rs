@@ -107,6 +107,12 @@ fn string_keys_match_std_by_string_and_by_str() {
         maps.get_borrowed(&key[..9]);
         maps.get_borrowed(format!("{key}\0").as_str());
     }
+    for number in 0..workload.key_space + 2 {
+        let key = ten_digits(number);
+        maps.remove_borrowed(&key[..9]);
+        maps.remove_borrowed(key.as_str());
+    }
+    maps.assert_same_entries();
 }
 
 #[test]
@@ -123,6 +129,12 @@ fn byte_vec_keys_match_std_by_vec_and_by_slice() {
         maps.get_borrowed(&key[..3]);
         maps.get_borrowed([key.as_slice(), &[0]].concat().as_slice());
     }
+    for number in 0..workload.key_space + 2 {
+        let key = Vec::from_number(number);
+        maps.remove_borrowed(&key[..3]);
+        maps.remove_borrowed(key.as_slice());
+    }
+    maps.assert_same_entries();
 }
 
 /// Every key ties on its inline key with every other: the search over inline
@@ -163,12 +175,13 @@ fn short_keys_match_std() {
     let mut theirs: BTreeMap<String, u64> = BTreeMap::new();
     for step in 0..steps as u64 {
         let key = short_string(&rng);
-        match rng.below(4) {
+        match rng.below(5) {
             0 | 1 => assert_eq!(ours.insert(key.clone(), step), theirs.insert(key, step)),
             2 => {
                 assert_eq!(ours.get(key.as_str()), theirs.get(key.as_str()));
                 assert_eq!(ours.get_key_value(&key), theirs.get_key_value(&key));
             }
+            3 => assert_eq!(ours.remove(key.as_str()), theirs.remove(key.as_str())),
             _ => assert_eq!(ours.get_mut(key.as_str()), theirs.get_mut(key.as_str())),
         }
     }
@@ -258,10 +271,10 @@ impl InlineKey for LyingKey<'_> {
     }
 }
 
-/// Inserts and looks up keys whose inline keys lie, checking only what any
-/// map must do whatever its answers: every value inserted is dropped once,
-/// and the map never holds more entries than were inserted. Returns whether
-/// every answer matched std's.
+/// Inserts, looks up and removes keys whose inline keys lie, checking only
+/// what any map must do whatever its answers: every value inserted is
+/// dropped once, and the map never holds more entries than were inserted.
+/// Returns whether every answer matched std's.
 fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
     let rng = TestRng::new(seed);
     let ledger = DropLedger::new();
@@ -282,15 +295,23 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
     let mut inserts = 0;
     for _ in 0..steps {
         let number = rng.below(key_space);
-        match rng.below(3) {
-            0 => {
+        match rng.below(5) {
+            0 | 1 => {
                 inserts += 1;
                 let replaced = ours.insert(key(number), ledger.track()).is_some();
                 all_right &= replaced == theirs.insert(number as u32, ()).is_some();
             }
-            1 => {
+            2 => {
                 let found = ours.get(&key(number)).map(Tracked::id).is_some();
                 all_right &= found == theirs.contains_key(&(number as u32));
+            }
+            3 => {
+                let removed = ours.remove(&key(number)).is_some();
+                all_right &= removed == theirs.remove(&(number as u32)).is_some();
+            }
+            _ if rng.below(8) == 0 => {
+                let popped = ours.pop_first().map(|(key, _)| key.number);
+                all_right &= popped == theirs.pop_first().map(|(number, ())| number);
             }
             _ => {
                 if let Some(value) = ours.get_mut(&key(number)) {

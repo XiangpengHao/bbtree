@@ -375,14 +375,11 @@ mod tests {
         assert_eq!(node.subtree_tracked_ids(), ids);
 
         for height in (0..3).rev() {
-            let ForceResult::Internal(root) = tree.force() else {
-                panic!("the root is internal");
-            };
-            let (only_child, page) = root.pop_internal_level();
-            pages.release(page);
-            tree = only_child;
+            pages.release(tree.pop_internal_level());
             assert_eq!(tree.height(), height);
         }
+        let popped_leaf = catch_unwind(AssertUnwindSafe(|| tree.pop_internal_level()));
+        assert!(popped_leaf.is_err(), "a leaf root has no level to pop");
         assert_eq!(tree.borrow().subtree_tracked_ids(), ids);
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();

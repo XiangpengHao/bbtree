@@ -406,23 +406,10 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// Replaces an internal root without keys by its only child, as the tree
     /// layer does after a merge empties the root.
     pub(super) fn pop_empty_roots(&mut self) {
-        loop {
-            let root = self.root.take().expect("the root is always there");
-            match root.force() {
-                ForceResult::Internal(internal) if internal.borrow().len() == 0 => {
-                    let (only_child, page) = internal.pop_internal_level();
-                    self.pages.release(page);
-                    self.root = Some(only_child);
-                }
-                ForceResult::Internal(internal) => {
-                    self.root = Some(internal.forget_type());
-                    return;
-                }
-                ForceResult::Leaf(leaf) => {
-                    self.root = Some(leaf.forget_type());
-                    return;
-                }
-            }
+        let pages = self.pages;
+        let root = self.root_mut();
+        while root.height() > 0 && root.borrow().len() == 0 {
+            pages.release(root.pop_internal_level());
         }
     }
 

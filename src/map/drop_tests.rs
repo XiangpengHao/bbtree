@@ -1,7 +1,7 @@
 //! Drop and panic tests: every key and value is dropped exactly once, and in
-//! the same order as by std's `BTreeMap`, including replaced and panicking
-//! ones and separators, whose values live in leaf heads (D17); and a
-//! panicking `Ord` leaves the map unchanged.
+//! the same order as by std's `BTreeMap`, including replaced, removed and
+//! panicking ones and separators, whose values live in leaf heads (D17); and
+//! a panicking `Ord` leaves the map unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -164,6 +164,33 @@ impl<'l> TrackedMaps<'l> {
         }
     }
 
+    /// Removes key `order` from both maps, through `remove_entry` if
+    /// `with_key`, otherwise through `remove`, which drops the key itself.
+    /// The caller gets the same entry from both, and drops it.
+    fn remove(&mut self, order: usize, with_key: bool) {
+        if with_key {
+            let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
+            let ours = self.ours.remove_entry(&order).map(ids);
+            assert_eq!(ours, self.theirs.remove_entry(&order).map(ids));
+        } else {
+            let ours = self.ours.remove(&order).map(|value| value.id());
+            assert_eq!(ours, self.theirs.remove(&order).map(|value| value.id()));
+        }
+        assert_eq!(self.ours.len(), self.theirs.len());
+    }
+
+    /// Removes the first entry, or the last if `last`, from both maps.
+    fn pop(&mut self, last: bool) {
+        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
+        let (ours, theirs) = if last {
+            (self.ours.pop_last(), self.theirs.pop_last())
+        } else {
+            (self.ours.pop_first(), self.theirs.pop_first())
+        };
+        assert_eq!(ours.map(ids), theirs.map(ids));
+        assert_eq!(self.ours.len(), self.theirs.len());
+    }
+
     /// Looks up key `order` in both maps: the same key, by its tracked id,
     /// and the same value.
     fn get(&self, order: usize) {
@@ -217,6 +244,57 @@ fn drops_match_std() {
     }
     ledgers.assert_same_drops_so_far();
     assert!(maps.ours.height() >= 2);
+    maps.ours.check_invariants();
+    assert!(!maps.drop_both());
+}
+
+/// Removals hand the entry to the caller, except that `remove` drops the
+/// key, as std's does: random removals among inserts, then every separator
+/// by key, whose value comes from a leaf's head (D17), then the rest.
+#[test]
+fn removals_drop_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(24);
+    let mut maps = TrackedMaps::new(&ledgers);
+    let (count, steps) = if cfg!(miri) {
+        (250, 500)
+    } else {
+        (3000, 20_000)
+    };
+    let mut orders: Vec<usize> = (0..count).collect();
+    rng.shuffle(&mut orders);
+    for order in orders {
+        assert!(!maps.insert(order, PanickingPart::Neither));
+    }
+    for _ in 0..steps {
+        let order = rng.below(count);
+        match rng.below(8) {
+            0..=2 => assert!(!maps.insert(order, PanickingPart::Neither)),
+            3 => maps.remove(order, false),
+            4 => maps.remove(order, true),
+            5 => maps.pop(rng.below(2) == 0),
+            _ => maps.get(order),
+        }
+        ledgers.assert_same_drops_so_far();
+    }
+    assert!(maps.ours.height() >= 2);
+    maps.ours.check_invariants();
+
+    let separators: Vec<usize> = maps
+        .ours
+        .separator_keys()
+        .iter()
+        .map(|key| key.order)
+        .collect();
+    for order in separators {
+        maps.remove(order, rng.below(2) == 0);
+        ledgers.assert_same_drops_so_far();
+    }
+    maps.ours.check_invariants();
+    while !maps.theirs.is_empty() {
+        maps.pop(rng.below(2) == 0);
+    }
+    ledgers.assert_same_drops_so_far();
     maps.ours.check_invariants();
     assert!(!maps.drop_both());
 }
@@ -300,6 +378,37 @@ fn a_panicking_new_key_leaves_both_maps_unchanged() {
         ledgers.assert_same_drops_so_far();
     }
     maps.ours.check_invariants();
+    assert!(!maps.drop_both());
+}
+
+/// `clear` drops the entries as dropping the map does, and leaves the map
+/// empty and usable even if one of their `Drop`s panics, as std's does.
+#[test]
+fn a_panicking_drop_while_clearing_matches_std() {
+    let ledgers = LockstepLedgers::new();
+    let mut maps = TrackedMaps::new(&ledgers);
+    let count = if cfg!(miri) { 200 } else { 600 };
+    for order in 0..count {
+        let panicking = if order == count / 2 {
+            PanickingPart::Value
+        } else {
+            PanickingPart::Neither
+        };
+        assert!(!maps.insert(order, panicking));
+    }
+    assert!(maps.ours.height() >= 2);
+    let ours = catch_unwind(AssertUnwindSafe(|| maps.ours.clear()));
+    let theirs = catch_unwind(AssertUnwindSafe(|| maps.theirs.clear()));
+    assert!(ours.is_err() && theirs.is_err());
+    ledgers.assert_same_drops_so_far();
+    assert!(maps.ours.is_empty() && maps.theirs.is_empty());
+    maps.ours.check_invariants();
+
+    assert!(!maps.insert(1, PanickingPart::Neither));
+    maps.get(1);
+    maps.ours.clear();
+    maps.theirs.clear();
+    ledgers.assert_same_drops_so_far();
     assert!(!maps.drop_both());
 }
 
@@ -403,13 +512,25 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         let number = rng.below(2 * count) as u64;
         let key = BudgetedKey::new(number, &budget);
         let seed = (count + trial) as u64;
+        let inserting = rng.below(2) == 0;
         budget.set(rng.below(20));
-        let inserted = catch_unwind(AssertUnwindSafe(|| map.insert(key, seed)));
+        // A removal by `BudgetedKey`, not by `u64`, so that its `Ord` runs.
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            if inserting {
+                map.insert(key, seed)
+            } else {
+                map.remove(&key)
+            }
+        }));
         budget.set(usize::MAX);
-        match inserted {
-            Ok(old_value) => {
+        match outcome {
+            Ok(old_value) if inserting => {
                 completed += 1;
                 assert_eq!(old_value, model.insert(number, seed));
+            }
+            Ok(removed_value) => {
+                completed += 1;
+                assert_eq!(removed_value, model.remove(&number));
             }
             Err(_) => panicked += 1,
         }

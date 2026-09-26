@@ -247,6 +247,38 @@ capacity, not `len`, so it never waits on the header miss.
   a shared size made internal nodes of large-value maps huge (u64 →
   `[u8; 1000]`: 13 KB, ~800 keys).
 
+**D22. Removal: physical, rebalanced bottom-up, nodes at least 1/8 full.** (2026-10-08)
+- **No tombstones.** `remove_entry` and `pop_first`/`pop_last` hand the key
+  back by value, a generic `K` has no sentinel, and a tombstoned key would
+  stay alive, heap memory included, until some compaction, unlike in std.
+  Removing costs one shift in the leaf, as inserting does (D16).
+- **Underfull** means fewer than `max(capacity / 8, 2)` keys, for a node below
+  the root, by its kind's capacity: 7 keys for a u64→u64 leaf of 63.
+- **Bottom-up, like insert (D11).** On the way back up, each level fixes the
+  child it went into if that child is underfull:
+  - it merges the child with a sibling (the left one if there is one) when
+    both fit in one node with their separator;
+  - otherwise it moves one entry over from the sibling. A sibling too full
+    to merge with holds more than `capacity - min_len` keys, so one entry
+    restores the minimum, and after at most `min_len` such steals in a row
+    the two fit. Moving more at once, to even the two out, is not worth its
+    code at this threshold.
+  A merge can leave the parent underfull in turn. An internal root left
+  without keys is popped; an empty leaf root stays allocated, as in std.
+- **A separator is replaced by its successor (D17).** The first key of the
+  leftmost leaf right of it moves up, and that key's value becomes the leaf's
+  head, so values never leave their leaf.
+- Why not std's ~1/2: too strict. At 1/2, a merge yields an almost full node
+  and a split leaves halves right at the threshold, so churn at a node
+  boundary splits and merges over and over; at 1/8, a split half takes about
+  3/8 of a node's worth of removals to underflow.
+- Cost: after adversarial removals, nodes may be 1/8 full, up to 4× the
+  memory per entry of a half-full guarantee.
+- Consequence: a non-root internal node may have only 3 children (capacity
+  12–23). The path-stack depth bound under "Proposed, not decided" (≥ 6
+  children, height ≤ 21) becomes height ≤ 34 for 1 KB nodes in a 64-bit
+  address space.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

@@ -514,14 +514,17 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         NodePtr::<K, V, S>::capacity(self.is_leaf())
     }
 
-    /// The fewest keys either half of a split of a node of this kind holds:
-    /// the smaller side of the full node around its separator, before the
-    /// new entry joins a side.
-    #[cfg(test)]
-    pub(crate) fn min_len_after_split(&self) -> usize {
-        let capacity = self.capacity();
-        let separator_index = FullEdge::<NodeMut<'_, K, V, S, Kind>>::separator_index(capacity);
-        separator_index.min(capacity - separator_index - 1)
+    /// The fewest keys a node below the root holds between removals: an
+    /// eighth of its capacity, and at least 2 (D22). A removal that leaves
+    /// fewer makes the node underfull, for its parent to fix. A split leaves
+    /// about half the capacity in each half, so inserts never do.
+    pub(crate) fn min_len(&self) -> usize {
+        (self.capacity() / 8).max(2)
+    }
+
+    /// Whether the node holds fewer keys than [`Self::min_len`].
+    pub(crate) fn is_underfull(&self) -> bool {
+        self.len() < self.min_len()
     }
 
     /// The prefix length of a node with inline keys, reserved for
@@ -1129,6 +1132,31 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeMut<'a, K, V, S, Leaf>> {
             (value, leaf)
         }
     }
+
+    /// Takes out the head and the first key, whose value becomes the new
+    /// head, and returns both; `None`, changing nothing, if the leaf has no
+    /// keys. This is how the leaf right of a separator being removed gives
+    /// up the separator's value, its head, and hands up the next key, with
+    /// its inline key, to take the separator's place (D17).
+    pub(crate) fn remove_with_first_key(self) -> Option<(V, InlinedKey<K, S>)> {
+        let Self { mut leaf } = self;
+        let len = leaf.len();
+        if len == 0 {
+            return None;
+        }
+        // SAFETY: `0 < len`, so key 0 is initialized, with its inline key,
+        // and is read out, shifting keys `1..len` down. The head is
+        // initialized (invariants 3 and 5), so head-and-value slots `0..=len`
+        // are: slot 0, the head, is read out, and value 0 shifts into it, so
+        // the leaf still has a head. Keys and values `0..len - 1` stay
+        // initialized; this handle is exclusive.
+        unsafe {
+            let key = leaf.key_slots().remove(0, len);
+            let head = leaf.head_and_value_slots().remove(0, len + 1);
+            leaf.set_len(len - 1);
+            Some((head, key))
+        }
+    }
 }
 
 /// An [`Edge`] in a node with room for one more entry: `len < capacity`.
@@ -1509,26 +1537,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S, Leaf> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S, Internal> {
-    /// Removes the root, which must hold no keys, and returns its only child
-    /// as the new tree along with the root's page. Were the root to hold keys,
-    /// they and the other children would be leaked.
-    pub(crate) fn pop_internal_level(self) -> (Subtree<K, V, S>, FreshPage<K, V, S, Internal>) {
-        debug_assert_eq!(self.borrow().len(), 0, "popping a root with keys");
-        // SAFETY: the root is internal, so edge 0 is initialized: the root of a
-        // well-formed subtree one level down that the root owned, and the
-        // returned `Subtree` owns now (invariant 2). Consuming `self` leaves
-        // nothing that reaches the root's page, an internal node's.
-        unsafe {
-            let child = self.node.edge_slots().slot(0).read();
-            (
-                Subtree::from_raw_parts(child, self.height - 1),
-                self.node.into_fresh_page(),
-            )
-        }
-    }
-}
-
 impl<K, V, S> Subtree<K, V, S> {
     /// Finds out the root's kind, from the height.
     pub(crate) fn force(self) -> ForceResult<Subtree<K, V, S, Leaf>, Subtree<K, V, S, Internal>> {
@@ -1561,6 +1569,29 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         // SAFETY: the tree is well-formed again, and `&mut self` gives the
         // handle exclusive access.
         unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+    }
+
+    /// Removes the root, which must be internal and hold no keys, making its
+    /// only child the root, and returns the old root's page: the inverse of
+    /// [`Self::push_internal_level`]. Were the root to hold keys, they and
+    /// the other children would be leaked.
+    ///
+    /// # Panics
+    ///
+    /// If the root is a leaf; the tree is unchanged then.
+    pub(crate) fn pop_internal_level(&mut self) -> FreshPage<K, V, S, Internal> {
+        assert!(self.height > 0, "popping a leaf root");
+        debug_assert_eq!(Self::borrow(self).len(), 0, "popping a root with keys");
+        let root = self.node;
+        // SAFETY: the root is internal, so edge 0 is initialized: the root of
+        // a well-formed subtree one level down that the root owned, and this
+        // `Subtree` owns now (invariant 2). Nothing reaches the old root's
+        // page, an internal node's, anymore.
+        unsafe {
+            self.node = root.edge_slots().slot(0).read();
+            self.height -= 1;
+            root.into_fresh_page()
+        }
     }
 }
 
