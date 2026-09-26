@@ -6,6 +6,7 @@
 
 use core::cell::Cell;
 use core::marker::{PhantomData, PhantomPinned};
+use core::ops::RangeFull;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use std::collections::{BTreeMap, btree_map};
 use std::rc::Rc;
@@ -13,8 +14,8 @@ use std::string::String;
 use std::sync::MutexGuard;
 
 use super::{
-    BBTreeMap, Entry, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, OccupiedEntry, Range,
-    RangeMut, VacantEntry, Values, ValuesMut,
+    BBTreeMap, Entry, ExtractIf, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys,
+    OccupiedEntry, Range, RangeMut, VacantEntry, Values, ValuesMut,
 };
 use crate::inline_key::WithInlineKey;
 
@@ -147,6 +148,13 @@ macro_rules! assert_auto_traits_match_std {
             auto_traits!(VacantEntry<'static, $key, $value>),
             auto_traits!(btree_map::VacantEntry<'static, $key, $value>),
             "VacantEntry in a map from {} to {}",
+            stringify!($key),
+            stringify!($value),
+        );
+        assert_eq!(
+            auto_traits!(ExtractIf<'static, $key, $value, RangeFull, fn(&$key, &mut $value) -> bool>),
+            auto_traits!(btree_map::ExtractIf<'static, $key, $value, RangeFull, fn(&$key, &mut $value) -> bool>),
+            "ExtractIf on a map from {} to {}",
             stringify!($key),
             stringify!($value),
         );

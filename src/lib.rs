@@ -27,7 +27,7 @@ pub use map::BBTreeMap;
 /// with it: the counterpart of `std::collections::btree_map`.
 pub mod bbtree_map {
     pub use crate::map::{
-        BBTreeMap, Entry, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys, OccupiedEntry,
-        Range, RangeMut, VacantEntry, Values, ValuesMut,
+        BBTreeMap, Entry, ExtractIf, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys,
+        OccupiedEntry, Range, RangeMut, VacantEntry, Values, ValuesMut,
     };
 }

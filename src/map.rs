@@ -8,18 +8,23 @@
 //! removing, for merges (`remove.rs`); looking up is a loop down from the
 //! root (`lookup.rs`). Iterating walks the tree from both ends at once
 //! (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value pops
-//! the first or last entry, for now (`into_iter.rs`).
+//! the first or last entry, for now (`into_iter.rs`). Entries remember the
+//! path their search found (`entry.rs`, `position.rs`). Bulk changes drain
+//! entries in order and build trees of full nodes (`append_split.rs`,
+//! `extract_if.rs`, `from_entries.rs`, on `node/build.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
 
 #![forbid(unsafe_code)]
 
+mod append_split;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
 mod drop_tests;
 mod entry;
+mod extract_if;
 mod from_entries;
 #[cfg(test)]
 mod inline_key_tests;
@@ -44,10 +49,12 @@ use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::node::build::TreeBuilder;
 use crate::node::handle::Subtree;
 use crate::node::page::{FreshPage, PageByKind};
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
+pub use extract_if::ExtractIf;
 pub use into_iter::{IntoIter, IntoKeys, IntoValues};
 pub use iter::{Iter, Keys, Range, Values};
 pub use iter_mut::{IterMut, RangeMut, ValuesMut};
@@ -130,6 +137,28 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             root: None,
             length: 0,
         }
+    }
+
+    /// A map with no tree, of any strategy: what `new` makes.
+    const fn empty() -> Self {
+        Self {
+            root: None,
+            length: 0,
+        }
+    }
+
+    /// The map of what `builder` built.
+    fn from_builder(builder: TreeBuilder<K, V, S>) -> Self {
+        let (root, length) = builder.finish();
+        Self { root, length }
+    }
+
+    /// Gives the map a tree, an empty leaf, if it has none: as std's map
+    /// keeps an empty root after losing its entries, which decides whether
+    /// `range` checks its bounds.
+    fn keep_a_tree(&mut self) {
+        self.root
+            .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
     }
 
     /// Returns the number of elements in the map.

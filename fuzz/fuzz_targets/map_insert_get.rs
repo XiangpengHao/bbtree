@@ -131,6 +131,30 @@ enum MapOperation {
         remove: bool,
         value: u16,
     },
+    /// Splits both maps at `key`, compares the parts, and appends the upper
+    /// part back, or drops it.
+    SplitOff {
+        key: InputKey,
+        append_back: bool,
+    },
+    /// Appends a map made of these entries to both maps.
+    Append {
+        entries: Vec<(InputKey, u16)>,
+    },
+    /// Keeps the entries whose bit of `keep` (by key, mod 64) is set,
+    /// bumping every value on the way.
+    Retain {
+        keep: u64,
+    },
+    /// Extracts the entries in a range whose bit of `extract` (by key, mod
+    /// 64) is set, taking at most `take` of them; bounds out of order are
+    /// skipped.
+    ExtractIf {
+        start: InputBound,
+        end: InputBound,
+        extract: u64,
+        take: u8,
+    },
     /// Replaces both maps by their clones.
     Clone,
     /// Replaces both maps by maps collected from these entries.
@@ -350,6 +374,60 @@ impl<V: FuzzValue> MirroredMaps<V> {
                         );
                     }
                     (ours, theirs) => assert_eq!(ours.is_none(), theirs.is_none()),
+                }
+            }
+            MapOperation::SplitOff { key, append_back } => {
+                let key = key.map_key();
+                let (mut ours, mut theirs) =
+                    (self.ours.split_off(&key), self.theirs.split_off(&key));
+                assert!(ours.iter().eq(theirs.iter()));
+                self.assert_same_entries();
+                if append_back {
+                    self.ours.append(&mut ours);
+                    self.theirs.append(&mut theirs);
+                    assert!(ours.is_empty() && theirs.is_empty());
+                }
+            }
+            MapOperation::Append { ref entries } => {
+                let entries = || {
+                    entries
+                        .iter()
+                        .map(|&(key, value)| (key.map_key(), V::from_input(value)))
+                };
+                let mut ours: BBTreeMap<u64, V> = entries().collect();
+                let mut theirs: BTreeMap<u64, V> = entries().collect();
+                self.ours.append(&mut ours);
+                self.theirs.append(&mut theirs);
+                assert!(ours.is_empty() && theirs.is_empty());
+            }
+            MapOperation::Retain { keep } => {
+                let keep = |key: &u64, value: &mut V| {
+                    value.bump(1);
+                    keep >> (key % 64) & 1 == 1
+                };
+                self.ours.retain(keep);
+                self.theirs.retain(keep);
+            }
+            MapOperation::ExtractIf {
+                start,
+                end,
+                extract,
+                take,
+            } => {
+                let bounds = (start.map_bound(), end.map_bound());
+                if !Self::out_of_order(bounds) {
+                    let extract = |key: &u64, _: &mut V| extract >> (key % 64) & 1 == 1;
+                    let ours: Vec<_> = self
+                        .ours
+                        .extract_if(bounds, extract)
+                        .take(usize::from(take))
+                        .collect();
+                    let theirs: Vec<_> = self
+                        .theirs
+                        .extract_if(bounds, extract)
+                        .take(usize::from(take))
+                        .collect();
+                    assert_eq!(ours, theirs);
                 }
             }
             MapOperation::Clone => {

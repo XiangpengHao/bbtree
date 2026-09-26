@@ -31,6 +31,7 @@
 //! each once. Every other module is `#![forbid(unsafe_code)]` and builds on
 //! their safe API.
 
+pub(crate) mod build;
 mod clone;
 pub(crate) mod handle;
 pub(crate) mod inline_keys;

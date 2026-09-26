@@ -554,6 +554,111 @@ fn entries_drop_like_std() {
     assert!(!maps.drop_both());
 }
 
+/// `retain` drops each entry it removes right after the predicate rejects
+/// it, and `extract_if` hands them out; a predicate that panics leaves every
+/// entry not removed yet in the map, the one it was testing included; all
+/// as std's do.
+#[test]
+fn retain_and_extract_if_drop_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(28);
+    let count = if cfg!(miri) { 300 } else { 2000 };
+    let mut maps = TrackedMaps::new(&ledgers);
+    for order in 0..count {
+        assert!(!maps.insert(order, PanickingPart::Neither));
+    }
+    let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
+    for round in 0..6 {
+        let decisions: Vec<bool> = (0..count).map(|_| rng.below(4) == 0).collect();
+        let panic_at = if round % 3 == 2 {
+            rng.below(count / 4 + 1)
+        } else {
+            usize::MAX
+        };
+        let pick = |calls: &mut usize, key: &CollidingKey<'_>| {
+            *calls += 1;
+            assert!(*calls != panic_at, "the predicate panics");
+            decisions[key.order]
+        };
+        let low = rng.below(count / 2);
+        let range = low..low + rng.below(count / 2);
+        match round % 3 {
+            0 => {
+                let mut calls = 0;
+                maps.ours.retain(|key, _| !pick(&mut calls, key));
+                let mut calls = 0;
+                maps.theirs.retain(|key, _| !pick(&mut calls, key));
+            }
+            1 => {
+                let mut calls = 0;
+                let ours: Vec<_> = maps
+                    .ours
+                    .extract_if(.., |key, _| {
+                        range.contains(&key.order) && pick(&mut calls, key)
+                    })
+                    .take(count / 8)
+                    .map(ids)
+                    .collect();
+                let mut calls = 0;
+                let theirs: Vec<_> = maps
+                    .theirs
+                    .extract_if(.., |key, _| {
+                        range.contains(&key.order) && pick(&mut calls, key)
+                    })
+                    .take(count / 8)
+                    .map(ids)
+                    .collect();
+                assert_eq!(ours, theirs);
+            }
+            _ => {
+                let mut calls = 0;
+                let ours = catch_unwind(AssertUnwindSafe(|| {
+                    maps.ours.retain(|key, _| !pick(&mut calls, key));
+                }));
+                let mut calls = 0;
+                let theirs = catch_unwind(AssertUnwindSafe(|| {
+                    maps.theirs.retain(|key, _| !pick(&mut calls, key));
+                }));
+                assert_eq!(ours.is_err(), theirs.is_err());
+            }
+        }
+        ledgers.assert_same_drops_so_far();
+        let entry_ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
+        assert!(
+            maps.ours
+                .iter()
+                .map(entry_ids)
+                .eq(maps.theirs.iter().map(entry_ids))
+        );
+        maps.ours.check_invariants();
+    }
+    assert!(!maps.drop_both());
+}
+
+/// `append` keeps the key and value of `other` for a key in both, and drops
+/// those of `self` in key order, as std's does.
+#[test]
+fn append_drops_like_std() {
+    let ledgers = LockstepLedgers::new();
+    let rng = TestRng::new(29);
+    let count = if cfg!(miri) { 300 } else { 2000 };
+    let mut maps = TrackedMaps::new(&ledgers);
+    let mut others = TrackedMaps::new(&ledgers);
+    for _ in 0..count {
+        assert!(!maps.insert(rng.below(count), PanickingPart::Neither));
+        assert!(!others.insert(rng.below(count), PanickingPart::Neither));
+    }
+    maps.ours.append(&mut others.ours);
+    maps.theirs.append(&mut others.theirs);
+    ledgers.assert_same_drops_so_far();
+    let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
+    assert!(maps.ours.iter().map(ids).eq(maps.theirs.iter().map(ids)));
+    assert!(others.ours.is_empty() && others.theirs.is_empty());
+    maps.ours.check_invariants();
+    drop(others);
+    assert!(!maps.drop_both());
+}
+
 #[test]
 fn replacing_keeps_the_old_key_and_drops_each_once() {
     let ledger = DropLedger::new();

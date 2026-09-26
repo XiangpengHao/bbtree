@@ -352,6 +352,30 @@ not decided".
   10M u64→u64: 164 vs std's 239; 1k u64→u64: 31.2 vs 31.5; 1k 16-byte
   strings: 42.6 vs 57.5.
 
+**D25. Bulk changes: a builder of full nodes, fed by draining in order.** (2026-10-08)
+
+- **`TreeBuilder`** (`node/build.rs`) builds a tree from entries in
+  ascending key order, comparing no keys: each node fills before the next
+  starts beside it, and `finish` tops up the right border to the minimum
+  (D22) from the full left siblings. The tree is well formed throughout but
+  for that border, so a panic part-way takes it apart as any other.
+- **`collect` and `from`** sort, keep the last of equal keys (as std), and
+  build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
+  18.2 bytes per entry; inserting the sorted entries one by one, as before,
+  took 18.6 ns and 33.0 bytes (half-full nodes).
+- **`append`, `split_off`, `retain` and `extract_if`** drain entries in order
+  by popping an end (no `Ord`), and rebuild with the builder, keeping std's
+  observable behavior: what the predicate sees and when, which key and
+  value survive, drop order, and what is left after a panic. Removing
+  while walking, as std's `extract_if` does in place, would need the walk's
+  position tracked through every merge and steal, which std's parent
+  pointers give for free.
+- **Cost, for now:** `append` O(n + m) as std's; `retain` O(n) as std's, but
+  moving the entries it keeps; `extract_if` O(n) wherever its range is, and
+  `split_off` O(the smaller part), where std's are O(log n) plus the part
+  they touch. A popped entry costs ~a `pop_first`; an owning walk (D23,
+  open) would make the drains cheaper.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -407,7 +431,5 @@ requires the token: one check, no duplicates, nothing on the hot path.
 - **`alloc`:** whether core code depends on `alloc` or only the default
   allocator does.
 - **Fill factor:** right-biased split for appends, redistribution to a sibling
-  before splitting, full-node bulk build for `FromIterator`/`append`.
-  `collect` now inserts the sorted entries one by one, which leaves nodes
-  half full: 10M u64→u64, 18.6 vs std's 3.05 ns per entry, and 33.0 vs 18.2
-  bytes per entry (2026-10-08).
+  before splitting. (The full-node bulk build for `FromIterator`/`append`
+  is D25.)

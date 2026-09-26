@@ -3,10 +3,9 @@
 //!
 //! `extend` inserts each entry in turn. `collect` and `from` sort the
 //! entries by key, stably, and keep only the last of each run of equal keys,
-//! key and value, dropping the others in order; then they insert the sorted
-//! entries, each one after the last, which the inserts' search for appends
-//! finds at once. A bulk build into full nodes is to replace those inserts
-//! (decisions, "Fill factor").
+//! key and value, dropping the others in order; then they build the tree
+//! from the sorted entries, into full nodes, comparing no more keys
+//! (`node/build.rs`).
 //!
 //! Like `new` and `Default`, `collect` and `from` make maps of the default
 //! strategy only, as std's make maps of the global allocator only: with a
@@ -15,25 +14,41 @@
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
+use core::iter::Peekable;
 
 use super::BBTreeMap;
 use crate::inline_key::InlineKeyStrategy;
+use crate::node::build::TreeBuilder;
 
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
     /// of equal keys is kept; the others are dropped in order.
     fn from_sorted_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        let mut map = Self::new();
-        let mut entries = entries.peekable();
-        while let Some(entry) = entries.next() {
-            // An entry left out drops whole, its key before its value.
-            if entries.peek().is_some_and(|next| next.0 == entry.0) {
-                continue;
+        let mut builder = TreeBuilder::new();
+        builder.extend(LastOfEqualKeys {
+            entries: entries.peekable(),
+        });
+        Self::from_builder(builder)
+    }
+}
+
+/// The entries of a sequence sorted by key, but for those followed by one
+/// with an equal key: the last of each run of equal keys, which std's
+/// `collect` keeps. The others drop whole, key before value.
+struct LastOfEqualKeys<I: Iterator> {
+    entries: Peekable<I>,
+}
+
+impl<K: PartialEq, V, I: Iterator<Item = (K, V)>> Iterator for LastOfEqualKeys<I> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        loop {
+            let entry = self.entries.next()?;
+            if self.entries.peek().is_none_or(|next| next.0 != entry.0) {
+                return Some(entry);
             }
-            let (key, value) = entry;
-            map.insert(key, value);
         }
-        map
     }
 }
 

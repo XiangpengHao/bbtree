@@ -487,6 +487,104 @@ where
         assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
     }
 
+    /// Bulk changes on both maps, alike: a split at a random key, the parts
+    /// checked and appended back; a small map appended; `retain` and
+    /// `extract_if` with the same decisions for both, on random ranges,
+    /// changing values on the way, some walks dropped early. Each is O(n):
+    /// a large map gets one round of each, a small one four.
+    fn bulk_changes(&mut self, rng: &TestRng, key_space: usize) {
+        let rounds = if self.theirs.len() > 20_000 { 1 } else { 4 };
+        let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
+        for _ in 0..rounds {
+            let key = match separators.len() {
+                len if len > 0 && rng.below(2) == 0 => separators[rng.below(len)].clone(),
+                _ => K::from_number(rng.below(key_space + 2)),
+            };
+            let mut upper = Self {
+                ours: self.ours.split_off(&key),
+                theirs: self.theirs.split_off(&key),
+            };
+            self.assert_same_contents();
+            upper.assert_same_contents();
+            if rng.below(2) == 0 {
+                self.ours.append(&mut upper.ours);
+                self.theirs.append(&mut upper.theirs);
+            } else {
+                upper.ours.append(&mut self.ours);
+                upper.theirs.append(&mut self.theirs);
+                mem::swap(self, &mut upper);
+            }
+            upper.assert_same_contents();
+            self.assert_same_contents();
+        }
+
+        let mut other = Self::new();
+        for _ in 0..rng.below(64) {
+            other.insert(
+                K::from_number(rng.below(key_space)),
+                V::from_number(rng.below(1 << 30)),
+            );
+        }
+        self.ours.append(&mut other.ours);
+        self.theirs.append(&mut other.theirs);
+        other.assert_same_contents();
+        self.assert_same_contents();
+
+        let decisions: Vec<bool> = (0..self.theirs.len()).map(|_| rng.below(8) != 0).collect();
+        let new_value = V::from_number(rng.below(1 << 30));
+        let keep = |decisions: &mut core::slice::Iter<'_, bool>, value: &mut V| {
+            *value = new_value.clone();
+            *decisions.next().expect("a decision per entry")
+        };
+        let mut our_decisions = decisions.iter();
+        self.ours.retain(|_, value| keep(&mut our_decisions, value));
+        let mut their_decisions = decisions.iter();
+        self.theirs
+            .retain(|_, value| keep(&mut their_decisions, value));
+        self.assert_same_contents();
+
+        for _ in 0..rounds {
+            let (start, end) = Self::random_range_bounds(rng, &separators, key_space);
+            let range = (start, end);
+            let decisions: Vec<bool> = (0..self.theirs.len()).map(|_| rng.below(3) == 0).collect();
+            let limit = if rng.below(2) == 0 {
+                usize::MAX
+            } else {
+                rng.below(16)
+            };
+            let mut our_decisions = decisions.iter();
+            let mut ours = self.ours.extract_if(range.clone(), |_, _| {
+                *our_decisions.next().expect("a decision")
+            });
+            let mut their_decisions = decisions.iter();
+            let mut theirs = self
+                .theirs
+                .extract_if(range, |_, _| *their_decisions.next().expect("a decision"));
+            for _ in 0..limit {
+                assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+                let (our_entry, their_entry) = (ours.next(), theirs.next());
+                let done = their_entry.is_none();
+                assert_eq!(our_entry, their_entry);
+                if done {
+                    break;
+                }
+            }
+            drop(ours);
+            drop(theirs);
+            self.assert_same_contents();
+        }
+    }
+
+    /// Checks the map's invariants, and that it holds std's entries, by
+    /// iterating both ways: [`Self::assert_same_entries`] without a lookup
+    /// per entry.
+    fn assert_same_contents(&self) {
+        self.ours.check_invariants();
+        self.assert_same_len();
+        assert!(self.ours.iter().eq(&self.theirs));
+        assert!(self.ours.iter().rev().eq(self.theirs.iter().rev()));
+    }
+
     /// Extends both maps with the same few entries, some of them with keys
     /// already there.
     fn extend(&mut self, rng: &TestRng, key_space: usize) {
@@ -718,7 +816,8 @@ impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
     /// followed by overwriting every separator's value, iterating and
-    /// checking ranges. Then each loses its entries: removed in random order
+    /// checking ranges; the random and the shuffled ones then go through
+    /// bulk changes, whose rebuilds make any shape the same. Then each loses its entries: removed in random order
     /// (after which the map of random operations takes more of them, and is
     /// cleared), popped from the front or the back, or consumed by an owning
     /// iterator.
@@ -733,6 +832,7 @@ impl Workload {
         maps.run_random_operations(&rng, self.random_steps, self.key_space);
         maps.overwrite_separators(&rng);
         self.walk(&mut maps, &rng, self.key_space);
+        maps.bulk_changes(&rng, self.key_space);
         maps.remove_all(RemovalOrder::Random, &rng, self.key_space);
         maps.run_random_operations(&rng, self.random_steps / 4, self.key_space);
         maps.clear();
@@ -761,6 +861,7 @@ impl Workload {
         maps.insert_evens_in_order(shuffled);
         maps.overwrite_separators(&rng);
         self.walk(&mut maps, &rng, self.ordered_key_space());
+        maps.bulk_changes(&rng, self.ordered_key_space());
         maps.consume(&rng);
     }
 
