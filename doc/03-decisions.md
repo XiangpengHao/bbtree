@@ -252,8 +252,10 @@ capacity, not `len`, so it never waits on the header miss.
   back by value, a generic `K` has no sentinel, and a tombstoned key would
   stay alive, heap memory included, until some compaction, unlike in std.
   Removing costs one shift in the leaf, as inserting does (D16).
-- **Underfull** means fewer than `max(capacity / 8, 2)` keys, for a node below
-  the root, by its kind's capacity: 7 keys for a u64→u64 leaf of 63.
+- **Underfull** means fewer than `max(capacity / 8, 4)` keys, for a node below
+  the root, by its kind's capacity: 7 keys for a u64→u64 leaf of 63, 4 for
+  a `String`→u64 leaf of 25. The floor of 4 (2 until the path change of
+  D24) bounds the height: see the last bullet.
 - **Bottom-up, like insert (D11).** On the way back up, each level fixes the
   child it went into if that child is underfull:
   - it merges the child with a sibling (the left one if there is one) when
@@ -274,83 +276,117 @@ capacity, not `len`, so it never waits on the header miss.
   3/8 of a node's worth of removals to underflow.
 - Cost: after adversarial removals, nodes may be 1/8 full, up to 4× the
   memory per entry of a half-full guarantee.
-- Consequence: a non-root internal node may have only 3 children (capacity
-  12–23). The path-stack depth bound under "Proposed, not decided" (≥ 6
-  children, height ≤ 21) becomes height ≤ 34 for 1 KB nodes in a 64-bit
-  address space.
+- Consequence: a non-root internal node has at least 5 children, so a tree
+  is at most 23 levels above its leaves: one level more would need
+  2·5^23 KB of leaves, more than 2^64 bytes. Every path has a slot per level
+  (D24). With the earlier floor of 2, a 3-child minimum allowed 34 levels,
+  and paths of 35 slots, about 370 bytes.
 
-**D23. Iteration: a cursor per end, holding its path as edge indexes, with the leaf and its parent cached.** (2026-10-08)
+**D23. Iteration: a cursor per end, each a path (D24).** (2026-10-08)
 Supersedes the path-stack frame and `MAX_HEIGHT` bullets under "Proposed,
 not decided".
 
 - **A position is an edge of a leaf.** Past a leaf's last entry, the next
-  one is the separator of the lowest ancestor with a key beyond the path,
+  one is the separator of the lowest node on the path with a key beyond it,
   and its value is the head of the leftmost leaf right of it (D17).
   Separator keys live only in internal nodes, so crossing a leaf boundary
   visits an ancestor whatever we do: leaf-to-leaf links would not help.
   `next()` never calls `Ord` (D11).
-- **Each end stores its leaf, the leaf's parent, and the edge index taken at
-  every level as a `u16`** (a node holds ≤ 1023 keys). The parent answers
-  most boundary crossings; when it runs out, the cursor walks down again
-  from the root by its edge indexes, still without `Ord`.
-- **35 indexes per end:** with D22's 3-child minimum and 1 KB leaves, a tree
-  taller than 34 levels above its leaves would need more than 2^64 bytes.
-- **Sizes:** `Iter` 232 B, `Range` 224 B (std: 72 B, 48 B). A pointer per
-  level would have made `Iter` ~560 B.
-- **Lazy:** an end that has not started starts at the first or last entry
-  on its first move, so iterating from one end never descends the other.
+- **Each end is a path** (D24): it goes up its own levels to the separator
+  and down to the next leaf. No end walks down from the root again.
+- **Lazy:** an end that has not started holds a detached path, which writes
+  nothing; it starts at the first or last entry on its first move, so
+  iterating from one end never descends the other. A range positions both
+  ends when it is made, for std's panics on bounds out of order.
 - **In place:** a cursor is updated field by field, never rebuilt and copied
   over. A copy reads it with 64-byte loads right after narrow stores, which
   can't be forwarded: the load waits for the stores to retire, and so for
   every older cache miss. Over many small maps, that serialized one map's
   misses behind the previous one's: one forwarding conflict per map,
   28.2 → 11.5 ns per entry for 1M 4-entry maps once removed.
-- Measured, one run each, mimalloc, Ryzen 9 9900X (ns per entry; per scan
-  for `range64`):
-
-  | workload | bbtree | std |
-  |---|--:|--:|
-  | iterate, 10M u64→u64 | 5.85 | 14.2 |
-  | range64, 10M u64→u64 | 719 | 1163 |
-  | iterate, 1M maps × 4 (`str-json`→`struct32`) | 11.5 | 4.9 |
-  | iterate, 100k maps × 32 | 10.8 | 7.2 |
-  | iterate, 1M real JSON objects | 13.6 | 6.0 |
-
+- **Sizes:** `Iter` 520 B, `Range` 512 B (std: 72 B, 48 B). Before D24, an
+  end kept its leaf, the leaf's parent and an index per level, and walked
+  down from the root when the parent ran out: `Iter` 232 B.
 - **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) use a `ValMut`
   borrow type, as std's do: its handles copy, so both ends hold some, and
   only read the structure and keys; handing out a value as `&mut V` is
   unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
-  (range). This is the path module D14 allows `unsafe` in, `node/walk.rs`.
+  (range). That is the one `unsafe` in `node/walk.rs`.
 - **Owning iteration, for now,** pops from either end, rebalancing as it
   goes (`into_iter.rs`). An owning walk that takes entries out and frees
   each node once both ends are past it is to replace the pops.
-- **Open:** small maps are 0.43–0.67× std, from instruction count (57 vs 26
-  per entry for 4-entry maps), not stalls. Range scans still take ~18
-  forwarding conflicts per scan, from adapters such as `take` moving the
-  freshly positioned `Range`.
+- Measured with D24, one run each, mimalloc, Ryzen 9 9900X (ns per entry;
+  per scan for `range64`):
 
-**D24. Entries remember a position: edge indexes from the root.** (2026-10-08)
+  | workload | bbtree | std |
+  |---|--:|--:|
+  | iterate, 10M u64→u64 | 9.49 | 14.4 |
+  | range64, 10M u64→u64 | 843 | 1174 |
+  | iterate, 1k u64→u64 | 2.91 | 0.56 |
+  | range64, 1k u64→u64 | 211 | 68 |
+  | iterate, 1M maps × 4 (`str-json`→`struct32`) | 14.3 | 4.7 |
+  | iterate, 100k maps × 32 | 13.1 | 6.9 |
+  | iterate, 1M real JSON objects | 17.9 | 6.0 |
 
-- `entry` searches once, calling every `Ord` the entry will need, and
-  remembers the path to the key, or to the leaf edge where it goes, as edge
-  indexes. Everything an entry does afterward follows that path down again,
-  comparing no keys, as std's entries compare none after `entry`.
-- **Removing** through an occupied entry runs the usual removal recursion
-  (D22) with the position as its target, separators included (D17).
-- **Inserting** through a vacant entry runs the insert recursion with the
-  position as its target. On the way back up, each level records the index
-  leading to the new entry: a split reports the half that took it, and a
-  level that took a split child's separator leads to the new entry by the
-  edge left of it, or right of it if the entry went to the child's right
-  half. The entry then follows the new path down to hand out the value.
-  Plain `insert` records nothing: the recording is a generic parameter that
-  compiles away for it.
-- No `unsafe`: following a path again costs a walk down instead of keeping
-  node handles, which would need std's dormant references.
-- Measured, one run each (ns per call): `entry(k).or_default()` counting,
-  10M u64→u64: 164 vs std's 239; 1k u64→u64: 31.2 vs 31.5; 1k 16-byte
-  strings: 42.6 vs 57.5.
+- **Open:** small maps are 3–5× std, from instruction count (about 72 per
+  entry), as before D24. A range is copied after both ends are positioned
+  (`take` moves it, for one), at about 15 forwarding conflicts per scan; it
+  can't wait to position them, having no type for the bounds' key to keep
+  them in.
+
+**D24. Paths: a node pointer per level from the root, shared by every operation.** (2026-10-08)
+
+- **One type** (`node/path.rs`): the node at each height from the root
+  down to a position in one of them, and the index taken at each, as a
+  `u16`. It stands for a borrow of the whole tree: shared or value-mutating
+  paths copy handles out, and an exclusive path (`PathMut`) lends one handle
+  at a time, to its bottom node, from which nothing leads up, and holds the
+  `&mut` of the tree to grow a new root.
+- **Who uses it:**
+  - lookups search down one;
+  - an insert searches down one, inserts at the leaf, carries splits up the
+    path, then goes back down through the halves that took the new entry,
+    so the path ends at it;
+  - a removal goes up the path from where the entry came out, fixing each
+    underfull child (D22) and stopping at the first level that loses no
+    key; a separator's successor comes up from the leftmost leaf right of
+    it;
+  - an entry keeps the path its search found: reading or changing it goes
+    straight to the bottom node, removing or inserting goes up the path;
+  - each end of a walk is one (D23).
+- **Why pointers, not indexes.** An index path is valid under the same
+  condition as a pointer path, that nothing else changes the tree, which
+  `&mut` already gives; it only turns a broken condition into a panic, and
+  costs a walk down from the root at each use. Before, an entry walked down
+  on every `get`, and insert and removal were recursions generic over how
+  to find their way, with an insert recording where the new entry went
+  (`Position`, `InsertionTarget`, `Placement`, `RemovalTarget`): all gone.
+- **24 slots** (`MAX_HEIGHT` 23, from D22's floor of 4), 248 B. The slots are
+  uninitialized until written; a path is made detached and started where it
+  stays, and is never moved once written inside the tree code: moving one
+  copies it with wide loads, which wait on the narrow stores that wrote it
+  (D23). Passing the path by value to `remove`, wrapping it in a search
+  result, or returning it from a constructor each did: the first version
+  took 31 ns per `get` on a 1k map (HEAD 10.9), and `pop_first` was 1.6×.
+  An entry and an iterator still move when returned.
+- **Not done:** 8 levels in place and a `Vec` for the rest, which made a path
+  112 B (`Iter` 248 B). Choosing the storage at every level cost 50–70
+  instructions per operation, and `get` +13% at 10M, where fewer
+  instructions let more independent lookups overlap.
+- Measured, one run each, against the index paths and recursions before
+  (ns per call):
+
+  | | 10M u64→u64 before | after | std | 1k u64→u64 before | after | std |
+  |---|--:|--:|--:|--:|--:|--:|
+  | insert_random | 171 | 164 | 227 | 15.9 | 16.6 | 10.2 |
+  | get_hit | 161 | 164 | 272 | 10.9 | 12.8 | 26.3 |
+  | remove_random | 227 | 178 | 274 | 28.4 | 30.1 | 39.9 |
+  | entry_upsert | 170 | 151 | 240 | 31.5 | 28.1 | 31.7 |
+  | pop_first | 27.2 | 16.3 | 21.0 | 14.0 | 9.6 | 10.8 |
+
+- **Open:** a lookup records its path, about 36 instructions more than the
+  loop it replaced, which shows on small maps only (+17% at 1k).
 
 **D25. Bulk changes: a builder of full nodes, fed by draining in order.** (2026-10-08)
 
@@ -386,6 +422,12 @@ not decided".
 - Iterators carry the root-to-leaf path inline, with no allocation. Unlike
   re-descending from the root (as bf-tree does), this never calls `Ord` inside
   `next()`, matching std.
+
+## Version policy
+
+- Everything that std btree has, bbtree should have, and is always v1.0;
+- All the additional features follow the semantic versioning.
+- MSRV is 3 months after the last release, bumped every 3 months.
 
 ## Safety
 

@@ -1,23 +1,24 @@
 //! The entry API: [`Entry`], [`OccupiedEntry`] and [`VacantEntry`], views
 //! into one key's place in a map, as std's.
 //!
-//! An entry remembers the [`Position`] that its search found: a path of
-//! indexes from the root (D11). Reading, changing or removing an occupied
-//! entry, or inserting into a vacant one, follows that path down again,
-//! comparing no keys: every `Ord` call happens in `entry`, as in std. An
-//! insert moves the position to where the splits took the new entry, which
-//! is how `insert` hands out its value.
+//! An entry keeps the path its search found, from the root down to the key
+//! or to the leaf edge where it goes (`node/path.rs`): every `Ord` call
+//! happens in `entry`, as in std. Reading or changing an occupied entry goes
+//! straight to the node at the end of the path; removing it, or inserting
+//! into a vacant one, goes back up the path, comparing no keys. An insert
+//! leaves the path at the new entry, wherever the splits took it, which is
+//! how `insert` hands out its value.
 
 #![forbid(unsafe_code)]
 
 use core::fmt;
 
 use super::BBTreeMap;
-use super::position::{KeyPosition, Position};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
 use crate::node::inline_keys::{InlinedKey, SearchKey};
 use crate::node::page::{FreshPage, PageByKind};
+use crate::node::path::PathMut;
 
 /// A view into a single entry in a map, which may either be vacant or
 /// occupied.
@@ -36,19 +37,29 @@ pub enum Entry<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K> = Auto> {
 /// enum.
 pub struct VacantEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
     key: InlinedKey<K, S>,
-    map: &'a mut BBTreeMap<K, V, S>,
-    /// The edge of a leaf where the key goes, or the start of the leaf that
-    /// will be made for it if the map has no tree.
-    position: Position,
+    length: &'a mut usize,
+    place: VacantPlace<'a, K, V, S>,
+}
+
+/// Where a vacant entry's key goes.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an entry lives briefly and moves by value, as std's; boxing the path would allocate for every entry"
+)]
+enum VacantPlace<'a, K, V, S> {
+    /// Into the leaf edge the path ends at.
+    InTree(PathMut<'a, K, V, S>),
+    /// Into a new tree, a leaf, for the map that has none.
+    NoTree(&'a mut Option<Subtree<K, V, S>>),
 }
 
 /// A view into an occupied entry in a `BBTreeMap`. It is part of the
 /// [`Entry`] enum.
 pub struct OccupiedEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
-    map: &'a mut BBTreeMap<K, V, S>,
-    /// Where the key is: in a leaf, or a separator in an internal node,
-    /// whose value is a leaf's head (D17).
-    position: Position,
+    length: &'a mut usize,
+    /// To the key: in a leaf, or a separator in an internal node, whose
+    /// value is a leaf's head (D17).
+    path: PathMut<'a, K, V, S>,
 }
 
 impl<K: fmt::Debug + Ord, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug
@@ -295,7 +306,9 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 37);
     /// ```
     pub fn insert(self, value: V) -> &'a mut V {
-        self.insert_entry(value).into_mut()
+        let (path, length) = self.insert_and_count(value);
+        *length += 1;
+        path.into_value_mut()
     }
 
     /// Sets the value of the entry with the `VacantEntry`'s key, and returns
@@ -316,23 +329,27 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 37);
     /// ```
     pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S> {
-        let Self {
-            key,
-            map,
-            mut position,
-        } = self;
-        let root = map
-            .root
-            .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
-        root.insert_at(
-            &mut position,
-            key,
-            value,
-            FreshPage::allocate,
-            FreshPage::allocate,
-        );
-        map.length += 1;
-        OccupiedEntry { map, position }
+        let (path, length) = self.insert_and_count(value);
+        *length += 1;
+        OccupiedEntry { length, path }
+    }
+
+    /// Inserts the key with `value`, and returns the path to the new entry,
+    /// and the map's length for the caller to count it.
+    fn insert_and_count(self, value: V) -> (PathMut<'a, K, V, S>, &'a mut usize) {
+        let Self { key, length, place } = self;
+        let mut path = match place {
+            VacantPlace::InTree(path) => path,
+            VacantPlace::NoTree(root) => {
+                let mut path = PathMut::new(
+                    root.insert(Subtree::new_leaf(FreshPage::allocate()).forget_type()),
+                );
+                path.start_at_root();
+                path
+            }
+        };
+        path.insert(key, value, FreshPage::allocate, FreshPage::allocate);
+        (path, length)
     }
 }
 
@@ -349,7 +366,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
     /// ```
     pub fn key(&self) -> &K {
-        self.position.kv(self.tree().borrow()).into_key()
+        self.path.key()
     }
 
     /// Take ownership of the key and value from the map.
@@ -372,14 +389,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// // println!("{}", map["poneyland"]);
     /// assert!(map.is_empty());
     /// ```
-    pub fn remove_entry(self) -> (K, V) {
-        let entry = self
-            .map
-            .root
-            .as_mut()
-            .expect("a map with an entry has a tree")
-            .remove_at(&self.position, PageByKind::deallocate);
-        self.map.length -= 1;
+    pub fn remove_entry(mut self) -> (K, V) {
+        let entry = self.path.remove(PageByKind::deallocate);
+        *self.length -= 1;
         entry
     }
 
@@ -399,7 +411,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// }
     /// ```
     pub fn get(&self) -> &V {
-        self.position.kv(self.tree().borrow()).into_key_value().1
+        self.path.value()
     }
 
     /// Gets a mutable reference to the value in the entry.
@@ -429,12 +441,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 24);
     /// ```
     pub fn get_mut(&mut self) -> &mut V {
-        let tree = self
-            .map
-            .root
-            .as_mut()
-            .expect("a map with an entry has a tree");
-        self.position.kv(tree.borrow_mut()).into_value_mut()
+        self.path.value_mut()
     }
 
     /// Converts the entry into a mutable reference to its value.
@@ -460,12 +467,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 22);
     /// ```
     pub fn into_mut(self) -> &'a mut V {
-        let tree = self
-            .map
-            .root
-            .as_mut()
-            .expect("a map with an entry has a tree");
-        self.position.kv(tree.borrow_mut()).into_value_mut()
+        self.path.into_value_mut()
     }
 
     /// Sets the value of the entry with the `OccupiedEntry`'s key, and
@@ -510,14 +512,6 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     pub fn remove(self) -> V {
         self.remove_entry().1
     }
-
-    /// The tree the entry is in.
-    fn tree(&self) -> &Subtree<K, V, S> {
-        self.map
-            .root
-            .as_ref()
-            .expect("a map with an entry has a tree")
-    }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
@@ -551,20 +545,23 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Ord,
     {
         let key = InlinedKey::new(key);
-        let found = match &self.root {
-            Some(root) => Position::of_key(root.borrow(), &SearchKey::for_inlined(&key)),
-            None => KeyPosition::Vacant(Position::START_OF_LEAF),
-        };
-        match found {
-            KeyPosition::Occupied(position) => Entry::Occupied(OccupiedEntry {
-                map: self,
-                position,
-            }),
-            KeyPosition::Vacant(position) => Entry::Vacant(VacantEntry {
+        let Self { root, length } = self;
+        if root.is_none() {
+            return Entry::Vacant(VacantEntry {
                 key,
-                map: self,
-                position,
-            }),
+                length,
+                place: VacantPlace::NoTree(root),
+            });
+        }
+        let mut path = PathMut::new(root.as_mut().expect("checked just above"));
+        if path.search_expecting_append(&SearchKey::for_inlined(&key)) {
+            Entry::Occupied(OccupiedEntry { length, path })
+        } else {
+            Entry::Vacant(VacantEntry {
+                key,
+                length,
+                place: VacantPlace::InTree(path),
+            })
         }
     }
 
@@ -591,11 +588,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let position = Position::of_first(self.root.as_ref()?.borrow())?;
-        Some(OccupiedEntry {
-            map: self,
-            position,
-        })
+        let Self { root, length } = self;
+        let mut path = PathMut::new(root.as_mut()?);
+        if path.descend_to_first_key() {
+            Some(OccupiedEntry { length, path })
+        } else {
+            None
+        }
     }
 
     /// Returns the last entry in the map for in-place manipulation. The key
@@ -621,10 +620,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let position = Position::of_last(self.root.as_ref()?.borrow())?;
-        Some(OccupiedEntry {
-            map: self,
-            position,
-        })
+        let Self { root, length } = self;
+        let mut path = PathMut::new(root.as_mut()?);
+        if path.descend_to_last_key() {
+            Some(OccupiedEntry { length, path })
+        } else {
+            None
+        }
     }
 }

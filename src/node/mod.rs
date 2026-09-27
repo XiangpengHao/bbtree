@@ -26,10 +26,11 @@
 //!   [`handle::Kv`] and [`handle::Head`] are positions in a node, and the
 //!   operations hang off them.
 //!
-//! Only `page.rs`, `slots.rs`, `handle.rs` and `walk.rs` contain `unsafe`
-//! code: `walk.rs`, the iterators' walks, only to hand out values mutably,
-//! each once. Every other module is `#![forbid(unsafe_code)]` and builds on
-//! their safe API.
+//! Only `page.rs`, `slots.rs`, `handle.rs`, `path.rs` and `walk.rs` contain
+//! `unsafe` code: `path.rs` to keep nodes as pointers along a path and make
+//! handles from them, and `walk.rs`, the iterators' walks, only to hand out
+//! values mutably, each once. Every other module is `#![forbid(unsafe_code)]`
+//! and builds on their safe API.
 
 pub(crate) mod build;
 mod clone;
@@ -39,6 +40,7 @@ mod internal;
 mod layout;
 mod leaf;
 pub(crate) mod page;
+pub(crate) mod path;
 mod separator;
 mod slots;
 mod teardown;

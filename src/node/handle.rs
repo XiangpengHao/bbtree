@@ -245,12 +245,18 @@ impl<BorrowType, K, V, S, Kind: NodeKind> NodeRef<BorrowType, K, V, S, Kind> {
     ///
     /// The type invariant holds for `node` at `height`, with this borrow type
     /// and kind.
-    unsafe fn from_raw_parts(node: NodePtr<K, V, S>, height: usize) -> Self {
+    pub(super) unsafe fn from_raw_parts(node: NodePtr<K, V, S>, height: usize) -> Self {
         Self {
             node,
             height,
             _marker: PhantomData,
         }
+    }
+
+    /// The node's page, for a path to keep (`path.rs`): making a handle from
+    /// it again is what needs care.
+    pub(super) fn node_ptr(&self) -> NodePtr<K, V, S> {
+        self.node
     }
 
     /// The number of keys.
@@ -561,11 +567,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     }
 
     /// The fewest keys a node below the root holds between removals: an
-    /// eighth of its capacity, and at least 2 (D22). A removal that leaves
-    /// fewer makes the node underfull, for its parent to fix. A split leaves
-    /// about half the capacity in each half, so inserts never do.
+    /// eighth of its capacity, and at least 4 (D22), so that an internal node
+    /// below the root has at least 5 children, which bounds the height
+    /// (`path.rs`). A removal that leaves fewer makes the node underfull, for
+    /// its parent to fix. A split leaves about half the capacity, at least 6
+    /// of 12 (D13), in each half, so inserts never do.
     pub(crate) fn min_len(&self) -> usize {
-        (self.capacity() / 8).max(2)
+        (self.capacity() / 8).max(4)
     }
 
     /// Whether the node holds fewer keys than [`Self::min_len`].
@@ -1015,13 +1023,6 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> Edge<NodeRef<BorrowType, K, V, S
             let child = self.node.edge_slots().slot(self.index).read();
             NodeRef::from_raw_parts(child, self.node.height - 1)
         }
-    }
-}
-
-impl<'a, K, V, S, Kind: NodeKind> Edge<NodeMut<'a, K, V, S, Kind>> {
-    pub(crate) fn reborrow_mut(&mut self) -> Edge<NodeMut<'_, K, V, S, Kind>> {
-        // SAFETY: the same index in the same node.
-        unsafe { Edge::new_unchecked(self.node.reborrow_mut(), self.index) }
     }
 }
 

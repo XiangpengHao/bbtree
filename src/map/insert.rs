@@ -1,30 +1,24 @@
-//! Inserting into a tree: a recursive descent whose call stack is the path
-//! back up (D11). Each level finds its edge on the way down: by searching for
-//! the key, or by a [`Position`] that a search found earlier, for an entry,
-//! without comparing keys. On the way back up, a child that split hands its
-//! separator key and right half to its parent, and a root that split grows a
-//! new root above it. A separator's value stays in the right half, as the
-//! head of its leftmost leaf (D17), and its inline key goes up with it
-//! (D18).
+//! Inserting into a tree: the entry goes in at the leaf edge where a path to
+//! it ends (`node/path.rs`), which a search for the key found. If the leaf
+//! is full, it splits, and going back up the path, each node takes its split
+//! child's separator key and right half, splitting in turn if it is full; a
+//! root that splits grows a new root above it. A separator's value stays in
+//! the right half, as the head of its leftmost leaf (D17), and its inline key
+//! goes up with it (D18).
 //!
-//! On the way back up, each level also records where the new entry ended
-//! up, so that a vacant entry can hand out its value afterward. A split
-//! takes the new entry into one of its halves; a level that took a split
-//! child's separator holds the new entry under the edge left of that
-//! separator, or right of it if the entry went to the child's right half.
+//! The path then goes back down to the new entry, through whichever half of
+//! each split took it, so that a vacant entry can hand it out, or keep it as
+//! an occupied one.
 
 #![forbid(unsafe_code)]
 
 use core::mem;
 
-use super::position::Position;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::{
-    EdgeRoom, ForceResult, Insertion, InsertionSide, Internal, Leaf, LeafOrInternal, NodeKind,
-    NodeMut, SearchResult, Subtree,
-};
+use crate::node::handle::{ForceResult, Insertion, Internal, Leaf, Subtree};
 use crate::node::inline_keys::{InlinedKey, SearchKey};
 use crate::node::page::FreshPage;
+use crate::node::path::{MAX_HEIGHT, PathMut};
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// Inserts `key`/`value` and returns `None`; or, if an equal key is
@@ -38,7 +32,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// `new_internal_page`.
     ///
     /// The key's inline key is computed once, first, and every `Ord` call
-    /// happens on the way down, before anything changes, so a panicking
+    /// happens in the search, before anything changes, so a panicking
     /// `InlineKey` or `Ord` leaves the tree unchanged. The page sources are
     /// called on the way back up, possibly after the leaf has changed: the
     /// global allocator's `handle_alloc_error` aborts by default, and a
@@ -54,231 +48,92 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     where
         K: Ord,
     {
-        self.insert_toward(
-            &ByKey,
-            InlinedKey::new(key),
-            value,
-            new_leaf_page,
-            new_internal_page,
-            &mut Unrecorded,
-        )
-    }
-
-    /// Inserts `key`/`value` at `position`, an edge of a leaf where a search
-    /// found the key belongs, without comparing keys, and moves `position`
-    /// to the new entry, wherever the splits took it. Pages come as for
-    /// [`Self::insert`].
-    pub(super) fn insert_at(
-        &mut self,
-        position: &mut Position,
-        key: InlinedKey<K, S>,
-        value: V,
-        new_leaf_page: impl FnMut() -> FreshPage<K, V, S, Leaf>,
-        new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
-    ) {
-        let target = *position;
-        let replaced = self.insert_toward(
-            &target,
-            key,
-            value,
-            new_leaf_page,
-            new_internal_page,
-            position,
-        );
-        debug_assert!(replaced.is_none(), "a position for a new key held a key");
-    }
-
-    /// Inserts toward `target`, and records in `placed` where the new entry
-    /// ended up, unless the key was there; see [`Self::insert`].
-    fn insert_toward(
-        &mut self,
-        target: &impl InsertionTarget<K, S>,
-        key: InlinedKey<K, S>,
-        value: V,
-        mut new_leaf_page: impl FnMut() -> FreshPage<K, V, S, Leaf>,
-        mut new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
-        placed: &mut impl Placement,
-    ) -> Option<V> {
-        let outcome = self.borrow_mut().insert_below(
-            target,
-            key,
-            value,
-            &mut new_leaf_page,
-            &mut new_internal_page,
-            placed,
-        );
-        match outcome {
-            InsertOutcome::Replaced(old_value) => Some(old_value),
-            InsertOutcome::Fit => None,
-            InsertOutcome::Split {
-                separator,
-                right,
-                new_entry_in_right,
-            } => {
-                let root = self.push_internal_level(new_internal_page());
-                placed.record(root.height(), usize::from(new_entry_in_right));
-                let EdgeRoom::Fits(edge) = root.first_edge().check_room() else {
-                    unreachable!("a new root has no keys");
-                };
-                edge.insert_fit(separator, right);
-                None
-            }
+        let key = InlinedKey::new(key);
+        let mut path = PathMut::new(self);
+        if path.search_expecting_append(&SearchKey::for_inlined(&key)) {
+            // As in std, the new key is dropped before the value changes: if
+            // its `Drop` panics, the map is unchanged.
+            drop(key);
+            Some(mem::replace(path.into_value_mut(), value))
+        } else {
+            path.insert(key, value, new_leaf_page, new_internal_page);
+            None
         }
     }
 }
 
-/// How an insert finds the edge to go down, in each node on the way.
-trait InsertionTarget<K, S> {
-    fn locate<'a, V, Kind: NodeKind>(
-        &self,
-        node: NodeMut<'a, K, V, S, Kind>,
-        key: &InlinedKey<K, S>,
-    ) -> SearchResult<NodeMut<'a, K, V, S, Kind>>;
-}
-
-/// By searching for the key, as `insert` does: an equal key is found.
-struct ByKey;
-
-impl<K: Ord, S: InlineKeyStrategy<K>> InsertionTarget<K, S> for ByKey {
-    fn locate<'a, V, Kind: NodeKind>(
-        &self,
-        node: NodeMut<'a, K, V, S, Kind>,
-        key: &InlinedKey<K, S>,
-    ) -> SearchResult<NodeMut<'a, K, V, S, Kind>> {
-        node.search_expecting_append(&SearchKey::for_inlined(key))
-    }
-}
-
-/// By the edges of a position a search found for the key, comparing nothing.
-impl<K, S: InlineKeyStrategy<K>> InsertionTarget<K, S> for Position {
-    fn locate<'a, V, Kind: NodeKind>(
-        &self,
-        node: NodeMut<'a, K, V, S, Kind>,
-        _key: &InlinedKey<K, S>,
-    ) -> SearchResult<NodeMut<'a, K, V, S, Kind>> {
-        SearchResult::GoDown(self.edge_in(node))
-    }
-}
-
-/// Where an insert records the new entry's place, one level at a time on
-/// the way back up: the index that leads to it in the node at each height.
-trait Placement {
-    fn record(&mut self, height: usize, index: usize);
-}
-
-/// For a vacant entry, which hands out the new value afterward.
-impl Placement for Position {
-    fn record(&mut self, height: usize, index: usize) {
-        self.set_index_at(height, index);
-    }
-}
-
-/// For `insert`, which doesn't need the place: records nothing, at no cost.
-struct Unrecorded;
-
-impl Placement for Unrecorded {
-    fn record(&mut self, _height: usize, _index: usize) {}
-}
-
-/// What inserting into a subtree leaves for the parent of its root to do.
-enum InsertOutcome<K, V, S> {
-    /// Nothing: the key was there, and this is its old value.
-    Replaced(V),
-    /// Nothing: the new entry is in the subtree, under the same root.
-    Fit,
-    /// The new entry is in the subtree, whose root split: the parent takes
-    /// the `separator` key, with its inline key, and `right` as the edge to
-    /// its right, which holds the separator's value. The new entry is under
-    /// that edge if `new_entry_in_right`, and under the one left of the
-    /// separator otherwise.
-    Split {
-        separator: InlinedKey<K, S>,
-        right: Subtree<K, V, S>,
-        new_entry_in_right: bool,
-    },
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
-    /// Inserts `key`/`value` into the subtree under this node toward
-    /// `target`: finds this node's edge, inserts into the leaf or recurses
-    /// into the child the edge leads to, and on the way back up inserts a
-    /// split child's separator and right half here. Records in `placed`, for
-    /// this node's height, the index that leads to the new entry.
-    fn insert_below(
-        self,
-        target: &impl InsertionTarget<K, S>,
+impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
+    /// Inserts `key`, with its inline key, and `value` at the leaf edge the
+    /// path ends at, and moves the path to the new entry; pages come as for
+    /// [`Subtree::insert`]. Compares no keys.
+    ///
+    /// # Panics
+    ///
+    /// If the path ends at no leaf edge.
+    pub(crate) fn insert(
+        &mut self,
         key: InlinedKey<K, S>,
         value: V,
-        new_leaf_page: &mut impl FnMut() -> FreshPage<K, V, S, Leaf>,
-        new_internal_page: &mut impl FnMut() -> FreshPage<K, V, S, Internal>,
-        placed: &mut impl Placement,
-    ) -> InsertOutcome<K, V, S> {
-        let height = self.height();
-        match target.locate(self, &key) {
-            SearchResult::Found(kv) => {
-                // As in std, the new key is dropped before the value changes:
-                // if its `Drop` panics, the map is unchanged.
-                drop(key);
-                InsertOutcome::Replaced(mem::replace(kv.into_value_mut(), value))
+        mut new_leaf_page: impl FnMut() -> FreshPage<K, V, S, Leaf>,
+        mut new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
+    ) {
+        let index = self.index();
+        let ForceResult::Leaf(leaf) = self.node_mut().force() else {
+            panic!("inserting above the leaves");
+        };
+        let split = match leaf.edge_at(index).insert(key, value, &mut new_leaf_page) {
+            // The new key is at the index of the edge it went in at.
+            Insertion::Fit(_) => return,
+            Insertion::Split(split) => split,
+        };
+        // In each node that split, from the leaf up, the index that leads to
+        // the new entry in the half that took it: its key's in the leaf, and
+        // above, the edge to the child that holds it.
+        let mut indexes_in_halves = [0; MAX_HEIGHT + 1];
+        indexes_in_halves[0] = split.inserted.index();
+        let mut carried = (
+            split.separator,
+            split.right.forget_type(),
+            split.inserted.is_right(),
+        );
+        loop {
+            let (separator, right, entry_is_right) = carried;
+            if self.height() == self.root_height() {
+                self.push_root(new_internal_page());
+            } else {
+                self.ascend();
             }
-            SearchResult::GoDown(edge) => match edge.force() {
-                ForceResult::Leaf(edge) => match edge.insert(key, value, new_leaf_page) {
-                    Insertion::Fit(kv) => {
-                        placed.record(height, kv.index());
-                        InsertOutcome::Fit
-                    }
-                    Insertion::Split(split) => {
-                        placed.record(height, split.inserted.index());
-                        InsertOutcome::Split {
-                            separator: split.separator,
-                            right: split.right.forget_type(),
-                            new_entry_in_right: split.inserted.is_right(),
-                        }
-                    }
-                },
-                ForceResult::Internal(mut edge) => {
-                    let child = edge.reborrow_mut().descend();
-                    let child_outcome = child.insert_below(
-                        target,
-                        key,
-                        value,
-                        new_leaf_page,
-                        new_internal_page,
-                        placed,
-                    );
-                    match child_outcome {
-                        InsertOutcome::Fit => {
-                            placed.record(height, edge.index());
-                            InsertOutcome::Fit
-                        }
-                        InsertOutcome::Split {
-                            separator,
-                            right,
-                            new_entry_in_right,
-                        } => {
-                            let beside_separator = |separator_index: usize| {
-                                separator_index + usize::from(new_entry_in_right)
-                            };
-                            match edge.insert(separator, right, new_internal_page) {
-                                Insertion::Fit(kv) => {
-                                    placed.record(height, beside_separator(kv.index()));
-                                    InsertOutcome::Fit
-                                }
-                                Insertion::Split(split) => {
-                                    let inserted: InsertionSide = split.inserted;
-                                    placed.record(height, beside_separator(inserted.index()));
-                                    InsertOutcome::Split {
-                                        separator: split.separator,
-                                        right: split.right.forget_type(),
-                                        new_entry_in_right: inserted.is_right(),
-                                    }
-                                }
-                            }
-                        }
-                        replaced => replaced,
-                    }
+            let (height, index) = (self.height(), self.index());
+            let ForceResult::Internal(node) = self.node_mut().force() else {
+                unreachable!("a node above another is internal");
+            };
+            // The new entry is under the edge left of the separator, or right
+            // of it if it went into the right half.
+            let beside_separator =
+                |separator_index: usize| separator_index + usize::from(entry_is_right);
+            match node
+                .edge_at(index)
+                .insert(separator, right, &mut new_internal_page)
+            {
+                Insertion::Fit(kv) => {
+                    let index = beside_separator(kv.index());
+                    self.set_index(index);
+                    break;
                 }
-            },
+                Insertion::Split(split) => {
+                    indexes_in_halves[height] = beside_separator(split.inserted.index());
+                    carried = (
+                        split.separator,
+                        split.right.forget_type(),
+                        split.inserted.is_right(),
+                    );
+                }
+            }
+        }
+        // Back down to the new entry, through the halves that took it.
+        while self.height() > 0 {
+            self.descend();
+            self.set_index(indexes_in_halves[self.height()]);
         }
     }
 }

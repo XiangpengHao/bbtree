@@ -1,20 +1,16 @@
 //! Walks over a tree in key order, from both ends at once (D23): the core of
-//! every iterator. Each end is a cursor: a position between two entries,
-//! kept as the edge indexes that lead to it from the root, with the leaf and
-//! its parent at hand. Moving a cursor never calls `Ord` (D11).
+//! every iterator. Each end is a cursor: a path from the root to a position
+//! between two entries of a leaf (`path.rs`). Moving a cursor never calls
+//! `Ord` (D11).
 //!
-//! A position is always an edge of a leaf. Within the leaf, the next entry is
-//! beside it. Past the leaf's last entry, it is the separator of the lowest
-//! ancestor that has a key right of the path, whose value is the head of the
-//! leftmost leaf right of that key (D17); the cursor descends to that leaf and
-//! starts there. Moving backward mirrors this: before the leaf's first entry,
-//! the previous one is the separator of the lowest ancestor with a key left of
-//! the path, whose value is this leaf's head, and the cursor goes on from the
-//! end of the rightmost leaf left of that key.
-//!
-//! The parent answers most of those trips up the tree: only when the path's
-//! edge is the parent's last (or first) does the cursor walk down again from
-//! the root, by its edge indexes, to find the separator further up.
+//! Within the leaf, the next entry is beside the position. Past the leaf's
+//! last entry, it is the separator of the lowest node on the path with a key
+//! right of it, whose value is the head of the leftmost leaf right of that
+//! key (D17); the cursor goes up the path to that node and down to that leaf.
+//! Moving backward mirrors this: before the leaf's first entry, the previous
+//! one is the separator of the lowest node on the path with a key left of
+//! it, whose value is this leaf's head, and the cursor goes on from the end
+//! of the rightmost leaf left of that key.
 //!
 //! A cursor changes in place, field by field, and is never rebuilt and
 //! copied over: a copy reads the cursor with wide loads right after narrow
@@ -24,11 +20,10 @@
 //!
 //! # Safety argument
 //!
-//! This is the tree's path module (D14), the one module besides `page.rs`,
-//! `slots.rs` and `handle.rs` with `unsafe` code. A walk with [`ValMut`]
-//! hands out values as `&mut V`, which
-//! is sound only if it hands out each value at most once. Every walk ensures
-//! that by construction:
+//! Besides the path module itself, this is the one module of the tree's
+//! path code (D14) with `unsafe` code. A walk with [`ValMut`] hands out
+//! values as `&mut V`, which is sound only if it hands out each value at
+//! most once. Every walk ensures that by construction:
 //!
 //! - its ends start at the tree's first and last positions, or at a range's
 //!   bounds with the front not after the back, which making the range checks;
@@ -47,17 +42,11 @@ use core::cmp::Ordering;
 use core::ops::Bound;
 
 use super::handle::{
-    CopyableBorrow, Edge, ForceResult, Head, Immut, Internal, Kv, Leaf, LeafOrInternal, NodeKind,
-    NodeRef, SearchResult, ValMut,
+    CopyableBorrow, ForceResult, Head, Immut, Internal, Kv, Leaf, LeafOrInternal, NodeRef, ValMut,
 };
 use super::inline_keys::SearchKey;
+use super::path::{NodeEnd, Path};
 use crate::inline_key::InlineKeyStrategy;
-
-/// The most levels above the leaves that a tree can have. A non-root
-/// internal node has at least 3 children (D13, D22) and a leaf takes at
-/// least 1 KB (D15), so a tree one level taller would need more than 2^64
-/// bytes of leaves.
-pub(crate) const MAX_HEIGHT: usize = 34;
 
 /// A handle to a tree's root, which a walk starts from.
 pub(crate) type Root<B, K, V, S> = NodeRef<B, K, V, S, LeafOrInternal>;
@@ -123,23 +112,11 @@ enum Direction {
 }
 
 impl Direction {
-    /// The edge where a walk in this direction enters a node of `len` keys:
-    /// its first, or its last.
-    fn entry_edge(self, len: usize) -> usize {
+    /// The end of a node where a walk in this direction enters it.
+    fn entry_end(self) -> NodeEnd {
         match self {
-            Self::Forward => 0,
-            Self::Backward => len,
-        }
-    }
-
-    /// The key next to `edge` in this direction, if any.
-    fn key_beyond<B: CopyableBorrow, K, V, S, Kind: NodeKind>(
-        self,
-        edge: Edge<NodeRef<B, K, V, S, Kind>>,
-    ) -> Option<Kv<NodeRef<B, K, V, S, Kind>>> {
-        match self {
-            Self::Forward => edge.right_kv().ok(),
-            Self::Backward => edge.left_kv().ok(),
+            Self::Forward => NodeEnd::First,
+            Self::Backward => NodeEnd::Last,
         }
     }
 }
@@ -153,44 +130,39 @@ enum KeySide {
     After,
 }
 
-/// One end of a walk: a position between two entries of a leaf, or not
-/// started yet, in which case its first move starts it at the first or last
-/// position of the tree, by the direction of the move.
+/// One end of a walk: a path to a position between two entries of a leaf,
+/// or, until it starts, a detached path, in which case its first move starts
+/// it at the first or last position of the tree, by the direction of the
+/// move. Not starting writes no path.
 ///
-/// Invariant, once started: `edges[0]` is an edge of `leaf`, and for every
-/// height `h` from 1 to the root's, `edges[h]` is the edge of the node at
-/// height `h` that leads toward `leaf`: walking down from the root by them
-/// reaches it. `parent` is the node at height 1, if the root is not the leaf
-/// itself. Entries above the root's height are 0. A node holds at most 1023
-/// keys (`layout.rs`), so every edge index fits in a `u16`.
-struct LeafCursor<B, K, V, S> {
-    /// `None` until the cursor starts.
-    leaf: Option<NodeRef<B, K, V, S, Leaf>>,
-    parent: Option<NodeRef<B, K, V, S, Internal>>,
-    edges: [u16; MAX_HEIGHT + 1],
+/// Invariant, once started (its path attached): the path ends at an edge of
+/// a leaf of the walk's tree.
+struct Cursor<B, K, V, S> {
+    path: Path<B, K, V, S>,
 }
 
-impl<B: CopyableBorrow, K, V, S> Clone for LeafCursor<B, K, V, S> {
+impl<B: CopyableBorrow, K, V, S> Clone for Cursor<B, K, V, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<B: CopyableBorrow, K, V, S> Copy for LeafCursor<B, K, V, S> {}
+impl<B: CopyableBorrow, K, V, S> Copy for Cursor<B, K, V, S> {}
 
-impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> LeafCursor<B, K, V, S> {
+impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// A cursor that has not started.
-    const UNSTARTED: Self = Self {
-        leaf: None,
-        parent: None,
-        edges: [0; MAX_HEIGHT + 1],
-    };
+    #[inline(always)]
+    fn unstarted() -> Self {
+        Self {
+            path: Path::detached(),
+        }
+    }
 
-    /// Moves to the position just before or just after `key` in the tree
+    /// Starts at the position just before or just after `key` in the tree
     /// under `root`, or, if no entry has that key, where it would be. A
     /// separator stands between the end of the leaf left of it and the start
     /// of the leaf right of it (D17).
-    fn move_beside_key<Q>(
+    fn start_beside_key<Q>(
         &mut self,
         root: Root<B, K, V, S>,
         key: &SearchKey<'_, K, S, Q>,
@@ -199,211 +171,141 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> LeafCursor<B, K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let mut parent = None;
-        let mut node = root;
-        loop {
-            node = match node.force() {
-                ForceResult::Leaf(leaf) => {
-                    let edge = match (leaf.search(key), side) {
-                        (SearchResult::Found(kv), KeySide::Before) => kv.left_edge(),
-                        (SearchResult::Found(kv), KeySide::After) => kv.right_edge(),
-                        (SearchResult::GoDown(edge), _) => edge,
-                    };
-                    self.edges[0] = edge.index() as u16;
-                    self.parent = parent;
-                    self.leaf = Some(leaf);
-                    return;
-                }
-                ForceResult::Internal(internal) => match internal.search(key) {
-                    SearchResult::Found(separator) => {
-                        match side {
-                            KeySide::Before => {
-                                self.descend(separator.left_edge(), Direction::Backward)
-                            }
-                            KeySide::After => {
-                                self.descend(separator.right_edge(), Direction::Forward)
-                            }
-                        };
-                        return;
-                    }
-                    SearchResult::GoDown(edge) => {
-                        self.edges[internal.height()] = edge.index() as u16;
-                        parent = Some(internal);
-                        edge.descend()
-                    }
-                },
-            };
+        self.path.attach(root);
+        if !self.path.search(key) {
+            return;
+        }
+        let index = self.path.index();
+        let direction = match side {
+            KeySide::Before => Direction::Backward,
+            KeySide::After => Direction::Forward,
+        };
+        self.path.set_index(match side {
+            KeySide::Before => index,
+            KeySide::After => index + 1,
+        });
+        self.path.descend_to_leaf(direction.entry_end());
+    }
+
+    /// Starts at the first position of the tree under `root` going forward,
+    /// or at its last going backward.
+    fn start_at_end(&mut self, root: Root<B, K, V, S>, direction: Direction) {
+        self.path.attach(root);
+        let end = direction.entry_end();
+        let root_edge = match end {
+            NodeEnd::First => 0,
+            NodeEnd::Last => self.path.node(self.path.height()).len(),
+        };
+        self.path.set_index(root_edge);
+        self.path.descend_to_leaf(end);
+    }
+
+    /// The leaf the cursor is in. It has started.
+    fn leaf(&self) -> NodeRef<B, K, V, S, Leaf> {
+        match self.path.node(0).force() {
+            ForceResult::Leaf(leaf) => leaf,
+            ForceResult::Internal(_) => unreachable!("a started cursor is in a leaf"),
+        }
+    }
+
+    /// The key at `index` of the node at `height` on the path, a separator.
+    fn separator(&self, height: usize, index: usize) -> Kv<NodeRef<B, K, V, S, Internal>> {
+        match self.path.node(height).force() {
+            ForceResult::Internal(node) => node.kv_at(index),
+            ForceResult::Leaf(_) => unreachable!("a node above the leaves is internal"),
         }
     }
 
     /// Moves over the next entry and returns it, or returns `None`, staying
-    /// put, at the end of the tree under `root`. A cursor that has not
-    /// started starts at the first position.
+    /// put, at the end of the tree. A cursor that has not started starts at
+    /// the first position of the tree under `root`.
     fn next(&mut self, root: Root<B, K, V, S>) -> Option<EntryPosition<B, K, V, S>> {
-        let leaf = match self.leaf {
-            Some(leaf) => leaf,
-            None => self.move_to_end(root, Direction::Forward),
-        };
-        if let Ok(kv) = leaf.edge_at(usize::from(self.edges[0])).right_kv() {
-            self.edges[0] += 1;
+        if !self.path.is_attached() {
+            self.start_at_end(root, Direction::Forward);
+        }
+        let index = self.path.index();
+        if let Ok(kv) = self.leaf().edge_at(index).right_kv() {
+            self.path.set_index(index + 1);
             return Some(EntryPosition::InLeaf(kv));
         }
-        let separator = self.separator_beyond_leaf(root, Direction::Forward)?;
-        let leaf = self.descend(separator.right_edge(), Direction::Forward);
-        let head = leaf.head().expect("a leaf right of a separator has a head");
+        let height = (1..=self.path.root_height())
+            .find(|&height| self.path.index_at(height) < self.path.node(height).len())?;
+        while self.path.height() < height {
+            self.path.ascend();
+        }
+        let separator = self.separator(height, self.path.index());
+        self.path.set_index(separator.index() + 1);
+        self.path.descend_to_leaf(NodeEnd::First);
+        let head = self
+            .leaf()
+            .head()
+            .expect("a leaf right of a separator has a head");
         Some(EntryPosition::Separator(separator, head))
     }
 
     /// Moves back over the previous entry and returns it, or returns `None`,
-    /// staying put, at the start of the tree under `root`. A cursor that has
-    /// not started starts at the last position.
+    /// staying put, at the start of the tree. A cursor that has not started
+    /// starts at the last position of the tree under `root`.
     fn next_back(&mut self, root: Root<B, K, V, S>) -> Option<EntryPosition<B, K, V, S>> {
-        let leaf = match self.leaf {
-            Some(leaf) => leaf,
-            None => self.move_to_end(root, Direction::Backward),
-        };
-        if let Ok(kv) = leaf.edge_at(usize::from(self.edges[0])).left_kv() {
-            self.edges[0] -= 1;
+        if !self.path.is_attached() {
+            self.start_at_end(root, Direction::Backward);
+        }
+        let index = self.path.index();
+        let leaf = self.leaf();
+        if let Ok(kv) = leaf.edge_at(index).left_kv() {
+            self.path.set_index(index - 1);
             return Some(EntryPosition::InLeaf(kv));
         }
-        let separator = self.separator_beyond_leaf(root, Direction::Backward)?;
+        let height =
+            (1..=self.path.root_height()).find(|&height| self.path.index_at(height) > 0)?;
         let head = leaf.head().expect("a leaf right of a separator has a head");
-        self.descend(separator.left_edge(), Direction::Backward);
+        while self.path.height() < height {
+            self.path.ascend();
+        }
+        let separator = self.separator(height, self.path.index() - 1);
+        self.path.set_index(separator.index());
+        self.path.descend_to_leaf(NodeEnd::Last);
         Some(EntryPosition::Separator(separator, head))
-    }
-
-    /// How this position compares with `other`, a position in the same tree:
-    /// in key order, by the edge indexes from the root down. Both cursors
-    /// have started.
-    fn cmp_position(&self, other: &Self) -> Ordering {
-        self.edges.iter().rev().cmp(other.edges.iter().rev())
-    }
-
-    /// Whether this position is `other`, a position in the same tree. Both
-    /// cursors have started. Checks the leaf's edge first, which tells apart
-    /// most positions.
-    fn is_at(&self, other: &Self) -> bool {
-        self.edges[0] == other.edges[0] && self.edges == other.edges
     }
 
     /// The same position, with shared access for as long as `self` is
     /// borrowed.
-    fn reborrow(&self) -> LeafCursor<Immut<'_>, K, V, S> {
-        LeafCursor {
-            leaf: self.leaf.as_ref().map(NodeRef::reborrow),
-            parent: self.parent.as_ref().map(NodeRef::reborrow),
-            edges: self.edges,
+    fn reborrow(&self) -> Cursor<Immut<'_>, K, V, S> {
+        Cursor {
+            path: self.path.reborrow(),
         }
-    }
-
-    /// Moves to the start of the tree under `root` going forward, or to its
-    /// end going backward, and returns the leaf it is in.
-    fn move_to_end(
-        &mut self,
-        root: Root<B, K, V, S>,
-        direction: Direction,
-    ) -> NodeRef<B, K, V, S, Leaf> {
-        match root.force() {
-            ForceResult::Leaf(leaf) => {
-                self.edges[0] = direction.entry_edge(leaf.len()) as u16;
-                self.parent = None;
-                self.leaf = Some(leaf);
-                leaf
-            }
-            ForceResult::Internal(internal) => {
-                let edge = internal.edge_at(direction.entry_edge(internal.len()));
-                self.descend(edge, direction)
-            }
-        }
-    }
-
-    /// Takes `edge` and goes on down to a leaf, along first edges to the
-    /// leaf's start going forward, or along last edges to its end going
-    /// backward; returns the leaf. The edges above `edge` stay.
-    fn descend(
-        &mut self,
-        edge: Edge<NodeRef<B, K, V, S, Internal>>,
-        direction: Direction,
-    ) -> NodeRef<B, K, V, S, Leaf> {
-        let mut parent = edge.into_node();
-        self.edges[parent.height()] = edge.index() as u16;
-        let mut node = edge.descend();
-        loop {
-            node = match node.force() {
-                ForceResult::Leaf(leaf) => {
-                    self.edges[0] = direction.entry_edge(leaf.len()) as u16;
-                    self.parent = Some(parent);
-                    self.leaf = Some(leaf);
-                    return leaf;
-                }
-                ForceResult::Internal(internal) => {
-                    let edge = internal.edge_at(direction.entry_edge(internal.len()));
-                    self.edges[internal.height()] = edge.index() as u16;
-                    parent = internal;
-                    edge.descend()
-                }
-            };
-        }
-    }
-
-    /// The separator next to the path in `direction` in the lowest internal
-    /// node that has one: the next entry that way once the leaf's own are
-    /// passed. `None` at the start or end of the tree.
-    ///
-    /// The parent is checked first. Only if the path leaves it by its last
-    /// edge (or first, going backward) does the search walk down again from
-    /// `root`, by the edge indexes, to the nodes above the parent.
-    fn separator_beyond_leaf(
-        &self,
-        root: Root<B, K, V, S>,
-        direction: Direction,
-    ) -> Option<Kv<NodeRef<B, K, V, S, Internal>>> {
-        let parent = self.parent?;
-        let parent_edge = parent.edge_at(usize::from(self.edges[1]));
-        if let Some(separator) = direction.key_beyond(parent_edge) {
-            return Some(separator);
-        }
-        let mut lowest = None;
-        let mut node = root;
-        while let ForceResult::Internal(internal) = node.force()
-            && internal.height() > 1
-        {
-            let edge = internal.edge_at(usize::from(self.edges[internal.height()]));
-            lowest = direction.key_beyond(edge).or(lowest);
-            node = edge.descend();
-        }
-        lowest
     }
 }
 
 /// The two ends of a walk over the tree under `root`.
 struct Ends<B, K, V, S> {
-    /// `None` for a map without a tree.
-    root: Option<Root<B, K, V, S>>,
-    front: LeafCursor<B, K, V, S>,
-    back: LeafCursor<B, K, V, S>,
+    root: Root<B, K, V, S>,
+    front: Cursor<B, K, V, S>,
+    back: Cursor<B, K, V, S>,
 }
 
-impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
-    const EMPTY: Self = Self {
-        root: None,
-        front: LeafCursor::UNSTARTED,
-        back: LeafCursor::UNSTARTED,
-    };
+impl<B: CopyableBorrow, K, V, S> Clone for Ends<B, K, V, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 
-    /// Ends that have not started, over the tree under `root`, if any.
-    fn unstarted(root: Option<Root<B, K, V, S>>) -> Self {
+impl<B: CopyableBorrow, K, V, S> Copy for Ends<B, K, V, S> {}
+
+impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
+    /// Ends that have not started, in the tree under `root`.
+    fn unstarted(root: Root<B, K, V, S>) -> Self {
         Self {
             root,
-            front: LeafCursor::UNSTARTED,
-            back: LeafCursor::UNSTARTED,
+            front: Cursor::unstarted(),
+            back: Cursor::unstarted(),
         }
     }
 
     /// The same ends, with shared access for as long as `self` is borrowed.
     fn reborrow(&self) -> Ends<Immut<'_>, K, V, S> {
         Ends {
-            root: self.root.as_ref().map(NodeRef::reborrow),
+            root: self.root.reborrow(),
             front: self.front.reborrow(),
             back: self.back.reborrow(),
         }
@@ -415,7 +317,8 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
 /// the first time it moves, so the walk costs nothing until then, and one end
 /// never moves the other.
 pub(crate) struct FullWalk<B, K, V, S> {
-    ends: Ends<B, K, V, S>,
+    /// `None` for a map without a tree.
+    ends: Option<Ends<B, K, V, S>>,
     /// The entries between the ends.
     length: usize,
 }
@@ -423,11 +326,7 @@ pub(crate) struct FullWalk<B, K, V, S> {
 impl<K, V, S> Clone for FullWalk<Immut<'_>, K, V, S> {
     fn clone(&self) -> Self {
         Self {
-            ends: Ends {
-                root: self.ends.root,
-                front: self.ends.front,
-                back: self.ends.back,
-            },
+            ends: self.ends,
             length: self.length,
         }
     }
@@ -436,14 +335,14 @@ impl<K, V, S> Clone for FullWalk<Immut<'_>, K, V, S> {
 impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
     /// A walk over no entries.
     pub(crate) const EMPTY: Self = Self {
-        ends: Ends::EMPTY,
+        ends: None,
         length: 0,
     };
 
     /// A walk over the `length` entries of the tree under `root`, if any.
     pub(crate) fn new(root: Option<Root<B, K, V, S>>, length: usize) -> Self {
         Self {
-            ends: Ends::unstarted(root),
+            ends: root.map(Ends::unstarted),
             length,
         }
     }
@@ -459,7 +358,8 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
             return None;
         }
         self.length -= 1;
-        let position = self.ends.front.next(self.ends.root?)?;
+        let ends = self.ends.as_mut()?;
+        let position = ends.front.next(ends.root)?;
         // SAFETY: an entry was left between the ends, so the front end moved
         // past one the back end has not (module safety argument).
         Some(unsafe { B::item(position) })
@@ -472,7 +372,8 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
             return None;
         }
         self.length -= 1;
-        let position = self.ends.back.next_back(self.ends.root?)?;
+        let ends = self.ends.as_mut()?;
+        let position = ends.back.next_back(ends.root)?;
         // SAFETY: an entry was left between the ends, so the back end moved
         // past one the front end has not (module safety argument).
         Some(unsafe { B::item(position) })
@@ -482,7 +383,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
     /// borrowed.
     pub(crate) fn reborrow(&self) -> FullWalk<Immut<'_>, K, V, S> {
         FullWalk {
-            ends: self.ends.reborrow(),
+            ends: self.ends.as_ref().map(Ends::reborrow),
             length: self.length,
         }
     }
@@ -491,24 +392,19 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
 /// A walk over the entries between two bounds, which stops where its ends
 /// meet. Both ends start when the walk is made, by searching for the bounds.
 pub(crate) struct RangeWalk<B, K, V, S> {
-    ends: Ends<B, K, V, S>,
+    /// `None` for a map without a tree.
+    ends: Option<Ends<B, K, V, S>>,
 }
 
 impl<K, V, S> Clone for RangeWalk<Immut<'_>, K, V, S> {
     fn clone(&self) -> Self {
-        Self {
-            ends: Ends {
-                root: self.ends.root,
-                front: self.ends.front,
-                back: self.ends.back,
-            },
-        }
+        Self { ends: self.ends }
     }
 }
 
 impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
     /// A walk over no entries.
-    pub(crate) const EMPTY: Self = Self { ends: Ends::EMPTY };
+    pub(crate) const EMPTY: Self = Self { ends: None };
 
     /// A walk over the entries of the tree under `root` within the bounds,
     /// with std's panics for bounds out of order (D1).
@@ -532,50 +428,51 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
             ) if start > end => panic!("range start is greater than range end in BTreeMap"),
             _ => {}
         }
-        let mut ends = Ends::unstarted(Some(root));
+        // The ends start where they stay: positioning them writes their
+        // paths, which a copy right after would wait on (`path.rs`).
+        let mut walk = Self {
+            ends: Some(Ends::unstarted(root)),
+        };
+        let ends = walk.ends.as_mut().expect("just made");
         match start {
             Bound::Included(key) => {
                 ends.front
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::Before);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before);
             }
             Bound::Excluded(key) => {
                 ends.front
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::After);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::After);
             }
-            Bound::Unbounded => {
-                ends.front.move_to_end(root, Direction::Forward);
-            }
+            Bound::Unbounded => ends.front.start_at_end(root, Direction::Forward),
         }
         match end {
             Bound::Included(key) => {
                 ends.back
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::After);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::After);
             }
             Bound::Excluded(key) => {
                 ends.back
-                    .move_beside_key(root, &SearchKey::new(key), KeySide::Before);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before);
             }
-            Bound::Unbounded => {
-                ends.back.move_to_end(root, Direction::Backward);
-            }
+            Bound::Unbounded => ends.back.start_at_end(root, Direction::Backward),
         }
-        if ends.front.cmp_position(&ends.back) == Ordering::Greater {
+        if ends.front.path.cmp_position(&ends.back.path) == Ordering::Greater {
             panic!("Ord is ill-defined in BTreeMap range");
         }
-        Self { ends }
+        walk
     }
 
-    /// Whether no entry is left between the ends.
-    fn ends_meet(&self) -> bool {
-        self.ends.root.is_none() || self.ends.front.is_at(&self.ends.back)
+    /// The ends, unless no entry is left between them.
+    fn ends_apart(&mut self) -> Option<&mut Ends<B, K, V, S>> {
+        self.ends
+            .as_mut()
+            .filter(|ends| !ends.front.path.is_at(&ends.back.path))
     }
 
     /// The entry after the front end, which moves past it, if any is left.
     pub(crate) fn next(&mut self) -> Option<B::Item> {
-        if self.ends_meet() {
-            return None;
-        }
-        let position = self.ends.front.next(self.ends.root?)?;
+        let ends = self.ends_apart()?;
+        let position = ends.front.next(ends.root)?;
         // SAFETY: the front end was before the back end, so it moved past an
         // entry the back end has not (module safety argument).
         Some(unsafe { B::item(position) })
@@ -584,10 +481,8 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
     /// The entry before the back end, which moves back past it, if any is
     /// left.
     pub(crate) fn next_back(&mut self) -> Option<B::Item> {
-        if self.ends_meet() {
-            return None;
-        }
-        let position = self.ends.back.next_back(self.ends.root?)?;
+        let ends = self.ends_apart()?;
+        let position = ends.back.next_back(ends.root)?;
         // SAFETY: the back end was after the front end, so it moved past an
         // entry the front end has not (module safety argument).
         Some(unsafe { B::item(position) })
@@ -597,7 +492,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
     /// borrowed.
     pub(crate) fn reborrow(&self) -> RangeWalk<Immut<'_>, K, V, S> {
         RangeWalk {
-            ends: self.ends.reborrow(),
+            ends: self.ends.as_ref().map(Ends::reborrow),
         }
     }
 }

@@ -198,9 +198,10 @@ pub(super) struct InlineKeyNodeHeader {
 /// written.
 ///
 /// It does not know the node's kind (the height does, D11), and it is what
-/// internal nodes store as edges. The kinds have different layouts (D21), so
-/// every slot array it hands out needs the caller to know the kind. Everything
-/// it offers is raw: the typed handles in `handle.rs` are the only users.
+/// internal nodes store as edges, and paths as the nodes on them (`path.rs`).
+/// The kinds have different layouts (D21), so every slot array it hands out
+/// needs the caller to know the kind. Everything it offers is raw: the typed
+/// handles in `handle.rs` are the only users.
 #[repr(transparent)]
 pub(super) struct NodePtr<K, V, S> {
     page: NonNull<u8>,
@@ -217,6 +218,11 @@ impl<K, V, S> Clone for NodePtr<K, V, S> {
 impl<K, V, S> Copy for NodePtr<K, V, S> {}
 
 impl<K, V, S> NodePtr<K, V, S> {
+    /// Whether `self` and `other` point to the same node.
+    pub(super) fn is(self, other: Self) -> bool {
+        self.page == other.page
+    }
+
     /// Gives the page back, as a fresh page for the node's kind.
     ///
     /// # Safety

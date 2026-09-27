@@ -3,14 +3,14 @@
 //! B+-tree that stores each key once (D17).
 //!
 //! The map owns at most one [`Subtree`]: none until the first insert, so
-//! that [`BBTreeMap::new`] allocates nothing. Inserting is a recursive descent
-//! whose call stack is the path back up for splits (`insert.rs`), and so is
-//! removing, for merges (`remove.rs`); looking up is a loop down from the
-//! root (`lookup.rs`). Iterating walks the tree from both ends at once
-//! (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value pops
-//! the first or last entry, for now (`into_iter.rs`). Entries remember the
-//! path their search found (`entry.rs`, `position.rs`). Bulk changes drain
-//! entries in order and build trees of full nodes (`append_split.rs`,
+//! that [`BBTreeMap::new`] allocates nothing. Every operation goes by a path
+//! from the root (`node/path.rs`): looking up searches down one; inserting
+//! goes back up the path its search found, for splits (`insert.rs`), and so
+//! does removing, for merges (`remove.rs`); an entry keeps its path
+//! (`entry.rs`). Iterating walks the tree from both ends at once, each end a
+//! path (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value
+//! pops the first or last entry, for now (`into_iter.rs`). Bulk changes
+//! drain entries in order and build trees of full nodes (`append_split.rs`,
 //! `extract_if.rs`, `from_entries.rs`, on `node/build.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
@@ -34,8 +34,6 @@ mod into_iter;
 mod invariants;
 mod iter;
 mod iter_mut;
-mod lookup;
-mod position;
 mod remove;
 #[cfg(test)]
 mod type_tests;
@@ -51,7 +49,9 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::build::TreeBuilder;
 use crate::node::handle::Subtree;
+use crate::node::inline_keys::SearchKey;
 use crate::node::page::{FreshPage, PageByKind};
+use crate::node::path::{Path, PathMut};
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use extract_if::ExtractIf;
@@ -232,9 +232,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let root = self.root.as_ref()?.borrow();
-        let kv = root.search_tree(key)?;
-        Some(kv.into_key_value())
+        let mut path = Path::detached();
+        path.attach(self.root.as_ref()?.borrow());
+        if path.search(&SearchKey::new(key)) {
+            Some(path.kv().into_key_value())
+        } else {
+            None
+        }
     }
 
     /// Returns the first key-value pair in the map. The key in this pair is
@@ -255,8 +259,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let kv = self.root.as_ref()?.borrow().first_leaf_kv()?;
-        Some(kv.into_key_value())
+        let mut path = Path::detached();
+        path.attach(self.root.as_ref()?.borrow());
+        if path.descend_to_first_key() {
+            Some(path.kv().into_key_value())
+        } else {
+            None
+        }
     }
 
     /// Removes and returns the first element in the map. The key of this
@@ -307,8 +316,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let kv = self.root.as_ref()?.borrow().last_leaf_kv()?;
-        Some(kv.into_key_value())
+        let mut path = Path::detached();
+        path.attach(self.root.as_ref()?.borrow());
+        if path.descend_to_last_key() {
+            Some(path.kv().into_key_value())
+        } else {
+            None
+        }
     }
 
     /// Removes and returns the last element in the map. The key of this
@@ -364,9 +378,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let root = self.root.as_mut()?.borrow_mut();
-        let kv = root.search_tree(key)?;
-        Some(kv.into_value_mut())
+        let mut path = PathMut::new(self.root.as_mut()?);
+        if path.search(&SearchKey::new(key)) {
+            Some(path.into_value_mut())
+        } else {
+            None
+        }
     }
 
     /// Inserts a key-value pair into the map.
