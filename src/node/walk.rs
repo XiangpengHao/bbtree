@@ -69,7 +69,7 @@ use super::handle::{
 };
 use super::inline_keys::SearchKey;
 use super::page::PageByKind;
-use super::path::{NodeEnd, Path};
+use super::path::{KeySide, NodeEnd, Path};
 use crate::inline_key::InlineKeyStrategy;
 
 /// A handle to a tree's root, which a walk starts from.
@@ -164,15 +164,6 @@ impl Direction {
     }
 }
 
-/// Where a cursor stands relative to a key it looked up.
-#[derive(Clone, Copy)]
-enum KeySide {
-    /// Just before the key, or where it would be.
-    Before,
-    /// Just after the key, or where it would be.
-    After,
-}
-
 /// One end of a walk: a path to a position between two entries of a leaf,
 /// or, until it starts, a detached path, in which case its first move starts
 /// it at the first or last position of the tree, by the direction of the
@@ -202,9 +193,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     }
 
     /// Starts at the position just before or just after `key` in the tree
-    /// under `root`, or, if no entry has that key, where it would be. A
-    /// separator stands between the end of the leaf left of it and the start
-    /// of the leaf right of it (D17).
+    /// under `root`; see [`Path::search_to_edge`].
     fn start_beside_key<Q>(
         &mut self,
         root: Root<B, K, V, S>,
@@ -215,19 +204,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         Q: Ord + ?Sized,
     {
         self.path.attach(root);
-        if !self.path.search(key) {
-            return;
-        }
-        let index = self.path.index();
-        let direction = match side {
-            KeySide::Before => Direction::Backward,
-            KeySide::After => Direction::Forward,
-        };
-        self.path.set_index(match side {
-            KeySide::Before => index,
-            KeySide::After => index + 1,
-        });
-        self.path.descend_to_leaf(direction.entry_end());
+        self.path.search_to_edge(key, side);
     }
 
     /// Starts at the first position of the tree under `root` going forward,

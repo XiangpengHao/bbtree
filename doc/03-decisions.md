@@ -410,20 +410,31 @@ not decided".
   build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
   18.2 bytes per entry; inserting the sorted entries one by one, as before,
   took 18.6 ns and 33.0 bytes (half-full nodes).
-- **`append`, `split_off`, `retain` and `extract_if`** drain entries in order
-  (no `Ord`): `append`, `retain` and `extract_if` by value from the front
-  (D23's owning walk), `split_off` by popping the smaller part from an end,
-  as what it leaves must stay a tree. They rebuild with the builder, keeping std's
+- **`append`, `retain` and `extract_if`** drain entries in order by value
+  from the front (D23's owning walk; no `Ord`), and rebuild with the
+  builder, keeping std's
   observable behavior: what the predicate sees and when, which key and
   value survive, drop order, and what is left after a panic. Removing
   while walking, as std's `extract_if` does in place, would need the walk's
   position tracked through every merge and steal, which std's parent
   pointers give for free.
+- **`split_off` cuts the tree along the search path, as std's does**
+  (`map/split_off.rs`): from the leaf up, each node on the path keeps what
+  lies left of it, and what lies right goes into a new node, after the part
+  cut off below; then both sides of the cut are brought back to the
+  minimum fill from the top down (`node/border.rs`, which the builder's
+  right border shares): each node on the border gets one key more than its
+  minimum, by a merge with its sibling or keys moved over from it, so that
+  a merge below leaves it at its minimum. A separator at the start of the
+  right tree comes down into its first leaf that way. The lengths come
+  from counting the shorter tree's entries a node at a time, as std's do.
+  1M u64→u64, one cut (µs): at the median 12 000 by popping before → 95
+  (std 320); at 1%, 2 400 → 3 (std 5).
 - **Cost, for now:** `append` O(n + m) as std's; `retain` O(n) as std's, but
-  moving the entries it keeps; `extract_if` O(n) wherever its range is, and
-  `split_off` O(the smaller part), where std's are O(log n) plus the part
-  they touch. A drained entry costs about a step of a walk; a popped one,
-  in `split_off`, about a `pop_first`.
+  moving the entries it keeps; `extract_if` O(n) wherever its range is,
+  where std's is O(log n) plus the part it touches; `split_off` O(log n),
+  plus the shorter tree's nodes to count. A drained entry costs about a
+  step of a walk.
 
 ## Navigation
 

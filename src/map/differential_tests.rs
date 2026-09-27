@@ -1137,3 +1137,49 @@ fn over_aligned_values_match_std() {
         assert_eq!(value.get(), key);
     }
 }
+
+/// `split_off` at every position of a tree a few levels tall: before the
+/// first key, at each key and between each two, after the last, and so at
+/// every separator. Both halves match std's and keep the invariants, in a
+/// tree of half-full nodes, from ascending inserts, and in one thinned by
+/// removals toward the minimum fill, whose borders have little to spare.
+#[test]
+fn split_off_at_every_position_matches_std() {
+    // 1500 ascending entries, 14 to a node, make a tree 3 levels tall, and
+    // Miri's 60, 2.
+    let (count, height) = if cfg!(miri) { (60, 2) } else { (1500, 3) };
+    for thinned in [false, true] {
+        let rng = TestRng::new(31);
+        let mut maps = MirroredMaps::<WideKey, u64>::new();
+        // Keys at even numbers, so that odd ones fall between them.
+        for number in (1..=count).map(|number| 2 * number) {
+            maps.insert(WideKey::from_number(number), u64::from_number(number));
+        }
+        if thinned {
+            for number in (1..=count).map(|number| 2 * number) {
+                if rng.below(4) != 0 {
+                    let key = WideKey::from_number(number);
+                    assert_eq!(maps.ours.remove(&key), maps.theirs.remove(&key));
+                }
+            }
+        } else {
+            assert!(
+                maps.ours.height() >= height,
+                "the tree is a few levels tall"
+            );
+        }
+        maps.assert_same_contents();
+        for number in 0..=2 * count + 1 {
+            let key = WideKey::from_number(number);
+            let mut lower = maps.ours.clone();
+            let mut theirs_lower = maps.theirs.clone();
+            let upper = lower.split_off(&key);
+            let theirs_upper = theirs_lower.split_off(&key);
+            for (ours, theirs) in [(&lower, &theirs_lower), (&upper, &theirs_upper)] {
+                ours.check_invariants();
+                assert_eq!(ours.len(), theirs.len());
+                assert!(ours.iter().eq(theirs));
+            }
+        }
+    }
+}

@@ -412,6 +412,27 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         self.search_with(key, NodeSearch::ExpectingAppend)
     }
 
+    /// Goes down from the bottom node to the leaf edge just before or just
+    /// after `key`, or, if no entry has that key, where it would be. A
+    /// separator stands between the end of the leaf left of it and the start
+    /// of the leaf right of it (D17).
+    pub(crate) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        if !self.search(key) {
+            return;
+        }
+        let index = self.index();
+        let (edge, end) = match side {
+            KeySide::Before => (index, NodeEnd::Last),
+            KeySide::After => (index + 1, NodeEnd::First),
+        };
+        self.set_index(edge);
+        self.descend_to_leaf(end);
+    }
+
     /// The search, with the node and its height in registers on the way
     /// down; the path only takes stores, which nothing reads until it is
     /// done.
@@ -451,6 +472,15 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
             }
         }
     }
+}
+
+/// Where a path stands relative to a key it looked up.
+#[derive(Clone, Copy)]
+pub(crate) enum KeySide {
+    /// Just before the key, or where it would be.
+    Before,
+    /// Just after the key, or where it would be.
+    After,
 }
 
 /// Which node search a path's search uses at each node.
@@ -551,6 +581,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     {
         self.start_at_root();
         self.path.search_expecting_append(key)
+    }
+
+    /// Starts the path at the root and goes down to the leaf edge beside
+    /// `key`; see [`Path::search_to_edge`].
+    pub(crate) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.start_at_root();
+        self.path.search_to_edge(key, side);
     }
 
     /// Starts the path at the root and goes down to the tree's first key;

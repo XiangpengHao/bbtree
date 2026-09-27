@@ -11,15 +11,15 @@
 //! path (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value
 //! takes the tree apart as it goes (`into_iter.rs`), as dropping the map
 //! does. Bulk changes drain entries in order and build trees of full nodes
-//! (`append_split.rs`, `extract_if.rs`, `from_entries.rs`, on
-//! `node/build.rs`).
+//! (`append.rs`, `extract_if.rs`, `from_entries.rs`, on `node/build.rs`),
+//! but `split_off`, which cuts the tree along a path (`split_off.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
 
 #![forbid(unsafe_code)]
 
-mod append_split;
+mod append;
 #[cfg(test)]
 mod differential_tests;
 #[cfg(test)]
@@ -36,6 +36,7 @@ mod invariants;
 mod iter;
 mod iter_mut;
 mod remove;
+mod split_off;
 #[cfg(test)]
 mod type_tests;
 

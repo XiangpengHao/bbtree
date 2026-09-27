@@ -849,6 +849,90 @@ impl<K, V, S> NodeMut<'_, K, V, S, Internal> {
     }
 }
 
+impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Leaf> {
+    /// Cuts the leaf at edge `index`: moves the entries from `index` on, with
+    /// their inline keys, into a new leaf in `page`, without a head, and
+    /// returns it. This leaf keeps the entries before `index`, and its head.
+    /// Either may be left with fewer than its minimum, down to none.
+    ///
+    /// # Panics
+    ///
+    /// If `index > len`; the leaf is unchanged then.
+    pub(crate) fn cut_off_at(
+        &mut self,
+        index: usize,
+        page: FreshPage<K, V, S, Leaf>,
+    ) -> Subtree<K, V, S, Leaf> {
+        let len = self.len();
+        assert!(index <= len, "cutting a leaf past its last edge");
+        let count = len - index;
+        let right = NodePtr::from_fresh_page(page);
+        // SAFETY: `index <= len`, so keys (with their inline keys) and values
+        // `index..len` are initialized; they move to `0..count` of `right`, a
+        // fresh leaf of the same map, so `true` says its kind. This handle is
+        // exclusive, and `right` is reached by nothing else yet. Afterwards
+        // this leaf holds `0..index` and its head, and `right` `0..count` and
+        // none.
+        unsafe {
+            self.key_slots()
+                .move_run_to(index, count, right.key_slots(true), 0);
+            self.value_slots()
+                .move_run_to(index, count, right.value_slots(), 0);
+            right.set_len(count);
+            self.set_len(index);
+        }
+        // SAFETY: `right` holds a well-formed leaf, made just above, which
+        // the returned subtree owns.
+        unsafe { Subtree::from_raw_parts(right, 0) }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Internal> {
+    /// Cuts the node at edge `index`: moves the keys from `index` on, with
+    /// their inline keys, and the edges right of them, into a new node in
+    /// `page`, after `first_child`, the part of the child at `index` that
+    /// went right, and returns it. This node keeps the keys before `index`
+    /// and the edges up to it. Either may be left with fewer keys than its
+    /// minimum, down to none.
+    ///
+    /// # Panics
+    ///
+    /// If `index > len`, or if `first_child` is not exactly one level below
+    /// this node; the node is unchanged then.
+    pub(crate) fn cut_off_at(
+        &mut self,
+        index: usize,
+        first_child: Subtree<K, V, S>,
+        page: FreshPage<K, V, S, Internal>,
+    ) -> Subtree<K, V, S, Internal> {
+        let len = self.len();
+        assert!(index <= len, "cutting a node past its last edge");
+        self.assert_child_level(&first_child);
+        let count = len - index;
+        let right = NodePtr::from_fresh_page(page);
+        // SAFETY: `index <= len`, so keys (with their inline keys)
+        // `index..len` and edges `index + 1..=len` are initialized; they move
+        // to keys `0..count` and edges `1..=count` of `right`, a fresh
+        // internal node of the same map, so `false` says its kind, after
+        // `first_child` as its edge 0, a subtree one level down (checked
+        // above), which `right` owns from now on (invariant 2). This handle
+        // is exclusive, and `right` is reached by nothing else yet.
+        // Afterwards this node holds keys `0..index` and edges `0..=index`.
+        unsafe {
+            right.edge_slots().slot(0).write(first_child.node);
+            self.key_slots()
+                .move_run_to(index, count, right.key_slots(false), 0);
+            self.edge_slots()
+                .move_run_to(index + 1, count, right.edge_slots(), 1);
+            right.set_len(count);
+            self.set_len(index);
+        }
+        // SAFETY: `right` holds a well-formed node at this node's height,
+        // made just above, which the returned subtree owns.
+        unsafe { Subtree::from_raw_parts(right, self.height) }
+    }
+}
+
 /// A position between two adjacent keys of a node, or before the first, or
 /// after the last: index `0..=len`. Where a new key goes, and in an internal
 /// node, the edge to the child holding the keys in between.

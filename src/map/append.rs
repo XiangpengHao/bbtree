@@ -1,21 +1,14 @@
-//! Moving entries between maps in bulk, as std's map does: `append` merges
-//! another map in, and `split_off` cuts off the entries from a key on.
+//! Moving another map's entries into a map, as std's map does: `append`
+//! merges them in.
 //!
-//! For now both take entries out of the trees one by one, and build the
-//! trees they make into full nodes (`node/build.rs`): `append` by value from
-//! the front of both maps (`IntoIter`), in O(n + m), as std's, and
-//! `split_off` by popping the smaller part from one end, in its size, where
-//! std's cuts the tree along a path. The part `split_off` leaves stays a
-//! tree, which the pops keep balanced.
+//! It takes the entries of both maps by value, from the front (`IntoIter`),
+//! merges them in key order and builds the tree they make into full nodes
+//! (`node/build.rs`): in O(n + m), as std's.
 
 #![forbid(unsafe_code)]
 
-use alloc::vec::Vec;
-use core::borrow::Borrow;
 use core::cmp::Ordering;
-use core::iter;
 use core::mem;
-use core::ops::Bound;
 
 use super::{BBTreeMap, IntoIter};
 use crate::inline_key::InlineKeyStrategy;
@@ -77,70 +70,6 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             first_duplicate_key: None,
         };
         merge.run();
-    }
-
-    /// Splits the collection into two at the given key. Returns everything
-    /// after the given key, including the key.
-    ///
-    /// Every `Ord` call happens first, before any entry moves. Both maps keep
-    /// a tree, even an empty one, as std's do.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bbtree::BBTreeMap;
-    ///
-    /// let mut a = BBTreeMap::new();
-    /// a.insert(1, "a");
-    /// a.insert(2, "b");
-    /// a.insert(3, "c");
-    /// a.insert(17, "d");
-    /// a.insert(41, "e");
-    ///
-    /// let b = a.split_off(&3);
-    ///
-    /// assert_eq!(a.len(), 2);
-    /// assert_eq!(b.len(), 3);
-    ///
-    /// assert_eq!(a[&1], "a");
-    /// assert_eq!(a[&2], "b");
-    ///
-    /// assert_eq!(b[&3], "c");
-    /// assert_eq!(b[&17], "d");
-    /// assert_eq!(b[&41], "e");
-    /// ```
-    pub fn split_off<Q>(&mut self, key: &Q) -> Self
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        if self.is_empty() {
-            return Self::empty();
-        }
-        let upper_len = self
-            .range::<Q, _>((Bound::Included(key), Bound::Unbounded))
-            .count();
-        let lower_len = self.len() - upper_len;
-        let mut upper = if lower_len < upper_len {
-            // The lower part is smaller: it moves to a new tree, which
-            // becomes this map's, and the old tree, with the upper part
-            // left, is handed back.
-            let mut lower = TreeBuilder::new();
-            lower.extend(iter::from_fn(|| self.take_first()).take(lower_len));
-            mem::replace(self, Self::from_builder(lower))
-        } else {
-            // The upper part moves, taken from the back, so in descending
-            // order, which the builder takes reversed.
-            let mut entries: Vec<(K, V)> =
-                iter::from_fn(|| self.take_last()).take(upper_len).collect();
-            entries.reverse();
-            let mut upper = TreeBuilder::new();
-            upper.extend(entries);
-            Self::from_builder(upper)
-        };
-        self.keep_a_tree();
-        upper.keep_a_tree();
-        upper
     }
 }
 

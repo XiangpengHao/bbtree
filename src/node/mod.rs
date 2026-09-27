@@ -32,6 +32,7 @@
 //! values mutably, each once. Every other module is `#![forbid(unsafe_code)]`
 //! and builds on their safe API.
 
+mod border;
 pub(crate) mod build;
 mod clone;
 pub(crate) mod handle;

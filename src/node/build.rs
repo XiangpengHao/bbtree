@@ -1,8 +1,9 @@
 //! Building a tree from entries in ascending key order, comparing no keys:
 //! [`TreeBuilder`]. Each node fills up before the next one starts beside it,
 //! so the tree comes out with full nodes but along its right border, which
-//! `finish` tops up from the full left siblings to the minimum (D22). No
-//! node is split in half, as inserting the same entries one by one would.
+//! `finish` tops up past the minimum (D22) from the full left siblings
+//! (`border.rs`). No node is split in half, as inserting the same entries
+//! one by one would.
 //!
 //! The tree is well formed all along, but for the right border, whose nodes
 //! may hold fewer keys than the minimum, down to none: if building stops
@@ -13,6 +14,7 @@
 use super::handle::{EdgeRoom, ForceResult, Internal, Leaf, LeafOrInternal, NodeMut, Subtree};
 use super::inline_keys::InlinedKey;
 use super::page::{FreshPage, PageByKind};
+use super::path::NodeEnd;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order.
@@ -77,12 +79,13 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         }
     }
 
-    /// The tree, with its right border topped up to the minimum, and its
-    /// number of entries; `None` if nothing was pushed.
+    /// The tree, with its right border topped up past the minimum from the
+    /// full left siblings (`border.rs`), and its number of entries; `None` if
+    /// nothing was pushed.
     pub(crate) fn finish(mut self) -> (Option<Subtree<K, V, S>>, usize) {
         let mut tree = self.tree.take();
         if let Some(tree) = &mut tree {
-            Self::fill_right_border(tree.borrow_mut());
+            tree.fix_border(NodeEnd::Last, &mut PageByKind::deallocate);
         }
         (tree, self.length)
     }
@@ -140,28 +143,6 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             unreachable!("a new root has room");
         };
         edge.insert_fit(separator, child);
-    }
-
-    /// Tops up each node of the right border under `node` to its minimum,
-    /// from the top down, by moving entries over from its left sibling,
-    /// which is full: a node on the border started only once its left
-    /// sibling was full, and gives at most a minimum's worth, far less than
-    /// half.
-    fn fill_right_border(mut node: NodeMut<'_, K, V, S, LeafOrInternal>) {
-        while let ForceResult::Internal(internal) = node.force() {
-            let last_child = internal.reborrow().last_edge().descend();
-            let min_len = last_child.min_len();
-            let separator = internal
-                .last_kv()
-                .expect("a node on the right border holds a key once topped up");
-            let mut context = separator.into_balancing_context();
-            while context.right_child_len() < min_len {
-                context
-                    .steal_left()
-                    .expect("a full left sibling can spare a key");
-            }
-            node = context.into_right_child();
-        }
     }
 }
 
