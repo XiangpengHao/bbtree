@@ -117,13 +117,29 @@ pub(crate) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 /// Invariant in `K` and `V`, like `&'a mut`.
 pub(crate) struct ValMut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 
+/// Borrow type of a [`NodeRef`]: ownership of a tree that a walk is taking
+/// apart, moving entries out from either end and freeing each node once past
+/// it (`walk.rs`), as std's `IntoIter` does.
+///
+/// Its handles may be copied, so that both ends of the walk hold some. Past
+/// the walk's ends, entries have been moved out and nodes freed, while the
+/// nodes' lengths still count them: only the walk knows where the gaps are.
+/// What the handles offer safely reads only the structure, and the walk uses
+/// them only between its ends. Moving an entry out and freeing a node are
+/// unsafe, and the walk vouches that it does each once.
+///
+/// It owns `K` and `V`, and is covariant in them, as an owned tree is.
+pub(crate) struct Dying<K, V>(PhantomData<(K, V)>);
+
 /// A borrow type whose handles may be copied, because nothing they offer
-/// safely changes the tree: [`Immut`] and [`ValMut`].
+/// safely changes the tree: [`Immut`], [`ValMut`] and [`Dying`].
 pub(crate) trait CopyableBorrow {}
 
 impl CopyableBorrow for Immut<'_> {}
 
 impl<K, V> CopyableBorrow for ValMut<'_, K, V> {}
+
+impl<K, V> CopyableBorrow for Dying<K, V> {}
 
 /// A handle to one node of kind `Kind` at `height`, with the access of
 /// `BorrowType` ([`Immut`], [`Mut`] or [`ValMut`]), in a map with inline-key
@@ -145,6 +161,10 @@ impl<K, V> CopyableBorrow for ValMut<'_, K, V> {}
 ///   except through copies of the handle, which only read the structure and
 ///   keys, and through the values they hand out, each at most once, as
 ///   `&'a mut V`.
+/// - With `Dying<K, V>`, the walk that holds the handle and its copies owns
+///   the tree. The node stays allocated, its length and edges unchanged,
+///   until the walk frees it; its keys and values are initialized except
+///   those the walk has moved out, which it never reads again.
 ///
 /// Handles never lead back up to a parent, so a handle derived from another
 /// one (by `reborrow_mut` or `descend`) is the only way into its subtree while
@@ -190,6 +210,16 @@ unsafe impl<K: Send, V: Send, S, Kind> Send for NodeRef<ValMut<'_, K, V>, K, V, 
 // SAFETY: through `&` a value-mutating handle only reads the structure, keys
 // and values, which `K: Sync` and `V: Sync` allow sharing.
 unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {}
+
+// SAFETY: a dying handle stands for ownership of the tree's keys and values,
+// as a `Box<(K, V)>` would: sending it to another thread sends them there,
+// which `K: Send` and `V: Send` allow. The pages come from the global
+// allocator, which any thread may free.
+unsafe impl<K: Send, V: Send, S, Kind> Send for NodeRef<Dying<K, V>, K, V, S, Kind> {}
+
+// SAFETY: through `&` a dying handle only reads the structure, and the keys
+// and values not moved out, which `K: Sync` and `V: Sync` allow sharing.
+unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<Dying<K, V>, K, V, S, Kind> {}
 
 /// How a node searches its keys when inline keys don't decide (D18). Fixed
 /// per key type at compile time, so the choice costs nothing at run time.
@@ -804,89 +834,6 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Leaf> {
             }
         }
     }
-
-    /// Empties the leaf: drops its head, then every key and value in
-    /// ascending order, each key before its value, where they lie. Removing
-    /// them one by one from the front would shift the rest of the leaf each
-    /// time; here nothing moves.
-    ///
-    /// If one of their `Drop`s panics, the rest are still dropped, in the
-    /// same order, before the panic goes on; a second panic aborts, as any
-    /// panic during unwinding does. Either way the leaf is left empty,
-    /// without a head.
-    pub(crate) fn drop_entries(&mut self) {
-        let len = self.len();
-        let has_head = self.reborrow().head().is_some();
-        // SAFETY: this handle is exclusive (invariant 1). An empty leaf
-        // without a head is well-formed, and `entries` takes over the head
-        // and keys and values `0..len` before any of them is dropped.
-        unsafe {
-            self.set_len(0);
-            self.node.set_has_head(false);
-        }
-        let mut entries = LeafEntriesToDrop {
-            keys: self.key_slots().keys(),
-            head_and_values: self.head_and_value_slots(),
-            has_head,
-            next: 0,
-            len,
-        };
-        // A panicking `Drop` unwinds through `entries`, whose own `Drop` goes
-        // on with the rest.
-        entries.drop_rest();
-    }
-}
-
-/// The head and entries of a leaf that has given them up but still holds
-/// them in its slots, being dropped in place by
-/// [`NodeMut::drop_entries`]; whatever is left when this goes out of scope,
-/// as a panicking `Drop` makes it, is dropped then.
-///
-/// Invariant: the head slot (slot 0 of `head_and_values`) holds a value
-/// exactly if `has_head`, and keys and values `next..len` are initialized;
-/// nothing else reads or drops them, and their page stays allocated while
-/// this lives.
-struct LeafEntriesToDrop<K, V> {
-    keys: Slots<K, Up>,
-    head_and_values: Slots<V, Down>,
-    has_head: bool,
-    next: usize,
-    len: usize,
-}
-
-impl<K, V> LeafEntriesToDrop<K, V> {
-    /// Drops the head, then each key before its value, in ascending order.
-    /// Each is taken out of `self` before its `Drop` runs, so a panic leaves
-    /// `self` holding exactly the ones not yet dropped.
-    fn drop_rest(&mut self) {
-        if mem::take(&mut self.has_head) {
-            // SAFETY: the head slot held a value (type invariant), which
-            // `has_head` no longer claims, so it is read out once.
-            drop(unsafe { self.head_and_values.slot(0).read() });
-        }
-        while self.next < self.len {
-            let index = self.next;
-            self.next += 1;
-            // SAFETY: `index < len <= capacity`, and key and value `index`
-            // were initialized (type invariant); `next` has moved past them,
-            // so they are read out once. Value `index` is head-and-value
-            // slot `index + 1`. Dropping the pair drops the key, then the
-            // value, even if the key's `Drop` panics.
-            let key_value = unsafe {
-                (
-                    self.keys.slot(index).read(),
-                    self.head_and_values.slot(index + 1).read(),
-                )
-            };
-            drop(key_value);
-        }
-    }
-}
-
-impl<K, V> Drop for LeafEntriesToDrop<K, V> {
-    fn drop(&mut self) {
-        self.drop_rest();
-    }
 }
 
 impl<K, V, S> NodeMut<'_, K, V, S, Internal> {
@@ -1285,6 +1232,75 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<ValMut<'a, K, V>, K, V, S, 
         // apart from every key and value, and the caller vouches that this
         // is its only reference.
         unsafe { self.leaf.head_and_value_slots().slot(0).as_mut() }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Dying<K, V>, K, V, S, Leaf>> {
+    /// Moves the key and value out of their slots, which the leaf keeps
+    /// counting: only the walk taking the tree apart knows they are gone.
+    ///
+    /// # Safety
+    ///
+    /// They are moved out only this once, and nothing reads their slots
+    /// afterward.
+    pub(crate) unsafe fn take_key_value(self) -> (K, V) {
+        // SAFETY: `index < len`, so key and value `index` are initialized
+        // unless moved out (invariants 1 and 3), which the caller vouches
+        // they are not, and only now.
+        unsafe {
+            (
+                self.node.key_slots().keys().slot(self.index).read(),
+                self.node.value_slots().slot(self.index).read(),
+            )
+        }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Dying<K, V>, K, V, S, Internal>> {
+    /// Moves the separator key out of its slot; see
+    /// [`Kv::take_key_value`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Kv::take_key_value`].
+    pub(crate) unsafe fn take_key(self) -> K {
+        // SAFETY: as for `take_key_value`.
+        unsafe { self.node.key_slots().keys().slot(self.index).read() }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Head<NodeRef<Dying<K, V>, K, V, S, Leaf>> {
+    /// Moves the head out of its slot, which the leaf's header still
+    /// flags; see [`Kv::take_key_value`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Kv::take_key_value`].
+    pub(crate) unsafe fn take_value(self) -> V {
+        // SAFETY: the head is initialized unless moved out (invariants 3 and
+        // 5), which the caller vouches it is not, and only now.
+        unsafe { self.leaf.head_and_value_slots().slot(0).read() }
+    }
+}
+
+impl<K, V, S> NodeRef<Dying<K, V>, K, V, S, LeafOrInternal> {
+    /// Gives the node's page back, sorted by the node's kind.
+    ///
+    /// # Safety
+    ///
+    /// Every key, value and head the node held has been moved out, and every
+    /// child it led to freed, and nothing uses the node, through this handle
+    /// or a copy, again.
+    pub(crate) unsafe fn free(self) -> PageByKind<K, V, S> {
+        // SAFETY: the height says the node's kind (invariant 1), and the
+        // caller hands over everything in it and every use of it.
+        unsafe {
+            if self.height == 0 {
+                self.node.into_fresh_page::<Leaf>().into()
+            } else {
+                self.node.into_fresh_page::<Internal>().into()
+            }
+        }
     }
 }
 
@@ -1703,6 +1719,13 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
         // as `ValMut` allows.
         unsafe { NodeRef::from_raw_parts(self.node, self.height) }
     }
+
+    /// The tree, for a walk to take apart (see [`Dying`]).
+    pub(crate) fn into_dying(self) -> NodeRef<Dying<K, V>, K, V, S, Kind> {
+        // SAFETY: the tree is well-formed (type invariant), and the
+        // `Subtree` given up was the only owner of it.
+        unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+    }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S, Leaf> {
@@ -1711,33 +1734,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S, Leaf> {
         // SAFETY: an empty leaf is complete, and the page is owned by the
         // subtree from now on.
         unsafe { Self::from_raw_parts(NodePtr::from_fresh_page(page), 0) }
-    }
-
-    /// Releases the page of an empty leaf without a head. Were the leaf to
-    /// hold entries or a head, they would be leaked.
-    pub(crate) fn into_page(self) -> FreshPage<K, V, S, Leaf> {
-        debug_assert_eq!(self.borrow().len(), 0, "releasing a leaf with entries");
-        debug_assert!(
-            self.borrow().head().is_none(),
-            "releasing a leaf with a head"
-        );
-        // SAFETY: the node is a leaf; the subtree owned the page, and
-        // consuming it leaves nothing that reaches the node (type invariant).
-        unsafe { self.node.into_fresh_page() }
-    }
-}
-
-impl<K, V, S> Subtree<K, V, S> {
-    /// Finds out the root's kind, from the height.
-    pub(crate) fn force(self) -> ForceResult<Subtree<K, V, S, Leaf>, Subtree<K, V, S, Internal>> {
-        // SAFETY: the height decides the kind.
-        unsafe {
-            if self.height == 0 {
-                ForceResult::Leaf(Subtree::from_raw_parts(self.node, self.height))
-            } else {
-                ForceResult::Internal(Subtree::from_raw_parts(self.node, self.height))
-            }
-        }
     }
 }
 

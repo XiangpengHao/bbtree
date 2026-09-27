@@ -1,19 +1,23 @@
 //! Iterating over a map by value: [`IntoIter`], [`IntoKeys`] and
 //! [`IntoValues`], which take the entries out in key order.
 //!
-//! For now each step removes the first or last entry, as `pop_first` and
-//! `pop_last` do, rebalancing as it goes, and dropping the iterator drops the
-//! entries left in ascending order, as dropping the map does. A walk that
-//! takes entries out and frees each node once past it, with no rebalancing,
-//! is to replace the removals.
+//! The iterator takes the tree apart as it goes (`node/walk.rs`, D23): each
+//! step moves an entry out of its slot, with nothing shifting and nothing
+//! rebalanced, and each node is freed once both ends are done with it.
+//! Dropping the iterator drops the entries left in ascending order, as
+//! dropping the map does, which is the same walk.
 
 #![forbid(unsafe_code)]
 
 use core::fmt;
-use core::iter::FusedIterator;
+use core::iter::{self, FusedIterator};
+use core::mem;
+use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::node::page::PageByKind;
+use crate::node::walk::DyingWalk;
 
 /// An owning iterator over the entries of a `BBTreeMap`, sorted by key.
 ///
@@ -22,31 +26,55 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 ///
 /// [`into_iter`]: IntoIterator::into_iter
 pub struct IntoIter<K, V, S: InlineKeyStrategy<K> = Auto> {
-    /// The entries left.
-    map: BBTreeMap<K, V, S>,
+    /// The walk taking the map's tree apart.
+    walk: DyingWalk<K, V, S, Deallocate<K, V, S>>,
 }
+
+/// Where the iterator's freed pages go: back to the global allocator.
+type Deallocate<K, V, S> = fn(PageByKind<K, V, S>);
+
+impl<K, V, S: InlineKeyStrategy<K>> IntoIter<K, V, S> {
+    /// The entries left, by reference, in ascending order.
+    fn remaining(&self) -> impl Iterator<Item = (&K, &V)> {
+        let mut walk = self.walk.remaining();
+        iter::from_fn(move || walk.next())
+    }
+
+    /// The next entry, by reference, without moving past it.
+    pub(super) fn peek(&self) -> Option<(&K, &V)> {
+        self.remaining().next()
+    }
+}
+
+// Entries are moved out of the tree's pages, never pinned: like the map, the
+// iterator is `Unpin` whatever `K` and `V` are, as std's is.
+impl<K, V, S: InlineKeyStrategy<K>> Unpin for IntoIter<K, V, S> {}
+
+// std's iterator is `UnwindSafe` whenever its keys and values are
+// `RefUnwindSafe`, as the map is; match it (D1).
+impl<K: RefUnwindSafe, V: RefUnwindSafe, S: InlineKeyStrategy<K>> UnwindSafe for IntoIter<K, V, S> {}
 
 impl<K, V, S: InlineKeyStrategy<K>> Iterator for IntoIter<K, V, S> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<(K, V)> {
-        self.map.take_first()
+        self.walk.next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.map.len(), Some(self.map.len()))
+        (self.walk.len(), Some(self.walk.len()))
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for IntoIter<K, V, S> {
     fn next_back(&mut self) -> Option<(K, V)> {
-        self.map.take_last()
+        self.walk.next_back()
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> ExactSizeIterator for IntoIter<K, V, S> {
     fn len(&self) -> usize {
-        self.map.len()
+        self.walk.len()
     }
 }
 
@@ -55,7 +83,7 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for IntoIter<K, V, S> {}
 /// Prints the entries left.
 impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for IntoIter<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.map.iter()).finish()
+        f.debug_list().entries(self.remaining()).finish()
     }
 }
 
@@ -69,10 +97,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for IntoIter<K, V, S> {
     /// ```
     fn default() -> Self {
         Self {
-            map: BBTreeMap {
-                root: None,
-                length: 0,
-            },
+            walk: DyingWalk::new(None, 0, PageByKind::deallocate),
         }
     }
 }
@@ -135,7 +160,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for IntoKeys<K, V, S> {}
 /// Prints the keys left.
 impl<K: fmt::Debug, V, S: InlineKeyStrategy<K>> fmt::Debug for IntoKeys<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.inner.map.keys()).finish()
+        f.debug_list()
+            .entries(self.inner.remaining().map(|(key, _)| key))
+            .finish()
     }
 }
 
@@ -198,7 +225,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for IntoValues<K, V, S> {}
 /// Prints the values left.
 impl<K, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for IntoValues<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.inner.map.values()).finish()
+        f.debug_list()
+            .entries(self.inner.remaining().map(|(_, value)| value))
+            .finish()
     }
 }
 
@@ -283,7 +312,11 @@ impl<K, V, S: InlineKeyStrategy<K>> IntoIterator for BBTreeMap<K, V, S> {
     ///     println!("{key}: {value}");
     /// }
     /// ```
-    fn into_iter(self) -> IntoIter<K, V, S> {
-        IntoIter { map: self }
+    fn into_iter(mut self) -> IntoIter<K, V, S> {
+        let tree = self.root.take();
+        let length = mem::take(&mut self.length);
+        IntoIter {
+            walk: DyingWalk::new(tree, length, PageByKind::deallocate),
+        }
     }
 }

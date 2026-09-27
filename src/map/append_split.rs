@@ -1,10 +1,12 @@
 //! Moving entries between maps in bulk, as std's map does: `append` merges
 //! another map in, and `split_off` cuts off the entries from a key on.
 //!
-//! For now both take entries out of the trees one by one, from an end, and
-//! build the trees they make into full nodes (`node/build.rs`): `append` in
-//! O(n + m), as std's, and `split_off` in the size of the smaller part,
-//! where std's cuts the tree along a path.
+//! For now both take entries out of the trees one by one, and build the
+//! trees they make into full nodes (`node/build.rs`): `append` by value from
+//! the front of both maps (`IntoIter`), in O(n + m), as std's, and
+//! `split_off` by popping the smaller part from one end, in its size, where
+//! std's cuts the tree along a path. The part `split_off` leaves stays a
+//! tree, which the pops keep balanced.
 
 #![forbid(unsafe_code)]
 
@@ -15,7 +17,7 @@ use core::iter;
 use core::mem;
 use core::ops::Bound;
 
-use super::BBTreeMap;
+use super::{BBTreeMap, IntoIter};
 use crate::inline_key::InlineKeyStrategy;
 use crate::node::build::TreeBuilder;
 
@@ -64,8 +66,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             mem::swap(self, other);
             return;
         }
-        let ours = mem::replace(self, Self::empty());
-        let theirs = mem::replace(other, Self::empty());
+        let ours = mem::replace(self, Self::empty()).into_iter();
+        let theirs = mem::replace(other, Self::empty()).into_iter();
         let mut merge = Merge {
             target: self,
             ours,
@@ -149,8 +151,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 /// are dropped.
 struct Merge<'a, K, V, S: InlineKeyStrategy<K>> {
     target: &'a mut BBTreeMap<K, V, S>,
-    ours: BBTreeMap<K, V, S>,
-    theirs: BBTreeMap<K, V, S>,
+    ours: IntoIter<K, V, S>,
+    theirs: IntoIter<K, V, S>,
     merged: TreeBuilder<K, V, S>,
     /// Whether an entry of the other map was merged yet.
     took_from_theirs: bool,
@@ -164,17 +166,17 @@ struct Merge<'a, K, V, S: InlineKeyStrategy<K>> {
 impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
     fn run(&mut self) {
         loop {
-            let order = match (self.ours.iter().next(), self.theirs.iter().next()) {
+            let order = match (self.ours.peek(), self.theirs.peek()) {
                 (Some((our_key, _)), Some((their_key, _))) => our_key.cmp(their_key),
                 (Some(_), None) => Ordering::Less,
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => return,
             };
             let entry = match order {
-                Ordering::Less => self.ours.take_first(),
+                Ordering::Less => self.ours.next(),
                 Ordering::Greater => {
                     self.took_from_theirs = true;
-                    self.theirs.take_first()
+                    self.theirs.next()
                 }
                 Ordering::Equal => self.take_duplicate(),
             };
@@ -188,8 +190,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
     /// dropped, then the other map's key, unless it is the first of that map
     /// merged.
     fn take_duplicate(&mut self) -> Option<(K, V)> {
-        let (key, old_value) = self.ours.take_first()?;
-        let (their_key, value) = self.theirs.take_first()?;
+        let (key, old_value) = self.ours.next()?;
+        let (their_key, value) = self.theirs.next()?;
         drop(old_value);
         if mem::replace(&mut self.took_from_theirs, true) {
             drop(their_key);
@@ -202,8 +204,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Drop for Merge<'_, K, V, S> {
     fn drop(&mut self) {
-        let ours = &mut self.ours;
-        self.merged.extend(iter::from_fn(|| ours.take_first()));
+        self.merged.extend(&mut self.ours);
         let merged = mem::replace(&mut self.merged, TreeBuilder::new());
         *self.target = BBTreeMap::from_builder(merged);
         // Before the other map's entries not merged, as std's unwinding

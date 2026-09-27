@@ -9,9 +9,10 @@
 //! does removing, for merges (`remove.rs`); an entry keeps its path
 //! (`entry.rs`). Iterating walks the tree from both ends at once, each end a
 //! path (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value
-//! pops the first or last entry, for now (`into_iter.rs`). Bulk changes
-//! drain entries in order and build trees of full nodes (`append_split.rs`,
-//! `extract_if.rs`, `from_entries.rs`, on `node/build.rs`).
+//! takes the tree apart as it goes (`into_iter.rs`), as dropping the map
+//! does. Bulk changes drain entries in order and build trees of full nodes
+//! (`append_split.rs`, `extract_if.rs`, `from_entries.rs`, on
+//! `node/build.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.

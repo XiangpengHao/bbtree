@@ -313,9 +313,20 @@ not decided".
   unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
   (range). That is the one `unsafe` in `node/walk.rs`.
-- **Owning iteration, for now,** pops from either end, rebalancing as it
-  goes (`into_iter.rs`). An owning walk that takes entries out and frees
-  each node once both ends are past it is to replace the pops.
+- **Owning iteration** (`DyingWalk`, for `IntoIter` and for dropping a
+  tree, which is dropping one) takes the tree apart as it goes: each entry
+  is moved out of its slot, nothing shifts and nothing rebalances, and an
+  end frees each node as it goes up out of it, past its last edge (its
+  first, going backward); the nodes on the path where the ends meet go
+  last. A `Dying` borrow type's handles copy, so both ends hold some;
+  moving an entry out and freeing a node are unsafe, vouched for by the
+  walk. Entries without drop glue are skipped a leaf at a time when the map
+  is dropped. Before, `IntoIter` popped from either end, rebalancing as it
+  went, and dropping a tree was a separate teardown. 1M entries, one run
+  (ns per entry): consuming `for` loop, u64→u64 15.1 → 7.5 (std 8.9),
+  `String`→u64 91.9 → 74.7 (std 74.4); dropping, u64→u64 2.1 → 2.4 (std
+  6.6), `String`→u64 64 → 67–72 (std 71), where the teardown dropped a
+  leaf's entries in one loop and the walk steps a cursor per entry.
 - Measured with D24, one run each, mimalloc, Ryzen 9 9900X (ns per entry;
   per scan for `range64`):
 
@@ -400,7 +411,9 @@ not decided".
   18.2 bytes per entry; inserting the sorted entries one by one, as before,
   took 18.6 ns and 33.0 bytes (half-full nodes).
 - **`append`, `split_off`, `retain` and `extract_if`** drain entries in order
-  by popping an end (no `Ord`), and rebuild with the builder, keeping std's
+  (no `Ord`): `append`, `retain` and `extract_if` by value from the front
+  (D23's owning walk), `split_off` by popping the smaller part from an end,
+  as what it leaves must stay a tree. They rebuild with the builder, keeping std's
   observable behavior: what the predicate sees and when, which key and
   value survive, drop order, and what is left after a panic. Removing
   while walking, as std's `extract_if` does in place, would need the walk's
@@ -409,8 +422,8 @@ not decided".
 - **Cost, for now:** `append` O(n + m) as std's; `retain` O(n) as std's, but
   moving the entries it keeps; `extract_if` O(n) wherever its range is, and
   `split_off` O(the smaller part), where std's are O(log n) plus the part
-  they touch. A popped entry costs ~a `pop_first`; an owning walk (D23,
-  open) would make the drains cheaper.
+  they touch. A drained entry costs about a step of a walk; a popped one,
+  in `split_off`, about a `pop_first`.
 
 ## Navigation
 

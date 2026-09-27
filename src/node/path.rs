@@ -42,7 +42,7 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
 use super::handle::{
-    CopyableBorrow, ForceResult, Immut, Internal, Kv, LeafOrInternal, Mut, NodeMut, NodeRef,
+    CopyableBorrow, Dying, ForceResult, Immut, Internal, Kv, LeafOrInternal, Mut, NodeMut, NodeRef,
     SearchResult, Subtree, ValMut,
 };
 use super::inline_keys::SearchKey;
@@ -121,6 +121,11 @@ unsafe impl<K: Sync, V: Sync, S> Sync for Path<ValMut<'_, K, V>, K, V, S> {}
 unsafe impl<K: Send, V: Send, S> Send for Path<Mut<'_, K, V>, K, V, S> {}
 // SAFETY: as for `Send`.
 unsafe impl<K: Sync, V: Sync, S> Sync for Path<Mut<'_, K, V>, K, V, S> {}
+// SAFETY: a dying path stands for ownership of the tree's keys and values,
+// as a `Box<(K, V)>` would (see `NodeRef<Dying>`).
+unsafe impl<K: Send, V: Send, S> Send for Path<Dying<K, V>, K, V, S> {}
+// SAFETY: as for `Send`; through `&` it only reads.
+unsafe impl<K: Sync, V: Sync, S> Sync for Path<Dying<K, V>, K, V, S> {}
 
 impl<B, K, V, S> Path<B, K, V, S> {
     /// A path that reaches no node. Making it writes nothing but its heights,

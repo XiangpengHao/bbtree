@@ -1,8 +1,9 @@
 //! Removing the entries a predicate picks: [`ExtractIf`], and `retain` on
 //! it, as std's.
 //!
-//! For now the walk takes every entry out of the map, from the front, and
-//! builds the map again from those it keeps (`node/build.rs`): O(n)
+//! For now the walk takes every entry out of the map, from the front, by
+//! value (`IntoIter`), and builds the map again from those it keeps
+//! (`node/build.rs`): O(n)
 //! wherever the range is, where std's walk passes over the entries outside
 //! it in place. As std's, it starts at the range's start, having passed the
 //! entries before it when made, and stops at the first entry after the
@@ -18,11 +19,11 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
-use core::iter::{self, FusedIterator};
+use core::iter::FusedIterator;
 use core::mem;
 use core::ops::{Bound, RangeBounds, RangeFull};
 
-use super::BBTreeMap;
+use super::{BBTreeMap, IntoIter};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::build::TreeBuilder;
 
@@ -35,8 +36,8 @@ pub struct ExtractIf<'a, K, V, R, F, S: InlineKeyStrategy<K> = Auto> {
     map: &'a mut BBTreeMap<K, V, S>,
     /// Whether the map had a tree, which it keeps even if no entry stays.
     had_tree: bool,
-    /// The entries not visited yet.
-    rest: BBTreeMap<K, V, S>,
+    /// The entries not visited yet, taken out of the map's tree in order.
+    rest: IntoIter<K, V, S>,
     /// The entry the predicate is testing: kept if it panics.
     testing: Option<(K, V)>,
     /// The entries visited and kept, in order, those before the range
@@ -78,7 +79,7 @@ where
 
     fn next(&mut self) -> Option<(K, V)> {
         while !self.finished {
-            let next_is_after = match self.rest.iter().next() {
+            let next_is_after = match self.rest.peek() {
                 Some((key, _)) => self.is_after_range(key),
                 None => true,
             };
@@ -86,7 +87,7 @@ where
                 self.finished = true;
                 return None;
             }
-            let entry = self.rest.take_first()?;
+            let entry = self.rest.next()?;
             let (key, value) = self.testing.insert(entry);
             if (self.pred)(key, value) {
                 return self.testing.take();
@@ -120,7 +121,7 @@ impl<K: fmt::Debug, V: fmt::Debug, R, F, S: InlineKeyStrategy<K>> fmt::Debug
         let peek = if self.finished {
             None
         } else {
-            self.rest.iter().next()
+            self.rest.peek()
         };
         f.debug_struct("ExtractIf")
             .field("peek", &peek)
@@ -139,8 +140,7 @@ impl<K, V, R, F, S: InlineKeyStrategy<K>> Drop for ExtractIf<'_, K, V, R, F, S> 
         if let Some((key, value)) = self.testing.take() {
             self.kept.push(key, value);
         }
-        let rest = &mut self.rest;
-        self.kept.extend(iter::from_fn(|| rest.take_first()));
+        self.kept.extend(&mut self.rest);
         let kept = mem::replace(&mut self.kept, TreeBuilder::new());
         *self.map = BBTreeMap::from_builder(kept);
         if self.had_tree {
@@ -196,7 +196,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         F: FnMut(&K, &mut V) -> bool,
     {
         let had_tree = self.root.is_some();
-        let rest = mem::replace(self, Self::empty());
+        let rest = mem::replace(self, Self::empty()).into_iter();
         let mut walk = ExtractIf {
             map: self,
             had_tree,
@@ -207,10 +207,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             range,
             pred,
         };
-        while let Some((key, _)) = walk.rest.iter().next()
+        while let Some((key, _)) = walk.rest.peek()
             && walk.is_before_range(key)
         {
-            let (key, value) = walk.rest.take_first().expect("the entry just seen");
+            let (key, value) = walk.rest.next().expect("the entry just seen");
             walk.kept.push(key, value);
         }
         walk

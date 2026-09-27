@@ -341,6 +341,12 @@ mod tests {
         let separator = internal_root(&mut tree).kv_at(0);
         let context = catch_unwind(AssertUnwindSafe(|| separator.into_balancing_context()));
         assert!(context.is_err());
+        // Taking the tree apart needs the head the separator's value is.
+        let ForceResult::Leaf(mut headless) = internal_root(&mut tree).edge_at(1).descend().force()
+        else {
+            panic!("the root's children are leaves");
+        };
+        headless.replace_head(ledger.track());
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
         ledger.assert_all_dropped_once();

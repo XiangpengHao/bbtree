@@ -1,131 +1,52 @@
-//! Taking an owned tree apart: [`Subtree::destroy`].
+//! Taking an owned tree apart: [`Subtree::destroy`], a walk that moves
+//! every entry out from the front and frees each node once past it
+//! ([`DyingWalk`]), dropped at once.
 
 #![forbid(unsafe_code)]
 
-use core::mem::needs_drop;
-
 use super::handle::{ForceResult, LeafOrInternal, NodeKind, NodeMut, Subtree};
 use super::page::PageByKind;
+use super::walk::DyingWalk;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
     /// Drops every key and value in ascending key order, each key before its
     /// value, as std's `BTreeMap` does (D1), and hands every page to
     /// `release`, sorted by the kind of node it held. A separator's value is
-    /// its right leaf's head (D17), dropped right after the separator.
+    /// its right leaf's head (D17), dropped right after the separator; a head
+    /// on the leftmost leaf, the value of a separator kept elsewhere, as a
+    /// split's right half has, goes first.
+    ///
+    /// The tree must be well-formed: every leaf right of a separator has a
+    /// head (D17).
     ///
     /// If a key's or value's `Drop` panics, the rest of the tree is still
     /// taken apart, in the same order, before the panic goes on, as in std's
     /// collections: either way, every key and value is dropped once and every
     /// page released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
-    pub(crate) fn destroy(self, mut release: impl FnMut(PageByKind<K, V, S>)) {
-        Teardown {
-            rest: Some(self.forget_type()),
-            release: &mut release,
-        }
-        .run();
+    pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
+        let mut tree = self.forget_type();
+        let head = tree.borrow_mut().take_leftmost_head();
+        // Without a count of the entries, the walk ends where the tree does:
+        // only its front moves.
+        let walk = DyingWalk::new(Some(tree), usize::MAX, release);
+        drop(head);
+        drop(walk);
     }
 }
 
-/// What is left of a tree being taken apart, and where its pages go.
-///
-/// Dropping it takes apart whatever is left: that is how a panicking key or
-/// value `Drop` still leaves nothing behind.
-struct Teardown<'r, K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)> {
-    rest: Option<Subtree<K, V, S>>,
-    release: &'r mut Release,
-}
-
-impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)>
-    Teardown<'_, K, V, S, Release>
-{
-    /// Drops the entries of `rest` in ascending order, then releases its
-    /// pages.
-    ///
-    /// Entries without drop glue skip the in-order pass: the order of their
-    /// drops is unobservable, and taking separators out from the front of an
-    /// internal node shifts the rest of the node each time, which the release
-    /// pass, taking them from the back, avoids.
-    fn run(&mut self) {
-        if (needs_drop::<K>() || needs_drop::<V>())
-            && let Some(tree) = &mut self.rest
-        {
-            Self::drop_entries_in_order(tree.borrow_mut(), self.release);
+impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
+    /// Takes the head out of the leftmost leaf under this node, if it has
+    /// one.
+    fn take_leftmost_head(self) -> Option<V> {
+        let mut node = self;
+        loop {
+            node = match node.force() {
+                ForceResult::Leaf(leaf) => return leaf.head().map(|head| head.remove().0),
+                ForceResult::Internal(internal) => internal.first_edge().descend(),
+            };
         }
-        self.release_pages();
-    }
-
-    /// Drops every entry below `node` in ascending order, leaving its nodes
-    /// empty and still linked through their first edges.
-    ///
-    /// The first child is emptied in place; each later child comes out with
-    /// the separator left of it, whose key is dropped before the child is
-    /// taken apart. The child's teardown starts at its leftmost leaf, with
-    /// the head: the separator's value (D17). User `Drop` code runs only on
-    /// keys and values already out of the tree, and while a [`Teardown`] owns
-    /// every detached child.
-    fn drop_entries_in_order(node: NodeMut<'_, K, V, S, LeafOrInternal>, release: &mut Release) {
-        match node.force() {
-            ForceResult::Leaf(mut leaf) => leaf.drop_entries(),
-            ForceResult::Internal(mut internal) => {
-                let first_child = internal.reborrow_mut().first_edge().descend();
-                Self::drop_entries_in_order(first_child, release);
-                while let Some(first) = internal.reborrow_mut().first_kv() {
-                    let (separator, right_child) = first.remove_with_right_child();
-                    let mut right_child = Teardown {
-                        rest: Some(right_child),
-                        release: &mut *release,
-                    };
-                    drop(separator);
-                    right_child.run();
-                }
-            }
-        }
-    }
-
-    /// Removes the root's separators from last to first, taking apart the
-    /// child right of each, then releases the root and goes on with its only
-    /// child; a leaf is emptied and released.
-    ///
-    /// Any key or value still in the tree has no drop glue (see
-    /// [`Self::run`]), so dropping it here does nothing.
-    fn release_pages(&mut self) {
-        while let Some(subtree) = self.rest.take() {
-            match subtree.force() {
-                ForceResult::Leaf(mut leaf) => {
-                    leaf.borrow_mut().drop_entries();
-                    (self.release)(leaf.into_page().into());
-                }
-                ForceResult::Internal(mut internal) => match internal.borrow_mut().last_kv() {
-                    Some(last) => {
-                        let (separator, right_child) = last.remove_with_right_child();
-                        self.rest = Some(internal.forget_type());
-                        drop(separator);
-                        Teardown {
-                            rest: Some(right_child),
-                            release: &mut *self.release,
-                        }
-                        .release_pages();
-                    }
-                    None => {
-                        let mut tree = internal.forget_type();
-                        let page = tree.pop_internal_level();
-                        self.rest = Some(tree);
-                        (self.release)(page.into());
-                    }
-                },
-            }
-        }
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>, Release: FnMut(PageByKind<K, V, S>)> Drop
-    for Teardown<'_, K, V, S, Release>
-{
-    fn drop(&mut self) {
-        // Nothing is left unless a panic cut `run` short.
-        self.run();
     }
 }
 

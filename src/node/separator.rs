@@ -194,6 +194,14 @@ mod tests {
         };
         let separator = root.kv_at(0);
         assert!(catch_unwind(AssertUnwindSafe(|| separator.into_value_head())).is_err());
+        // Taking the tree apart needs the head the separator's value is.
+        let ForceResult::Internal(root) = tree.borrow_mut().force() else {
+            panic!("the root is internal");
+        };
+        let ForceResult::Leaf(mut headless) = root.edge_at(1).descend().force() else {
+            panic!("the root's children are leaves");
+        };
+        headless.replace_head(ledger.track());
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
         ledger.assert_all_dropped_once();
