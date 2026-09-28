@@ -25,21 +25,25 @@
 //!    header says the leaf has a head; every operation that fills or empties
 //!    the slot updates the header with it (D17).
 //! 6. **Inline keys follow keys.** In a node with inline keys (D18), inline
-//!    key `i` is key `i`'s for every `i < len`: every operation moves keys
-//!    through [`KeySlots`], which moves their inline keys with them. All
-//!    `capacity` inline-key slots are initialized, from the node's creation
-//!    on (`NodePtr::from_fresh_page`), and only ever overwritten by inline
-//!    keys or copies of them, so a search may read past `len`: slots `len..`
-//!    hold stale inline keys, which it masks out.
+//!    key `i` is key `i`'s window at the node's prefix length for every
+//!    `i < len` (05-fence-key.md): every operation moves keys through
+//!    [`KeySlots`], which moves their inline keys with them; a key that
+//!    moves up into a node, or a node whose prefix length shrinks, gets its
+//!    window moved back with [`Window::moved_back_to`], and a node whose
+//!    prefix length grows reads its keys (`prefix.rs`). All `capacity` inline-key
+//!    slots are initialized, from the node's creation on
+//!    (`NodePtr::from_fresh_page`), and only ever overwritten by inline
+//!    keys, so a search may read past `len`: slots `len..` hold stale inline
+//!    keys, which it masks out.
 //!
 //! Every fact is established once, by a check the B-tree makes anyway (the
 //! search, the insert-or-split decision, the merge decision) or by a checked
 //! constructor off the hot path. The operations that need it take the proof
 //! and check nothing.
 //!
-//! Inline keys steer searches only: whatever they hold, every position a
-//! search returns is in bounds, so a wrong `InlineKey` gives wrong answers,
-//! never undefined behavior.
+//! Inline keys and prefix lengths steer searches only: whatever they hold,
+//! every position a search returns is in bounds, so a wrong `InlineKey`, or
+//! a wrong prefix length, gives wrong answers, never undefined behavior.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -48,7 +52,7 @@ use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
 
-use super::inline_keys::{InlineTarget, InlinedKey, SearchKey};
+use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Window};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
 use super::slots::{Down, KeySlots, Slots, Up};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
@@ -356,6 +360,13 @@ impl<BorrowType, K, V, S, Kind: NodeKind> NodeRef<BorrowType, K, V, S, Kind> {
     fn is_leaf(&self) -> bool {
         Kind::is_leaf(self.height)
     }
+
+    /// The same handle, for a node of either kind.
+    pub(super) fn forget_type(self) -> NodeRef<BorrowType, K, V, S, LeafOrInternal> {
+        // SAFETY: the same node at the same height, with the same access;
+        // `LeafOrInternal` fits any kind.
+        unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+    }
 }
 
 impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowType, K, V, S, Kind> {
@@ -372,6 +383,23 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     {
         self.prefetch_search_area();
         self.search_prefetched(key)
+    }
+
+    /// `key`'s inline key at this node's prefix length, if the node has
+    /// inline keys and `key` one to compare with them (D18).
+    ///
+    /// Each search takes it where it uses it, rather than having it handed
+    /// in: handed across a call, it went through the stack, written right
+    /// before the search read it back, a store the CPU can't always
+    /// forward, which stalled every level. For a std byte string, it is one
+    /// load from the search key's padded copy, written once.
+    #[inline]
+    fn inline_target<Q: ?Sized>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<InlineTarget> {
+        if NodePtr::<K, V, S>::has_inline_keys() {
+            key.inline_target(self.prefix_len())
+        } else {
+            None
+        }
     }
 
     /// [`Self::search`] once [`Self::prefetch_search_area`] has run.
@@ -415,23 +443,25 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     }
 
     /// Whether `key` is greater than the last of the node's `len > 0` keys.
-    /// Inline keys that differ tell without reading the key (D18).
+    /// Inline keys that differ tell without reading the key (D18), and tied
+    /// ones compare as a search's do ([`SearchKey::cmp_tied`]).
     fn is_after_last_key<Q>(&self, key: &SearchKey<'_, K, S, Q>, len: usize) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if let Some(target) = key.inline_target()
-            && let Some(inline_keys) = self.reborrow().inline_keys()
+        // SAFETY: `len - 1 < len`.
+        let last_key = unsafe { self.reborrow().keys().get_unchecked(len - 1) };
+        if let Some(inline_keys) = self.reborrow().inline_keys()
+            && let Some(target) = self.inline_target(key)
         {
             // SAFETY: `len - 1 < len`, the number of inline keys.
             let last_inline_key = unsafe { *inline_keys.get_unchecked(len - 1) };
             if last_inline_key != target.inline_key() {
                 return last_inline_key < target.inline_key();
             }
+            return key.cmp_tied(target, last_key).is_gt();
         }
-        // SAFETY: `len - 1 < len`.
-        let last_key = unsafe { self.reborrow().keys().get_unchecked(len - 1) };
         last_key.borrow() < key.key()
     }
 
@@ -477,17 +507,18 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     /// where `key` belongs. In bounds for any `Ord` and `InlineKey`,
     /// consistent or not.
     ///
-    /// If the node has inline keys and `key` has one to compare (D18), the
-    /// search runs over them; otherwise over the keys, as the key type picks
-    /// (D19). After monomorphization, a map without inline keys has only the
+    /// If the node has inline keys and `key` has one to compare (D18), taken
+    /// at the node's prefix length, the search runs over them; otherwise over
+    /// the keys, as the key type picks (D19).
+    /// After monomorphization, a map without inline keys has only the
     /// latter.
     fn search_index<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if let Some(target) = key.inline_target()
-            && let Some(inline_keys) = self.reborrow().inline_key_slots()
+        if let Some(inline_keys) = self.reborrow().inline_key_slots()
+            && let Some(target) = self.inline_target(key)
         {
             return self.inline_search_index(inline_keys, key, target);
         }
@@ -504,11 +535,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     /// of keys whose inline keys equal the target's: only those can equal
     /// `key`. A plain binary search over their full keys (D19's `Binary`)
     /// decides within the run, comparing them as [`SearchKey::cmp_tied`]
-    /// does: by length where that tells, and byte arrays word by word. Keys
-    /// outside
-    /// the run differ from `key` in their inline keys, which order them (the
-    /// `InlineKey` contract), so if `key` is in no run, its edge is where the
-    /// run would start.
+    /// does: std byte strings a word at a time, from past the bytes the run
+    /// shares. Keys outside the run differ from `key` in their inline keys,
+    /// which order them (the `InlineKey` contract), so if `key` is in no
+    /// run, its edge is where the run would start.
     ///
     /// In bounds for any `Ord` and `InlineKey`: the run lies within `0..len`
     /// whatever the inline keys hold ([`NodeInlineKeys::equal_run`]), taking
@@ -526,7 +556,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     {
         let run = inline_keys.equal_run(target.inline_key());
         let candidates = &self.reborrow().keys()[run.clone()];
-        let found = Self::binary_search_index(candidates, |stored| key.cmp_tied(stored));
+        let found = Self::binary_search_index(candidates, |stored| key.cmp_tied(target, stored));
         found
             .map(|index| run.start + index)
             .map_err(|index| run.start + index)
@@ -611,12 +641,19 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         self.len() < self.min_len()
     }
 
-    /// The prefix length of a node with inline keys, reserved for
-    /// 05-fence-key.md, or `None` for a node without.
-    pub(super) fn prefix_len(&self) -> Option<usize> {
+    /// How many leading bytes the node's fences share, and so every key in
+    /// it, which its inline keys skip (05-fence-key.md); 0 for a node
+    /// without inline keys.
+    pub(crate) fn prefix_len(&self) -> usize {
         // SAFETY: the node is allocated and initialized, and only this handle
         // writes its header (invariant 1).
-        unsafe { self.node.prefix_len() }
+        unsafe { self.node.prefix_len() }.unwrap_or(0)
+    }
+
+    /// Whether the node holds as many keys as it can: an insert into it
+    /// splits it.
+    pub(super) fn is_full(&self) -> bool {
+        self.len() == self.capacity()
     }
 
     fn key_slots(&self) -> KeySlots<K, S> {
@@ -739,6 +776,36 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Lea
     }
 }
 
+impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, Internal> {
+    /// The window of a key beside edge `index`, the one left of it if there
+    /// is one: a bound of the child there, which shares the child's prefix,
+    /// at this node's prefix length. `None` if the node has no keys.
+    ///
+    /// # Panics
+    ///
+    /// If `index > len`.
+    pub(super) fn bound_window(self, index: usize) -> Option<Window> {
+        let len = self.len();
+        assert!(index <= len, "edge index out of bounds");
+        let beside = index.checked_sub(1).or((index < len).then_some(index))?;
+        Some(self.key_window(beside))
+    }
+
+    /// `key`, from the child at edge `index` (a separator from its split),
+    /// with its window moved back to this node's prefix length, filled from
+    /// [`Self::bound_window`]. A node without keys is a new root, whose
+    /// only child, the old root, has prefix 0, as it does.
+    fn window_from_child(self, index: usize, key: InlinedKey<K, S>) -> InlinedKey<K, S> {
+        match self.bound_window(index) {
+            Some(fill) => key.moved_back_to(fill),
+            None => {
+                debug_assert_eq!(key.window().prefix_len(), self.prefix_len());
+                key
+            }
+        }
+    }
+}
+
 impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Internal> {
     fn edge_slots(&self) -> Slots<NodePtr<K, V, S>, Up> {
         // SAFETY: the node is an allocated internal node (invariant 1).
@@ -778,6 +845,19 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'a>, K, V,
         Some(unsafe { inline_keys.run(0, self.len()).as_ref() })
     }
 
+    /// Key `index`'s window: its inline key at the node's prefix length, or
+    /// [`Window::NONE`] in a node without inline keys.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    fn key_window(self, index: usize) -> Window {
+        match self.inline_keys() {
+            Some(inline_keys) => Window::new(self.prefix_len(), inline_keys[index]),
+            None => Window::NONE,
+        }
+    }
+
     /// Every inline-key slot up to the capacity, if the node has inline keys
     /// (D18), for a search that reads past `len` and masks those out.
     fn inline_key_slots(self) -> Option<NodeInlineKeys<'a>> {
@@ -813,6 +893,73 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
+    /// Moves the node's prefix length back to `fill`'s, and every inline key
+    /// with it ([`Window::moved_back_to`]), given `fill`, the window there of
+    /// a key whose encoding shares the node's prefix: one of the node's
+    /// fences, or one of its keys. Reads no key. Does nothing if the node's
+    /// prefix is no longer than `fill`'s, which includes every node without
+    /// inline keys.
+    pub(super) fn move_prefix_back_to(&mut self, fill: Window) {
+        let prefix_len = self.prefix_len();
+        if prefix_len <= fill.prefix_len() {
+            return;
+        }
+        let len = self.len();
+        let Some(inline_keys) = self.key_slots().inline_keys() else {
+            return;
+        };
+        // SAFETY: inline keys `0..len` are initialized (invariants 1 and 6),
+        // each is rewritten in place with the window of the same key, and
+        // the header with them; this handle is exclusive.
+        unsafe {
+            for index in 0..len {
+                let slot = inline_keys.slot(index);
+                let window = Window::new(prefix_len, slot.read()).moved_back_to(fill);
+                slot.write(window.inline_key());
+            }
+            self.node.set_prefix_len(fill.prefix_len());
+        }
+    }
+
+    /// Makes `prefix_len` the node's prefix length, and `inline_keys` its
+    /// keys' inline keys, in order, which must be their windows there: how a
+    /// prefix grows, once its windows are computed (`prefix.rs`). Calls no
+    /// `InlineKey`. Does nothing to a node without inline keys.
+    ///
+    /// # Panics
+    ///
+    /// If `inline_keys` does not have one inline key per key; the node is
+    /// unchanged then.
+    pub(super) fn set_windows(&mut self, prefix_len: usize, inline_keys: &[InlineWord]) {
+        assert_eq!(inline_keys.len(), self.len(), "one inline key per key");
+        let Some(slots) = self.key_slots().inline_keys() else {
+            return;
+        };
+        // SAFETY: `inline_keys.len() == len <= capacity`, checked above, so
+        // each slot written is in bounds; inline keys are plain data, and
+        // this handle is exclusive.
+        unsafe {
+            for (index, &inline_key) in inline_keys.iter().enumerate() {
+                slots.slot(index).write(inline_key);
+            }
+            self.node.set_prefix_len(prefix_len);
+        }
+    }
+
+    /// Gives a node with no keys `prefix_len`, which, with no inline keys to
+    /// match, any prefix length is: as a copy of a node starts (`clone.rs`).
+    ///
+    /// # Panics
+    ///
+    /// If the node has keys.
+    pub(super) fn set_empty_prefix_len(&mut self, prefix_len: usize) {
+        assert_eq!(self.len(), 0, "a node with keys keeps their prefix length");
+        // SAFETY: the node is allocated and this handle is exclusive.
+        unsafe { self.node.set_prefix_len(prefix_len) }
     }
 }
 
@@ -869,11 +1016,12 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Leaf> {
         let right = NodePtr::from_fresh_page(page);
         // SAFETY: `index <= len`, so keys (with their inline keys) and values
         // `index..len` are initialized; they move to `0..count` of `right`, a
-        // fresh leaf of the same map, so `true` says its kind. This handle is
-        // exclusive, and `right` is reached by nothing else yet. Afterwards
-        // this leaf holds `0..index` and its head, and `right` `0..count` and
-        // none.
+        // fresh leaf of the same map, so `true` says its kind, at this leaf's
+        // prefix length. This handle is exclusive, and `right` is reached by
+        // nothing else yet. Afterwards this leaf holds `0..index` and its
+        // head, and `right` `0..count` and none.
         unsafe {
+            right.set_prefix_len(self.prefix_len());
             self.key_slots()
                 .move_run_to(index, count, right.key_slots(true), 0);
             self.value_slots()
@@ -918,7 +1066,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Internal> {
         // above), which `right` owns from now on (invariant 2). This handle
         // is exclusive, and `right` is reached by nothing else yet.
         // Afterwards this node holds keys `0..index` and edges `0..=index`.
+        // The keys keep their windows, at this node's prefix length, which
+        // `right` takes.
         unsafe {
+            right.set_prefix_len(self.prefix_len());
             right.edge_slots().slot(0).write(first_child.node);
             self.key_slots()
                 .move_run_to(index, count, right.key_slots(false), 0);
@@ -1163,10 +1314,26 @@ impl<K, V, S, Kind: NodeKind> Kv<NodeMut<'_, K, V, S, Kind>> {
     }
 }
 
+impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind>
+    Kv<NodeRef<BorrowType, K, V, S, Kind>>
+{
+    /// The key's window: its inline key at the node's prefix length, or
+    /// [`Window::NONE`] in a node without inline keys.
+    pub(super) fn window(&self) -> Window {
+        self.node.reborrow().key_window(self.index)
+    }
+}
+
 impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Kv<NodeMut<'_, K, V, S, Kind>> {
     /// Replaces the key and its inline key, returning the old key. Keeping
     /// the keys in order is the caller's business.
+    ///
+    /// The new key's window may be at a longer prefix length, if it comes
+    /// from a node below this key whose bounds it is, such as the leaf right
+    /// of a separator: it moves back to this node's, filled from the old
+    /// key's window.
     pub(crate) fn replace_key(&mut self, key: InlinedKey<K, S>) -> K {
+        let key = key.moved_back_to(self.window());
         // SAFETY: `index < len`, so key `index` is initialized, with its
         // inline key, and this handle is exclusive.
         unsafe { self.node.key_slots().replace(self.index, key).into_key() }
@@ -1519,6 +1686,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
             index,
         } = self.0;
         let len = parent.len();
+        let key = parent.reborrow().window_from_child(index, key);
         // SAFETY: `index <= len < capacity` (invariants 3 and 4), so
         // `index + 1 <= len + 1 < capacity + 1`; keys (with their inline keys)
         // `0..len` and edges `0..=len` are initialized, and one more of each
@@ -1652,6 +1820,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> FullEdge<NodeMut<'a, K, 
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
         let right = NodePtr::from_fresh_page(right_page);
+        // SAFETY: `right` is a fresh node, reached by nothing else; it takes
+        // the prefix length of the keys and inline keys it is about to get.
+        unsafe { right.set_prefix_len(left.prefix_len()) };
         // SAFETY: `separator_index < len == capacity` (invariant 4 and the
         // policy). Keys `separator_index + 1..len` are initialized and move,
         // with their inline keys, to the start of `right`, a fresh page of the
@@ -1926,6 +2097,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
     /// the parent, and the parent's separator comes down to the front of the
     /// right child, each with its inline key.
     ///
+    /// The right child takes the parent's prefix length (05-fence-key.md),
+    /// at which the separator's inline key is, so that no key is read: its
+    /// inline keys, and the key going up, move back to it, filled from the
+    /// separator's, a fence of both children. Fitting both children's
+    /// prefixes to their new fences, which reads keys, is the caller's
+    /// business, once its operation is done (`prefix.rs`).
+    ///
     /// Between leaves, the value rotates through the right child's head: the
     /// left child's last value becomes the head, and the old head joins the
     /// separator that came down (D17). Between internal children, the left
@@ -1940,6 +2118,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
             return Err(StealError::ReceiverFull);
         }
         let is_leaf = self.left_child.is_leaf();
+        let fill = self.parent.window();
+        self.right_child.move_prefix_back_to(fill);
         let parent = &mut self.parent;
         // SAFETY: checked just above: the left child has a key `left_len - 1`
         // (with a value, or an edge `left_len`) to give, and the right child
@@ -1956,7 +2136,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
         // same height (invariant 2).
         unsafe {
             let key = self.left_child.key_slots().remove(left_len - 1, left_len);
-            let separator = parent.node.key_slots().replace(parent.index, key);
+            let separator = parent
+                .node
+                .key_slots()
+                .replace(parent.index, key.moved_back_to(fill));
             self.right_child.key_slots().insert(0, right_len, separator);
             if is_leaf {
                 let left_values = self.left_child.node.value_slots();
@@ -1977,7 +2160,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
 
     /// Rotates one entry leftwards: the right child's first key goes up into
     /// the parent, and the parent's separator comes down to the end of the
-    /// left child, each with its inline key.
+    /// left child, each with its inline key. The left child takes the
+    /// parent's prefix length, as in [`Self::steal_left`].
     ///
     /// Between leaves, the value rotates through the right child's head: the
     /// old head joins the separator that came down, and the value of the key
@@ -1993,6 +2177,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
             return Err(StealError::ReceiverFull);
         }
         let is_leaf = self.left_child.is_leaf();
+        let fill = self.parent.window();
+        self.left_child.move_prefix_back_to(fill);
         let parent = &mut self.parent;
         // SAFETY: as in `steal_left`, mirrored: the right child gives key 0
         // (and edge 0, or its head, after which value 0 is its head), and
@@ -2000,7 +2186,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
         // `left_len + 1`. The left child's head is untouched.
         unsafe {
             let key = self.right_child.key_slots().remove(0, right_len);
-            let separator = parent.node.key_slots().replace(parent.index, key);
+            let separator = parent
+                .node
+                .key_slots()
+                .replace(parent.index, key.moved_back_to(fill));
             self.left_child
                 .key_slots()
                 .insert(left_len, left_len, separator);
@@ -2038,15 +2227,25 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Mergeable<'a, K, V, S> {
     /// Between leaves, the separator rejoins its value, the right child's
     /// head, as an ordinary entry, and the left child keeps its own head, if
     /// any (D17). Keys move with their inline keys.
+    ///
+    /// The merged child takes the parent's prefix length (05-fence-key.md),
+    /// at which the separator's inline key is, so that no key is read: both
+    /// children's inline keys move back to it, filled from the separator's,
+    /// a fence of both. Fitting the merged child's prefix to its fences,
+    /// which reads keys, is the caller's business, as for
+    /// [`BalancingContext::steal_left`].
     pub(crate) fn merge(self) -> (EdgeMut<'a, K, V, S, Internal>, PageByKind<K, V, S>) {
+        let fill = self.0.parent.window();
         let BalancingContext {
             parent: Kv {
                 node: mut parent,
                 index,
             },
             mut left_child,
-            right_child,
+            mut right_child,
         } = self.0;
+        left_child.move_prefix_back_to(fill);
+        right_child.move_prefix_back_to(fill);
         let parent_len = parent.len();
         let left_len = left_child.len();
         let right_len = right_child.len();

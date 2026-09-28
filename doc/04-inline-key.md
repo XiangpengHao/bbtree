@@ -29,6 +29,9 @@ touching the heap**.
 - **A inline key is a small `Copy` value derived from a key,** with one contract:
   if `inline(a) != inline(b)`, their order equals the order of `a` and `b`. Equal
   inline keys decide nothing, and the search falls back to comparing the full keys.
+  - **Refined by prefix stripping** (05-fence-key.md, "The trait"): an inline
+    key is a window, 8 bytes at an offset, of an encoding of the key that orders
+    like it, so that a node can skip the bytes its keys share.
 - **A wrong inline-key implementation gives wrong answers, never undefined
   behaviour.** The search stays in bounds for any comparator (D14).
 - **Inline keys are stored beside the keys, as a parallel dense array in the
@@ -86,11 +89,12 @@ Sketch:
 pub type InlineWord = u64;  // 8 bytes; u128 for 16
 
 pub trait InlineKey: Ord {
-    /// If a.inline_key() != b.inline_key(), they order like a and b.
-    fn inline_key(&self) -> InlineWord;
+    /// Bytes offset..offset + 8 of an encoding that orders like the key,
+    /// big-endian, zero past its end (05-fence-key.md, "The trait").
+    fn inline_key_at(&self, offset: usize) -> InlineWord;
 }
 impl InlineKey for String {
-    fn inline_key(&self) -> InlineWord { prefix(self.as_bytes()) }
+    fn inline_key_at(&self, offset: usize) -> InlineWord { window(self.as_bytes(), offset) }
 }
 
 pub struct Auto;
@@ -107,7 +111,7 @@ let names: BBTreeMap<String, u64> = BBTreeMap::new();      // inline keys
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct UserName(String);
 impl InlineKey for UserName {
-    fn inline_key(&self) -> InlineWord { self.0.inline_key() }
+    fn inline_key_at(&self, offset: usize) -> InlineWord { self.0.inline_key_at(offset) }
 }
 let plain: BBTreeMap<UserName, u64> = BBTreeMap::new();                     // no inline keys
 let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
@@ -300,6 +304,8 @@ AVX-512, a branchless binary search otherwise.**
     overhead, about 100 instructions per level, before the full-key search.
   - **Result so far:** before the prefetch fix, `str-json` and `str-16` gets
     ran at 0.61–0.74× std's time at 1M and 10M.
+  - **With prefix stripping** (D26), `str-path` runs at 0.66–0.76× its time
+    before at 1M (05-fence-key.md, "Measured").
 
 ## TODO
 

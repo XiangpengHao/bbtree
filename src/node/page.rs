@@ -188,9 +188,14 @@ pub(super) struct NodeHeader {
 #[repr(C)]
 pub(super) struct InlineKeyNodeHeader {
     common: NodeHeader,
-    /// How many leading bytes every key of the node shares and its inline
-    /// keys skip (05-fence-key.md). Reserved: always 0 for now.
+    /// How many leading bytes the node's fences share, and so every key in
+    /// it, which its inline keys skip (05-fence-key.md).
     prefix_len: u16,
+}
+
+impl InlineKeyNodeHeader {
+    /// The longest prefix a node records: what `prefix_len` holds.
+    pub(super) const MAX_PREFIX_LEN: usize = u16::MAX as usize;
 }
 
 /// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
@@ -384,6 +389,24 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         })
     }
 
+    /// Sets the `prefix_len` of a node with inline keys; does nothing to a
+    /// node without. Keeping the inline keys at that prefix length is the
+    /// caller's business: it decides answers, not memory safety.
+    ///
+    /// # Safety
+    ///
+    /// The node has not been released, and its handle has exclusive access.
+    pub(super) unsafe fn set_prefix_len(self, prefix_len: usize) {
+        if Self::has_inline_keys() {
+            debug_assert!(prefix_len <= InlineKeyNodeHeader::MAX_PREFIX_LEN);
+            let prefix_len = prefix_len.min(InlineKeyNodeHeader::MAX_PREFIX_LEN) as u16;
+            let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
+            // SAFETY: a node with inline keys starts with an aligned
+            // `InlineKeyNodeHeader`; the caller has exclusive access.
+            unsafe { (*header).prefix_len = prefix_len }
+        }
+    }
+
     /// # Safety
     ///
     /// The node has not been released, its handle has exclusive access, and
@@ -398,13 +421,16 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
     /// The key slots, `capacity` of them growing up from the keys' offset,
     /// and in a node with inline keys, as many inline-key slots growing up
-    /// from theirs (D18).
+    /// from theirs (D18), at the node's prefix length.
     ///
     /// # Safety
     ///
-    /// The node has not been released, and is a leaf exactly if `is_leaf`.
+    /// The node has not been released, and is a leaf exactly if `is_leaf`;
+    /// nothing writes its header concurrently.
     pub(super) unsafe fn key_slots(self, is_leaf: bool) -> KeySlots<K, S> {
         let area = Self::key_area(is_leaf);
+        // SAFETY: forwarded.
+        let prefix_len = unsafe { self.prefix_len() }.unwrap_or(0);
         // SAFETY: the keys' offset is aligned for `K`, the inline keys' for
         // `InlineWord`, and `capacity` of each from there stay within a page
         // of the node's kind, which `is_leaf` names, and clear of each other
@@ -417,7 +443,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                     area.capacity,
                 )
             });
-            KeySlots::new(keys, inline_keys)
+            KeySlots::new(keys, inline_keys, prefix_len)
         }
     }
 
@@ -617,13 +643,6 @@ mod type_identity {
                 representation,
                 _type: PhantomData,
             })
-        }
-
-        /// Whether `T` is a byte array, whose values all have the same
-        /// length, a constant. Folds to a constant after monomorphization.
-        #[inline(always)]
-        pub(in crate::node) fn is_array(self) -> bool {
-            matches!(self.representation, ByteStringType::Array)
         }
 
         /// The bytes of `value`. Their length comes from `value` itself: for

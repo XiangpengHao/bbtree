@@ -8,13 +8,19 @@
 //! node below as its first child. The new nodes make a tree as tall as the
 //! old one, with the keys from the key on.
 //!
+//! The nodes on the path become the borders of the two trees, where every
+//! prefix is 0 (05-fence-key.md): before the cut, their prefixes go back to
+//! 0, from the root down, reading no key.
+//!
 //! Along the cut, nodes on both sides may hold fewer keys than their
 //! minimum, down to none. Fixing the left tree's right border and the right
 //! tree's left border, from the top down, brings them back
 //! (`node/border.rs`). A separator left at the start of the right tree, with
 //! nothing left of it, comes down along that border, by a merge or a move,
 //! into the tree's first leaf, with its value, the head of the leaf right of
-//! it (D17).
+//! it (D17). Once both maps are counted, the nodes beside the borders, which
+//! entries moved over from, fit their prefixes to their new fences, reading
+//! keys.
 //!
 //! That touches the nodes along the path and the two borders: O(log n) of
 //! them. The two maps' lengths come from counting the entries of the shorter
@@ -35,8 +41,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Splits the collection into two at the given key. Returns everything
     /// after the given key, including the key.
     ///
-    /// Every `Ord` call happens first, before any entry moves. Both maps keep
-    /// a tree, even an empty one, as std's do.
+    /// Every `Ord` call happens first, before any entry moves. `InlineKey`
+    /// is called last, once both maps are counted: if it panics, both stay
+    /// valid. Both maps keep a tree, even an empty one, as std's do.
     ///
     /// # Examples
     ///
@@ -74,6 +81,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let lower = self.root.as_mut().expect("a map with entries has a tree");
         let mut path = PathMut::new(&mut *lower);
         path.search_to_edge(&SearchKey::new(key), KeySide::Before);
+        path.clear_prefixes();
         let mut upper = path.cut();
         let release = &mut PageByKind::deallocate;
         lower.fix_border(NodeEnd::Last, release);
@@ -86,10 +94,16 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             (length - upper_length, upper_length)
         };
         self.length = lower_length;
-        Self {
+        let mut upper = Self {
             root: Some(upper),
             length: upper_length,
+        };
+        for (map, end) in [(&mut *self, NodeEnd::Last), (&mut upper, NodeEnd::First)] {
+            if let Some(root) = &mut map.root {
+                root.fit_border_siblings(end);
+            }
         }
+        upper
     }
 }
 

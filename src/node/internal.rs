@@ -61,7 +61,7 @@ mod tests {
         let EdgeRoom::Fits(edge) = leaf.borrow_mut().first_edge().check_room() else {
             panic!("an empty leaf has room");
         };
-        edge.insert_fit(InlinedKey::new(key), ledger.track());
+        edge.insert_fit(InlinedKey::new(key, 0), ledger.track());
         (leaf, name)
     }
 
@@ -133,7 +133,10 @@ mod tests {
                         let key = K::from_tracked(ledger.track());
                         separators.insert(index, (key.tracked_id(), head_id));
                         children.insert(index + 1, name);
-                        assert_eq!(edge.insert_fit(InlinedKey::new(key), child).index(), index);
+                        assert_eq!(
+                            edge.insert_fit(InlinedKey::new(key, 0), child).index(),
+                            index
+                        );
                     }
                 }
                 4 | 5 if len > 0 => {
@@ -158,7 +161,7 @@ mod tests {
                     let new_id = key.tracked_id();
                     let old_key = internal_root(&mut tree)
                         .kv_at(index)
-                        .replace_key(InlinedKey::new(key));
+                        .replace_key(InlinedKey::new(key, 0));
                     assert_eq!(old_key.tracked_id(), separators[index].0);
                     separators[index].0 = new_id;
                 }
@@ -244,7 +247,7 @@ mod tests {
             let key = K::from_tracked(ledger.track());
             separators.push((key.tracked_id(), head_id));
             children.push(name);
-            edge.insert_fit(InlinedKey::new(key), child);
+            edge.insert_fit(InlinedKey::new(key, 0), child);
         }
         let (child, name, head_id) = child_leaf(&pages, ledger);
         let key = K::from_tracked(ledger.track());
@@ -257,7 +260,7 @@ mod tests {
             separator,
             right,
             ..
-        }) = edge.insert(InlinedKey::new(key), child, || pages.fresh())
+        }) = edge.insert(InlinedKey::new(key, 0), child, || pages.fresh())
         else {
             panic!("a full node splits");
         };
@@ -313,7 +316,7 @@ mod tests {
         let EdgeRoom::Fits(edge) = internal_root(&mut tree).first_edge().check_room() else {
             panic!("a root without keys has room");
         };
-        let key = InlinedKey::new(ledger.track());
+        let key = InlinedKey::new(ledger.track(), 0);
         let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(key, too_tall)));
         assert!(rejected.is_err());
         let root = tree.borrow();
@@ -337,7 +340,7 @@ mod tests {
         let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() else {
             panic!("a root without keys has room");
         };
-        edge.insert_fit(InlinedKey::new(ledger.track()), headless.forget_type());
+        edge.insert_fit(InlinedKey::new(ledger.track(), 0), headless.forget_type());
         let separator = internal_root(&mut tree).kv_at(0);
         let context = catch_unwind(AssertUnwindSafe(|| separator.into_balancing_context()));
         assert!(context.is_err());
@@ -364,7 +367,7 @@ mod tests {
             let EdgeRoom::Fits(edge) = leaf.last_edge().check_room() else {
                 panic!("the leaf has room");
             };
-            edge.insert_fit(InlinedKey::new(ledger.track()), ledger.track());
+            edge.insert_fit(InlinedKey::new(ledger.track(), 0), ledger.track());
         }
         let ids = tree.borrow().subtree_tracked_ids();
 

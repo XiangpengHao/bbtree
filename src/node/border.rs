@@ -4,6 +4,10 @@
 //! built from the left (`build.rs`) along its right edge: there, nodes may
 //! hold any number of keys, down to none, where every other node holds its
 //! minimum.
+//!
+//! It reads no key: the nodes beside the border that give it entries keep
+//! their prefixes, which still fit their narrower fences, until the caller
+//! fits them, once its operation is done ([`Subtree::fit_border_siblings`]).
 
 #![forbid(unsafe_code)]
 

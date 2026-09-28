@@ -1,0 +1,273 @@
+//! Per-node prefix stripping (`doc/05-fence-key.md`): a node with inline keys
+//! skips the leading bytes that its two fences share, and stores each key's
+//! window past them.
+//!
+//! A node's fences are the separators beside it in its ancestors: the key
+//! left of its edge in the nearest ancestor where it is not the first edge,
+//! and the key right of it in the nearest where it is not the last. Nothing
+//! stores them. A node's prefix length is what they share, 0 if one is
+//! missing, along the tree's left and right borders; every key in the node
+//! lies between them, so it shares that prefix, whatever is inserted.
+//!
+//! A child's fences lie within its parent's, so its prefix is never shorter
+//! than its parent's: for keys a ≤ b ≤ c, what a and c share is the shorter
+//! of what a and b share and what b and c share.
+//!
+//! A prefix changes only when a fence does, which only a separator change
+//! does: a split adds one, a merge takes one out, a move between siblings or
+//! a removal replaces one, and a cut leaves nodes without one. The nodes
+//! whose fences changed then read their keys for their new windows
+//! ([`NodeMut::refit_prefix`]).
+//!
+//! An operation changes the tree's shape without reading a key, so that a
+//! panicking `InlineKey` can't stop it halfway. A prefix may have to shrink
+//! during it: it shrinks to the parent's, the shift of a window filled from
+//! the parent's separator ([`Window::moved_back_to`]), which bounds the node
+//! (`handle.rs`). Once it is done, and its entry counted, the nodes whose
+//! fences changed are fit to them: the halves of each split
+//! ([`PathMut::fit_split_halves`]), the nodes a removal merged or moved
+//! entries between (`map/remove.rs`), the siblings a cut's borders took
+//! entries from ([`Subtree::fit_border_siblings`]), and a built tree's nodes
+//! as they close (`build.rs`). A removed separator's successor is the one
+//! change read first ([`PathMut::fit_left_of_separator`]).
+//!
+//! [`Window::moved_back_to`]: super::inline_keys::Window::moved_back_to
+
+#![forbid(unsafe_code)]
+
+use super::handle::{ForceResult, Immut, LeafOrInternal, NodeMut, NodeRef, Subtree};
+use super::inline_keys::KeyInliner;
+use super::path::{MAX_HEIGHT, NodeEnd, PathMut};
+use crate::inline_key::{InlineKeyStrategy, InlineWord};
+
+/// The most keys a node can hold for [`NodeMut::refit_prefix`]: their
+/// windows are computed into a buffer of this many on the stack before any
+/// is written. Every node with inline keys holds fewer: a node is the
+/// smallest multiple of 1 KB that holds 12 entries (D15, D21), and each takes
+/// 8 bytes for its inline key alone.
+const MAX_REFIT_LEN: usize = 128;
+
+impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> {
+    /// Whether the node's first and last keys differ in the first byte past
+    /// its prefix, as their inline keys tell: then its fences, which lie
+    /// outside its keys, share no more than its prefix, and fitting it can
+    /// skip reading them. Fitting only grows a prefix: every change that
+    /// shrinks one shrinks it to fit already.
+    fn keys_differ_past_prefix(self) -> bool {
+        self.inline_keys()
+            .and_then(|inline_keys| Some((inline_keys.first()?, inline_keys.last()?)))
+            .is_some_and(|(first, last)| (first ^ last).leading_zeros() < u8::BITS)
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
+    /// Sets the node's prefix length to `prefix_len`, at most what its
+    /// fences share, and every inline key to its key's window there, read
+    /// from the key. Computes them all first, then writes them, so that a
+    /// panicking `InlineKey` leaves the node as it was. Does nothing if the
+    /// node has no inline keys.
+    ///
+    /// An internal node's grows at most to its children's: a prefix that
+    /// fits its fences never passes them, but a panic may have left one of
+    /// theirs short of their fences.
+    pub(super) fn refit_prefix(&mut self, prefix_len: usize) {
+        let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
+            return;
+        };
+        let node = self.reborrow();
+        let prefix_len = match node.force() {
+            ForceResult::Internal(internal) if prefix_len > node.prefix_len() => (0..=internal
+                .len())
+                .map(|index| internal.edge_at(index).descend().prefix_len())
+                .fold(prefix_len, usize::min),
+            _ => prefix_len,
+        };
+        if prefix_len == node.prefix_len() {
+            return;
+        }
+        let keys = node.keys();
+        let len = keys.len();
+        let mut windows: [InlineWord; MAX_REFIT_LEN] = [0; MAX_REFIT_LEN];
+        for (window, key) in windows[..len].iter_mut().zip(keys) {
+            *window = inliner.inline_key_at(key, prefix_len);
+        }
+        self.set_windows(prefix_len, &windows[..len]);
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
+    /// Fits the prefixes of the nodes an insert split to their fences, from
+    /// the leaves up, so that each node's sees its children's; the path,
+    /// which ends at the new entry, ends there again afterwards.
+    ///
+    /// `separators[height]`, for each height from 1 to `top`, is where the
+    /// node the path goes through there holds the separator between the
+    /// two halves of the node below it that split.
+    ///
+    /// Calls `InlineKey`: an insert does this last, once its entry is in and
+    /// counted, so that a panic leaves a map that has it.
+    pub(crate) fn fit_split_halves(&mut self, separators: &[usize; MAX_HEIGHT + 1], top: usize) {
+        if KeyInliner::<K>::resolve::<S>().is_none() {
+            return;
+        }
+        let bottom = self.height();
+        let mut indexes = [0; MAX_HEIGHT + 1];
+        indexes[bottom] = self.index();
+        while self.height() < top {
+            self.ascend();
+            indexes[self.height()] = self.index();
+            let separator = separators[self.height()];
+            self.fit_children_to_fences([separator, separator + 1]);
+        }
+        while self.height() > bottom {
+            self.descend();
+            self.set_index(indexes[self.height()]);
+        }
+    }
+
+    /// Fits the prefixes of the bottom node's children at `edges`, an
+    /// internal node's, to what their fences share, reading the fences
+    /// unless the child's own inline keys tell they share no more
+    /// ([`NodeRef::keys_differ_past_prefix`]), and, if a prefix changes, the
+    /// child's keys.
+    pub(crate) fn fit_children_to_fences<const N: usize>(&mut self, edges: [usize; N]) {
+        let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
+            return;
+        };
+        let prefix_lens = {
+            let (low, high) = self.bounds();
+            let ForceResult::Internal(node) = self.view().force() else {
+                unreachable!("a node with children is internal");
+            };
+            let keys = node.keys();
+            edges.map(|edge| {
+                if node.edge_at(edge).descend().keys_differ_past_prefix() {
+                    return None;
+                }
+                let child_low = match edge.checked_sub(1) {
+                    Some(left) => keys.get(left),
+                    None => low,
+                };
+                Some(inliner.fence_prefix_len(child_low, keys.get(edge).or(high)))
+            })
+        };
+        let ForceResult::Internal(mut node) = self.node_mut().force() else {
+            unreachable!("a node with children is internal");
+        };
+        for (edge, prefix_len) in edges.into_iter().zip(prefix_lens) {
+            if let Some(prefix_len) = prefix_len {
+                node.reborrow_mut()
+                    .edge_at(edge)
+                    .descend()
+                    .refit_prefix(prefix_len);
+            }
+        }
+    }
+
+    /// Before the separator the path ends at, `s`, in an internal node,
+    /// gives way to its successor, `s'`, the first key of the leftmost leaf
+    /// right of it (D17): shrinks the prefixes of the nodes along the right
+    /// border of the subtree left of `s`, whose upper fence `s'` becomes, to
+    /// what they will share with it, from the top down, reading keys. Their
+    /// fences are still what they were, which a shorter prefix fits too, so
+    /// a removal does this before it changes anything.
+    ///
+    /// A node there has fences `low` and `s`, so its new prefix is the
+    /// shorter of its own and what `s` and `s'` share: `low ≤ s ≤ s'`.
+    pub(crate) fn fit_left_of_separator(&mut self) {
+        let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
+            return;
+        };
+        let index = self.index();
+        let shared = {
+            let ForceResult::Internal(node) = self.view().force() else {
+                unreachable!("a separator is in an internal node");
+            };
+            let mut right = node.edge_at(index + 1).descend();
+            let successor = loop {
+                right = match right.force() {
+                    ForceResult::Leaf(leaf) => break leaf.keys().first(),
+                    ForceResult::Internal(internal) => internal.first_edge().descend(),
+                };
+            }
+            .expect("the leaf right of a separator has keys");
+            inliner.common_prefix_len(&node.keys()[index], successor)
+        };
+        let ForceResult::Internal(node) = self.node_mut().force() else {
+            unreachable!("a separator is in an internal node");
+        };
+        let mut left = node.edge_at(index).descend();
+        loop {
+            if left.prefix_len() > shared {
+                left.refit_prefix(shared);
+            }
+            left = match left.force() {
+                ForceResult::Leaf(_) => break,
+                ForceResult::Internal(internal) => internal.last_edge().descend(),
+            };
+        }
+    }
+
+    /// Moves the prefix of every node on the path back to 0, from the root
+    /// down, each filled from its parent's key beside the path, which is one
+    /// of its fences, once the parent's is 0 too. Before a cut along the
+    /// path, whose nodes become the borders of two trees, where every
+    /// prefix is 0. Reads no key; the path ends where it did.
+    pub(crate) fn clear_prefixes(&mut self) {
+        if KeyInliner::<K>::resolve::<S>().is_none() {
+            return;
+        }
+        let bottom = self.height();
+        let mut indexes = [0; MAX_HEIGHT + 1];
+        indexes[bottom] = self.index();
+        while self.height() < self.root_height() {
+            self.ascend();
+            indexes[self.height()] = self.index();
+        }
+        let mut node = self.node_mut();
+        debug_assert_eq!(node.prefix_len(), 0, "the root's prefix is 0");
+        while node.height() > bottom {
+            let ForceResult::Internal(internal) = node.force() else {
+                unreachable!("a node above another is internal");
+            };
+            let index = indexes[internal.height()];
+            let fill = internal
+                .reborrow()
+                .bound_window(index)
+                .expect("a node on a path down holds a key");
+            node = internal.edge_at(index).descend();
+            node.move_prefix_back_to(fill);
+        }
+        while self.height() > bottom {
+            self.descend();
+            self.set_index(indexes[self.height()]);
+        }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+    /// Fits the prefix of the node beside each node along the tree's `end`
+    /// border to its fences, from the root down: after
+    /// [`Subtree::fix_border`], which moves entries over from those nodes,
+    /// into the border, without reading a key. The border's own nodes keep
+    /// prefix 0.
+    pub(crate) fn fit_border_siblings(&mut self, end: NodeEnd) {
+        if KeyInliner::<K>::resolve::<S>().is_none() {
+            return;
+        }
+        let mut path = PathMut::new(self);
+        path.start_at_root();
+        while path.height() > 0 {
+            let len = path.view().len();
+            let (sibling, border) = match end {
+                NodeEnd::First => (1, 0),
+                NodeEnd::Last => (len.saturating_sub(1), len),
+            };
+            if len > 0 {
+                path.fit_children_to_fences([sibling]);
+            }
+            path.set_index(border);
+            path.descend();
+        }
+    }
+}

@@ -54,7 +54,7 @@ mod tests {
     ) {
         match leaf.last_edge().check_room() {
             EdgeRoom::Fits(edge) => {
-                edge.insert_fit(InlinedKey::new(key), value);
+                edge.insert_fit(InlinedKey::new(key, 0), value);
             }
             EdgeRoom::Full(_) => panic!("the leaf is full"),
         }
@@ -195,7 +195,7 @@ mod tests {
 
     /// Few distinct values, so that runs of equal inline keys are common.
     impl<const PADDING: usize> InlineKey for Chaotic<'_, PADDING> {
-        fn inline_key(&self) -> InlineWord {
+        fn inline_key_at(&self, _offset: usize) -> InlineWord {
             self.0.below(4) as InlineWord
         }
     }
@@ -235,7 +235,7 @@ mod tests {
             };
             assert!(edge.index() <= edge.reborrow().into_node().len());
             if let EdgeRoom::Fits(edge) = edge.check_room() {
-                edge.insert_fit(InlinedKey::new(Chaotic::new(&rng)), ledger.track());
+                edge.insert_fit(InlinedKey::new(Chaotic::new(&rng), 0), ledger.track());
             }
         }
         leaf.destroy(|page| pages.release(page));
@@ -335,7 +335,7 @@ mod tests {
                     let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                     model.entries.insert(index, (key.id(), value.tracked_id()));
                     let edge = root_leaf(&mut tree).edge_at(index);
-                    match edge.insert(InlinedKey::new(key), value, || pages.fresh()) {
+                    match edge.insert(InlinedKey::new(key, 0), value, || pages.fresh()) {
                         Insertion::Fit(kv) => assert_eq!(kv.index(), index),
                         Insertion::Split(split) => {
                             model.assert_split_halves(&split);
@@ -361,7 +361,7 @@ mod tests {
                     let new_ids = (key.id(), value.tracked_id());
                     let (old_key, old_value) = root_leaf(&mut tree)
                         .kv_at(index)
-                        .replace_key_value(InlinedKey::new(key), value);
+                        .replace_key_value(InlinedKey::new(key, 0), value);
                     assert_eq!((old_key.id(), old_value.tracked_id()), model.entries[index]);
                     model.entries[index] = new_ids;
                 }
@@ -542,14 +542,14 @@ mod tests {
         while let EdgeRoom::Fits(edge) = leaf.borrow_mut().last_edge().check_room() {
             let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
             model.entries.push((key.id(), value.tracked_id()));
-            edge.insert_fit(InlinedKey::new(key), value);
+            edge.insert_fit(InlinedKey::new(key, 0), value);
         }
         let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
         model
             .entries
             .insert(position, (key.id(), value.tracked_id()));
         let edge = leaf.borrow_mut().edge_at(position);
-        let Insertion::Split(split) = edge.insert(InlinedKey::new(key), value, || pages.fresh())
+        let Insertion::Split(split) = edge.insert(InlinedKey::new(key, 0), value, || pages.fresh())
         else {
             panic!("a full leaf splits");
         };
@@ -613,12 +613,12 @@ mod tests {
         let mut leaf = Subtree::new_leaf(pages.fresh());
         let mut len = 0;
         while let EdgeRoom::Fits(edge) = leaf.borrow_mut().first_edge().check_room() {
-            edge.insert_fit(InlinedKey::new(()), ());
+            edge.insert_fit(InlinedKey::new((), 0), ());
             len += 1;
         }
         assert_eq!(len, 1023);
         let middle = leaf.borrow_mut().edge_at(len / 2);
-        let Insertion::Split(split) = middle.insert(InlinedKey::new(()), (), || pages.fresh())
+        let Insertion::Split(split) = middle.insert(InlinedKey::new((), 0), (), || pages.fresh())
         else {
             panic!("a full leaf splits");
         };

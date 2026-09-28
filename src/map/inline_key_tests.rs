@@ -57,8 +57,8 @@ impl FromNumber for [u8; 16] {
 struct UserName(String);
 
 impl InlineKey for UserName {
-    fn inline_key(&self) -> InlineWord {
-        self.0.inline_key()
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        self.0.inline_key_at(offset)
     }
 }
 
@@ -293,7 +293,7 @@ impl Ord for LyingKey<'_> {
 }
 
 impl InlineKey for LyingKey<'_> {
-    fn inline_key(&self) -> InlineWord {
+    fn inline_key_at(&self, _offset: usize) -> InlineWord {
         match self.lie {
             Lie::Constant => 7,
             Lie::Reversed => InlineWord::from(u32::MAX - self.number),

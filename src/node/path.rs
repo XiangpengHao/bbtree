@@ -643,6 +643,25 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.path.descend_to_leaf(end);
     }
 
+    /// The bottom node's bounds, low and high: the keys just left and just
+    /// right of the path in the nodes above it, nearest first; `None` past
+    /// the tree's first or last key.
+    pub(super) fn bounds(&self) -> (Option<&K>, Option<&K>) {
+        let (mut low, mut high) = (None, None);
+        for height in self.path.height() + 1..=self.path.root_height() {
+            // SAFETY: `&self` keeps the path from lending an exclusive
+            // handle while the keys are borrowed.
+            let keys = unsafe { self.path.view(height) }.keys();
+            let index = self.path.index_at(height);
+            low = low.or_else(|| index.checked_sub(1).and_then(|left| keys.get(left)));
+            high = high.or_else(|| keys.get(index));
+            if low.is_some() && high.is_some() {
+                break;
+            }
+        }
+        (low, high)
+    }
+
     /// Shared access to the bottom node, for as long as `self` is borrowed.
     pub(crate) fn view(&self) -> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> {
         // SAFETY: `&self` keeps the path from lending an exclusive handle

@@ -5,7 +5,7 @@
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use super::inline_keys::InlinedKey;
+use super::inline_keys::{InlinedKey, Window};
 use crate::inline_key::InlineWord;
 
 /// The direction in which an array of slots grows from its anchor.
@@ -199,13 +199,17 @@ impl<T, Dir: Direction> Slots<T, Dir> {
 /// `i`'s; each mirrors the [`Slots`] operation of its name, with the same
 /// contract for both arrays.
 ///
-/// A key read out of a node without inline keys comes with the inline key 0,
-/// which no node stores.
+/// The node stores its keys' windows at its prefix length (05-fence-key.md):
+/// a key read out comes with its window there, and a key written in must
+/// come with its window there, which debug builds check. A key read out of
+/// a node without inline keys comes with [`Window::NONE`].
 ///
 /// Invariant: `inline_keys`, if any, has the capacity of `keys`.
 pub(super) struct KeySlots<K, S> {
     keys: Slots<K, Up>,
     inline_keys: Option<Slots<InlineWord, Up>>,
+    /// The node's prefix length; 0 without inline keys.
+    prefix_len: usize,
     _strategy: PhantomData<fn() -> S>,
 }
 
@@ -224,11 +228,13 @@ impl<K, S> KeySlots<K, S> {
     pub(super) unsafe fn new(
         keys: Slots<K, Up>,
         inline_keys: Option<Slots<InlineWord, Up>>,
+        prefix_len: usize,
     ) -> Self {
         debug_assert!(inline_keys.is_none_or(|inline_keys| inline_keys.capacity == keys.capacity));
         Self {
             keys,
             inline_keys,
+            prefix_len,
             _strategy: PhantomData,
         }
     }
@@ -242,6 +248,27 @@ impl<K, S> KeySlots<K, S> {
     /// has them.
     pub(super) fn inline_keys(self) -> Option<Slots<InlineWord, Up>> {
         self.inline_keys
+    }
+
+    /// The window that inline key `word` of this node is.
+    fn window(self, word: InlineWord) -> Window {
+        match self.inline_keys {
+            Some(_) => Window::new(self.prefix_len, word),
+            None => Window::NONE,
+        }
+    }
+
+    /// The inline key to store for `key`, whose window must be at this
+    /// node's prefix length.
+    fn inline_key_of(self, key: &InlinedKey<K, S>) -> InlineWord {
+        let window = key.window();
+        debug_assert!(
+            self.inline_keys.is_none() || window.prefix_len() == self.prefix_len,
+            "a key at prefix length {} goes into a node at {}",
+            window.prefix_len(),
+            self.prefix_len
+        );
+        window.inline_key()
     }
 
     /// Reads key `index` and its inline key out; the slot holds nothing
@@ -259,7 +286,7 @@ impl<K, S> KeySlots<K, S> {
                 Some(inline_keys) => inline_keys.slot(index).read(),
                 None => 0,
             };
-            InlinedKey::from_parts(key, inline_key)
+            InlinedKey::from_parts(key, self.window(inline_key))
         }
     }
 
@@ -270,7 +297,8 @@ impl<K, S> KeySlots<K, S> {
     /// `index < capacity`, and slot `index` holds nothing that needs
     /// dropping: it is overwritten, and is initialized afterwards.
     pub(super) unsafe fn write(self, index: usize, key: InlinedKey<K, S>) {
-        let (key, inline_key) = key.into_parts();
+        let inline_key = self.inline_key_of(&key);
+        let (key, _) = key.into_parts();
         // SAFETY: forwarded; the inline-key slots have the keys' capacity
         // (type invariant).
         unsafe {
@@ -301,7 +329,8 @@ impl<K, S> KeySlots<K, S> {
     ///
     /// As for [`Slots::insert`].
     pub(super) unsafe fn insert(self, index: usize, len: usize, key: InlinedKey<K, S>) {
-        let (key, inline_key) = key.into_parts();
+        let inline_key = self.inline_key_of(&key);
+        let (key, _) = key.into_parts();
         // SAFETY: forwarded; the inline-key slots have the keys' capacity and
         // are initialized like them (type invariant).
         unsafe {
@@ -326,7 +355,7 @@ impl<K, S> KeySlots<K, S> {
                 Some(inline_keys) => inline_keys.remove(index, len),
                 None => 0,
             };
-            InlinedKey::from_parts(key, inline_key)
+            InlinedKey::from_parts(key, self.window(inline_key))
         }
     }
 
@@ -335,7 +364,8 @@ impl<K, S> KeySlots<K, S> {
     /// # Safety
     ///
     /// As for [`Slots::move_run_to`], and `dest` is a node of the same map,
-    /// which has inline keys exactly if this one has.
+    /// which has inline keys exactly if this one has. The inline keys move
+    /// as they are, so `dest` must have this node's prefix length.
     pub(super) unsafe fn move_run_to(
         self,
         start: usize,
@@ -344,6 +374,10 @@ impl<K, S> KeySlots<K, S> {
         dest_start: usize,
     ) {
         debug_assert_eq!(self.inline_keys.is_some(), dest.inline_keys.is_some());
+        debug_assert_eq!(
+            self.prefix_len, dest.prefix_len,
+            "a run moves between nodes of different prefix lengths"
+        );
         // SAFETY: forwarded; the inline-key slots of both have their keys'
         // capacity and are initialized like them (type invariant).
         unsafe {

@@ -35,6 +35,8 @@ mod into_iter;
 mod invariants;
 mod iter;
 mod iter_mut;
+#[cfg(test)]
+mod prefix_tests;
 mod remove;
 mod split_off;
 #[cfg(test)]
@@ -121,8 +123,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// struct Id([u8; 8]);
     ///
     /// impl InlineKey for Id {
-    ///     fn inline_key(&self) -> InlineWord {
-    ///         self.0.inline_key()
+    ///     fn inline_key_at(&self, offset: usize) -> InlineWord {
+    ///         self.0.inline_key_at(offset)
     ///     }
     /// }
     ///
@@ -296,9 +298,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// [`Self::pop_first`] without its `Ord` bound, which finding the first
     /// entry doesn't need: `IntoIter` has none.
     fn take_first(&mut self) -> Option<(K, V)> {
-        let entry = self.root.as_mut()?.pop_first(PageByKind::deallocate)?;
-        self.length -= 1;
-        Some(entry)
+        let Self { root, length } = self;
+        root.as_mut()?.pop_first(PageByKind::deallocate, length)
     }
 
     /// Returns the last key-value pair in the map. The key in this pair is
@@ -352,9 +353,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 
     /// [`Self::pop_last`] without its `Ord` bound, as [`Self::take_first`].
     fn take_last(&mut self) -> Option<(K, V)> {
-        let entry = self.root.as_mut()?.pop_last(PageByKind::deallocate)?;
-        self.length -= 1;
-        Some(entry)
+        let Self { root, length } = self;
+        root.as_mut()?.pop_last(PageByKind::deallocate, length)
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -396,8 +396,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// old value is returned. The key is not updated, though: the map keeps
     /// its key and drops the given one, before it replaces the value.
     ///
-    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics, the
-    /// map is unchanged: every call to them happens before the first change.
+    /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
+    /// before the first change. So does every call to its `InlineKey` with
+    /// [`WithInlineKey`], but for those an insert makes last, once the entry
+    /// is in and counted, if it split nodes, to fit their inline keys to
+    /// their new fences: if one of those panics, the map has the new entry.
+    /// Either way, it stays valid.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
@@ -407,11 +411,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let root = self
             .root
             .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
-        let old_value = root.insert(key, value, FreshPage::allocate, FreshPage::allocate);
-        if old_value.is_none() {
-            self.length += 1;
-        }
-        old_value
+        root.insert(
+            key,
+            value,
+            FreshPage::allocate,
+            FreshPage::allocate,
+            &mut self.length,
+        )
     }
 
     /// Removes a key from the map, returning the value at the key if the key
@@ -421,8 +427,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ordering on the borrowed form *must* match the ordering on the key
     /// type.
     ///
-    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics, the
-    /// map is unchanged: every call to them happens before the first change.
+    /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
+    /// before the first change. So does every call to its `InlineKey` with
+    /// [`WithInlineKey`], but for those a removal makes last, once the entry
+    /// is out and counted, if it merged nodes or moved entries between them
+    /// or removed a key from an internal node, to fit their inline keys to
+    /// their new fences: if one of those panics, the entry is gone. Either
+    /// way, the map stays valid.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     ///
@@ -451,7 +462,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ordering on the borrowed form *must* match the ordering on the key
     /// type.
     ///
-    /// Panics in `K`'s `Ord` or `InlineKey` leave the map unchanged, as for
+    /// Panics in `K`'s `Ord` or `InlineKey` leave the map as for
     /// [`BBTreeMap::remove`].
     ///
     /// # Examples
@@ -469,12 +480,9 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let entry = self
-            .root
-            .as_mut()?
-            .remove_entry(key, PageByKind::deallocate)?;
-        self.length -= 1;
-        Some(entry)
+        let Self { root, length } = self;
+        root.as_mut()?
+            .remove_entry(key, PageByKind::deallocate, length)
     }
 }
 

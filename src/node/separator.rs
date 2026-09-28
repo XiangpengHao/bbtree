@@ -188,7 +188,7 @@ mod tests {
             panic!("a new root has room");
         };
         let headless = Subtree::new_leaf(pages.fresh()).forget_type();
-        edge.insert_fit(InlinedKey::new(ledger.track()), headless);
+        edge.insert_fit(InlinedKey::new(ledger.track(), 0), headless);
         let ForceResult::Internal(root) = tree.borrow().force() else {
             panic!("the root is internal");
         };

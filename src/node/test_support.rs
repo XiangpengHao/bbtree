@@ -143,11 +143,11 @@ impl Ord for Tracked<'_> {
     }
 }
 
-/// The id, which orders like the value: maps with `WithInlineKey` test the
-/// node operations with inline keys on tracked keys.
+/// The id as a big-endian `u64`, which orders like the value: maps with
+/// `WithInlineKey` test the node operations with inline keys on tracked keys.
 impl InlineKey for Tracked<'_> {
-    fn inline_key(&self) -> InlineWord {
-        InlineWord::from(self.id)
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        u64::from(self.id).to_be_bytes().inline_key_at(offset)
     }
 }
 
@@ -312,20 +312,35 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Leaf
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'_>, K, V, S, Kind> {
     /// Panics unless the node has inline keys exactly if its map's strategy
-    /// gives its keys some, and then has its keys' inline keys, in order, and
-    /// a prefix length of 0 (D18, 05-fence-key.md).
+    /// gives its keys some, and then has its keys' windows at its prefix
+    /// length, in order (D18, 05-fence-key.md); a node without has prefix 0.
     pub(crate) fn assert_inline_keys_match(self) {
+        let prefix_len = self.prefix_len();
         let expected: Option<Vec<InlineWord>> = KeyInliner::<K>::resolve::<S>().map(|inliner| {
             (self.keys().iter())
-                .map(|key| inliner.inline_key(key))
+                .map(|key| inliner.inline_key_at(key, prefix_len))
                 .collect()
         });
         assert_eq!(
             self.inline_keys(),
             expected.as_deref(),
-            "the inline keys are not the keys'"
+            "the inline keys are not the keys' windows at prefix length {prefix_len}"
         );
-        assert_eq!(self.prefix_len(), expected.map(|_| 0));
+        if expected.is_none() {
+            assert_eq!(prefix_len, 0, "a node without inline keys has a prefix");
+        }
+    }
+
+    /// Panics unless the node's prefix length is what its fences, `lower`
+    /// and `upper`, share, 0 if either is missing (05-fence-key.md).
+    pub(crate) fn assert_prefix_fits_fences(self, lower: Option<&K>, upper: Option<&K>) {
+        let shared = KeyInliner::<K>::resolve::<S>()
+            .map_or(0, |inliner| inliner.fence_prefix_len(lower, upper));
+        assert_eq!(
+            self.prefix_len(),
+            shared,
+            "a node's prefix length is not what its fences share"
+        );
     }
 }
 
@@ -426,8 +441,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
     /// returns the old one, as the map does.
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
         let pages = self.pages;
+        let mut length = 0;
         self.root_mut()
-            .insert(key, value, || pages.fresh(), || pages.fresh())
+            .insert(key, value, || pages.fresh(), || pages.fresh(), &mut length)
     }
 }
 

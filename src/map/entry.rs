@@ -16,7 +16,7 @@ use core::fmt;
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Subtree;
-use crate::node::inline_keys::{InlinedKey, SearchKey};
+use crate::node::inline_keys::SearchKey;
 use crate::node::page::{FreshPage, PageByKind};
 use crate::node::path::PathMut;
 
@@ -36,7 +36,7 @@ pub enum Entry<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K> = Auto> {
 /// A view into a vacant entry in a `BBTreeMap`. It is part of the [`Entry`]
 /// enum.
 pub struct VacantEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
-    key: InlinedKey<K, S>,
+    key: K,
     length: &'a mut usize,
     place: VacantPlace<'a, K, V, S>,
 }
@@ -268,7 +268,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
     /// ```
     pub fn key(&self) -> &K {
-        self.key.key()
+        &self.key
     }
 
     /// Take ownership of the key.
@@ -286,7 +286,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// }
     /// ```
     pub fn into_key(self) -> K {
-        self.key.into_key()
+        self.key
     }
 
     /// Sets the value of the entry with the `VacantEntry`'s key, and returns
@@ -306,8 +306,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 37);
     /// ```
     pub fn insert(self, value: V) -> &'a mut V {
-        let (path, length) = self.insert_and_count(value);
-        *length += 1;
+        let (path, _) = self.insert_and_count(value);
         path.into_value_mut()
     }
 
@@ -330,12 +329,11 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// ```
     pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S> {
         let (path, length) = self.insert_and_count(value);
-        *length += 1;
         OccupiedEntry { length, path }
     }
 
-    /// Inserts the key with `value`, and returns the path to the new entry,
-    /// and the map's length for the caller to count it.
+    /// Inserts the key with `value`, counting it in the map's length, and
+    /// returns the path to the new entry, and the length.
     fn insert_and_count(self, value: V) -> (PathMut<'a, K, V, S>, &'a mut usize) {
         let Self { key, length, place } = self;
         let mut path = match place {
@@ -348,7 +346,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
                 path
             }
         };
-        path.insert(key, value, FreshPage::allocate, FreshPage::allocate);
+        path.insert(key, value, FreshPage::allocate, FreshPage::allocate, length);
         (path, length)
     }
 }
@@ -390,9 +388,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert!(map.is_empty());
     /// ```
     pub fn remove_entry(mut self) -> (K, V) {
-        let entry = self.path.remove(PageByKind::deallocate);
-        *self.length -= 1;
-        entry
+        self.path.remove(PageByKind::deallocate, self.length)
     }
 
     /// Gets a reference to the value in the entry.
@@ -520,7 +516,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     ///
     /// Every `Ord` call the entry makes happens here; the entry's methods
     /// compare no keys. If `K`'s `Ord`, or its `InlineKey` with
-    /// [`WithInlineKey`], panics, the map is unchanged.
+    /// [`WithInlineKey`], panics here, the map is unchanged. A vacant
+    /// entry's insert calls `InlineKey` too, as [`BBTreeMap::insert`] does.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     ///
@@ -544,7 +541,6 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let key = InlinedKey::new(key);
         let Self { root, length } = self;
         if root.is_none() {
             return Entry::Vacant(VacantEntry {
@@ -554,7 +550,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             });
         }
         let mut path = PathMut::new(root.as_mut().expect("checked just above"));
-        if path.search_expecting_append(&SearchKey::for_inlined(&key)) {
+        if path.search_expecting_append(&SearchKey::new(&key)) {
             Entry::Occupied(OccupiedEntry { length, path })
         } else {
             Entry::Vacant(VacantEntry {

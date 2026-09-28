@@ -1,6 +1,7 @@
 //! Copying an owned tree: [`Subtree::clone_tree`], node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
-//! `Ord` and no `InlineKey`: every inline key is copied (D18).
+//! `Ord` and no `InlineKey`: every inline key is copied (D18), and every
+//! node's prefix length (05-fence-key.md).
 
 #![forbid(unsafe_code)]
 
@@ -31,11 +32,12 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                 if let Some(head) = leaf.head() {
                     copy_leaf.replace_head(head.into_value().clone());
                 }
-                let inline_keys = leaf.inline_keys();
+                copy_leaf.set_empty_prefix_len(leaf.prefix_len());
                 for index in 0..leaf.len() {
-                    let (key, value) = leaf.kv_at(index).into_key_value();
-                    let inline_key = inline_keys.map_or(0, |inline_keys| inline_keys[index]);
-                    let key = InlinedKey::from_parts(key.clone(), inline_key);
+                    let kv = leaf.kv_at(index);
+                    let window = kv.window();
+                    let (key, value) = kv.into_key_value();
+                    let key = InlinedKey::from_parts(key.clone(), window);
                     let value = value.clone();
                     let EdgeRoom::Fits(edge) = copy_leaf.reborrow_mut().last_edge().check_room()
                     else {
@@ -48,12 +50,13 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
             ForceResult::Internal(internal) => {
                 let first_child = Self::clone_subtree(internal.first_edge().descend());
                 let mut copy = PartialCopy::new(first_child);
-                copy.tree_mut().push_internal_level(FreshPage::allocate());
-                let inline_keys = internal.inline_keys();
+                copy.tree_mut()
+                    .push_internal_level(FreshPage::allocate())
+                    .set_empty_prefix_len(internal.prefix_len());
                 for index in 0..internal.len() {
                     let separator = internal.kv_at(index);
-                    let inline_key = inline_keys.map_or(0, |inline_keys| inline_keys[index]);
-                    let key = InlinedKey::from_parts(separator.into_key().clone(), inline_key);
+                    let window = separator.window();
+                    let key = InlinedKey::from_parts(separator.into_key().clone(), window);
                     let child = Self::clone_subtree(separator.right_edge().descend());
                     let ForceResult::Internal(copy_root) = copy.tree_mut().borrow_mut().force()
                     else {

@@ -13,10 +13,7 @@ mod inline_key;
 mod map;
 #[cfg_attr(
     not(test),
-    expect(
-        dead_code,
-        reason = "fence keys (05-fence-key.md), not yet written, and the node tests use the rest of the node API"
-    )
+    expect(dead_code, reason = "the node tests use the rest of the node API")
 )]
 mod node;
 

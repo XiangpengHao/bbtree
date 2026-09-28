@@ -212,6 +212,11 @@ Design in 04-inline-key.md.
 - **Width:** inline keys start at 8 bytes (`InlineWord = u64`). The width is
   one constant, to revisit on real keys (04-inline-key.md Q7). At 8 bytes, real
   neighbours tie 24–70% of the time; at 16 bytes, 1–20%.
+- **The trait gives windows** (2026-10-08): `inline_key_at(offset)`, bytes
+  `offset..offset + 8` of an encoding that orders like the key, so that a
+  node can skip the bytes its keys share (05-fence-key.md, "The trait").
+  8 bytes for every key type for now; later each key type chooses its own
+  (05-fence-key.md, "Width").
 - **Why not a plain trait with a default:** "default for every type, override for
   `String`" needs specialization, which is nightly-only and years from stable.
 - **TODO:** when specialization is stable, switch to it, and drop the std-type
@@ -435,6 +440,30 @@ not decided".
   where std's is O(log n) plus the part it touches; `split_off` O(log n),
   plus the shorter tree's nodes to count. A drained entry costs about a
   step of a walk.
+
+**D26. Per-node prefix stripping: a node's inline keys skip what its fences share.** (2026-10-08, exact since 2026-10-09)
+Design and measurements in 05-fence-key.md.
+
+- **What a node stores:** `prefix_len`, exactly what its fences (the
+  separators beside it in its ancestors) share, 0 along the tree's borders,
+  and its keys' windows past it as their inline keys. No fence key is stored
+  (D10).
+- **For every key with inline keys:** the trait gives windows of an encoding
+  (D18), so newtypes get it as std byte strings do.
+- **Only a separator change moves a fence,** never an insert into a node.
+  The change itself reads no key, so that a panicking `InlineKey` can't
+  stop it halfway: a node that must shrink takes its parent's prefix, by a
+  shift filled from the parent's separator. Once the entry is counted, the
+  nodes whose fences changed fit them, reading their keys.
+- **Exact, not "at most":** the first version kept prefixes at most what
+  the fences share, grown only where inline keys tied. Exact needs no gate
+  and no test-only growth rule, and rebalanced nodes keep their prefixes,
+  for 4–23% on inserts, gets and removals of keys that rarely share
+  prefixes.
+- **Measured:** 24–34% faster at 1M on keys with shared prefixes (paths,
+  addresses), 9–12% on Wikipedia titles' inserts and gets; on random strings,
+  inserts about 25%, gets 5–10% and removals 21–23% slower than without
+  stripping.
 
 ## Navigation
 

@@ -27,9 +27,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     ///   has `L - 1` separators and as many heads;
     /// - `len()` is the number of entries, each counted once: leaf entries
     ///   and separators, whose values are the heads;
-    /// - if the strategy gives the keys inline keys, every node holds those
-    ///   of its keys, in order, and a prefix length of 0; otherwise none
-    ///   (D18).
+    /// - if the strategy gives the keys inline keys, every node holds its
+    ///   keys' windows at its prefix length, in order (D18), which is what
+    ///   its fences share, 0 along the tree's borders (05-fence-key.md);
+    ///   otherwise none, and prefix 0.
     pub(super) fn check_invariants(&self) {
         let Some(root) = &self.root else {
             assert_eq!(self.length, 0, "a map without a root has entries");
@@ -59,6 +60,28 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// or nothing.
     pub(super) fn height(&self) -> usize {
         self.root.as_ref().map_or(0, |root| root.height())
+    }
+
+    /// Every node's prefix length (05-fence-key.md), from the root down, each
+    /// node before its children.
+    pub(super) fn node_prefix_lens(&self) -> Vec<usize> {
+        let mut prefix_lens = Vec::new();
+        if let Some(root) = &self.root {
+            Self::collect_prefix_lens(root.borrow(), &mut prefix_lens);
+        }
+        prefix_lens
+    }
+
+    fn collect_prefix_lens(
+        node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
+        prefix_lens: &mut Vec<usize>,
+    ) {
+        prefix_lens.push(node.prefix_len());
+        if let ForceResult::Internal(internal) = node.force() {
+            for index in 0..=internal.len() {
+                Self::collect_prefix_lens(internal.edge_at(index).descend(), prefix_lens);
+            }
+        }
     }
 
     /// The keys that live in internal nodes, in order: each one's value is a
@@ -143,6 +166,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         depth: usize,
     ) {
         node.assert_inline_keys_match();
+        node.assert_prefix_fits_fences(bounds.lower, bounds.upper);
         let keys = node.keys();
         if depth > 0 {
             assert!(
@@ -170,7 +194,8 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
             ForceResult::Internal(internal) => {
                 for index in 0..=keys.len() {
                     let child = internal.edge_at(index).descend();
-                    self.check_subtree(child, bounds.of_child(keys, index), depth + 1);
+                    let child_bounds = bounds.of_child(keys, index);
+                    self.check_subtree(child, child_bounds, depth + 1);
                     if let Some(key) = keys.get(index) {
                         self.separators += 1;
                         self.visit(key);
