@@ -6,12 +6,11 @@ What makes bbtree different is that we are more performant and more memory effic
 
 ## First principles
 
-- Design BBTree with the mindset that "it might be merged into Rust's stdlib someday", anything breaking this should be flagged.
+- Design BBTree with the mindset that any exsiting users of std BTreeMap/BTreeSet should be able to switch to BBTree without any code changes. But not the other way around.
 
 - High performance is our differentiator; correctness is the long term value proposition.
 
 - Large data first, small data not ugly. People whose data is small don't care about performance, so they won't bother switching to bbtree; only people with sufficiently large data will. So our goal is to make large data very, very efficient, and meanwhile not make small data too ugly: when the two conflict, large data wins, as long as small data stays reasonably close to std.
-
 
 ## Design
 
