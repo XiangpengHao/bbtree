@@ -3,16 +3,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use bbtree::BBTreeMap;
+use bbtree::{BBTreeMap, InlineKey, WithInlineKey};
 
 use crate::command_line::Named;
-use crate::keys::BenchKey;
+use crate::keys::{BenchKey, KeyKind};
 use crate::operations::Operation;
 use crate::values::BenchValue;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MapKind {
     BBTree,
+    /// `BBTreeMap` with the `WithInlineKey` strategy: keys with inline keys
+    /// through their own `InlineKey` impl. Runs only when `--map` names it,
+    /// and only on the keys that `bbtree` gives none, the integers.
+    BBTreeInline,
     StdBTree,
     /// hashbrown's `HashMap` with its default hasher (foldhash).
     Hashbrown,
@@ -21,11 +25,18 @@ pub(crate) enum MapKind {
 }
 
 impl Named for MapKind {
-    const ALL: &'static [Self] = &[Self::BBTree, Self::StdBTree, Self::Hashbrown, Self::StdHash];
+    const ALL: &'static [Self] = &[
+        Self::BBTree,
+        Self::BBTreeInline,
+        Self::StdBTree,
+        Self::Hashbrown,
+        Self::StdHash,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::BBTree => "bbtree",
+            Self::BBTreeInline => "bbtree-inline",
             Self::StdBTree => "std-btree",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std-hash",
@@ -38,6 +49,7 @@ impl MapKind {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::BBTree => "bbtree",
+            Self::BBTreeInline => "bbtree, inline keys",
             Self::StdBTree => "std BTreeMap",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std HashMap",
@@ -48,11 +60,28 @@ impl MapKind {
         !self.unsupported_operations().contains(&operation)
     }
 
+    /// Whether the map runs on keys of `key`: `bbtree-inline` only on those
+    /// whose type has an `InlineKey` impl that `bbtree` doesn't use.
+    pub(crate) fn supports_key(self, key: KeyKind) -> bool {
+        match self {
+            Self::BBTreeInline => key.is_inline_keyed_integer(),
+            Self::BBTree | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
+        }
+    }
+
+    /// Whether the map runs only when `--map` names it.
+    pub(crate) fn is_opt_in(self) -> bool {
+        matches!(self, Self::BBTreeInline)
+    }
+
     /// The adapter's list, read at `u64 → u64`: the lists don't depend on
     /// the key and value types.
     fn unsupported_operations(self) -> &'static [Operation] {
         match self {
             Self::BBTree => <BBTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
+            Self::BBTreeInline => {
+                <BBTreeMap<u64, u64, WithInlineKey> as MapUnderTest<u64, u64>>::UNSUPPORTED
+            }
             Self::StdBTree => <BTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
             Self::Hashbrown => {
                 <hashbrown::HashMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED
@@ -167,6 +196,47 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
 
     fn from_sorted_entries(entries: Vec<(K, V)>) -> Self {
         entries.into_iter().collect()
+    }
+
+    fn bump_count(&mut self, key: K) {
+        self.entry(key).or_default().bump();
+    }
+}
+
+/// `collect` makes maps of the default strategy only.
+impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V, WithInlineKey> {
+    const UNSUPPORTED: &'static [Operation] = &[Operation::BulkBuild];
+
+    fn new() -> Self {
+        BBTreeMap::with_strategy(WithInlineKey)
+    }
+
+    fn entry_count(&self) -> usize {
+        BBTreeMap::len(self)
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        BBTreeMap::insert(self, key, value);
+    }
+
+    fn get(&self, key: &K) -> Option<&V> {
+        BBTreeMap::get(self, key)
+    }
+
+    fn checksum_all(&self) -> u64 {
+        Self::checksum(self.iter())
+    }
+
+    fn checksum_range(&self, start: &K, count: usize) -> u64 {
+        Self::checksum(self.range::<K, _>(start..).take(count))
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        BBTreeMap::remove(self, key)
+    }
+
+    fn pop_first(&mut self) -> Option<(K, V)> {
+        BBTreeMap::pop_first(self)
     }
 
     fn bump_count(&mut self, key: K) {

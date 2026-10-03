@@ -32,9 +32,10 @@
 //!    window moved back with [`Window::moved_back_to`], and a node whose
 //!    prefix length grows reads its keys (`prefix.rs`). All `capacity` inline-key
 //!    slots are initialized, from the node's creation on
-//!    (`NodePtr::from_fresh_page`), and only ever overwritten by inline
-//!    keys, so a search may read past `len`: slots `len..` hold stale inline
-//!    keys, which it masks out.
+//!    (`NodePtr::from_fresh_page`), so a search may read past `len`; slots
+//!    `len..` hold the greatest inline key, all ones, so that a search may
+//!    count every slot without masking those out: a fresh page starts so,
+//!    and [`NodeMut::set_len`] refills the slots a shorter length leaves.
 //!
 //! Every fact is established once, by a check the B-tree makes anyway (the
 //! search, the insert-or-split decision, the merge decision) or by a checked
@@ -52,9 +53,9 @@ use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
 
-use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Window};
+use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, KeyInliner, SearchKey, Window};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
-use super::slots::{Down, KeySlots, Slots, Up};
+use super::slots::{Down, InlineKeySlots, KeySlots, Slots, Up};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// Node kind: a leaf, at height 0.
@@ -394,7 +395,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     /// forward, which stalled every level. For a std byte string, it is one
     /// load from the search key's padded copy, written once.
     #[inline]
-    fn inline_target<Q: ?Sized>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<InlineTarget> {
+    fn inline_target<Q: ?Sized>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<InlineTarget>
+    where
+        K: Borrow<Q>,
+    {
         if NodePtr::<K, V, S>::has_inline_keys() {
             key.inline_target(self.prefix_len())
         } else {
@@ -455,12 +459,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         if let Some(inline_keys) = self.reborrow().inline_keys()
             && let Some(target) = self.inline_target(key)
         {
-            // SAFETY: `len - 1 < len`, the number of inline keys.
-            let last_inline_key = unsafe { *inline_keys.get_unchecked(len - 1) };
-            if last_inline_key != target.inline_key() {
-                return last_inline_key < target.inline_key();
-            }
-            return key.cmp_tied(target, last_key).is_gt();
+            return match inline_keys.cmp_at(len - 1, target.inline_key()) {
+                Ordering::Equal => key.cmp_tied(target, last_key).is_gt(),
+                unequal => unequal.is_lt(),
+            };
         }
         last_key.borrow() < key.key()
     }
@@ -517,10 +519,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if let Some(inline_keys) = self.reborrow().inline_key_slots()
-            && let Some(target) = self.inline_target(key)
+        if let Some(target) = self.inline_target(key)
+            && let Some(run) = self.inline_equal_run(target)
         {
-            return self.inline_search_index(inline_keys, key, target);
+            return self.search_run(run, key, target);
         }
         let keys = self.reborrow().keys();
         match Self::KEY_SEARCH {
@@ -531,22 +533,41 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         }
     }
 
-    /// The search over inline keys (D18). One count over them finds the run
-    /// of keys whose inline keys equal the target's: only those can equal
-    /// `key`. A plain binary search over their full keys (D19's `Binary`)
-    /// decides within the run, comparing them as [`SearchKey::cmp_tied`]
-    /// does: std byte strings a word at a time, from past the bytes the run
-    /// shares. Keys outside the run differ from `key` in their inline keys,
+    /// The positions of the node's keys whose inline keys equal `target`'s
+    /// in the bytes the node keeps (D18), or `None` if the node has no inline
+    /// keys: only those can equal the key searched for. Found through the
+    /// node's own kind, so that the count over its inline keys runs over its
+    /// kind's capacity as a constant, which the compiler unrolls
+    /// ([`LiveSlots::equal_run_by_count`]); over a capacity that depends on
+    /// the height, it compiled to a loop of several times the instructions.
+    fn inline_equal_run(&self, target: InlineTarget) -> Option<Range<usize>> {
+        let run = match self.reborrow().forget_type().force() {
+            ForceResult::Leaf(leaf) => leaf.inline_keys()?.equal_run(target.inline_key()),
+            ForceResult::Internal(internal) => {
+                internal.inline_keys()?.equal_run(target.inline_key())
+            }
+        };
+        Some(run)
+    }
+
+    /// The search within `run`, the keys whose inline keys equal `key`'s
+    /// (D18). Keys outside the run differ from `key` in their inline keys,
     /// which order them (the `InlineKey` contract), so if `key` is in no
     /// run, its edge is where the run would start.
     ///
+    /// Keys with their own `InlineKey` impl compare by `Ord` within it, and
+    /// search as their type picks (D19): branchless for plain data such as
+    /// integers, whose run is the whole node where their kept bytes all tie,
+    /// as at a node of prefix 0, the root's. Std byte strings search it by
+    /// binary search, comparing as [`SearchKey::cmp_tied`] does, a word at a
+    /// time from past the bytes the run shares.
+    ///
     /// In bounds for any `Ord` and `InlineKey`: the run lies within `0..len`
     /// whatever the inline keys hold ([`NodeInlineKeys::equal_run`]), taking
-    /// it out of the keys checks that, and the binary search stays within
-    /// it.
-    fn inline_search_index<Q>(
+    /// it out of the keys checks that, and either search stays within it.
+    fn search_run<Q>(
         &self,
-        inline_keys: NodeInlineKeys<'_>,
+        run: Range<usize>,
         key: &SearchKey<'_, K, S, Q>,
         target: InlineTarget,
     ) -> Result<usize, usize>
@@ -554,9 +575,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let run = inline_keys.equal_run(target.inline_key());
         let candidates = &self.reborrow().keys()[run.clone()];
-        let found = Self::binary_search_index(candidates, |stored| key.cmp_tied(target, stored));
+        let found = match (KeyInliner::<K>::resolve::<S>(), Self::KEY_SEARCH) {
+            (Some(KeyInliner::InlineKeyTrait { .. }), KeySearch::Branchless) => {
+                Self::branchless_search_index(candidates, key.key())
+            }
+            _ => Self::binary_search_index(candidates, |stored| key.cmp_tied(target, stored)),
+        };
         found
             .map(|index| run.start + index)
             .map_err(|index| run.start + index)
@@ -663,53 +688,175 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
     }
 }
 
-/// A node's inline-key slots up to its capacity, as a search reads them
-/// (D18): slots `0..len` hold the inline keys, the rest stale ones.
+/// A node's inline keys, read in place (D18): every slot up to the
+/// capacity, at the map's width, of which slots `0..len` hold the inline keys
+/// of keys `0..len`, and the rest stale ones, which a search reads and masks
+/// out. Its methods speak in windows: they narrow a window to the bytes the
+/// node keeps, and give an inline key back as those bytes, zeros after.
+///
+/// Every node of a map has the same width, so after monomorphization each
+/// method is that of one width. They are not generic, so they need
+/// `#[inline]` to inline into the searches, which other crates instantiate,
+/// and `always`: before the width folds, each looks like a match of three
+/// arms with bounds checks, which the compiler kept out of line, a call and
+/// a match on every level of every insert.
 #[derive(Clone, Copy)]
-struct NodeInlineKeys<'a> {
-    slots: &'a [InlineWord],
+pub(super) enum NodeInlineKeys<'a> {
+    Two(LiveSlots<'a, u16>),
+    Four(LiveSlots<'a, u32>),
+    Eight(LiveSlots<'a, u64>),
+}
+
+/// `$body`, with `$live` bound to the slots of `$inline_keys`, whichever
+/// their width.
+macro_rules! with_live_slots {
+    ($inline_keys:expr, |$live:ident| $body:expr) => {
+        match $inline_keys {
+            NodeInlineKeys::Two($live) => $body,
+            NodeInlineKeys::Four($live) => $body,
+            NodeInlineKeys::Eight($live) => $body,
+        }
+    };
+}
+
+impl<'a> NodeInlineKeys<'a> {
+    /// The first `capacity` of `slots`, of which the first `len` are live.
+    ///
+    /// # Safety
+    ///
+    /// `capacity` is the slots' own, all of them are initialized, and none
+    /// changes for `'a`.
+    #[inline(always)]
+    unsafe fn new(slots: InlineKeySlots, capacity: usize, len: usize) -> Self {
+        // SAFETY: forwarded, at the slots' width.
+        unsafe {
+            match slots {
+                InlineKeySlots::Two(slots) => {
+                    Self::Two(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                }
+                InlineKeySlots::Four(slots) => {
+                    Self::Four(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                }
+                InlineKeySlots::Eight(slots) => {
+                    Self::Eight(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                }
+            }
+        }
+    }
+
+    /// Inline key `index`: the bytes the node keeps of key `index`'s
+    /// window, zeros after them.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    #[inline(always)]
+    pub(super) fn inline_key(self, index: usize) -> InlineWord {
+        with_live_slots!(self, |live| live.live()[index].window())
+    }
+
+    /// How inline key `index` orders against the bytes the node keeps of
+    /// `window`. Equal says nothing of the keys.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    #[inline(always)]
+    fn cmp_at(self, index: usize, window: InlineWord) -> Ordering {
+        with_live_slots!(self, |live| live
+            .cmp_at(index, InlineSlot::of_window(window)))
+    }
+
+    /// The positions of the inline keys equal to the bytes the node keeps
+    /// of `window`; see [`LiveSlots::equal_run`].
+    #[inline(always)]
+    fn equal_run(self, window: InlineWord) -> Range<usize> {
+        with_live_slots!(self, |live| live.equal_run(InlineSlot::of_window(window)))
+    }
+
+    /// Whether every slot past `len` holds the greatest inline key
+    /// (invariant 6).
+    #[cfg(test)]
+    pub(super) fn pads_with_greatest(self) -> bool {
+        with_live_slots!(self, |live| live.pads_with_greatest())
+    }
+}
+
+/// A node's inline keys at one width, as [`NodeInlineKeys`] reads them:
+/// `slots` up to the capacity, of which the first `len` are live.
+#[derive(Clone, Copy)]
+pub(super) struct LiveSlots<'a, W> {
+    slots: &'a [W],
     len: usize,
 }
 
-impl NodeInlineKeys<'_> {
-    /// The positions of the inline keys equal to `inline_key`: exactly those
+impl<'a, W: InlineSlot> LiveSlots<'a, W> {
+    fn new(slots: &'a [W], len: usize) -> Self {
+        debug_assert!(len <= slots.len());
+        Self { slots, len }
+    }
+
+    /// The live slots.
+    fn live(self) -> &'a [W] {
+        &self.slots[..self.len]
+    }
+
+    #[cfg(test)]
+    fn pads_with_greatest(self) -> bool {
+        let greatest = W::of_window(InlineWord::MAX);
+        self.slots[self.len..].iter().all(|&slot| slot == greatest)
+    }
+
+    /// How live slot `index` orders against `target`.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    fn cmp_at(self, index: usize, target: W) -> Ordering {
+        self.live()[index].cmp(&target)
+    }
+
+    /// The positions of the inline keys equal to `target`: exactly those
     /// for sorted inline keys, which the `InlineKey` contract gives, and a
     /// range within `0..len` for any. If none equals it, the empty range at
     /// the first inline key greater than it.
     ///
-    /// Found by a count of every slot ([`Self::equal_run_by_count`]) where
-    /// the target has AVX-512, which compares unsigned 64-bit integers in
-    /// vectors, and by a binary search otherwise
-    /// ([`Self::equal_run_by_search`]): without such compares, the count is
-    /// an emulated sequence that costs more than the mispredicts it avoids.
-    /// Measured on 1M-entry maps (04, Q6).
-    ///
-    /// Not generic, so it needs `#[inline]` to inline into the searches,
-    /// which other crates instantiate.
-    #[inline]
-    fn equal_run(self, inline_key: InlineWord) -> Range<usize> {
-        if cfg!(target_feature = "avx512f") {
-            self.equal_run_by_count(inline_key)
+    /// Found by a count of every slot: in explicit vectors where the target
+    /// has them for slots of this width
+    /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
+    /// compiler vectorizes it ([`Self::equal_run_by_count`]) where it
+    /// compares slots of this width in vectors
+    /// ([`InlineSlot::COUNTS_IN_VECTORS`]); and by a binary search
+    /// otherwise ([`Self::equal_run_by_search`]): without such compares,
+    /// the count is an emulated sequence that costs more than the
+    /// mispredicts it avoids. Measured on 1M-entry maps of 8-byte inline
+    /// keys (04, Q6).
+    #[inline(always)]
+    fn equal_run(self, target: W) -> Range<usize> {
+        if let Some(run) = W::equal_run_in_vectors(self.slots, self.len, target) {
+            return run;
+        }
+        if W::COUNTS_IN_VECTORS {
+            self.equal_run_by_count(target)
         } else {
-            self.equal_run_by_search(inline_key)
+            self.equal_run_by_search(target)
         }
     }
 
     /// One pass over every slot up to the capacity counts the inline keys
-    /// below `inline_key` and those equal to it, masking out the slots from
-    /// `len` on. It has no branch and no dependent load, and its trip count
-    /// is the capacity, a constant per node kind, so the compiler unrolls it
-    /// into a few vector compares. Within `0..len` for any slots: each of
-    /// the `len` live slots counts at most once.
-    #[inline]
-    fn equal_run_by_count(self, inline_key: InlineWord) -> Range<usize> {
-        let (mut below, mut equal) = (0, 0);
-        for (index, &slot) in self.slots.iter().enumerate() {
-            let live = index < self.len;
-            below += usize::from(live & (slot < inline_key));
-            equal += usize::from(live & (slot == inline_key));
-        }
-        below..below + equal
+    /// below `target` and those equal to it. The slots from `len` on hold
+    /// the greatest inline key (invariant 6), so they never count below it,
+    /// and count equal only to a greatest `target`, whose run the cut at
+    /// `len` ends where the live slots do. With no branch, no dependent load
+    /// and no mask per slot, and a trip count that is the capacity, one of
+    /// two constants per map, the compiler unrolls it into a few vector
+    /// compares whose masks it counts. Within `0..len` for any slots, by the
+    /// cuts.
+    fn equal_run_by_count(self, target: W) -> Range<usize> {
+        let below = self.slots.iter().filter(|&&slot| slot < target).count();
+        let equal = self.slots.iter().filter(|&&slot| slot == target).count();
+        let below = below.min(self.len);
+        below..(below + equal).min(self.len)
     }
 
     /// A branchless binary search finds where the run starts, and a scan
@@ -717,24 +864,22 @@ impl NodeInlineKeys<'_> {
     /// don't tie make predictable, rather than a second search, whose exit
     /// depends on where the first one ended. Within `0..len` for any slots:
     /// the search and the scan stay within the live slots.
-    #[inline]
-    fn equal_run_by_search(self, inline_key: InlineWord) -> Range<usize> {
-        let live = &self.slots[..self.len];
-        let start = Self::count_below(live, inline_key);
+    fn equal_run_by_search(self, target: W) -> Range<usize> {
+        let live = self.live();
+        let start = Self::count_below(live, target);
         let mut end = start;
-        while live.get(end) == Some(&inline_key) {
+        while live.get(end) == Some(&target) {
             end += 1;
         }
         start..end
     }
 
-    /// How many of `inline_keys`, sorted, are below `inline_key`, by a
+    /// How many of `inline_keys`, sorted, are below `target`, by a
     /// branchless binary search, as in `NodeRef::branchless_search_index`;
     /// in `0..=len` for any inline keys, by construction: the loop keeps
     /// `base + size <= len`, and probes only `mid = base + size / 2 < base +
     /// size`.
-    #[inline]
-    fn count_below(inline_keys: &[InlineWord], inline_key: InlineWord) -> usize {
+    fn count_below(inline_keys: &[W], target: W) -> usize {
         let mut size = inline_keys.len();
         if size == 0 {
             return 0;
@@ -745,13 +890,13 @@ impl NodeInlineKeys<'_> {
             let mid = base + half;
             // SAFETY: `mid < base + size <= inline_keys.len()`.
             let probe = unsafe { *inline_keys.get_unchecked(mid) };
-            base = hint::select_unpredictable(probe < inline_key, mid, base);
+            base = hint::select_unpredictable(probe < target, mid, base);
             size -= half;
         }
         // SAFETY: `base < base + size <= inline_keys.len()`, with `size == 1`
         // here.
         let last = unsafe { *inline_keys.get_unchecked(base) };
-        base + usize::from(last < inline_key)
+        base + usize::from(last < target)
     }
 }
 
@@ -835,14 +980,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'a>, K, V,
         unsafe { self.key_slots().keys().run(0, self.len()).as_ref() }
     }
 
-    /// The inline keys `0..len`, in order, if the node has them (D18):
-    /// inline key `i` is key `i`'s.
-    pub(super) fn inline_keys(self) -> Option<&'a [InlineWord]> {
-        let inline_keys = self.key_slots().inline_keys()?;
-        // SAFETY: inline keys `0..len` are initialized, like keys `0..len`
-        // (invariants 1 and 6), and unchanged for `'a`; they grow up, so
-        // memory order is index order.
-        Some(unsafe { inline_keys.run(0, self.len()).as_ref() })
+    /// The node's inline keys, if it has them (D18): inline key `i` is key
+    /// `i`'s, for `i < len`, and a search may read the slots past them.
+    pub(super) fn inline_keys(self) -> Option<NodeInlineKeys<'a>> {
+        let slots = self.key_slots().inline_keys()?;
+        // SAFETY: the node's inline-key slots number its capacity, all are
+        // initialized (invariant 6), and none changes for `'a` (invariant
+        // 1); they grow up, so memory order is index order.
+        Some(unsafe { NodeInlineKeys::new(slots, self.capacity(), self.len()) })
     }
 
     /// Key `index`'s window: its inline key at the node's prefix length, or
@@ -853,22 +998,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'a>, K, V,
     /// If `index >= len`.
     fn key_window(self, index: usize) -> Window {
         match self.inline_keys() {
-            Some(inline_keys) => Window::new(self.prefix_len(), inline_keys[index]),
+            Some(inline_keys) => Window::new(self.prefix_len(), inline_keys.inline_key(index)),
             None => Window::NONE,
         }
-    }
-
-    /// Every inline-key slot up to the capacity, if the node has inline keys
-    /// (D18), for a search that reads past `len` and masks those out.
-    fn inline_key_slots(self) -> Option<NodeInlineKeys<'a>> {
-        let inline_keys = self.key_slots().inline_keys()?;
-        // SAFETY: all `capacity` inline-key slots are initialized (invariant
-        // 6), and none changes for `'a` (invariant 1).
-        let slots = unsafe { inline_keys.run(0, self.capacity()).as_ref() };
-        Some(NodeInlineKeys {
-            slots,
-            len: self.len(),
-        })
     }
 }
 
@@ -883,6 +1015,10 @@ impl<K, V, S, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
+    /// Sets the length; the inline-key slots a shorter length leaves get
+    /// the greatest inline key, as all slots past the length hold
+    /// (invariant 6). Called once the slots are where the length says.
+    ///
     /// # Safety
     ///
     /// `len` is at most the capacity, and keys `0..len` (with their inline
@@ -890,6 +1026,14 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
     /// `0..=len`) are initialized by the time the node is used again.
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
+        let old_len = self.len();
+        if let Some(inline_keys) = self.key_slots().inline_keys() {
+            for index in len..old_len {
+                // SAFETY: `index < old_len <= capacity`; inline keys are
+                // plain data, and this handle is exclusive.
+                unsafe { inline_keys.write(index, InlineWord::MAX) };
+            }
+        }
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
@@ -917,9 +1061,8 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
         // the header with them; this handle is exclusive.
         unsafe {
             for index in 0..len {
-                let slot = inline_keys.slot(index);
-                let window = Window::new(prefix_len, slot.read()).moved_back_to(fill);
-                slot.write(window.inline_key());
+                let window = Window::new(prefix_len, inline_keys.read(index)).moved_back_to(fill);
+                inline_keys.write(index, window.inline_key());
             }
             self.node.set_prefix_len(fill.prefix_len());
         }
@@ -932,19 +1075,24 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
     ///
     /// # Panics
     ///
-    /// If `inline_keys` does not have one inline key per key; the node is
-    /// unchanged then.
-    pub(super) fn set_windows(&mut self, prefix_len: usize, inline_keys: &[InlineWord]) {
-        assert_eq!(inline_keys.len(), self.len(), "one inline key per key");
+    /// If `inline_keys` does not say it has one inline key per key; the
+    /// node is unchanged then.
+    pub(super) fn set_windows(
+        &mut self,
+        prefix_len: usize,
+        inline_keys: impl ExactSizeIterator<Item = InlineWord>,
+    ) {
+        let len = self.len();
+        assert_eq!(inline_keys.len(), len, "one inline key per key");
         let Some(slots) = self.key_slots().inline_keys() else {
             return;
         };
-        // SAFETY: `inline_keys.len() == len <= capacity`, checked above, so
-        // each slot written is in bounds; inline keys are plain data, and
-        // this handle is exclusive.
+        // SAFETY: each slot written has an index below `len <= capacity`,
+        // however many inline keys the iterator gives; inline keys are plain
+        // data, and this handle is exclusive.
         unsafe {
-            for (index, &inline_key) in inline_keys.iter().enumerate() {
-                slots.slot(index).write(inline_key);
+            for (index, inline_key) in (0..len).zip(inline_keys) {
+                slots.write(index, inline_key);
             }
             self.node.set_prefix_len(prefix_len);
         }
@@ -2308,8 +2456,12 @@ mod tests {
     use std::string::String;
     use std::vec::Vec;
 
-    use super::{KeySearch, NodeInlineKeys};
-    use crate::inline_key::InlineWord;
+    use core::cmp::Ordering;
+    use core::ptr::NonNull;
+    use std::vec;
+
+    use super::{InlineKeySlots, InlineSlot, KeySearch, LiveSlots, NodeInlineKeys};
+    use crate::inline_key::{InlineWidth, InlineWord};
     use crate::node::test_support::TestRng;
 
     #[test]
@@ -2332,56 +2484,135 @@ mod tests {
         ));
     }
 
-    /// Slots past `len` hold stale inline keys, which a search must ignore:
-    /// `stale_count` random ones after `live`.
-    fn slots_with_stale_tail(
+    /// `stale_count` random slots after `live`, as no node holds past its
+    /// length: a search must stay in bounds whatever they hold.
+    fn slots_with_stale_tail<W: InlineSlot + From<u8>>(
         rng: &TestRng,
-        live: &[InlineWord],
+        live: &[W],
         stale_count: usize,
-    ) -> Vec<InlineWord> {
-        let stale = (0..stale_count).map(|_| rng.below(20) as InlineWord);
+    ) -> Vec<W> {
+        let stale = (0..stale_count).map(|_| W::from(rng.below(20) as u8));
         live.iter().copied().chain(stale).collect()
     }
 
+    /// The greatest inline key, which slots past a node's length hold.
+    fn greatest<W: InlineSlot>() -> W {
+        W::of_window(InlineWord::MAX)
+    }
+
     /// On sorted inline keys, the run is exactly the equal ones, wherever
-    /// they are and however many, whatever the slots past `len` hold, by
-    /// either way of finding it.
-    #[test]
-    fn equal_runs_of_sorted_inline_keys() {
-        let rng = TestRng::new(51);
+    /// they are and however many, over several words of slots, the
+    /// greatest too, by every way of finding it, with the slots past `len`
+    /// holding the greatest (invariant 6), and by the vector count whatever
+    /// they hold.
+    fn assert_equal_runs_of_sorted_inline_keys<W: InlineSlot + From<u8>>(seed: u64) {
+        let rng = TestRng::new(seed);
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
-            let len = rng.below(40);
-            let mut inline_keys: Vec<InlineWord> =
-                (0..len).map(|_| rng.below(8) as InlineWord * 2).collect();
+            let len = rng.below(140);
+            let mut inline_keys: Vec<W> = (0..len)
+                .map(|_| match rng.below(9) {
+                    8 => greatest(),
+                    small => W::from(small as u8 * 2),
+                })
+                .collect();
             inline_keys.sort_unstable();
-            let slots = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
-            let node = NodeInlineKeys { slots: &slots, len };
-            for target in 0..18 {
+            let stale = core::iter::repeat_n(greatest(), rng.below(8));
+            let slots: Vec<W> = inline_keys.iter().copied().chain(stale).collect();
+            let node = LiveSlots::new(&slots, len);
+            let unpadded = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
+            for target in (0..18).map(W::from).chain([greatest()]) {
                 let start = inline_keys.partition_point(|&probe| probe < target);
                 let end = inline_keys.partition_point(|&probe| probe <= target);
                 assert_eq!(node.equal_run_by_count(target), start..end);
                 assert_eq!(node.equal_run_by_search(target), start..end);
+                for slots in [&slots, &unpadded] {
+                    if let Some(run) = W::equal_run_in_vectors(slots, len, target) {
+                        assert_eq!(run, start..end);
+                    }
+                }
             }
         }
     }
 
-    /// On any inline keys, the run stays within the live ones.
     #[test]
-    fn equal_runs_stay_in_bounds_for_unsorted_inline_keys() {
-        let rng = TestRng::new(52);
+    fn equal_runs_of_sorted_inline_keys() {
+        assert_equal_runs_of_sorted_inline_keys::<u16>(51);
+        assert_equal_runs_of_sorted_inline_keys::<u32>(53);
+        assert_equal_runs_of_sorted_inline_keys::<u64>(54);
+    }
+
+    /// On any inline keys, the run stays within the live ones.
+    fn assert_equal_runs_stay_in_bounds<W: InlineSlot + From<u8>>(seed: u64) {
+        let rng = TestRng::new(seed);
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
             let len = rng.below(40);
-            let inline_keys: Vec<InlineWord> =
-                (0..len).map(|_| rng.below(4) as InlineWord).collect();
+            let inline_keys: Vec<W> = (0..len).map(|_| W::from(rng.below(4) as u8)).collect();
             let slots = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
-            let node = NodeInlineKeys { slots: &slots, len };
-            for target in 0..5 {
-                for run in [
+            let node = LiveSlots::new(&slots, len);
+            for target in (0..5).map(W::from) {
+                let runs = [
                     node.equal_run_by_count(target),
                     node.equal_run_by_search(target),
-                ] {
+                ];
+                for run in runs
+                    .into_iter()
+                    .chain(W::equal_run_in_vectors(&slots, len, target))
+                {
                     assert!(run.start <= run.end && run.end <= len);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn equal_runs_stay_in_bounds_for_unsorted_inline_keys() {
+        assert_equal_runs_stay_in_bounds::<u16>(52);
+        assert_equal_runs_stay_in_bounds::<u32>(55);
+        assert_equal_runs_stay_in_bounds::<u64>(56);
+    }
+
+    /// A node's inline keys at each width keep the first bytes of the
+    /// windows written, compare by them, and find the runs of windows that
+    /// tie in them: three sorted windows that share 2 bytes, two of which
+    /// share 4.
+    #[test]
+    fn inline_keys_of_each_width_keep_the_first_bytes() {
+        let windows: [InlineWord; 3] = [
+            0x0102_0304_0506_0708,
+            0x0102_0304_ffff_ffff,
+            0x0102_ffff_0000_0000,
+        ];
+        for (width, kept_bytes) in [
+            (InlineWidth::Two, 2),
+            (InlineWidth::Four, 4),
+            (InlineWidth::Eight, 8),
+        ] {
+            let capacity = 1024 / kept_bytes;
+            // All ones: the greatest inline key at every width, which slots
+            // past a node's length hold (invariant 6).
+            let mut buffer = vec![u64::MAX; 128];
+            let anchor = NonNull::new(buffer.as_mut_ptr().cast::<u8>()).unwrap();
+            // SAFETY: `capacity` slots of `kept_bytes` fill the 1 KB buffer,
+            // which is 8-aligned and outlives them.
+            let slots = unsafe { InlineKeySlots::new(width, anchor, capacity) };
+            for (index, &window) in windows.iter().enumerate() {
+                // SAFETY: `index < capacity`.
+                unsafe { slots.write(index, window) };
+            }
+            // SAFETY: the buffer was filled, so every slot is initialized,
+            // and nothing writes it while `inline_keys` lives.
+            let inline_keys = unsafe { NodeInlineKeys::new(slots, capacity, windows.len()) };
+            let kept_mask = !(InlineWord::MAX
+                .checked_shr(8 * kept_bytes as u32)
+                .unwrap_or(0));
+            for (index, &window) in windows.iter().enumerate() {
+                let kept = window & kept_mask;
+                assert_eq!(inline_keys.inline_key(index), kept);
+                assert_eq!(inline_keys.cmp_at(index, window), Ordering::Equal);
+                let below = windows.iter().filter(|&&other| other & kept_mask < kept);
+                let ties = windows.iter().filter(|&&other| other & kept_mask == kept);
+                let (below, ties) = (below.count(), ties.count());
+                assert_eq!(inline_keys.equal_run(window), below..below + ties);
             }
         }
     }

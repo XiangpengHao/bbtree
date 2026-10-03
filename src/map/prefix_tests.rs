@@ -98,6 +98,26 @@ fn opted_in_keys_get_prefixes() {
     assert_prefixes_cover_shared_bytes(&map);
 }
 
+/// Integers get prefixes through their big-endian bytes: keys below 2^24
+/// share their first 5 bytes, and nodes off the borders skip them.
+#[test]
+fn integer_keys_get_prefixes() {
+    let rng = TestRng::new(84);
+    let mut map: BBTreeMap<u64, usize, WithInlineKey> = BBTreeMap::with_strategy(WithInlineKey);
+    for value in 0..key_count() {
+        map.insert(rng.below(1 << 24) as u64, value);
+    }
+    map.check_invariants();
+    let prefix_lens = map.node_prefix_lens();
+    let short = prefix_lens.iter().filter(|&&len| len < 5).count();
+    let border_nodes = 2 * (map.height() + 1);
+    assert!(
+        short <= border_nodes,
+        "{short} of {} nodes skip fewer than 5 bytes",
+        prefix_lens.len()
+    );
+}
+
 /// Removals refit prefixes where fences move, and cuts clear them along
 /// the cut: the trees stay valid, and lookups right, throughout.
 #[test]

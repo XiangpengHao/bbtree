@@ -243,13 +243,14 @@ impl CellRun {
     ) -> Result<CellMeasurement, String> {
         match self.request.cell().map() {
             MapKind::BBTree => self.measure::<BBTreeMap<K, V>, K, V>(prepared),
+            MapKind::BBTreeInline => K::measure_with_inline_keys(self, prepared),
             MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
             MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
             MapKind::StdHash => self.measure::<HashMap<K, V>, K, V>(prepared),
         }
     }
 
-    fn measure<M, K, V>(
+    pub(crate) fn measure<M, K, V>(
         &self,
         mut prepared: impl PreparedCell<K, V>,
     ) -> Result<CellMeasurement, String>

@@ -209,14 +209,18 @@ Design in 04-inline-key.md.
   alias type. Until the allocator parameter lands, `S` is the third parameter.
 - **Lint:** node handles carry five type parameters, so `clippy.toml` raises
   `type-complexity-threshold` to 300.
-- **Width:** inline keys start at 8 bytes (`InlineWord = u64`). The width is
-  one constant, to revisit on real keys (04-inline-key.md Q7). At 8 bytes, real
-  neighbours tie 24–70% of the time; at 16 bytes, 1–20%.
+- **Width:** windows are 8 bytes (`InlineWord = u64`), and a key type says
+  how many of their first bytes nodes keep, `InlineKey::WIDTH`, 2, 4 or 8
+  (2026-10-09): 8 for std byte strings, whose ties read the heap; 2 for
+  `u64`, `i64`, `u128` and `i128`, which implement `InlineKey` and opt in
+  with `WithInlineKey`. At 8 bytes, real neighbours tie 24–70% of the time;
+  at 16 bytes, 1–20% (04-inline-key.md Q7). Integers stay opt-in: their
+  gains depend on how the count over their slots vectorizes, which depends
+  on the node's capacity (05-fence-key.md, "Width").
 - **The trait gives windows** (2026-10-08): `inline_key_at(offset)`, bytes
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
-  8 bytes for every key type for now; later each key type chooses its own
-  (05-fence-key.md, "Width").
+  Windows stay 8 bytes for every key type; nodes keep `WIDTH` of them.
 - **Why not a plain trait with a default:** "default for every type, override for
   `String`" needs specialization, which is nightly-only and years from stable.
 - **TODO:** when specialization is stable, switch to it, and drop the std-type

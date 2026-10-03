@@ -1,7 +1,8 @@
 //! Inline keys (D18) against std's `BTreeMap`: std byte-string keys with the
 //! default strategy, looked up by every borrowed form; keys whose inline
 //! keys tie, or hold the whole key; a newtype that opts in, looked up through
-//! another borrowed form too; and inline keys that break their contract,
+//! another borrowed form too; integers, and strings, whose nodes keep 2 or 4
+//! bytes of their inline keys; and inline keys that break their contract,
 //! which may give wrong answers but never break memory safety.
 
 #![forbid(unsafe_code)]
@@ -19,7 +20,7 @@ use std::vec::Vec;
 
 use super::BBTreeMap;
 use super::differential_tests::{FromNumber, MirroredMaps, Workload};
-use crate::inline_key::{Auto, InlineKey, InlineWord, WithInlineKey};
+use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
 use crate::node::test_support::{DropLedger, TestRng, Tracked};
 
 /// Ten digits: keys of up to 100 consecutive numbers tie on their first 8
@@ -69,6 +70,50 @@ impl Borrow<str> for UserName {
 }
 
 impl FromNumber for UserName {
+    fn from_number(number: usize) -> Self {
+        Self(ten_digits(number))
+    }
+}
+
+/// Half below zero: the sign flip in the encoding puts them first.
+impl FromNumber for i64 {
+    fn from_number(number: usize) -> Self {
+        number as i64 - (1 << 17)
+    }
+}
+
+/// Spread over the high half and into the low one: neighbours share 8 bytes
+/// or more, so windows cross the halves.
+impl FromNumber for u128 {
+    fn from_number(number: usize) -> Self {
+        (number as u128) << 40 | 0xabcd
+    }
+}
+
+impl FromNumber for i128 {
+    fn from_number(number: usize) -> Self {
+        (number as i128 - (1 << 17)) << 40
+    }
+}
+
+/// Ten digits, of whose inline keys the nodes keep `BYTES`, 2 or 4: past a
+/// node's prefix, keys tie on them often, and the strings decide.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NarrowName<const BYTES: usize>(String);
+
+impl<const BYTES: usize> InlineKey for NarrowName<BYTES> {
+    const WIDTH: InlineWidth = if BYTES == 2 {
+        InlineWidth::Two
+    } else {
+        InlineWidth::Four
+    };
+
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        self.0.inline_key_at(offset)
+    }
+}
+
+impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
     fn from_number(number: usize) -> Self {
         Self(ten_digits(number))
     }
@@ -251,6 +296,26 @@ fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
         maps.get_borrowed(&key);
         maps.get_borrowed(key.0.as_str());
     }
+}
+
+/// Integers opt in, and their nodes keep 2 bytes of their inline keys:
+/// unsigned and signed, 8 and 16 bytes, maps and sets.
+#[test]
+fn integer_keys_match_std() {
+    let workload = workload(100_000, 1 << 16);
+    workload.run::<u64, u64, WithInlineKey>(76);
+    workload.run::<i64, u64, WithInlineKey>(77);
+    workload.run::<u128, u64, WithInlineKey>(78);
+    workload.run::<i128, (), WithInlineKey>(79);
+}
+
+/// Strings whose nodes keep 2 or 4 bytes of their inline keys: runs of
+/// tied inline keys are long, and the full keys decide within them.
+#[test]
+fn narrow_inline_keys_match_std() {
+    let workload = workload(100_000, 1 << 16);
+    workload.run::<NarrowName<2>, u64, WithInlineKey>(80);
+    workload.run::<NarrowName<4>, String, WithInlineKey>(81);
 }
 
 /// A key with a consistent `Ord` and an `InlineKey` that breaks its

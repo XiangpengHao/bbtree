@@ -602,7 +602,7 @@ mod tests {
         assert!(leaf.borrow().first_edge().left_kv().is_err());
         assert!(leaf.borrow().last_edge().right_kv().is_err());
         assert_eq!(leaf.borrow().keys(), &[1, 2]);
-        assert_eq!(leaf.borrow().inline_keys(), None);
+        assert!(leaf.borrow().inline_keys().is_none());
         leaf.destroy(|page| pages.release(page));
         pages.assert_all_released();
     }

@@ -5,11 +5,15 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use bbtree::{BBTreeMap, WithInlineKey};
 use bytes::Bytes;
 
+use crate::cell_runner::{CellMeasurement, CellRun};
 use crate::command_line::Named;
 use crate::datasets::DataFile;
+use crate::operations::PreparedCell;
 use crate::random::{RandomStream, SeededRng};
+use crate::values::BenchValue;
 use crate::workload::MapSize;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -134,6 +138,12 @@ impl KeyKind {
         self.data_files().is_empty()
     }
 
+    /// Whether the keys are integers with an `InlineKey` impl, which only
+    /// `bbtree-inline` uses.
+    pub(crate) fn is_inline_keyed_integer(self) -> bool {
+        matches!(self, Self::U64Random | Self::U64Sequential)
+    }
+
     /// The sizes the keys come in. Generated keys come in every size whose
     /// shape is fixed, and JSON objects in their own shape. The small
     /// datasets' keys come in `all` and the fixed sizes they have enough keys
@@ -163,11 +173,29 @@ pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
     /// A cheap read of the key, folded into checksums so that the optimizer
     /// can't skip visiting it.
     fn fingerprint(&self) -> u64;
+
+    /// Measures `prepared` on `bbtree-inline`, a `BBTreeMap` whose keys have
+    /// inline keys through their `InlineKey` impl: for the key types of
+    /// [`KeyKind::is_inline_keyed_integer`] only.
+    fn measure_with_inline_keys<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        let _ = (run, prepared);
+        Err("bbtree-inline runs on integer keys only".to_owned())
+    }
 }
 
 impl BenchKey for u64 {
     fn fingerprint(&self) -> u64 {
         *self
+    }
+
+    fn measure_with_inline_keys<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<BBTreeMap<u64, V, WithInlineKey>, u64, V>(prepared)
     }
 }
 

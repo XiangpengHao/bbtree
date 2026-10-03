@@ -36,16 +36,57 @@
 #![forbid(unsafe_code)]
 
 use super::handle::{ForceResult, Immut, LeafOrInternal, NodeMut, NodeRef, Subtree};
-use super::inline_keys::KeyInliner;
+use super::inline_keys::{InlineSlot, KeyInliner};
+use super::layout::KeyArea;
 use super::path::{MAX_HEIGHT, NodeEnd, PathMut};
-use crate::inline_key::{InlineKeyStrategy, InlineWord};
+use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
-/// The most keys a node can hold for [`NodeMut::refit_prefix`]: their
-/// windows are computed into a buffer of this many on the stack before any
-/// is written. Every node with inline keys holds fewer: a node is the
-/// smallest multiple of 1 KB that holds 12 entries (D15, D21), and each takes
-/// 8 bytes for its inline key alone.
-const MAX_REFIT_LEN: usize = 128;
+/// The inline keys of a node's keys at a new prefix length, computed before
+/// any is written ([`NodeMut::refit_prefix`]), kept at the node's width: as
+/// many as [`KeyArea::MAX_INLINE_KEYS_SIZE`] bytes hold, which every node's
+/// inline keys fit in (`layout.rs`), on the stack.
+enum RefitBuffer {
+    Two([u16; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
+    Four([u32; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
+    Eight([u64; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
+}
+
+impl RefitBuffer {
+    fn new(width: InlineWidth) -> Self {
+        match width {
+            InlineWidth::Two => Self::Two([0; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
+            InlineWidth::Four => Self::Four([0; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
+            InlineWidth::Eight => Self::Eight([0; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
+        }
+    }
+
+    /// Keeps the first bytes of `window` as inline key `index`.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the buffer, which no node's key is.
+    fn set(&mut self, index: usize, window: InlineWord) {
+        match self {
+            Self::Two(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+            Self::Four(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+            Self::Eight(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+        }
+    }
+
+    /// Inline key `index`, as the window it starts.
+    fn inline_key(&self, index: usize) -> InlineWord {
+        match self {
+            Self::Two(inline_keys) => inline_keys[index].window(),
+            Self::Four(inline_keys) => inline_keys[index].window(),
+            Self::Eight(inline_keys) => inline_keys[index].window(),
+        }
+    }
+
+    /// The first `len` inline keys.
+    fn inline_keys(&self, len: usize) -> impl ExactSizeIterator<Item = InlineWord> {
+        (0..len).map(|index| self.inline_key(index))
+    }
+}
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> {
     /// Whether the node's first and last keys differ in the first byte past
@@ -54,9 +95,12 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> 
     /// skip reading them. Fitting only grows a prefix: every change that
     /// shrinks one shrinks it to fit already.
     fn keys_differ_past_prefix(self) -> bool {
-        self.inline_keys()
-            .and_then(|inline_keys| Some((inline_keys.first()?, inline_keys.last()?)))
-            .is_some_and(|(first, last)| (first ^ last).leading_zeros() < u8::BITS)
+        let len = self.len();
+        self.inline_keys().is_some_and(|inline_keys| {
+            len > 0
+                && (inline_keys.inline_key(0) ^ inline_keys.inline_key(len - 1)).leading_zeros()
+                    < u8::BITS
+        })
     }
 }
 
@@ -86,12 +130,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
             return;
         }
         let keys = node.keys();
-        let len = keys.len();
-        let mut windows: [InlineWord; MAX_REFIT_LEN] = [0; MAX_REFIT_LEN];
-        for (window, key) in windows[..len].iter_mut().zip(keys) {
-            *window = inliner.inline_key_at(key, prefix_len);
+        let mut inline_keys = RefitBuffer::new(inliner.width());
+        for (index, key) in keys.iter().enumerate() {
+            inline_keys.set(index, inliner.inline_key_at(key, prefix_len));
         }
-        self.set_windows(prefix_len, &windows[..len]);
+        self.set_windows(prefix_len, inline_keys.inline_keys(keys.len()));
     }
 }
 

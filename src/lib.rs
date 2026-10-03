@@ -17,7 +17,7 @@ mod map;
 )]
 mod node;
 
-pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
+pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
 pub use map::BBTreeMap;
 
 /// An ordered map based on a B-tree, [`BBTreeMap`], and the types that go

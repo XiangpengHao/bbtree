@@ -245,10 +245,10 @@ impl Cell {
         self.workload
     }
 
-    /// Whether the map has the API the operation needs. Cells that aren't
-    /// applicable are reported as `n/a`, not run.
+    /// Whether the map has the API the operation needs, and runs on the
+    /// keys. Cells that aren't applicable are reported as `n/a`, not run.
     pub(crate) fn is_applicable(self) -> bool {
-        self.map.supports(self.workload.operation)
+        self.map.supports(self.workload.operation) && self.map.supports_key(self.workload.key)
     }
 }
 

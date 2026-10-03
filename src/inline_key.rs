@@ -4,7 +4,8 @@
 //! where inline keys tie.
 //!
 //! - [`InlineKey`] is how a key type gives its keys inline keys; std byte
-//!   strings implement it.
+//!   strings and the 64- and 128-bit integers implement it.
+//! - [`InlineWidth`] is how many bytes of each inline key the nodes keep.
 //! - The map's strategy parameter, [`InlineKeyStrategy`], decides which keys
 //!   have them: with [`Auto`], the default, std byte strings do, recognized
 //!   by their type; with [`WithInlineKey`], every key does, through its
@@ -20,8 +21,39 @@ use core::mem::size_of;
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
 /// compare like the bytes they come from (see [`InlineKey`]).
 ///
-/// 8 bytes for now. Its width is this one type: `u128` makes it 16.
+/// Always 8 bytes, of which the nodes keep the first [`InlineKey::WIDTH`].
 pub type InlineWord = u64;
+
+/// How many bytes of each inline key the nodes keep: the first 2, the first
+/// 4, or all 8 of the window that [`InlineKey::inline_key_at`] gives.
+///
+/// Narrower inline keys pack more of a node's into each cache line, and
+/// compare in more vector lanes at once, but tie more often: inline keys that
+/// tie say nothing, and the search then compares the keys themselves. A key
+/// stored in the node, such as an integer, makes a tie cheap, and 2 bytes
+/// past the bytes a node's keys share rarely tie on keys whose bytes are
+/// dense. A key behind a pointer, such as a `String`, reads the heap on a
+/// tie: 8 bytes, the default, tie least.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InlineWidth {
+    /// The first 2 bytes: the integers' width.
+    Two,
+    /// The first 4 bytes.
+    Four,
+    /// All 8 bytes: the default.
+    Eight,
+}
+
+impl InlineWidth {
+    /// How many bytes the nodes keep.
+    pub(crate) const fn bytes(self) -> usize {
+        match self {
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Eight => 8,
+        }
+    }
+}
 
 /// A key type whose keys have inline keys: windows of the key's encoding, a
 /// byte string that orders like the key.
@@ -34,6 +66,10 @@ pub type InlineWord = u64;
 /// like those inline keys. Equal inline keys say nothing, and the map
 /// compares the full keys. Offsets past 0 let the map skip bytes that all the
 /// keys of a node share.
+///
+/// The nodes keep the first [`Self::WIDTH`] bytes of each inline key, all 8
+/// unless the impl says fewer: kept bytes that differ order the keys the
+/// same way, and kept bytes that tie say nothing.
 ///
 /// A key wrapping a byte string can window its bytes. A key ordered by
 /// several fields encodes them one after the other: a `u32` and then a
@@ -66,6 +102,10 @@ pub type InlineWord = u64;
 /// assert_eq!(names.get(&UserName("ferris".to_string())), Some(&7));
 /// ```
 pub trait InlineKey: Ord {
+    /// How many bytes of each inline key the nodes keep (see
+    /// [`InlineWidth`]).
+    const WIDTH: InlineWidth = InlineWidth::Eight;
+
     /// This key's inline key at `offset`: bytes `offset..offset + 8` of its
     /// encoding, big-endian, zero past its end.
     fn inline_key_at(&self, offset: usize) -> InlineWord;
@@ -79,19 +119,22 @@ impl InlineKey for [u8] {
     /// fewer than 8 bytes, its bytes one by one, shifted the same way.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        const WIDTH: usize = size_of::<InlineWord>();
-        if let Some(window) = self.get(offset..).and_then(<[u8]>::first_chunk::<WIDTH>) {
+        const WINDOW_LEN: usize = size_of::<InlineWord>();
+        if let Some(window) = self
+            .get(offset..)
+            .and_then(<[u8]>::first_chunk::<WINDOW_LEN>)
+        {
             return InlineWord::from_be_bytes(*window);
         }
-        let (word, word_start) = match self.last_chunk::<WIDTH>() {
-            Some(last) => (InlineWord::from_be_bytes(*last), self.len() - WIDTH),
+        let (word, word_start) = match self.last_chunk::<WINDOW_LEN>() {
+            Some(last) => (InlineWord::from_be_bytes(*last), self.len() - WINDOW_LEN),
             None => {
                 let padded = core::array::from_fn(|index| self.get(index).copied().unwrap_or(0));
                 (InlineWord::from_be_bytes(padded), 0)
             }
         };
         // The window starts past `word_start`, as it didn't fit.
-        let shift_bytes = (offset - word_start).min(WIDTH);
+        let shift_bytes = (offset - word_start).min(WINDOW_LEN);
         word.checked_shl((8 * shift_bytes) as u32).unwrap_or(0)
     }
 }
@@ -125,8 +168,61 @@ impl<const N: usize> InlineKey for [u8; N] {
     }
 }
 
+/// Its big-endian bytes, which order like it. The nodes keep 2 of them, past
+/// the bytes that a node's keys share.
+impl InlineKey for u64 {
+    const WIDTH: InlineWidth = InlineWidth::Two;
+
+    /// The bytes before `offset` shifted out, which leaves the window on
+    /// top, zeros after the last byte.
+    #[inline]
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
+        self.checked_shl(shift_bits).unwrap_or(0)
+    }
+}
+
+/// Its big-endian bytes, which order like it. The nodes keep 2 of them, past
+/// the bytes that a node's keys share.
+impl InlineKey for u128 {
+    const WIDTH: InlineWidth = InlineWidth::Two;
+
+    /// The bytes before `offset` shifted out, which leaves the window in the
+    /// top 8 bytes, zeros after the last byte.
+    #[inline]
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
+        let shifted = self.checked_shl(shift_bits).unwrap_or(0);
+        (shifted >> InlineWord::BITS) as InlineWord
+    }
+}
+
+/// That of its bits with the sign bit flipped, as a `u64`: big-endian bytes
+/// that order like it, negatives first.
+impl InlineKey for i64 {
+    const WIDTH: InlineWidth = InlineWidth::Two;
+
+    #[inline]
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        (self.cast_unsigned() ^ (1 << 63)).inline_key_at(offset)
+    }
+}
+
+/// That of its bits with the sign bit flipped, as a `u128`: big-endian bytes
+/// that order like it, negatives first.
+impl InlineKey for i128 {
+    const WIDTH: InlineWidth = InlineWidth::Two;
+
+    #[inline]
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        (self.cast_unsigned() ^ (1 << 127)).inline_key_at(offset)
+    }
+}
+
 /// The referenced key's: covers `&str` and `&[u8]`.
 impl<T: InlineKey + ?Sized> InlineKey for &T {
+    const WIDTH: InlineWidth = T::WIDTH;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         (**self).inline_key_at(offset)
@@ -135,6 +231,8 @@ impl<T: InlineKey + ?Sized> InlineKey for &T {
 
 /// The boxed key's: covers `Box<str>` and `Box<[u8]>`.
 impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
+    const WIDTH: InlineWidth = T::WIDTH;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         (**self).inline_key_at(offset)
@@ -154,7 +252,7 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
 pub struct Auto;
 
 /// The opt-in strategy: every key has the inline key its [`InlineKey`] impl
-/// gives.
+/// gives, of which the nodes keep [`InlineKey::WIDTH`] bytes.
 ///
 /// A lookup uses the inline keys when it looks up with the key type itself.
 /// A lookup through another borrowed form of the key (a `Q` other than `K`
@@ -176,7 +274,7 @@ impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {}
 
 /// What a strategy tells the nodes, kept out of the public API.
 pub(crate) mod sealed {
-    use super::{Auto, InlineKey, InlineWord, WithInlineKey};
+    use super::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
 
     /// Where a strategy's inline keys come from. Plain data: the node code
     /// resolves it for a key type (`node/inline_keys.rs`), and page layouts
@@ -185,9 +283,12 @@ pub(crate) mod sealed {
         /// Std byte strings, recognized by their type, have windows of their
         /// bytes as inline keys; other keys have none ([`Auto`]).
         StdByteStrings,
-        /// Every key has the inline keys its [`InlineKey`] impl gives
-        /// ([`WithInlineKey`]).
-        InlineKeyTrait(fn(&K, usize) -> InlineWord),
+        /// Every key has the inline keys its [`InlineKey`] impl gives, of
+        /// which the nodes keep `width` bytes ([`WithInlineKey`]).
+        InlineKeyTrait {
+            inline_key_at: fn(&K, usize) -> InlineWord,
+            width: InlineWidth,
+        },
     }
 
     pub trait Sealed<K> {
@@ -199,7 +300,10 @@ pub(crate) mod sealed {
     }
 
     impl<K: InlineKey> Sealed<K> for WithInlineKey {
-        const SOURCE: InlineKeySource<K> = InlineKeySource::InlineKeyTrait(K::inline_key_at);
+        const SOURCE: InlineKeySource<K> = InlineKeySource::InlineKeyTrait {
+            inline_key_at: K::inline_key_at,
+            width: K::WIDTH,
+        };
     }
 }
 
@@ -209,7 +313,7 @@ mod tests {
     use std::string::String;
     use std::vec::Vec;
 
-    use super::{InlineKey, InlineWord};
+    use super::{InlineKey, InlineWidth, InlineWord};
     use crate::node::test_support::TestRng;
 
     #[test]
@@ -295,6 +399,83 @@ mod tests {
                         a.cmp(&b),
                         "{a:?} vs {b:?} at {offset}"
                     );
+                }
+            }
+        }
+        assert!(ties > 0 && decided > 0);
+    }
+
+    /// Integers' windows are those of their big-endian bytes, the signed
+    /// ones with the sign bit flipped, at every offset, inside and past
+    /// them.
+    #[test]
+    fn integer_windows_are_their_big_endian_bytes() {
+        let rng = TestRng::new(42);
+        for _ in 0..if cfg!(miri) { 20 } else { 1000 } {
+            let high = (rng.below(1 << 30) as u64) << 34 | rng.below(1 << 30) as u64;
+            let low = (rng.below(1 << 30) as u64) << 34 | rng.below(1 << 30) as u64;
+            let wide = u128::from(high) << 64 | u128::from(low);
+            for offset in [0, 1, 3, 7, 8, 9, 15, 16, 17, usize::MAX] {
+                assert_eq!(
+                    high.inline_key_at(offset),
+                    high.to_be_bytes().inline_key_at(offset)
+                );
+                assert_eq!(
+                    wide.inline_key_at(offset),
+                    wide.to_be_bytes().inline_key_at(offset)
+                );
+                let signed = high.cast_signed();
+                let flipped = (signed.cast_unsigned() ^ (1 << 63)).to_be_bytes();
+                assert_eq!(signed.inline_key_at(offset), flipped.inline_key_at(offset));
+                let signed = wide.cast_signed();
+                let flipped = (signed.cast_unsigned() ^ (1 << 127)).to_be_bytes();
+                assert_eq!(signed.inline_key_at(offset), flipped.inline_key_at(offset));
+            }
+        }
+        assert_eq!(
+            0x0102_0304_0506_0708_u64.inline_key_at(2),
+            0x0304_0506_0708_0000
+        );
+        assert_eq!((-1_i64).inline_key_at(0), 0x7fff_ffff_ffff_ffff);
+        assert_eq!(0_i64.inline_key_at(0), 0x8000_0000_0000_0000);
+        assert_eq!(i128::MIN.inline_key_at(0), 0);
+        assert_eq!(u128::MAX.inline_key_at(9), 0xffff_ffff_ffff_ff00);
+    }
+
+    /// Integers keep 2 bytes of their inline keys; other keys all 8.
+    #[test]
+    fn integers_keep_two_bytes() {
+        assert_eq!(<u64 as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<i64 as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<u128 as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<i128 as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<&i64 as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<Box<u128> as InlineKey>::WIDTH, InlineWidth::Two);
+        assert_eq!(<String as InlineKey>::WIDTH, InlineWidth::Eight);
+        assert_eq!(<[u8; 16] as InlineKey>::WIDTH, InlineWidth::Eight);
+    }
+
+    /// The contract, on signed integers that share their leading bytes
+    /// often and cross zero: at every offset up to where the encodings first
+    /// differ, the first 2 bytes of the windows, where they differ, order
+    /// like the integers.
+    #[test]
+    fn differing_integer_windows_order_like_the_integers() {
+        let rng = TestRng::new(43);
+        let random = || (rng.below(1 << 12) as i64 - (1 << 11)) << (8 * rng.below(7));
+        let (mut ties, mut decided) = (0, 0);
+        for _ in 0..if cfg!(miri) { 300 } else { 30_000 } {
+            let (a, b) = (random(), random());
+            let shared = (a.inline_key_at(0) ^ b.inline_key_at(0)).leading_zeros() as usize / 8;
+            for offset in 0..=shared.min(7) {
+                let kept = |window: InlineWord| window >> 48;
+                let (window_a, window_b) =
+                    (kept(a.inline_key_at(offset)), kept(b.inline_key_at(offset)));
+                if window_a == window_b {
+                    ties += 1;
+                } else {
+                    decided += 1;
+                    assert_eq!(window_a.cmp(&window_b), a.cmp(&b), "{a} vs {b} at {offset}");
                 }
             }
         }

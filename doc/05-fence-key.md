@@ -403,6 +403,101 @@ Every set ties 0% at 4 bytes.
   per leaf), one more array to shift, and the upkeep. Measure against
   today's branchless search first.
 
+### Implemented: 8-byte windows, narrow slots (2026-10-09)
+
+- **The trait is unchanged:** `inline_key_at` gives 8-byte windows, and
+  `InlineKey::WIDTH` (an `InlineWidth`: `Two`, `Four`, `Eight`, defaulting
+  to `Eight`) says how many of their first bytes a node keeps. Windows,
+  their shifts and fills, and common prefix lengths stay 8 bytes; a node
+  narrows a window as it stores it and as it compares a search's with its
+  own (`InlineSlot`: `u16`, `u32`, `u64`). A window read out of a node holds
+  only the kept bytes, and moved back to a shorter prefix it still holds at
+  least as many right ones; nothing moves a window to a longer prefix.
+- **Prefixes stay in whole bytes.** `Auto` keeps 8 for std byte strings;
+  `u64`, `i64`, `u128` and `i128` implement `InlineKey` with 2 (signed ones
+  with the sign bit flipped), and get inline keys through `WithInlineKey`
+  only.
+- **What the search needed,** found by profiling the first version, which
+  was 1.5–1.8× slower than no inline keys on `u64`:
+  - slots past `len` hold all ones, so the count needs no mask per slot:
+    `filter().count()` over every slot compiles to a few vector compares
+    whose masks are counted (`popcnt`), where the masked count took about
+    75 instructions per 56-slot node;
+  - `SearchKey` resolves the strategy where it uses it, a constant, so the
+    `InlineKey` impl inlines and a map runs only its own way, instead of
+    calling through a function pointer past dead byte-string code;
+  - the count goes through the node's kind, so its trip count, the kind's
+    capacity, is a constant;
+  - within a run of tied inline keys, keys with their own impl search as
+    D19 picks: the root has prefix 0, and dense integers below 2^48 all tie
+    on their first 2 bytes there.
+- **The count's code depended on the capacity.** LLVM vectorizes
+  `filter().count()` well for some slot counts and not others. A `u64 →
+  [u64; 4]` leaf has 23 slots: LLVM compared 16 in a vector, then took its
+  mask apart a bit at a time (`kshiftrw`, `kmovd`, `and`, `add` per slot),
+  compared the rest as scalars, and merged the leaf's and the internal
+  node's counts through permutes: 1,043 instructions per `get_hit` against
+  450 without inline keys. Isolated, by slot count, 2-byte slots: 16 → 15
+  instructions, 23 → 45, 24 → 25, 56 → 24, 64 → 77, 112 → 140; 8-byte
+  slots: 25 → 34, 26 → 43, 28 → 195.
+- **So 2- and 4-byte slots count in explicit AVX-512 vectors**
+  (`vector_count.rs`): the search's 2 or 4 bytes broadcast to every lane,
+  one load and two compares (below, equal) per 64 bytes, over the capacity
+  with constant masks, so neither waits for `len`; the compares' bits
+  gathered 64 slots to a word, one `bzhi` by `len` keeps the live ones, one
+  `popcnt` counts them. It reads nothing past `len` into the answer, so it
+  needs no padding. Against the versions it replaced, `u64` keys, one run
+  each:
+
+  | count | ns per 10M miss | ns per 1M 1 KB hit | instructions per 1M hit |
+  |---|--:|--:|--:|
+  | LLVM's, over padded slots | 107 | 226 | 312 |
+  | explicit, looping over `len` | — | 200 | 404 |
+  | explicit, loads masked by `len` | — | 212 | 320 |
+  | explicit, padded slots, counts cut at `len` | 109 | 158 | 270 |
+  | explicit, each 32 slots' bits masked by `len` | 131 | 203 | 327 |
+  | explicit, 64 slots' bits masked by one `bzhi` | 104 | 144 | 258 |
+
+- **8-byte slots keep LLVM's count.** The explicit one measured slower on
+  string maps: 368 against 341 ns per 10M `str-json` hit, with 56 more
+  instructions per lookup; why is open.
+  Its first version also ran out of line: `LiveSlots::equal_run` is
+  generic over the slot width alone, so every map with 8-byte slots shared
+  one copy, with the capacity a variable; it is `#[inline(always)]` now.
+- **Measured,** `u64` keys with 2-byte inline keys (`bbtree-inline`, opt-in)
+  against none, ns per operation, one repetition; a 1M map sits at the size
+  of the L3 of one CCD, and moves between runs:
+
+  | cell | none | 2 B |
+  |---|--:|--:|
+  | 10M `get_hit` / `get_miss` | 168 / 150 | 134 / 107 |
+  | 10M `insert_random` / `insert_sequential` | 150 / 9.7 | 131 / 15.0 |
+  | 10M `remove_random` / `pop_first` | 234 / 33.3 | 232 / 34.1 |
+  | 10M `iterate` / `range64`, before the explicit count | 5.7 / 714 | 5.2 / 719 |
+  | 1M `get_hit` / `insert_random` | 61 / 62 | 61 / 52 |
+  | 1k `get_hit` / `get_miss` | 13.1 / 12.6 | 6.4 / 4.3 |
+  | 1k `insert_random` / `insert_sequential` | 16.3 / 5.3 | 14.5 / 8.3 |
+  | 1k `remove_random` / `pop_first` | 43.4 / 27.5 | 48.7 / 24.8 |
+  | 1M `u64` → 32-byte struct, `get_hit` | 138 | 109 |
+  | 1M `u64` → 1 KB inline value, `get_hit` | 153 | 148 |
+  | bytes per entry, `u64` → `u64` / set | 23.5 / 11.8 | 26.4 / 14.9 |
+
+  The 1 KB values gain even though their tree is a level taller: 12-entry
+  leaves and internal nodes of 56 keys rather than 63 make the 1M map 4
+  levels above its leaves against 3 (counted with the test-only height).
+- **Std byte strings, through the same changes,** against before: `hash32`
+  3–16% faster, `str-path` and `kernel-paths` within 3%, `str-json` within
+  4% at 1M and 8% slower at 10M, and 1k `str-16` and `crate-names` lookups
+  about 20% slower (29 → 35 ns, five repetitions each), all with 8–18%
+  fewer instructions, and none of it from the count: their 8-byte count is
+  the same code as before the explicit one. A candidate, not confirmed:
+  `get` now builds the search key's padded copy with 8-byte stores and
+  then copies it with 64-byte loads, which can't be forwarded from them;
+  before, it built it with vector stores.
+- **So integers stay opt-in for now,** and `Auto` keeps giving them none,
+  until sequential inserts and the string lookups above are understood;
+  every entry also takes 2 bytes more.
+
 ## Plan
 
 1. **Done.** The trait: `inline_key_at`, and `KeyInliner`'s window and common
@@ -419,6 +514,8 @@ Every set ties 0% at 4 bytes.
    function of the fences, so the invariant is one equality, there is no
    gate, no test-only rule that grows every prefix, no separate "at least
    the parent's" invariant, and nothing decays.
+7. **Done (2026-10-09).** Per-type widths: 8-byte windows, of which nodes
+   keep 2, 4 or 8 bytes; integers with 2, opt-in (see "Width").
 
 ## Open questions
 
@@ -435,4 +532,11 @@ Every set ties 0% at 4 bytes.
   lengths kept in registers and picked by a shift, might hide it.
 - **The fuzzer has no inline keys:** it fuzzes `u64` keys only. A target with
   string keys sharing prefixes would fuzz all of the above.
-- **Per-type widths,** and fixed-width keys (see "Width").
+- **1k string lookups** (see "Width"): about 20% slower than before the
+  per-type widths, with fewer instructions.
+- **The padding past `len`** (invariant 6) is now needed only by LLVM's
+  counts: 8-byte slots, and every width without AVX-512. Explicit counts
+  for those, masking by `len` as the AVX-512 one does (AVX2's
+  `movemask`, NEON's lane compares), would let the nodes drop it, and its
+  upkeep on every shrink.
+- **Integers by default:** not before the losses above are understood.

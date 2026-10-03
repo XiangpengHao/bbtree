@@ -157,8 +157,13 @@ pub(crate) struct CellFilter {
 }
 
 impl CellFilter {
+    /// An empty list admits every map but the opt-in ones.
     pub(crate) fn admits_map(&self, map: MapKind) -> bool {
-        Self::list_admits(&self.maps, map)
+        if self.maps.is_empty() {
+            !map.is_opt_in()
+        } else {
+            self.maps.contains(&map)
+        }
     }
 
     pub(crate) fn admits(&self, workload: Workload) -> bool {

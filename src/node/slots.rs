@@ -1,12 +1,13 @@
 //! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
 //! only code that moves keys, values and edges around (D9, D12, D14).
-//! [`KeySlots`] moves a node's keys together with their inline keys (D18).
+//! [`InlineKeySlots`] are a node's inline keys at the map's width, and
+//! [`KeySlots`] moves a node's keys together with them (D18).
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlinedKey, Window};
-use crate::inline_key::InlineWord;
+use super::inline_keys::{InlineSlot, InlinedKey, Window};
+use crate::inline_key::{InlineWidth, InlineWord};
 
 /// The direction in which an array of slots grows from its anchor.
 pub(super) trait Direction {
@@ -193,6 +194,147 @@ impl<T, Dir: Direction> Slots<T, Dir> {
     }
 }
 
+/// A node's inline-key slots (D18): `capacity` of them, growing up, each
+/// the first bytes of a window, as many as the map's [`InlineWidth`], stored
+/// as the [`InlineSlot`] of that width. The operations mirror those of
+/// [`Slots`], with the same contracts, and speak in windows: a write keeps a
+/// window's first bytes, and a read gives them back, zeros after.
+///
+/// Every node of a map has the same width, a constant of its key type and
+/// strategy, so after monomorphization each operation is that of one width.
+#[derive(Clone, Copy)]
+pub(super) enum InlineKeySlots {
+    Two(Slots<u16, Up>),
+    Four(Slots<u32, Up>),
+    Eight(Slots<u64, Up>),
+}
+
+/// `$body`, with `$slots` bound to the slots of `$inline_keys`, whichever
+/// their width.
+macro_rules! with_slots_of_width {
+    ($inline_keys:expr, |$slots:ident| $body:expr) => {
+        match $inline_keys {
+            InlineKeySlots::Two($slots) => $body,
+            InlineKeySlots::Four($slots) => $body,
+            InlineKeySlots::Eight($slots) => $body,
+        }
+    };
+}
+
+impl InlineKeySlots {
+    /// `capacity` slots of `width` growing up from `anchor`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::new`], for slots of `width` bytes.
+    pub(super) unsafe fn new(width: InlineWidth, anchor: NonNull<u8>, capacity: usize) -> Self {
+        // SAFETY: forwarded, for the slot type of `width`.
+        unsafe {
+            match width {
+                InlineWidth::Two => Self::Two(Slots::new(anchor.cast(), capacity)),
+                InlineWidth::Four => Self::Four(Slots::new(anchor.cast(), capacity)),
+                InlineWidth::Eight => Self::Eight(Slots::new(anchor.cast(), capacity)),
+            }
+        }
+    }
+
+    pub(super) fn width(self) -> InlineWidth {
+        match self {
+            Self::Two(_) => InlineWidth::Two,
+            Self::Four(_) => InlineWidth::Four,
+            Self::Eight(_) => InlineWidth::Eight,
+        }
+    }
+
+    pub(super) fn capacity(self) -> usize {
+        with_slots_of_width!(self, |slots| slots.capacity)
+    }
+
+    /// Slot `index`'s inline key: the bytes it keeps of a window, zeros
+    /// after them.
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`, and slot `index` is initialized.
+    pub(super) unsafe fn read(self, index: usize) -> InlineWord {
+        // SAFETY: forwarded.
+        unsafe { with_slots_of_width!(self, |slots| slots.slot(index).read().window()) }
+    }
+
+    /// Writes the first bytes of `window` into slot `index`, which is
+    /// initialized afterwards. Inline keys need no dropping.
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`.
+    pub(super) unsafe fn write(self, index: usize, window: InlineWord) {
+        // SAFETY: forwarded.
+        unsafe {
+            with_slots_of_width!(self, |slots| {
+                slots.slot(index).write(InlineSlot::of_window(window));
+            });
+        }
+    }
+
+    /// See [`Slots::insert`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::insert`].
+    pub(super) unsafe fn insert(self, index: usize, len: usize, window: InlineWord) {
+        // SAFETY: forwarded.
+        unsafe {
+            with_slots_of_width!(self, |slots| {
+                slots.insert(index, len, InlineSlot::of_window(window));
+            });
+        }
+    }
+
+    /// See [`Slots::remove`]; returns the inline key taken out, as
+    /// [`Self::read`] does.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::remove`].
+    pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlineWord {
+        // SAFETY: forwarded.
+        unsafe { with_slots_of_width!(self, |slots| slots.remove(index, len).window()) }
+    }
+
+    /// See [`Slots::move_run_to`]. `dest` has this array's width, as every
+    /// node of a map does; `KeySlots` checks that in debug builds, before
+    /// anything moves.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::move_run_to`].
+    pub(super) unsafe fn move_run_to(
+        self,
+        start: usize,
+        count: usize,
+        dest: Self,
+        dest_start: usize,
+    ) {
+        // SAFETY: forwarded.
+        unsafe {
+            match (self, dest) {
+                (Self::Two(source), Self::Two(destination)) => {
+                    source.move_run_to(start, count, destination, dest_start);
+                }
+                (Self::Four(source), Self::Four(destination)) => {
+                    source.move_run_to(start, count, destination, dest_start);
+                }
+                (Self::Eight(source), Self::Eight(destination)) => {
+                    source.move_run_to(start, count, destination, dest_start);
+                }
+                // Unreachable: whatever it left in `dest`, inline keys
+                // steer searches only (`handle.rs`).
+                _ => {}
+            }
+        }
+    }
+}
+
 /// A node's key slots and, in a node with inline keys, its inline-key slots
 /// beside them (D18), for a map with strategy `S`. Every operation moves a
 /// key and its inline key together, so that inline key `i` is always key
@@ -207,7 +349,7 @@ impl<T, Dir: Direction> Slots<T, Dir> {
 /// Invariant: `inline_keys`, if any, has the capacity of `keys`.
 pub(super) struct KeySlots<K, S> {
     keys: Slots<K, Up>,
-    inline_keys: Option<Slots<InlineWord, Up>>,
+    inline_keys: Option<InlineKeySlots>,
     /// The node's prefix length; 0 without inline keys.
     prefix_len: usize,
     _strategy: PhantomData<fn() -> S>,
@@ -227,10 +369,12 @@ impl<K, S> KeySlots<K, S> {
     /// `inline_keys`, if any, has the capacity of `keys`.
     pub(super) unsafe fn new(
         keys: Slots<K, Up>,
-        inline_keys: Option<Slots<InlineWord, Up>>,
+        inline_keys: Option<InlineKeySlots>,
         prefix_len: usize,
     ) -> Self {
-        debug_assert!(inline_keys.is_none_or(|inline_keys| inline_keys.capacity == keys.capacity));
+        debug_assert!(
+            inline_keys.is_none_or(|inline_keys| inline_keys.capacity() == keys.capacity)
+        );
         Self {
             keys,
             inline_keys,
@@ -246,7 +390,7 @@ impl<K, S> KeySlots<K, S> {
 
     /// The inline-key slots alone, to read inline keys in place, if the node
     /// has them.
-    pub(super) fn inline_keys(self) -> Option<Slots<InlineWord, Up>> {
+    pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
         self.inline_keys
     }
 
@@ -283,7 +427,7 @@ impl<K, S> KeySlots<K, S> {
         unsafe {
             let key = self.keys.slot(index).read();
             let inline_key = match self.inline_keys {
-                Some(inline_keys) => inline_keys.slot(index).read(),
+                Some(inline_keys) => inline_keys.read(index),
                 None => 0,
             };
             InlinedKey::from_parts(key, self.window(inline_key))
@@ -304,7 +448,7 @@ impl<K, S> KeySlots<K, S> {
         unsafe {
             self.keys.slot(index).write(key);
             if let Some(inline_keys) = self.inline_keys {
-                inline_keys.slot(index).write(inline_key);
+                inline_keys.write(index, inline_key);
             }
         }
     }
@@ -373,7 +517,10 @@ impl<K, S> KeySlots<K, S> {
         dest: Self,
         dest_start: usize,
     ) {
-        debug_assert_eq!(self.inline_keys.is_some(), dest.inline_keys.is_some());
+        debug_assert_eq!(
+            self.inline_keys.map(InlineKeySlots::width),
+            dest.inline_keys.map(InlineKeySlots::width)
+        );
         debug_assert_eq!(
             self.prefix_len, dest.prefix_len,
             "a run moves between nodes of different prefix lengths"

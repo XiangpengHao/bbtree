@@ -13,7 +13,7 @@ use super::handle::{
 };
 use super::inline_keys::KeyInliner;
 use super::page::TestPages;
-use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
+use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// A deterministic xorshift64* generator; shared by reference.
 pub(crate) struct TestRng(Cell<u64>);
@@ -312,18 +312,28 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Leaf
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'_>, K, V, S, Kind> {
     /// Panics unless the node has inline keys exactly if its map's strategy
-    /// gives its keys some, and then has its keys' windows at its prefix
-    /// length, in order (D18, 05-fence-key.md); a node without has prefix 0.
+    /// gives its keys some, and then has the first bytes of its keys'
+    /// windows at its prefix length, as many as the strategy keeps, in order
+    /// (D18, 05-fence-key.md); a node without has prefix 0.
     pub(crate) fn assert_inline_keys_match(self) {
         let prefix_len = self.prefix_len();
         let expected: Option<Vec<InlineWord>> = KeyInliner::<K>::resolve::<S>().map(|inliner| {
+            let dropped_bits = 8 * (InlineWidth::Eight.bytes() - inliner.width().bytes()) as u32;
             (self.keys().iter())
-                .map(|key| inliner.inline_key_at(key, prefix_len))
+                .map(|key| inliner.inline_key_at(key, prefix_len) >> dropped_bits << dropped_bits)
+                .collect()
+        });
+        let actual: Option<Vec<InlineWord>> = self.inline_keys().map(|inline_keys| {
+            assert!(
+                inline_keys.pads_with_greatest(),
+                "an inline-key slot past the length is not the greatest"
+            );
+            (0..self.len())
+                .map(|index| inline_keys.inline_key(index))
                 .collect()
         });
         assert_eq!(
-            self.inline_keys(),
-            expected.as_deref(),
+            actual, expected,
             "the inline keys are not the keys' windows at prefix length {prefix_len}"
         );
         if expected.is_none() {

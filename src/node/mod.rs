@@ -26,10 +26,11 @@
 //!   [`handle::Kv`] and [`handle::Head`] are positions in a node, and the
 //!   operations hang off them.
 //!
-//! Only `page.rs`, `slots.rs`, `handle.rs`, `path.rs` and `walk.rs` contain
-//! `unsafe` code: `path.rs` to keep nodes as pointers along a path and make
-//! handles from them, and `walk.rs`, the iterators' walks, only to hand out
-//! values mutably, each once. Every other module is `#![forbid(unsafe_code)]`
+//! Only `page.rs`, `slots.rs`, `handle.rs`, `path.rs`, `walk.rs` and
+//! `vector_count.rs` contain `unsafe` code: `path.rs` to keep nodes as
+//! pointers along a path and make handles from them, `walk.rs`, the
+//! iterators' walks, only to hand out values mutably, each once, and
+//! `vector_count.rs` for the AVX-512 intrinsics of the inline-key count. Every other module is `#![forbid(unsafe_code)]`
 //! and builds on their safe API.
 
 mod border;
@@ -46,6 +47,7 @@ mod prefix;
 mod separator;
 mod slots;
 mod teardown;
+mod vector_count;
 pub(crate) mod walk;
 
 #[cfg(test)]
