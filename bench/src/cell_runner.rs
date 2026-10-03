@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use bbtree::BBTreeMap;
-
 use crate::command_line::{CellRequest, Named};
 use crate::datasets::{DataDirectory, DataFile, JsonObjectCorpus, KeyList};
 use crate::keys::{BenchKey, KeyKind, KeyMaker};
@@ -242,7 +240,7 @@ impl CellRun {
         prepared: impl PreparedCell<K, V>,
     ) -> Result<CellMeasurement, String> {
         match self.request.cell().map() {
-            MapKind::BBTree => self.measure::<BBTreeMap<K, V>, K, V>(prepared),
+            MapKind::BBTree => K::measure_on_bbtree(self, prepared),
             MapKind::BBTreeInline => K::measure_with_inline_keys(self, prepared),
             MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
             MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
@@ -260,6 +258,15 @@ impl CellRun {
         V: BenchValue,
     {
         let operation = self.request.cell().workload().operation();
+        // `MapKind` reads its maps' lists at `u64 → u64`; a key type can pick
+        // another adapter, as memtable keys do on `bbtree`.
+        if M::UNSUPPORTED.contains(&operation) {
+            return Err(format!(
+                "{} lacks {} on these keys",
+                self.request.cell().map().name(),
+                operation.name()
+            ));
+        }
         match self.mode {
             RunMode::Timing => {
                 let perf_control = (self.request.perf_control())

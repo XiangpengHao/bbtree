@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use bbtree::{BBTreeMap, WithInlineKey};
+use bbtree::{BBTreeMap, InlineKey, InlineWord, WithInlineKey};
 use bytes::Bytes;
 
 use crate::cell_runner::{CellMeasurement, CellRun};
@@ -174,6 +174,16 @@ pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
     /// can't skip visiting it.
     fn fingerprint(&self) -> u64;
 
+    /// Measures `prepared` on `bbtree`, a `BBTreeMap` set up as users of the
+    /// key type would set it up: with the default strategy, `Auto`, unless
+    /// the impl says otherwise.
+    fn measure_on_bbtree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<BBTreeMap<Self, V>, Self, V>(prepared)
+    }
+
     /// Measures `prepared` on `bbtree-inline`, a `BBTreeMap` whose keys have
     /// inline keys through their `InlineKey` impl: for the key types of
     /// [`KeyKind::is_inline_keyed_integer`] only.
@@ -221,6 +231,15 @@ impl BenchKey for SequencedKey {
     fn fingerprint(&self) -> u64 {
         self.sequence
     }
+
+    /// With `WithInlineKey`: `Auto` gives inline keys to std byte strings
+    /// only, and a memtable on bbtree would give its keys theirs.
+    fn measure_on_bbtree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<BBTreeMap<Self, V, WithInlineKey>, Self, V>(prepared)
+    }
 }
 
 /// An LSM memtable key, like SlateDB's `SequencedKey`: ordered by user key
@@ -243,6 +262,15 @@ impl Ord for SequencedKey {
 impl PartialOrd for SequencedKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+/// The encoding is the user key's bytes, which order like the keys; keys of
+/// equal user keys tie, for `Ord` to order by sequence number. Appending the
+/// sequence number would misorder user keys of different lengths.
+impl InlineKey for SequencedKey {
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        self.user_key[..].inline_key_at(offset)
     }
 }
 
@@ -596,5 +624,22 @@ mod tests {
         };
         assert!(newer < older);
         assert!(older < next_user_key);
+    }
+
+    #[test]
+    fn memtable_inline_keys_order_like_the_keys() {
+        let user = |bytes: &'static [u8], sequence| SequencedKey {
+            user_key: Bytes::from_static(bytes),
+            sequence,
+        };
+        let mut keys = vec![user(b"user", 1), user(b"user", 2), user(b"users", 0)];
+        let mut maker = KeyMaker::memtable(16);
+        keys.extend((0..1000).map(|index| maker.key(index)));
+        for a in &keys {
+            for b in &keys {
+                let inline_order = a.inline_key_at(0).cmp(&b.inline_key_at(0));
+                assert!(inline_order.is_eq() || inline_order == a.cmp(b));
+            }
+        }
     }
 }

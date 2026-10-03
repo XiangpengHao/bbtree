@@ -12,6 +12,9 @@ use crate::values::BenchValue;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MapKind {
+    /// `BBTreeMap` with the strategy its users would pick for the key type
+    /// (`BenchKey::measure_on_bbtree`): `WithInlineKey` for memtable keys,
+    /// `Auto` for the others.
     BBTree,
     /// `BBTreeMap` with the `WithInlineKey` strategy: keys with inline keys
     /// through their own `InlineKey` impl. Runs only when `--map` names it,
@@ -75,7 +78,8 @@ impl MapKind {
     }
 
     /// The adapter's list, read at `u64 → u64`: the lists don't depend on
-    /// the key and value types.
+    /// the value type, nor on the key type unless it picks another adapter,
+    /// which `CellRun::measure` checks.
     fn unsupported_operations(self) -> &'static [Operation] {
         match self {
             Self::BBTree => <BBTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
