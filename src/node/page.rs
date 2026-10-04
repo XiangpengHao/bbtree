@@ -17,27 +17,42 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 pub(super) use type_identity::{ByteString, SameType};
 
-/// A node kind that pages are allocated for: [`Leaf`] or [`Internal`]. Each
-/// kind has a page layout of its own (D21), and a page holds nodes of the
-/// kind it was allocated for only.
+/// A node kind that pages are allocated for, known at compile time: [`Leaf`]
+/// or [`Internal`]. Each kind has a page layout of its own (D21), and a page
+/// holds nodes of the kind it was allocated for only. Everything that
+/// depends on a node's layout, its capacity and where its slots are, is
+/// for handles of these kinds only: a traversal decides a node's kind once,
+/// with `NodeRef::force`, and its code knows it from then on.
 ///
 /// # Safety
 ///
-/// `IS_LEAF` is what [`NodeKind::is_leaf`] says at every height: a page of
-/// this kind gets the layout of that kind of node, and the node code
-/// accesses the node made from it with that kind's offsets and capacity.
-pub(crate) unsafe trait PageKind: NodeKind {
+/// `IS_LEAF` is whether nodes of this kind are leaves, the nodes at height
+/// 0: a page of this kind gets the layout of that kind of node, and the node
+/// code accesses the node made from it with that kind's offsets and
+/// capacity.
+pub(crate) unsafe trait PageKind: NodeKind + Sized {
     const IS_LEAF: bool;
+
+    /// `page`, sorted by its kind, this one.
+    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S>;
 }
 
-// SAFETY: `Leaf::is_leaf` is always `true`.
+// SAFETY: leaves are the nodes at height 0.
 unsafe impl PageKind for Leaf {
     const IS_LEAF: bool = true;
+
+    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
+        ForceResult::Leaf(page)
+    }
 }
 
-// SAFETY: `Internal::is_leaf` is always `false`.
+// SAFETY: internal nodes are the nodes above height 0.
 unsafe impl PageKind for Internal {
     const IS_LEAF: bool = false;
+
+    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
+        ForceResult::Internal(page)
+    }
 }
 
 /// An allocated page for a node of kind `Kind` ([`Leaf`] or [`Internal`])
@@ -208,7 +223,7 @@ impl InlineKeyNodeHeader {
 /// needs the caller to know the kind. Everything it offers is raw: the typed
 /// handles in `handle.rs` are the only users.
 #[repr(transparent)]
-pub(super) struct NodePtr<K, V, S> {
+pub(crate) struct NodePtr<K, V, S> {
     page: NonNull<u8>,
     _marker: PhantomData<*const (K, V)>,
     _strategy: PhantomData<fn() -> S>,
@@ -252,6 +267,7 @@ impl<K, V, S> NodePtr<K, V, S> {
 
     /// The address of the node's first byte, for prefetching. Every access
     /// through it goes through the methods here.
+    #[cfg(all(feature = "prefetch", target_arch = "x86_64"))]
     pub(super) fn page_start(self) -> *const u8 {
         self.page.as_ptr()
     }
@@ -324,18 +340,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         NodeLayout::<K, V>::internal(Self::inline_width())
     }
 
-    /// Where a node's keys and inline keys sit, by its kind.
-    pub(super) fn key_area(is_leaf: bool) -> KeyArea {
-        if is_leaf {
+    /// Where the keys and inline keys of a node of kind `Kind` sit.
+    pub(super) fn key_area<Kind: PageKind>() -> KeyArea {
+        if Kind::IS_LEAF {
             Self::leaf_layout().keys
         } else {
             Self::internal_layout().keys
         }
     }
 
-    /// The maximum number of keys of a node of either kind.
-    pub(super) fn capacity(is_leaf: bool) -> usize {
-        Self::key_area(is_leaf).capacity
+    /// The maximum number of keys of a node of kind `Kind`.
+    pub(super) fn capacity<Kind: PageKind>() -> usize {
+        Self::key_area::<Kind>().capacity
     }
 
     /// Turns a fresh page into an empty node of the page's kind: no keys
@@ -363,7 +379,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                         common,
                         prefix_len: 0,
                     });
-                let area = Self::key_area(Kind::IS_LEAF);
+                let area = Self::key_area::<Kind>();
                 if let Some(offset) = area.inline_keys_offset {
                     page.byte_add(offset)
                         .write_bytes(u8::MAX, area.capacity * width.bytes());
@@ -432,17 +448,17 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     ///
     /// # Safety
     ///
-    /// The node has not been released, and is a leaf exactly if `is_leaf`;
-    /// nothing writes its header concurrently.
-    pub(super) unsafe fn key_slots(self, is_leaf: bool) -> KeySlots<K, S> {
-        let area = Self::key_area(is_leaf);
+    /// The node has not been released, and is of kind `Kind`; nothing writes
+    /// its header concurrently.
+    pub(super) unsafe fn key_slots<Kind: PageKind>(self) -> KeySlots<K, S> {
+        let area = Self::key_area::<Kind>();
         // SAFETY: forwarded.
         let prefix_len = unsafe { self.prefix_len() }.unwrap_or(0);
         // SAFETY: the keys' offset is aligned for `K`, the inline keys' for
         // inline keys of any width, and `capacity` of each from there stay
-        // within a page of the node's kind, which `is_leaf` names, and clear
-        // of each other (layout invariants); the inline keys are of the
-        // width the layout was made for; the page is allocated (caller).
+        // within a page of the node's kind, `Kind`, and clear of each other
+        // (layout invariants); the inline keys are of the width the layout
+        // was made for; the page is allocated (caller).
         unsafe {
             let keys = Slots::new(self.page.byte_add(area.keys_offset).cast(), area.capacity);
             let inline_keys = Option::zip(Self::inline_width(), area.inline_keys_offset).map(
@@ -910,17 +926,17 @@ mod tests {
         let internal = NodePtr::from_fresh_page(pages.fresh::<Internal>());
         let leaf_page = SlotRange::page_bytes::<K, V, S, Leaf>(leaf);
         let internal_page = SlotRange::page_bytes::<K, V, S, Internal>(internal);
-        let leaf_capacity = NodePtr::<K, V, S>::capacity(true);
-        let internal_capacity = NodePtr::<K, V, S>::capacity(false);
+        let leaf_capacity = NodePtr::<K, V, S>::capacity::<Leaf>();
+        let internal_capacity = NodePtr::<K, V, S>::capacity::<Internal>();
 
         // SAFETY: both pages are allocated, and each is asked for the slots
         // of its own kind; nothing is dereferenced.
         let (leaf_keys, values, head_and_values, internal_keys, edges) = unsafe {
             (
-                leaf.key_slots(true),
+                leaf.key_slots::<Leaf>(),
                 SlotRange::of(leaf.value_slots(), leaf_capacity),
                 SlotRange::of(leaf.head_and_value_slots(), leaf_capacity + 1),
-                internal.key_slots(false),
+                internal.key_slots::<Internal>(),
                 SlotRange::of(internal.edge_slots(), internal_capacity + 1),
             )
         };

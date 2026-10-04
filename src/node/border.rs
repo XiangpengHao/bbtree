@@ -11,14 +11,18 @@
 
 #![forbid(unsafe_code)]
 
-use super::handle::{BalancingContext, ForceResult, LeafOrInternal, NodeMut, Subtree};
+use super::handle::{
+    BalancingContext, ForceResult, Internal, Leaf, NodeMut, Subtree, TrailingSlots,
+};
 use super::page::PageByKind;
 use super::path::NodeEnd;
+#[cfg(doc)]
+use super::path::{FirstEdge, LastEdge};
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
-    /// Makes every node along the tree's `end` edge, its last children for
-    /// [`NodeEnd::Last`] or its first for [`NodeEnd::First`], hold at least
+    /// Makes every node along the tree's `End` edge, its last children for
+    /// [`LastEdge`] or its first for [`FirstEdge`], hold at least
     /// its minimum, by merging it with its sibling or moving keys over from
     /// it, from the root down; and gives way to the only child of a root left
     /// without keys, until the root has some or is a leaf. Every other node
@@ -27,26 +31,30 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// Going down, each node on the edge is brought to one key more than its
     /// minimum, so that a merge one level down, which takes one of its keys,
     /// leaves it at its minimum still.
-    pub(crate) fn fix_border(
+    pub(crate) fn fix_border<End: NodeEnd>(
         &mut self,
-        end: NodeEnd,
         release: &mut impl FnMut(PageByKind<K, V, S>),
     ) {
         self.pop_empty_roots(release);
-        let mut node = self.borrow_mut();
-        while let ForceResult::Internal(internal) = node.force() {
-            let min_len = match end {
-                NodeEnd::First => internal.reborrow().first_edge().descend().min_len(),
-                NodeEnd::Last => internal.reborrow().last_edge().descend().min_len(),
-            };
-            let separator = match end {
-                NodeEnd::First => internal.first_kv(),
-                NodeEnd::Last => internal.last_kv(),
+        if let ForceResult::Internal(mut node) = self.borrow_mut().force() {
+            loop {
+                let leaf_children = node.has_leaf_children();
+                let separator = if End::IS_LAST {
+                    node.last_kv()
+                } else {
+                    node.first_kv()
+                }
+                .expect("a node on the border holds a key once stocked");
+                if leaf_children {
+                    separator
+                        .into_balancing_context::<Leaf>()
+                        .stock_border_child::<End>(release);
+                    break;
+                }
+                node = separator
+                    .into_balancing_context::<Internal>()
+                    .stock_border_child::<End>(release);
             }
-            .expect("a node on the border holds a key once stocked");
-            node = separator
-                .into_balancing_context()
-                .stock_border_child(end, min_len + 1, release);
         }
         self.pop_empty_roots(release);
     }
@@ -60,51 +68,56 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> BalancingContext<'a, K, V, S> {
-    /// Brings the child on the `end` side, the right one for
-    /// [`NodeEnd::Last`], to at least `target` keys: merges the two children
-    /// if they fit in one node with their separator, or else moves keys over
-    /// from the other child, which, too full to merge, can spare them, as
-    /// long as `target` is at most one more than the minimum and the other
-    /// child holds its minimum. Returns the child on the `end` side, merged
-    /// or not.
-    fn stock_border_child(
+impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
+    BalancingContext<'a, K, V, S, ChildKind>
+{
+    /// Brings the child on the `End` side, the right one for
+    /// [`LastEdge`], to at least one key more than its minimum: merges
+    /// the two children if they fit in one node with their separator, or
+    /// else moves keys over from the other child, which, too full to merge
+    /// and holding its minimum, can spare them. Returns the child on the
+    /// `End` side, merged or not.
+    fn stock_border_child<End: NodeEnd>(
         self,
-        end: NodeEnd,
-        target: usize,
         release: &mut impl FnMut(PageByKind<K, V, S>),
-    ) -> NodeMut<'a, K, V, S, LeafOrInternal> {
-        let border_len = |context: &Self| match end {
-            NodeEnd::First => context.left_child_len(),
-            NodeEnd::Last => context.right_child_len(),
+    ) -> NodeMut<'a, K, V, S, ChildKind> {
+        let target = self.child_min_len() + 1;
+        let border_len = |context: &Self| {
+            if End::IS_LAST {
+                context.right_child_len()
+            } else {
+                context.left_child_len()
+            }
         };
         if border_len(&self) < target {
             match self.can_merge() {
                 Ok(mergeable) => {
                     let (edge, page) = mergeable.merge();
                     release(page);
-                    return edge.descend();
+                    return edge.descend_as::<ChildKind>();
                 }
                 Err(mut context) => {
                     while border_len(&context) < target {
-                        match end {
-                            NodeEnd::First => context.steal_right(),
-                            NodeEnd::Last => context.steal_left(),
+                        if End::IS_LAST {
+                            context.steal_left()
+                        } else {
+                            context.steal_right()
                         }
                         .expect("a sibling too full to merge with can spare a key");
                     }
-                    return context.into_border_child(end);
+                    return context.into_border_child::<End>();
                 }
             }
         }
-        self.into_border_child(end)
+        self.into_border_child::<End>()
     }
 
-    /// The child on the `end` side.
-    fn into_border_child(self, end: NodeEnd) -> NodeMut<'a, K, V, S, LeafOrInternal> {
-        match end {
-            NodeEnd::First => self.into_left_child(),
-            NodeEnd::Last => self.into_right_child(),
+    /// The child on the `End` side.
+    fn into_border_child<End: NodeEnd>(self) -> NodeMut<'a, K, V, S, ChildKind> {
+        if End::IS_LAST {
+            self.into_right_child()
+        } else {
+            self.into_left_child()
         }
     }
 }

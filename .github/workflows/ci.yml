@@ -36,6 +36,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The build the benchmarks time by default (D27).
+      - name: Clippy without prefetch
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
       - name: Test
         run: cargo test --workspace --all-features
 

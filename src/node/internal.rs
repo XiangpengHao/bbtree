@@ -44,7 +44,7 @@ mod tests {
     use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::node::handle::{
         EdgeRoom, ForceResult, Immut, Insertion, Internal, Kv, Leaf, LeafOrInternal, NodeMut,
-        NodeRef, Split, StealError, Subtree,
+        NodeRef, Split, StealError, Subtree, TrailingSlots,
     };
     use crate::node::inline_keys::InlinedKey;
     use crate::node::page::{NodePtr, TestPages};
@@ -84,7 +84,7 @@ mod tests {
         node: NodeRef<Immut<'_>, K, V, S, Internal>,
     ) -> Vec<usize> {
         (0..=node.len())
-            .map(|index| node.edge_at(index).descend().keys()[0].tracked_id())
+            .map(|index| node.edge_at(index).descend_as::<Leaf>().keys()[0].tracked_id())
             .collect()
     }
 
@@ -150,7 +150,10 @@ mod tests {
                         separators.remove(index)
                     );
                     assert_eq!(child.height(), 0);
-                    let name = child.borrow().keys()[0].tracked_id();
+                    let ForceResult::Leaf(child_leaf) = child.borrow().force() else {
+                        panic!("the root's children are leaves");
+                    };
+                    let name = child_leaf.keys()[0].tracked_id();
                     assert_eq!(name, children.remove(index + 1));
                     drop(key);
                     child.destroy(|page| pages.release(page));
@@ -182,14 +185,14 @@ mod tests {
                     let index = rng.below(len + 1);
                     match root.edge_at(index).left_kv() {
                         Ok(kv) => {
-                            let child = kv.right_edge().descend();
+                            let child = kv.right_edge().descend_as::<Leaf>();
                             assert_eq!(child.keys()[0].tracked_id(), children[index]);
                         }
                         Err(edge) => assert_eq!(edge.index(), 0),
                     }
                     match root.edge_at(index).right_kv() {
                         Ok(kv) => {
-                            let child = kv.left_edge().descend();
+                            let child = kv.left_edge().descend_as::<Leaf>();
                             assert_eq!(child.keys()[0].tracked_id(), children[index]);
                         }
                         Err(edge) => assert_eq!(edge.index(), len),
@@ -288,7 +291,7 @@ mod tests {
     #[test]
     fn split_and_insert_at_every_position() {
         fn every_position<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(ledger: &'l DropLedger) {
-            for position in 0..=NodePtr::<K, Tracked<'l>, S>::capacity(false) {
+            for position in 0..=NodePtr::<K, Tracked<'l>, S>::capacity::<Internal>() {
                 split_at::<K, S>(ledger, position);
             }
         }
@@ -342,7 +345,9 @@ mod tests {
         };
         edge.insert_fit(InlinedKey::new(ledger.track(), 0), headless.forget_type());
         let separator = internal_root(&mut tree).kv_at(0);
-        let context = catch_unwind(AssertUnwindSafe(|| separator.into_balancing_context()));
+        let context = catch_unwind(AssertUnwindSafe(|| {
+            separator.into_balancing_context::<Leaf>()
+        }));
         assert!(context.is_err());
         // Taking the tree apart needs the head the separator's value is.
         let ForceResult::Leaf(mut headless) = internal_root(&mut tree).edge_at(1).descend().force()
@@ -445,7 +450,7 @@ mod tests {
 
         let context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Leaf>();
         assert_eq!(
             (context.left_child_len(), context.right_child_len()),
             (6, 6)
@@ -477,7 +482,7 @@ mod tests {
         drop((key, value));
         let context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Leaf>();
         let Ok(mergeable) = context.can_merge() else {
             panic!("6 + 1 + 5 entries fit in one leaf");
         };
@@ -514,7 +519,7 @@ mod tests {
 
         let mut context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Leaf>();
         assert_eq!(
             (context.left_child_len(), context.right_child_len()),
             (6, 12)
@@ -524,34 +529,27 @@ mod tests {
             (context.left_child_len(), context.right_child_len()),
             (6, 12)
         );
-        let left = context.into_left_child();
-        let ForceResult::Leaf(left) = left.force() else {
-            panic!("the children are leaves");
-        };
-        let mut left = left;
+        let mut left = context.into_left_child();
         while let Some(kv) = left.reborrow_mut().first_kv() {
             kv.remove();
         }
 
         let mut context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Leaf>();
         assert_eq!(context.steal_left(), Err(StealError::DonorEmpty));
         assert_eq!(context.steal_right(), Ok(()));
         assert_eq!(
             (context.left_child_len(), context.right_child_len()),
             (1, 11)
         );
-        let right = context.into_right_child();
-        let ForceResult::Leaf(mut right) = right.force() else {
-            panic!("the children are leaves");
-        };
+        let mut right = context.into_right_child();
         while let Some(kv) = right.reborrow_mut().last_kv() {
             kv.remove();
         }
         let mut context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Leaf>();
         assert_eq!(context.steal_right(), Err(StealError::DonorEmpty));
         assert_eq!(entry_ids(&tree), [model[6], model[7]]);
 
@@ -570,7 +568,7 @@ mod tests {
 
         let mut context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Internal>();
         let (left_len, right_len) = (context.left_child_len(), context.right_child_len());
         assert_eq!(context.steal_left(), Ok(()));
         assert_eq!(context.steal_right(), Ok(()));
@@ -586,14 +584,12 @@ mod tests {
         loop {
             let context = internal_root(tree.root_mut())
                 .kv_at(0)
-                .into_balancing_context();
-            let capacity = NodePtr::<Bulky<'_>, Tracked<'_>, Auto>::capacity(false);
+                .into_balancing_context::<Internal>();
+            let capacity = NodePtr::<Bulky<'_>, Tracked<'_>, Auto>::capacity::<Internal>();
             if context.left_child_len() + 1 + context.right_child_len() <= capacity {
                 break;
             }
-            let ForceResult::Internal(left) = context.into_left_child().force() else {
-                panic!("the children are internal");
-            };
+            let left = context.into_left_child();
             let (key, grandchild) = left.kv_at(0).remove_with_right_child();
             let value_id = grandchild.borrow().leftmost_head_id();
             let mut removed = std::vec![(key.tracked_id(), value_id.expect("a head"))];
@@ -604,7 +600,7 @@ mod tests {
         }
         let context = internal_root(tree.root_mut())
             .kv_at(0)
-            .into_balancing_context();
+            .into_balancing_context::<Internal>();
         let Ok(mergeable) = context.can_merge() else {
             panic!("the children fit in one node");
         };
@@ -684,34 +680,15 @@ mod tests {
                     model.retain(|&entry| entry != (key.tracked_id(), value.id()));
                 }
             } else if let Some(kv) = random_internal_kv(tree.root_mut().borrow_mut(), &rng) {
-                let children_are_leaves = kv.reborrow().into_node().height() == 1;
-                let children_capacity = NodePtr::<K, Tracked<'l>, S>::capacity(children_are_leaves);
-                let mut context = match kv.into_balancing_context().can_merge() {
-                    Ok(mergeable) if rng.below(2) == 0 => {
-                        let (_, page) = mergeable.merge();
-                        pages.release(page);
-                        merges += 1;
-                        continue;
-                    }
-                    Ok(mergeable) => mergeable.into_context(),
-                    Err(context) => context,
-                };
-                let (left_len, right_len) = (context.left_child_len(), context.right_child_len());
-                let (stolen, donor_len, receiver_len) = if rng.below(2) == 0 {
-                    (context.steal_left(), left_len, right_len)
+                let balanced = if kv.reborrow().into_node().has_leaf_children() {
+                    balance_randomly::<K, S, Leaf>(kv, &rng, &pages)
                 } else {
-                    (context.steal_right(), right_len, left_len)
+                    balance_randomly::<K, S, Internal>(kv, &rng, &pages)
                 };
-                match stolen {
-                    Ok(()) => steals += 1,
-                    Err(StealError::DonorEmpty) => {
-                        assert_eq!(donor_len, 0);
-                        refusals += 1;
-                    }
-                    Err(StealError::ReceiverFull) => {
-                        assert_eq!(receiver_len, children_capacity);
-                        refusals += 1;
-                    }
+                match balanced {
+                    Balanced::Merged => merges += 1,
+                    Balanced::Stole => steals += 1,
+                    Balanced::Refused => refusals += 1,
                 }
             }
             tree.pop_empty_roots();
@@ -725,6 +702,55 @@ mod tests {
 
         tree.destroy();
         pages.assert_all_released();
+    }
+
+    /// What a random balancing step did.
+    enum Balanced {
+        Merged,
+        Stole,
+        Refused,
+    }
+
+    /// A random balancing step between the children of kind `ChildKind`
+    /// around `kv`: a merge, half the times they fit, or else a steal either
+    /// way, which may be refused.
+    fn balance_randomly<
+        'l,
+        K: FromTracked<'l>,
+        S: InlineKeyStrategy<K>,
+        ChildKind: TrailingSlots,
+    >(
+        kv: Kv<NodeMut<'_, K, Tracked<'l>, S, Internal>>,
+        rng: &TestRng,
+        pages: &TestPages<K, Tracked<'l>, S>,
+    ) -> Balanced {
+        let children_capacity = NodePtr::<K, Tracked<'l>, S>::capacity::<ChildKind>();
+        let mut context = match kv.into_balancing_context::<ChildKind>().can_merge() {
+            Ok(mergeable) if rng.below(2) == 0 => {
+                let (_, page) = mergeable.merge();
+                pages.release(page);
+                return Balanced::Merged;
+            }
+            Ok(mergeable) => mergeable.into_context(),
+            Err(context) => context,
+        };
+        let (left_len, right_len) = (context.left_child_len(), context.right_child_len());
+        let (stolen, donor_len, receiver_len) = if rng.below(2) == 0 {
+            (context.steal_left(), left_len, right_len)
+        } else {
+            (context.steal_right(), right_len, left_len)
+        };
+        match stolen {
+            Ok(()) => Balanced::Stole,
+            Err(StealError::DonorEmpty) => {
+                assert_eq!(donor_len, 0);
+                Balanced::Refused
+            }
+            Err(StealError::ReceiverFull) => {
+                assert_eq!(receiver_len, children_capacity);
+                Balanced::Refused
+            }
+        }
     }
 
     #[test]

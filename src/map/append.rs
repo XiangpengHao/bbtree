@@ -63,11 +63,13 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let theirs = mem::replace(other, Self::empty()).into_iter();
         let mut merge = Merge {
             target: self,
-            ours,
-            theirs,
+            entries: MergedEntries {
+                ours,
+                theirs,
+                took_from_theirs: false,
+                first_duplicate_key: None,
+            },
             merged: TreeBuilder::new(),
-            took_from_theirs: false,
-            first_duplicate_key: None,
         };
         merge.run();
     }
@@ -80,9 +82,15 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 /// are dropped.
 struct Merge<'a, K, V, S: InlineKeyStrategy<K>> {
     target: &'a mut BBTreeMap<K, V, S>,
+    entries: MergedEntries<K, V, S>,
+    merged: TreeBuilder<K, V, S>,
+}
+
+/// The entries of both maps in key order, each key once: where both maps
+/// have a key, the target's key with the other map's value.
+struct MergedEntries<K, V, S: InlineKeyStrategy<K>> {
     ours: IntoIter<K, V, S>,
     theirs: IntoIter<K, V, S>,
-    merged: TreeBuilder<K, V, S>,
     /// Whether an entry of the other map was merged yet.
     took_from_theirs: bool,
     /// The key of the other map's first entry, if the target had that key:
@@ -93,27 +101,36 @@ struct Merge<'a, K, V, S: InlineKeyStrategy<K>> {
 }
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
+    /// Builds the new tree from the merged entries in one go, which finds
+    /// the tree's rightmost leaf once per leaf rather than once per entry.
     fn run(&mut self) {
-        loop {
-            let order = match (self.ours.peek(), self.theirs.peek()) {
-                (Some((our_key, _)), Some((their_key, _))) => our_key.cmp(their_key),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => return,
-            };
-            let entry = match order {
-                Ordering::Less => self.ours.next(),
-                Ordering::Greater => {
-                    self.took_from_theirs = true;
-                    self.theirs.next()
-                }
-                Ordering::Equal => self.take_duplicate(),
-            };
-            let (key, value) = entry.expect("the side picked has an entry");
-            self.merged.push(key, value);
-        }
+        self.merged.extend(&mut self.entries);
     }
+}
 
+impl<K: Ord, V, S: InlineKeyStrategy<K>> Iterator for MergedEntries<K, V, S> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        let order = match (self.ours.peek(), self.theirs.peek()) {
+            (Some((our_key, _)), Some((their_key, _))) => our_key.cmp(their_key),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => return None,
+        };
+        let entry = match order {
+            Ordering::Less => self.ours.next(),
+            Ordering::Greater => {
+                self.took_from_theirs = true;
+                self.theirs.next()
+            }
+            Ordering::Equal => self.take_duplicate(),
+        };
+        Some(entry.expect("the side picked has an entry"))
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> MergedEntries<K, V, S> {
     /// The first entries of both maps, whose keys are equal, as one: the
     /// target's key and the other map's value. The target's old value is
     /// dropped, then the other map's key, unless it is the first of that map
@@ -133,11 +150,11 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Drop for Merge<'_, K, V, S> {
     fn drop(&mut self) {
-        self.merged.extend(&mut self.ours);
+        self.merged.extend(&mut self.entries.ours);
         let merged = mem::replace(&mut self.merged, TreeBuilder::new());
         *self.target = BBTreeMap::from_builder(merged);
         // Before the other map's entries not merged, as std's unwinding
         // drops them.
-        drop(self.first_duplicate_key.take());
+        drop(self.entries.first_duplicate_key.take());
     }
 }

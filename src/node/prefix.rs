@@ -35,9 +35,10 @@
 
 #![forbid(unsafe_code)]
 
-use super::handle::{ForceResult, Immut, LeafOrInternal, NodeMut, NodeRef, Subtree};
+use super::handle::{ForceResult, Immut, Internal, Leaf, NodeMut, NodeRef, Subtree};
 use super::inline_keys::{InlineSlot, KeyInliner};
 use super::layout::KeyArea;
+use super::page::PageKind;
 use super::path::{MAX_HEIGHT, NodeEnd, PathMut};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
@@ -88,7 +89,7 @@ impl RefitBuffer {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> {
+impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, Kind> {
     /// Whether the node's first and last keys differ in the first byte past
     /// its prefix, as their inline keys tell: then its fences, which lie
     /// outside its keys, share no more than its prefix, and fitting it can
@@ -104,28 +105,54 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, LeafOrInternal> 
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
+/// How far a node's prefix may grow, by its kind: a leaf's to what its
+/// fences share; an internal node's no further than its children's too. A
+/// prefix that fits its fences never passes them, but a panic may have left
+/// one of the children's short of their fences.
+pub(crate) trait PrefixGrowth: PageKind {
+    /// `prefix_len`, or as far as `node`'s prefix may grow toward it.
+    fn grown_prefix_len<K, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'_>, K, V, S, Self>,
+        prefix_len: usize,
+    ) -> usize;
+}
+
+impl PrefixGrowth for Leaf {
+    fn grown_prefix_len<K, V, S: InlineKeyStrategy<K>>(
+        _node: NodeRef<Immut<'_>, K, V, S, Self>,
+        prefix_len: usize,
+    ) -> usize {
+        prefix_len
+    }
+}
+
+impl PrefixGrowth for Internal {
+    fn grown_prefix_len<K, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'_>, K, V, S, Self>,
+        prefix_len: usize,
+    ) -> usize {
+        if prefix_len <= node.prefix_len() {
+            return prefix_len;
+        }
+        (0..=node.len())
+            .map(|index| node.edge_at(index).descend().prefix_len())
+            .fold(prefix_len, usize::min)
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>, Kind: PrefixGrowth> NodeMut<'_, K, V, S, Kind> {
     /// Sets the node's prefix length to `prefix_len`, at most what its
-    /// fences share, and every inline key to its key's window there, read
-    /// from the key. Computes them all first, then writes them, so that a
-    /// panicking `InlineKey` leaves the node as it was. Does nothing if the
-    /// node has no inline keys.
-    ///
-    /// An internal node's grows at most to its children's: a prefix that
-    /// fits its fences never passes them, but a panic may have left one of
-    /// theirs short of their fences.
+    /// fences share, as far as its kind lets it grow ([`PrefixGrowth`]), and
+    /// every inline key to its key's window there, read from the key.
+    /// Computes them all first, then writes them, so that a panicking
+    /// `InlineKey` leaves the node as it was. Does nothing if the node has
+    /// no inline keys.
     pub(super) fn refit_prefix(&mut self, prefix_len: usize) {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
             return;
         };
         let node = self.reborrow();
-        let prefix_len = match node.force() {
-            ForceResult::Internal(internal) if prefix_len > node.prefix_len() => (0..=internal
-                .len())
-                .map(|index| internal.edge_at(index).descend().prefix_len())
-                .fold(prefix_len, usize::min),
-            _ => prefix_len,
-        };
+        let prefix_len = Kind::grown_prefix_len(node, prefix_len);
         if prefix_len == node.prefix_len() {
             return;
         }
@@ -135,6 +162,13 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
             inline_keys.set(index, inliner.inline_key_at(key, prefix_len));
         }
         self.set_windows(prefix_len, inline_keys.inline_keys(keys.len()));
+    }
+
+    /// Shrinks the node's prefix length to `prefix_len` if it is longer.
+    fn shrink_prefix_to(&mut self, prefix_len: usize) {
+        if self.prefix_len() > prefix_len {
+            self.refit_prefix(prefix_len);
+        }
     }
 }
 
@@ -177,14 +211,27 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
             return;
         };
+        if self.internal().has_leaf_children() {
+            self.fit_children_of_kind::<Leaf, N>(inliner, edges);
+        } else {
+            self.fit_children_of_kind::<Internal, N>(inliner, edges);
+        }
+    }
+
+    /// [`Self::fit_children_to_fences`], for children of kind `ChildKind`,
+    /// as decided once for the bottom node.
+    fn fit_children_of_kind<ChildKind: PrefixGrowth, const N: usize>(
+        &mut self,
+        inliner: KeyInliner<K>,
+        edges: [usize; N],
+    ) {
         let prefix_lens = {
             let (low, high) = self.bounds();
-            let ForceResult::Internal(node) = self.view().force() else {
-                unreachable!("a node with children is internal");
-            };
+            let node = self.internal();
             let keys = node.keys();
             edges.map(|edge| {
-                if node.edge_at(edge).descend().keys_differ_past_prefix() {
+                let child = node.edge_at(edge).descend_as::<ChildKind>();
+                if child.keys_differ_past_prefix() {
                     return None;
                 }
                 let child_low = match edge.checked_sub(1) {
@@ -194,14 +241,12 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 Some(inliner.fence_prefix_len(child_low, keys.get(edge).or(high)))
             })
         };
-        let ForceResult::Internal(mut node) = self.node_mut().force() else {
-            unreachable!("a node with children is internal");
-        };
+        let mut node = self.internal_mut();
         for (edge, prefix_len) in edges.into_iter().zip(prefix_lens) {
             if let Some(prefix_len) = prefix_len {
                 node.reborrow_mut()
                     .edge_at(edge)
-                    .descend()
+                    .descend_as::<ChildKind>()
                     .refit_prefix(prefix_len);
             }
         }
@@ -223,9 +268,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         };
         let index = self.index();
         let shared = {
-            let ForceResult::Internal(node) = self.view().force() else {
-                unreachable!("a separator is in an internal node");
-            };
+            let node = self.internal();
             let mut right = node.edge_at(index + 1).descend();
             let successor = loop {
                 right = match right.force() {
@@ -236,17 +279,17 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             .expect("the leaf right of a separator has keys");
             inliner.common_prefix_len(&node.keys()[index], successor)
         };
-        let ForceResult::Internal(node) = self.node_mut().force() else {
-            unreachable!("a separator is in an internal node");
-        };
-        let mut left = node.edge_at(index).descend();
+        let mut left = self.internal_mut().edge_at(index).descend();
         loop {
-            if left.prefix_len() > shared {
-                left.refit_prefix(shared);
-            }
             left = match left.force() {
-                ForceResult::Leaf(_) => break,
-                ForceResult::Internal(internal) => internal.last_edge().descend(),
+                ForceResult::Leaf(mut leaf) => {
+                    leaf.shrink_prefix_to(shared);
+                    break;
+                }
+                ForceResult::Internal(mut internal) => {
+                    internal.shrink_prefix_to(shared);
+                    internal.last_edge().descend()
+                }
             };
         }
     }
@@ -269,17 +312,34 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         }
         let mut node = self.node_mut();
         debug_assert_eq!(node.prefix_len(), 0, "the root's prefix is 0");
-        while node.height() > bottom {
-            let ForceResult::Internal(internal) = node.force() else {
-                unreachable!("a node above another is internal");
+        // Each node's kind is decided once: it takes the window its parent
+        // fills it from, then, above the bottom, fills its child's.
+        let mut fill = None;
+        loop {
+            node = match node.force() {
+                ForceResult::Leaf(mut leaf) => {
+                    if let Some(fill) = fill {
+                        leaf.move_prefix_back_to(fill);
+                    }
+                    break;
+                }
+                ForceResult::Internal(mut internal) => {
+                    if let Some(fill) = fill {
+                        internal.move_prefix_back_to(fill);
+                    }
+                    if internal.height() == bottom {
+                        break;
+                    }
+                    let index = indexes[internal.height()];
+                    fill = Some(
+                        internal
+                            .reborrow()
+                            .bound_window(index)
+                            .expect("a node on a path down holds a key"),
+                    );
+                    internal.edge_at(index).descend()
+                }
             };
-            let index = indexes[internal.height()];
-            let fill = internal
-                .reborrow()
-                .bound_window(index)
-                .expect("a node on a path down holds a key");
-            node = internal.edge_at(index).descend();
-            node.move_prefix_back_to(fill);
         }
         while self.height() > bottom {
             self.descend();
@@ -289,12 +349,12 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
-    /// Fits the prefix of the node beside each node along the tree's `end`
+    /// Fits the prefix of the node beside each node along the tree's `End`
     /// border to its fences, from the root down: after
     /// [`Subtree::fix_border`], which moves entries over from those nodes,
     /// into the border, without reading a key. The border's own nodes keep
     /// prefix 0.
-    pub(crate) fn fit_border_siblings(&mut self, end: NodeEnd) {
+    pub(crate) fn fit_border_siblings<End: NodeEnd>(&mut self) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
@@ -302,9 +362,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         path.start_at_root();
         while path.height() > 0 {
             let len = path.view().len();
-            let (sibling, border) = match end {
-                NodeEnd::First => (1, 0),
-                NodeEnd::Last => (len.saturating_sub(1), len),
+            let (sibling, border) = if End::IS_LAST {
+                (len.saturating_sub(1), len)
+            } else {
+                (1, 0)
             };
             if len > 0 {
                 path.fit_children_to_fences([sibling]);

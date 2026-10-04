@@ -24,6 +24,7 @@ pub(crate) struct RunHeader {
     cpu: String,
     allocator: String,
     vector_extensions: &'static str,
+    bbtree_prefetch: &'static str,
     settings: String,
     command_line: String,
     started: Instant,
@@ -56,6 +57,7 @@ impl RunHeader {
             cpu: Self::cpu_model(),
             allocator: mode.allocator_description(),
             vector_extensions: Self::vector_extensions(),
+            bbtree_prefetch: Self::bbtree_prefetch(),
             settings: format!(
                 "{} mode, {scale}, {} repetition(s) per cell{perf}",
                 mode.name(),
@@ -80,6 +82,16 @@ impl RunHeader {
         }
     }
 
+    /// Whether bbtree was built with its software prefetch (the bench's
+    /// `prefetch` feature).
+    fn bbtree_prefetch() -> &'static str {
+        if cfg!(feature = "prefetch") {
+            "on (`--features prefetch`)"
+        } else {
+            "off (default)"
+        }
+    }
+
     /// Records the run's wall time and the load average at its end, once
     /// every cell has run.
     pub(crate) fn record_end(&mut self) {
@@ -99,13 +111,14 @@ impl RunHeader {
     fn markdown(&self) -> String {
         let mut text = format!(
             "| | |\n|---|---|\n| date | {} |\n| commit | {} |\n| CPU | {} |\n| allocator | {} |\n\
-             | vector extensions | {} |\n| settings | {} |\n| command | `{}` |\n\
-             | load average (1, 5, 15 min) at start | {} |\n",
+             | vector extensions | {} |\n| bbtree prefetch | {} |\n| settings | {} |\n\
+             | command | `{}` |\n| load average (1, 5, 15 min) at start | {} |\n",
             self.started_at,
             self.commit,
             self.cpu,
             self.allocator,
             self.vector_extensions,
+            self.bbtree_prefetch,
             self.settings,
             self.command_line,
             self.load_average_at_start

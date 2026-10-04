@@ -8,11 +8,9 @@ use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
 use std::vec::Vec;
 
-use super::handle::{
-    ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeKind, NodeRef, Subtree,
-};
+use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
 use super::inline_keys::KeyInliner;
-use super::page::TestPages;
+use super::page::{PageKind, TestPages};
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// A deterministic xorshift64* generator; shared by reference.
@@ -276,10 +274,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Leaf
     /// keys, in order, and a prefix length of 0, or has neither (D18); see
     /// [`NodeRef::assert_inline_keys_match`].
     pub(crate) fn assert_subtree_inline_keys_match(self) {
-        self.assert_inline_keys_match();
-        if let ForceResult::Internal(internal) = self.force() {
-            for index in 0..=internal.len() {
-                (internal.edge_at(index).descend()).assert_subtree_inline_keys_match();
+        match self.force() {
+            ForceResult::Leaf(leaf) => leaf.assert_inline_keys_match(),
+            ForceResult::Internal(internal) => {
+                internal.assert_inline_keys_match();
+                for index in 0..=internal.len() {
+                    (internal.edge_at(index).descend()).assert_subtree_inline_keys_match();
+                }
             }
         }
     }
@@ -310,7 +311,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Leaf
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<Immut<'_>, K, V, S, Kind> {
+impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, Kind> {
     /// Panics unless the node has inline keys exactly if its map's strategy
     /// gives its keys some, and then has the first bytes of its keys'
     /// windows at its prefix length, as many as the strategy keeps, in order

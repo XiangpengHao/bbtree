@@ -17,7 +17,7 @@
 use core::mem;
 
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::{ForceResult, Insertion, Internal, Leaf, Subtree};
+use crate::node::handle::{Insertion, Internal, Leaf, Subtree};
 use crate::node::inline_keys::{InlinedKey, SearchKey};
 use crate::node::page::FreshPage;
 use crate::node::path::{MAX_HEIGHT, PathMut};
@@ -85,9 +85,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         length: &mut usize,
     ) {
         let index = self.index();
-        let ForceResult::Leaf(leaf) = self.node_mut().force() else {
-            panic!("inserting above the leaves");
-        };
+        let leaf = self.leaf_mut();
         // The key's window at the leaf's prefix length, which both halves
         // of a split keep: the last `InlineKey` call before the first change.
         let key = InlinedKey::new(key, leaf.prefix_len());
@@ -120,9 +118,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
                 self.ascend();
             }
             let (height, index) = (self.height(), self.index());
-            let ForceResult::Internal(node) = self.node_mut().force() else {
-                unreachable!("a node above another is internal");
-            };
+            let node = self.internal_mut();
             // The new entry is under the edge left of the separator, or right
             // of it if it went into the right half.
             let beside_separator =

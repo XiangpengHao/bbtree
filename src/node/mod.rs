@@ -43,7 +43,7 @@ mod layout;
 mod leaf;
 pub(crate) mod page;
 pub(crate) mod path;
-mod prefix;
+pub(crate) mod prefix;
 mod separator;
 mod slots;
 mod teardown;

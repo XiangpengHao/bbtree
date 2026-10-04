@@ -501,7 +501,7 @@ mod tests {
             };
             assert_eq!((key.id(), value), entries.remove(model_index));
 
-            let context = root.kv_at(0).into_balancing_context();
+            let context = root.kv_at(0).into_balancing_context::<Leaf>();
             assert_eq!(
                 context.left_child_len() + 1 + context.right_child_len(),
                 entries.len()
@@ -569,7 +569,7 @@ mod tests {
             ledger: &'l DropLedger,
             heads: &[bool],
         ) {
-            for position in 0..=NodePtr::<Tracked<'l>, V, S>::capacity(true) {
+            for position in 0..=NodePtr::<Tracked<'l>, V, S>::capacity::<Leaf>() {
                 for &with_head in heads {
                     split_at::<V, S>(ledger, position, with_head);
                 }

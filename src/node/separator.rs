@@ -63,7 +63,8 @@ mod tests {
 
     use crate::inline_key::Auto;
     use crate::node::handle::{
-        EdgeRoom, ForceResult, Immut, Internal, Kv, LeafOrInternal, NodeRef, SearchResult, Subtree,
+        EdgeRoom, ForceResult, Immut, Internal, Kv, KvByKind, LeafOrInternal, NodeRef,
+        SearchResult, Subtree,
     };
     use crate::node::inline_keys::{InlinedKey, SearchKey};
     use crate::node::page::TestPages;
@@ -98,14 +99,19 @@ mod tests {
     fn search_tree<'a, K: Ord, V>(
         mut node: NodeRef<Immut<'a>, K, V, Auto, LeafOrInternal>,
         key: &K,
-    ) -> Option<Kv<NodeRef<Immut<'a>, K, V, Auto, LeafOrInternal>>> {
+    ) -> Option<KvByKind<Immut<'a>, K, V, Auto>> {
         let key = SearchKey::new(key);
         loop {
-            node = match node.search(&key) {
-                SearchResult::Found(kv) => return Some(kv),
-                SearchResult::GoDown(edge) => match edge.force() {
-                    ForceResult::Leaf(_) => return None,
-                    ForceResult::Internal(edge) => edge.descend(),
+            node = match node.force() {
+                ForceResult::Leaf(leaf) => {
+                    return match leaf.search(&key) {
+                        SearchResult::Found(kv) => Some(ForceResult::Leaf(kv)),
+                        SearchResult::GoDown(_) => None,
+                    };
+                }
+                ForceResult::Internal(internal) => match internal.search(&key) {
+                    SearchResult::Found(kv) => return Some(ForceResult::Internal(kv)),
+                    SearchResult::GoDown(edge) => edge.descend(),
                 },
             };
         }
@@ -150,12 +156,10 @@ mod tests {
         assert!(!separators.is_empty());
         for &(key, value_id) in &separators {
             assert_eq!(value_id, value_ids[&key]);
-            let kv = search_tree(tree.root().borrow(), &key).expect("a separator is found");
-            assert!(
-                kv.reborrow().into_node().height() > 0,
-                "found where it lives"
-            );
-            let (found_key, value) = kv.into_key_value();
+            let Some(ForceResult::Internal(kv)) = search_tree(tree.root().borrow(), &key) else {
+                panic!("a separator is found where it lives, above the leaves");
+            };
+            let (found_key, value) = (kv.into_key(), kv.into_value_head().into_value());
             assert_eq!((*found_key, value.id()), (key, value_id));
         }
 

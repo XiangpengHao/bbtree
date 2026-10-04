@@ -16,10 +16,13 @@
 
 #![forbid(unsafe_code)]
 
-use super::handle::{EdgeRoom, ForceResult, Internal, Leaf, LeafOrInternal, NodeMut, Subtree};
+use super::handle::{
+    EdgeRoom, ForceResult, Immut, Leaf, LeafOrInternal, NodeMut, NodeRef, Subtree,
+};
 use super::inline_keys::{InlinedKey, KeyInliner};
-use super::page::{FreshPage, PageByKind};
-use super::path::{MAX_HEIGHT, NodeEnd};
+use super::page::{FreshPage, PageByKind, PageKind};
+use super::path::{LastEdge, MAX_HEIGHT, PathMut};
+use super::prefix::PrefixGrowth;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order.
@@ -94,8 +97,8 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     pub(crate) fn finish(mut self) -> (Option<Subtree<K, V, S>>, usize) {
         let mut tree = self.tree.take();
         if let Some(tree) = &mut tree {
-            tree.fix_border(NodeEnd::Last, &mut PageByKind::deallocate);
-            tree.fit_border_siblings(NodeEnd::Last);
+            tree.fix_border::<LastEdge>(&mut PageByKind::deallocate);
+            tree.fit_border_siblings::<LastEdge>();
         }
         (tree, self.length)
     }
@@ -126,50 +129,62 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         let mut low = None;
         let mut node = tree.borrow();
         loop {
-            if node.is_full() {
-                prefix_lens[node.height()] = Some(inliner.fence_prefix_len(low, Some(first_key)));
-            }
-            if let Some(last) = node.last_kv() {
-                low = Some(last.into_key());
-            }
-            node = match node.force() {
-                ForceResult::Leaf(_) => break,
-                ForceResult::Internal(internal) => internal.last_edge().descend(),
+            let height = node.height();
+            let ((is_full, last_key), child) = match node.force() {
+                ForceResult::Leaf(leaf) => (Self::closing_state(leaf), None),
+                ForceResult::Internal(internal) => (
+                    Self::closing_state(internal),
+                    Some(internal.last_edge().descend()),
+                ),
             };
+            if is_full {
+                prefix_lens[height] = Some(inliner.fence_prefix_len(low, Some(first_key)));
+            }
+            if last_key.is_some() {
+                low = last_key;
+            }
+            match child {
+                Some(child) => node = child,
+                None => break,
+            }
         }
         // From the leaf up, while full, so that each node's prefix sees its
         // children's.
-        let height = tree.height();
-        for (height, prefix_len) in prefix_lens.into_iter().enumerate().take(height + 1) {
-            let mut node = if height == 0 {
-                Self::rightmost_leaf(tree.borrow_mut()).forget_type()
-            } else {
-                Self::rightmost_at(tree.borrow_mut(), height).forget_type()
-            };
-            if !node.is_full() {
-                break;
-            }
-            if let Some(prefix_len) = prefix_len {
-                node.refit_prefix(prefix_len);
+        let mut path = PathMut::new(tree);
+        path.descend_to_last_key();
+        if !Self::refit_if_full(path.leaf_mut(), prefix_lens[0]) {
+            return;
+        }
+        while path.height() < path.root_height() {
+            path.ascend();
+            let height = path.height();
+            if !Self::refit_if_full(path.internal_mut(), prefix_lens[height]) {
+                return;
             }
         }
     }
 
-    /// The rightmost node at `height`, above the leaves, of the tree under
-    /// `node`.
-    fn rightmost_at(
-        mut node: NodeMut<'_, K, V, S, LeafOrInternal>,
-        height: usize,
-    ) -> NodeMut<'_, K, V, S, Internal> {
-        loop {
-            let ForceResult::Internal(internal) = node.force() else {
-                unreachable!("a height above the leaves is internal");
-            };
-            if internal.height() == height {
-                return internal;
-            }
-            node = internal.last_edge().descend();
+    /// Whether `node`, a rightmost node, is full, and its last key.
+    fn closing_state<'t, Kind: PageKind>(
+        node: NodeRef<Immut<'t>, K, V, S, Kind>,
+    ) -> (bool, Option<&'t K>) {
+        (node.is_full(), node.last_kv().map(|last| last.into_key()))
+    }
+
+    /// Fits the prefix of `node`, a rightmost node a new leaf closes, to
+    /// `prefix_len`, what its fences share, if it is full; returns whether
+    /// it was.
+    fn refit_if_full<Kind: PrefixGrowth>(
+        mut node: NodeMut<'_, K, V, S, Kind>,
+        prefix_len: Option<usize>,
+    ) -> bool {
+        if !node.is_full() {
+            return false;
         }
+        if let Some(prefix_len) = prefix_len {
+            node.refit_prefix(prefix_len);
+        }
+        true
     }
 
     /// Starts a new rightmost leaf after a full one, with `value` as its
@@ -181,18 +196,18 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         let mut leaf = Subtree::new_leaf(FreshPage::allocate());
         leaf.borrow_mut().replace_head(value);
         let mut child = leaf.forget_type();
-        let mut height = 1;
-        while height <= tree.height() {
-            let node = Self::rightmost_at(tree.borrow_mut(), height);
-            if let EdgeRoom::Fits(edge) = node.last_edge().check_room() {
+        let mut path = PathMut::new(tree);
+        path.descend_to_last_key();
+        while path.height() < path.root_height() {
+            path.ascend();
+            if let EdgeRoom::Fits(edge) = path.internal_mut().last_edge().check_room() {
                 edge.insert_fit(separator, child);
                 return;
             }
             child.push_internal_level(FreshPage::allocate());
-            height += 1;
         }
-        let root = tree.push_internal_level(FreshPage::allocate());
-        let EdgeRoom::Fits(edge) = root.last_edge().check_room() else {
+        path.push_root(FreshPage::allocate());
+        let EdgeRoom::Fits(edge) = path.internal_mut().last_edge().check_room() else {
             unreachable!("a new root has room");
         };
         edge.insert_fit(separator, child);

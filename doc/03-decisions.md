@@ -469,6 +469,71 @@ Design and measurements in 05-fence-key.md.
   inserts about 25%, gets 5–10% and removals 21–23% slower than without
   stripping.
 
+**D27. Prefetch behind a default `prefetch` feature; benchmarks time without it.** (2026-10-09)
+Refines D20.
+
+- **Library:** the `prefetch` feature, on by default, gates the one
+  software prefetch, `prefetch_search_area` (`node/handle.rs`). Without it
+  a search reads the node as it goes.
+- **Benchmarks:** `bench` depends on bbtree without default features, so a
+  run times the code's own memory access unless built with
+  `--features prefetch`. The report header records which.
+- Why: prefetch hides layout and access-pattern effects, and how much it
+  helps depends on how many lines it asks for. In the A/B below, the same
+  layout moved by ±5–10% depending only on what was prefetched, so a
+  layout change can't be judged with prefetch on.
+- The A/B that prompted it: prefetching whole leaves (keys and values) in
+  inline-key layouts, a stand-in for interleaving keys and values, made
+  10M `str-json` gets 7–9% and inserts 6–7% faster but `u64` gets with
+  inline keys 7% slower; prefetching inline keys only was slower on every
+  String-like key (`hash32` gets +33%).
+- Measured with the feature off (10M `get_hit`, one run): `u64` 166 →
+  199 ns, `str-json` 339 → 427 ns, `u64` with inline keys 135 → 133 ns.
+
+**D28. Branch early, loop late: a node's kind is decided once per step.** (2026-10-09)
+
+- **The rule:** a traversal decides whether a node is a leaf or internal
+  once, at the top of each step (`NodeRef::force`, or the height a loop
+  already knows), and the code after it is for that kind. Likewise a choice
+  fixed for a whole loop, such as the node search an insert uses or the end
+  a border is on, is made before the loop, as a type.
+- **Enforced by the types:** what depends on the kind, a node's capacity
+  and where its slots are, is only for `PageKind` handles (`Leaf`,
+  `Internal`); a `LeafOrInternal` handle can only be told its kind. Before,
+  `NodeKind::is_leaf` answered at run time for `LeafOrInternal`, so every
+  such method also compiled on untyped handles and decided the kind inside:
+  a descent decided it three to six times per level, a steal or merge five
+  to eight times.
+- **What it took:** the descent forces each level once and searches it as
+  that kind; `TrailingSlots` (a leaf's head and values, an internal node's
+  edges) makes splitting, stealing and merging one code for both kinds;
+  `BalancingContext` is typed by its children's kind, which
+  `has_leaf_children` decides once per node; a walk's cursor reads its leaf
+  edge without deciding (its invariant); prefix refits take the kind as a
+  type (`PrefixGrowth`); `NodeEnd` is a type (`FirstEdge`, `LastEdge`);
+  `append` builds through one `extend`.
+- **Why:** the inline-key count of a node with 8-byte inline keys was one
+  `filter().count()` in two arms, a leaf's and an internal node's; where
+  their capacities differed, LLVM summed the compares' bits one at a time.
+- **Measured** against the commit before, prefetch off, medians of three
+  interleaved runs (ns per op; per entry for `iterate`, per scan for
+  `range64`), instructions per op in brackets:
+
+  | cell | before | after |
+  |---|--:|--:|
+  | memtable16 → bytes100, 1M `get_hit` | 355 [1,024] | 300 [593] |
+  | `str-json` set, 1M `get_hit` | 305 [1,244] | 284 [702] |
+  | `u64`, 10M `iterate` | 5.7 [37] | 5.2 [23] |
+  | `u64`, 10M `range64` | 740 [3,056] | 707 [2,434] |
+  | `u64` with inline keys, 10M `insert_random` | 142 [435] | 134 [415] |
+  | `u64` with inline keys, 10M `remove_random` | 269 [640] | 254 [596] |
+
+  The other headline, key and real-key lookups and inserts stayed within
+  2%, with as many or fewer instructions.
+- **Open:** a single 8-byte count over 28 to 31 slots, as a `String` set's
+  31-slot leaf has, still sums the bits one at a time (31 slots: 222
+  instructions, 25: 34).
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

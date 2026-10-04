@@ -25,10 +25,10 @@
 use core::borrow::Borrow;
 
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::{Edge, ForceResult, Internal, NodeMut, Subtree};
+use crate::node::handle::{Edge, Internal, Leaf, NodeMut, Subtree, TrailingSlots};
 use crate::node::inline_keys::SearchKey;
 use crate::node::page::PageByKind;
-use crate::node::path::{MAX_HEIGHT, NodeEnd, PathMut};
+use crate::node::path::{FirstEdge, MAX_HEIGHT, PathMut};
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// Removes the entry whose key equals `key` and returns it, with the key
@@ -107,21 +107,16 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         let separator_height = self.height();
         let separator_index = self.index();
         let (entry, changed) = if separator_height == 0 {
-            let ForceResult::Leaf(leaf) = self.node_mut().force() else {
-                unreachable!("a node at height 0 is a leaf");
-            };
-            let (entry, _) = leaf.kv_at(separator_index).remove();
+            let (entry, _) = self.leaf_mut().kv_at(separator_index).remove();
             (entry, self.fix_up_the_path(0, &mut release, |_| {}))
         } else {
             self.fit_left_of_separator();
             // The separator's value is the head of the leftmost leaf right
             // of it.
             self.set_index(separator_index + 1);
-            self.descend_to_leaf(NodeEnd::First);
-            let ForceResult::Leaf(leaf) = self.node_mut().force() else {
-                unreachable!("a path down to a leaf ends at a leaf");
-            };
-            let (value, successor) = leaf
+            self.descend_to_leaf::<FirstEdge>();
+            let (value, successor) = self
+                .leaf_mut()
                 .head()
                 .and_then(|head| head.remove_with_first_key())
                 .expect("the leaf right of a separator has a head and keys");
@@ -159,14 +154,18 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             self.ascend();
             let (height, index) = (self.height(), self.index());
             changed.indexes[height] = index;
-            let ForceResult::Internal(mut node) = self.node_mut().force() else {
-                unreachable!("a node above another is internal");
-            };
+            let mut node = self.internal_mut();
             if height == must_reach {
                 at_must_reach(node.reborrow_mut());
             }
             if child_lost_a_key {
-                let fix = node.edge_at(index).fix_underfull_child(release);
+                let leaf_children = node.has_leaf_children();
+                let child = node.edge_at(index);
+                let fix = if leaf_children {
+                    child.fix_underfull_child::<Leaf>(release)
+                } else {
+                    child.fix_underfull_child::<Internal>(release)
+                };
                 child_lost_a_key =
                     matches!(fix, ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRight);
                 changed.record(height, fix);
@@ -277,13 +276,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'_, K, V, S, Internal>> {
     /// keys, so it can spare one; after at most `min_len` such steals in a
     /// row, the two fit.
     ///
+    /// The children are of kind `ChildKind`, which the caller decided once
+    /// for the node (`NodeRef::has_leaf_children`).
+    ///
     /// # Panics
     ///
     /// If the node has no keys, so that the child has no sibling: a node
     /// that a removal went through holds a key until it fixes its child,
-    /// which is the only time it can lose one.
-    fn fix_underfull_child(self, release: &mut impl FnMut(PageByKind<K, V, S>)) -> ChildFix {
-        if !self.reborrow().descend().is_underfull() {
+    /// which is the only time it can lose one. If the children are of the
+    /// other kind.
+    fn fix_underfull_child<ChildKind: TrailingSlots>(
+        self,
+        release: &mut impl FnMut(PageByKind<K, V, S>),
+    ) -> ChildFix {
+        if !self.reborrow().descend_as::<ChildKind>().is_underfull() {
             return ChildFix::Nothing;
         }
         let (separator, child_is_right) = match self.left_kv() {
@@ -293,7 +299,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'_, K, V, S, Internal>> {
                 Err(_) => unreachable!("an internal node a removal went through has a key"),
             },
         };
-        let context = separator.into_balancing_context();
+        let context = separator.into_balancing_context::<ChildKind>();
         let left_len = context.left_child_len();
         let mut context = match context.can_merge() {
             Ok(mergeable) => {

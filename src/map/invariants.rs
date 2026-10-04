@@ -7,6 +7,7 @@ use std::vec::Vec;
 
 use crate::inline_key::InlineKeyStrategy;
 use crate::node::handle::{ForceResult, Immut, LeafOrInternal, NodeRef};
+use crate::node::page::PageKind;
 
 use super::BBTreeMap;
 
@@ -165,6 +166,42 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         bounds: KeyBounds<'a, K>,
         depth: usize,
     ) {
+        match node.force() {
+            ForceResult::Leaf(leaf) => {
+                let keys = Self::check_node(leaf, &bounds, depth);
+                assert_eq!(depth, self.leaf_depth, "leaves at different depths");
+                let is_leftmost = self.leaves == 0;
+                assert_eq!(
+                    leaf.head().is_some(),
+                    !is_leftmost,
+                    "every leaf but the leftmost has a head, and only those"
+                );
+                self.leaves += 1;
+                keys.iter().for_each(|key| self.visit(key));
+            }
+            ForceResult::Internal(internal) => {
+                let keys = Self::check_node(internal, &bounds, depth);
+                for index in 0..=keys.len() {
+                    let child = internal.edge_at(index).descend();
+                    let child_bounds = bounds.of_child(keys, index);
+                    self.check_subtree(child, child_bounds, depth + 1);
+                    if let Some(key) = keys.get(index) {
+                        self.separators += 1;
+                        self.visit(key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checks what every node satisfies, whatever its kind: its inline keys
+    /// and prefix length, at least its minimum of keys below the root, and
+    /// every key within its bounds. Returns its keys.
+    fn check_node<V, S: InlineKeyStrategy<K>, Kind: PageKind>(
+        node: NodeRef<Immut<'a>, K, V, S, Kind>,
+        bounds: &KeyBounds<'a, K>,
+        depth: usize,
+    ) -> &'a [K] {
         node.assert_inline_keys_match();
         node.assert_prefix_fits_fences(bounds.lower, bounds.upper);
         let keys = node.keys();
@@ -179,30 +216,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         for key in keys {
             bounds.assert_contains(key);
         }
-        match node.force() {
-            ForceResult::Leaf(leaf) => {
-                assert_eq!(depth, self.leaf_depth, "leaves at different depths");
-                let is_leftmost = self.leaves == 0;
-                assert_eq!(
-                    leaf.head().is_some(),
-                    !is_leftmost,
-                    "every leaf but the leftmost has a head, and only those"
-                );
-                self.leaves += 1;
-                keys.iter().for_each(|key| self.visit(key));
-            }
-            ForceResult::Internal(internal) => {
-                for index in 0..=keys.len() {
-                    let child = internal.edge_at(index).descend();
-                    let child_bounds = bounds.of_child(keys, index);
-                    self.check_subtree(child, child_bounds, depth + 1);
-                    if let Some(key) = keys.get(index) {
-                        self.separators += 1;
-                        self.visit(key);
-                    }
-                }
-            }
-        }
+        keys
     }
 
     fn visit(&mut self, key: &'a K) {

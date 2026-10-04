@@ -26,46 +26,44 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         match node.force() {
             ForceResult::Leaf(leaf) => {
                 let mut copy = PartialCopy::new(Subtree::new_leaf(FreshPage::allocate()));
-                let ForceResult::Leaf(mut copy_leaf) = copy.tree_mut().borrow_mut().force() else {
-                    unreachable!("a new leaf is a leaf");
-                };
+                let mut copy_leaf = copy.tree_mut().borrow_mut();
                 if let Some(head) = leaf.head() {
                     copy_leaf.replace_head(head.into_value().clone());
                 }
                 copy_leaf.set_empty_prefix_len(leaf.prefix_len());
-                for index in 0..leaf.len() {
-                    let kv = leaf.kv_at(index);
+                let mut edge = leaf.first_edge();
+                while let Ok(kv) = edge.right_kv() {
                     let window = kv.window();
                     let (key, value) = kv.into_key_value();
                     let key = InlinedKey::from_parts(key.clone(), window);
                     let value = value.clone();
-                    let EdgeRoom::Fits(edge) = copy_leaf.reborrow_mut().last_edge().check_room()
+                    let EdgeRoom::Fits(copy_edge) =
+                        copy_leaf.reborrow_mut().last_edge().check_room()
                     else {
                         unreachable!("a leaf's entries fit in a leaf of its kind");
                     };
-                    edge.insert_fit(key, value);
+                    copy_edge.insert_fit(key, value);
+                    edge = kv.right_edge();
                 }
-                copy.finish()
+                copy.finish().forget_type()
             }
             ForceResult::Internal(internal) => {
                 let first_child = Self::clone_subtree(internal.first_edge().descend());
                 let mut copy = PartialCopy::new(first_child);
-                copy.tree_mut()
-                    .push_internal_level(FreshPage::allocate())
-                    .set_empty_prefix_len(internal.prefix_len());
-                for index in 0..internal.len() {
-                    let separator = internal.kv_at(index);
+                let mut copy_root = copy.tree_mut().push_internal_level(FreshPage::allocate());
+                copy_root.set_empty_prefix_len(internal.prefix_len());
+                let mut edge = internal.first_edge();
+                while let Ok(separator) = edge.right_kv() {
                     let window = separator.window();
                     let key = InlinedKey::from_parts(separator.into_key().clone(), window);
                     let child = Self::clone_subtree(separator.right_edge().descend());
-                    let ForceResult::Internal(copy_root) = copy.tree_mut().borrow_mut().force()
+                    let EdgeRoom::Fits(copy_edge) =
+                        copy_root.reborrow_mut().last_edge().check_room()
                     else {
-                        unreachable!("a pushed level is internal");
-                    };
-                    let EdgeRoom::Fits(edge) = copy_root.last_edge().check_room() else {
                         unreachable!("a node's separators fit in a node of its kind");
                     };
-                    edge.insert_fit(key, child);
+                    copy_edge.insert_fit(key, child);
+                    edge = separator.right_edge();
                 }
                 copy.finish()
             }
@@ -75,32 +73,30 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
 
 /// A copy being made: taken apart if a `clone` panics, so that nothing
 /// cloned so far leaks.
-struct PartialCopy<K, V, S: InlineKeyStrategy<K>> {
+struct PartialCopy<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> {
     /// `None` once finished.
-    tree: Option<Subtree<K, V, S>>,
+    tree: Option<Subtree<K, V, S, Kind>>,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> PartialCopy<K, V, S> {
-    fn new<Kind: NodeKind>(tree: Subtree<K, V, S, Kind>) -> Self {
-        Self {
-            tree: Some(tree.forget_type()),
-        }
+impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> PartialCopy<K, V, S, Kind> {
+    fn new(tree: Subtree<K, V, S, Kind>) -> Self {
+        Self { tree: Some(tree) }
     }
 
-    fn tree_mut(&mut self) -> &mut Subtree<K, V, S> {
+    fn tree_mut(&mut self) -> &mut Subtree<K, V, S, Kind> {
         self.tree
             .as_mut()
             .expect("a copy is unfinished until `finish`")
     }
 
-    fn finish(mut self) -> Subtree<K, V, S> {
+    fn finish(mut self) -> Subtree<K, V, S, Kind> {
         self.tree
             .take()
             .expect("a copy is unfinished until `finish`")
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Drop for PartialCopy<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Drop for PartialCopy<K, V, S, Kind> {
     fn drop(&mut self) {
         if let Some(tree) = self.tree.take() {
             tree.destroy(PageByKind::deallocate);

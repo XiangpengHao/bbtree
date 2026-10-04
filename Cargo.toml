@@ -6,3 +6,10 @@ description = "Blessed B-tree."
 repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
+
+[features]
+default = ["prefetch"]
+# Software prefetch of each node's search area as a search enters it (D20,
+# D27). The benchmarks build without it by default, so that their numbers
+# show what the code itself does with memory.
+prefetch = []

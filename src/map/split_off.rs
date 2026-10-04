@@ -35,7 +35,7 @@ use crate::inline_key::InlineKeyStrategy;
 use crate::node::handle::{ForceResult, Immut, LeafOrInternal, NodeRef, Subtree};
 use crate::node::inline_keys::SearchKey;
 use crate::node::page::{FreshPage, PageByKind};
-use crate::node::path::{KeySide, NodeEnd, PathMut};
+use crate::node::path::{FirstEdge, KeySide, LastEdge, PathMut};
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Splits the collection into two at the given key. Returns everything
@@ -84,8 +84,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         path.clear_prefixes();
         let mut upper = path.cut();
         let release = &mut PageByKind::deallocate;
-        lower.fix_border(NodeEnd::Last, release);
-        upper.fix_border(NodeEnd::First, release);
+        lower.fix_border::<LastEdge>(release);
+        upper.fix_border::<FirstEdge>(release);
         let (lower_length, upper_length) = if lower.height() < upper.height() {
             let lower_length = Subtree::borrow(lower).count_entries();
             (lower_length, length - lower_length)
@@ -98,10 +98,11 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             root: Some(upper),
             length: upper_length,
         };
-        for (map, end) in [(&mut *self, NodeEnd::Last), (&mut upper, NodeEnd::First)] {
-            if let Some(root) = &mut map.root {
-                root.fit_border_siblings(end);
-            }
+        if let Some(root) = &mut self.root {
+            root.fit_border_siblings::<LastEdge>();
+        }
+        if let Some(root) = &mut upper.root {
+            root.fit_border_siblings::<FirstEdge>();
         }
         upper
     }
@@ -121,17 +122,15 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// If the path ends at no leaf edge.
     fn cut(mut self) -> Subtree<K, V, S> {
         let index = self.index();
-        let ForceResult::Leaf(mut leaf) = self.node_mut().force() else {
-            panic!("cutting above the leaves");
-        };
-        let mut right = leaf.cut_off_at(index, FreshPage::allocate()).forget_type();
+        let mut right = self
+            .leaf_mut()
+            .cut_off_at(index, FreshPage::allocate())
+            .forget_type();
         while self.height() < self.root_height() {
             self.ascend();
             let index = self.index();
-            let ForceResult::Internal(mut node) = self.node_mut().force() else {
-                unreachable!("a node above another is internal");
-            };
-            right = node
+            right = self
+                .internal_mut()
                 .cut_off_at(index, right, FreshPage::allocate())
                 .forget_type();
         }
