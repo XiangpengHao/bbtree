@@ -6,7 +6,7 @@
 use std::vec::Vec;
 
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::{ForceResult, Immut, LeafOrInternal, NodeRef};
+use crate::node::handle::{ForceResult, Immut, LeafOrInternal, NodeKeys, NodeRef};
 use crate::node::page::PageKind;
 
 use super::BBTreeMap;
@@ -135,11 +135,11 @@ impl<'a, K: Ord> KeyBounds<'a, K> {
 
     /// The bounds of the child at edge `index` of a node with these bounds
     /// and these keys.
-    fn of_child(&self, keys: &'a [K], index: usize) -> Self {
+    fn of_child(&self, keys: NodeKeys<'a, K>, index: usize) -> Self {
         Self {
             lower: index
                 .checked_sub(1)
-                .map_or(self.lower, |left| Some(&keys[left])),
+                .map_or(self.lower, |left| keys.get(left)),
             upper: keys.get(index).or(self.upper),
         }
     }
@@ -201,7 +201,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         node: NodeRef<Immut<'a>, K, V, S, Kind>,
         bounds: &KeyBounds<'a, K>,
         depth: usize,
-    ) -> &'a [K] {
+    ) -> NodeKeys<'a, K> {
         node.assert_inline_keys_match();
         node.assert_prefix_fits_fences(bounds.lower, bounds.upper);
         let keys = node.keys();
@@ -213,7 +213,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
                 node.min_len()
             );
         }
-        for key in keys {
+        for key in keys.iter() {
             bounds.assert_contains(key);
         }
         keys

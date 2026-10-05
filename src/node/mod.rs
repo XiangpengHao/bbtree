@@ -1,7 +1,7 @@
 //! B-tree nodes: fixed-size, self-aligned 1 KB pages, with keys and values in
 //! leaves and separator keys in internal nodes (`doc/03-decisions.md` D9, D11,
-//! D12, D13, D15, D17, D21), behind typed, zero-overhead abstractions over all
-//! the `unsafe` code (D14).
+//! D12, D13, D15, D17, D21, D29), behind typed, zero-overhead abstractions
+//! over all the `unsafe` code (D14).
 //!
 //! A leaf is a page of a `NodeLayout::<K, V>` leaf layout, sized by its keys
 //! and values, and an internal node a page of an internal layout, sized by its
@@ -11,8 +11,11 @@
 //!
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
-//! beside the keys, and searches run over that array first
-//! (`inline_keys.rs`); otherwise nothing changes, at no cost.
+//! before its keys, and searches run over that array first
+//! (`inline_keys.rs`); each key then shares an entry with its value, or with
+//! the edge right of it, so that the key a search ends at brings them along
+//! (D29). Otherwise keys and values, or edges, are arrays of their own, and
+//! nothing else changes, at no cost.
 //!
 //! The tree is a B+-tree whose keys are each stored once (D17): values live
 //! only in leaves, and a separator key, moved up into an internal node, keeps

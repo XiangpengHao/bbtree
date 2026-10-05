@@ -149,6 +149,9 @@ if is_byte_string::<K>() && is_byte_string::<Q>() {
   own `Ord` as `Q`. Every listed type orders by bytes. A newtype has its own
   `TypeId`, so it is never misclassified; it takes today's path unless it opts
   in.
+- **Integers too, since D31.** `Auto` also recognizes `u64`, `i64`, `u128`
+  and `i128`, and uses their own `InlineKey` impls, as `WithInlineKey` does;
+  a lookup uses them when `Q` is `K`.
 - **The choice costs nothing at run time.** `TypeId::of` is a const fn since
   1.91, but comparing `TypeId`s in a const context is still unstable
   (`const_cmp`), so `is_byte_string` is a plain function that the optimizer folds

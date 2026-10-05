@@ -46,7 +46,7 @@ use super::handle::{
     NodeKind, NodeMut, NodeRef, SearchResult, Subtree, ValMut,
 };
 use super::inline_keys::SearchKey;
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
+use super::page::{FreshPage, NodePtr, PageByKind};
 use crate::inline_key::InlineKeyStrategy;
 
 /// The most levels above the leaves that a tree can have. A non-root
@@ -370,8 +370,8 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         self.bottom -= 1;
     }
 
-    /// Goes down from the edge the path ends at to a leaf, along the `end`
-    /// edge of every node below, and ends at that leaf's `end` edge. At a
+    /// Goes down from the edge the path ends at to a leaf, along the `End`
+    /// edge of every node below, and ends at that leaf's `End` edge. At a
     /// leaf already, stays.
     ///
     /// The node and its height stay in registers on the way down; the path
@@ -425,22 +425,46 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// Goes down from the bottom node, searching each node on the way for
     /// `key`, and returns whether it is there: the path ends at it then, in
     /// whichever node holds it, or else at the leaf edge where it belongs.
+    ///
+    /// The node and its height stay in registers on the way down; the path
+    /// only takes stores, which nothing reads until it is done. Each level
+    /// decides its node's kind once, first, and searches it as a node of
+    /// that kind.
     pub(crate) fn search<Q>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.search_with::<Q, PlainSearch>(key)
-    }
-
-    /// [`Self::search`] with each node searched expecting the key to go
-    /// after its last, as inserts do (`NodeRef::search_expecting_append`).
-    pub(crate) fn search_expecting_append<Q>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.search_with::<Q, AppendingSearch>(key)
+        let mut height = self.height();
+        // SAFETY: the path only records where it goes while the view and the
+        // handles below it live; the tree is unchanged.
+        let mut node = unsafe { self.view(height) };
+        loop {
+            let internal = match node.force() {
+                ForceResult::Leaf(leaf) => {
+                    let (found, index) = match leaf.search(key) {
+                        SearchResult::Found(kv) => (true, kv.index()),
+                        SearchResult::GoDown(edge) => (false, edge.index()),
+                    };
+                    self.write_index(height, index);
+                    self.bottom = height as u8;
+                    return found;
+                }
+                ForceResult::Internal(internal) => internal,
+            };
+            let edge = match internal.search(key) {
+                SearchResult::Found(kv) => {
+                    self.write_index(height, kv.index());
+                    self.bottom = height as u8;
+                    return true;
+                }
+                SearchResult::GoDown(edge) => edge,
+            };
+            self.write_index(height, edge.index());
+            node = edge.descend();
+            height -= 1;
+            self.nodes[height].write(node.node_ptr());
+        }
     }
 
     /// Goes down from the bottom node to the leaf edge just before or just
@@ -467,47 +491,6 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
             }
         }
     }
-
-    /// The search, with the node and its height in registers on the way
-    /// down; the path only takes stores, which nothing reads until it is
-    /// done. Each level decides its node's kind once, first, and searches it
-    /// as a node of that kind, with `Search`, which the whole search uses.
-    fn search_with<Q, Search: NodeSearch>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let mut height = self.height();
-        // SAFETY: the path only records where it goes while the view and the
-        // handles below it live; the tree is unchanged.
-        let mut node = unsafe { self.view(height) };
-        loop {
-            let internal = match node.force() {
-                ForceResult::Leaf(leaf) => {
-                    let (found, index) = match Search::search(leaf, key) {
-                        SearchResult::Found(kv) => (true, kv.index()),
-                        SearchResult::GoDown(edge) => (false, edge.index()),
-                    };
-                    self.write_index(height, index);
-                    self.bottom = height as u8;
-                    return found;
-                }
-                ForceResult::Internal(internal) => internal,
-            };
-            let edge = match Search::search(internal, key) {
-                SearchResult::Found(kv) => {
-                    self.write_index(height, kv.index());
-                    self.bottom = height as u8;
-                    return true;
-                }
-                SearchResult::GoDown(edge) => edge,
-            };
-            self.write_index(height, edge.index());
-            node = edge.descend();
-            height -= 1;
-            self.nodes[height].write(node.node_ptr());
-        }
-    }
 }
 
 /// Where a path stands relative to a key it looked up.
@@ -517,51 +500,6 @@ pub(crate) enum KeySide {
     Before,
     /// Just after the key, or where it would be.
     After,
-}
-
-/// How a path's search searches each node on the way down: chosen once per
-/// search, as a type, so that the loop down holds no choice.
-trait NodeSearch {
-    fn search<'n, K, V, S: InlineKeyStrategy<K>, Kind: PageKind, Q>(
-        node: NodeRef<Immut<'n>, K, V, S, Kind>,
-        key: &SearchKey<'_, K, S, Q>,
-    ) -> SearchResult<NodeRef<Immut<'n>, K, V, S, Kind>>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized;
-}
-
-/// Searches each node with [`NodeRef::search`].
-enum PlainSearch {}
-
-impl NodeSearch for PlainSearch {
-    fn search<'n, K, V, S: InlineKeyStrategy<K>, Kind: PageKind, Q>(
-        node: NodeRef<Immut<'n>, K, V, S, Kind>,
-        key: &SearchKey<'_, K, S, Q>,
-    ) -> SearchResult<NodeRef<Immut<'n>, K, V, S, Kind>>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        node.search(key)
-    }
-}
-
-/// Searches each node with [`NodeRef::search_expecting_append`], as
-/// inserts do.
-enum AppendingSearch {}
-
-impl NodeSearch for AppendingSearch {
-    fn search<'n, K, V, S: InlineKeyStrategy<K>, Kind: PageKind, Q>(
-        node: NodeRef<Immut<'n>, K, V, S, Kind>,
-        key: &SearchKey<'_, K, S, Q>,
-    ) -> SearchResult<NodeRef<Immut<'n>, K, V, S, Kind>>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        node.search_expecting_append(key)
-    }
 }
 
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
@@ -680,17 +618,6 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     {
         self.start_at_root();
         self.path.search(key)
-    }
-
-    /// Starts the path at the root and searches down; see
-    /// [`Path::search_expecting_append`].
-    pub(crate) fn search_expecting_append<Q>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.start_at_root();
-        self.path.search_expecting_append(key)
     }
 
     /// Starts the path at the root and goes down to the leaf edge beside

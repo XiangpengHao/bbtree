@@ -26,7 +26,7 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use super::page::{ByteString, InlineKeyNodeHeader, SameType};
+use super::page::{ByteString, InlineKeyNodeHeader, SameType, StdInteger};
 use super::vector_count::VectorCount;
 use crate::inline_key::sealed::InlineKeySource;
 use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
@@ -42,10 +42,12 @@ pub(super) enum KeyInliner<K> {
     ///
     /// [`Auto`]: crate::Auto
     ByteString(ByteString<K>),
-    /// `K`'s [`InlineKey`] impl ([`WithInlineKey`]), of whose inline keys
-    /// the nodes keep `width` bytes.
+    /// `K`'s [`InlineKey`] impl, of whose inline keys the nodes keep
+    /// `width` bytes: any key's under [`WithInlineKey`], and a std
+    /// integer's under [`Auto`].
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
+    /// [`Auto`]: crate::Auto
     InlineKeyTrait {
         inline_key_at: fn(&K, usize) -> InlineWord,
         width: InlineWidth,
@@ -71,7 +73,14 @@ impl<K> KeyInliner<K> {
     #[inline]
     pub(super) fn resolve<S: InlineKeyStrategy<K>>() -> Option<Self> {
         match S::SOURCE {
-            InlineKeySource::StdByteStrings => ByteString::recognize().map(Self::ByteString),
+            InlineKeySource::RecognizedStdTypes => {
+                ByteString::recognize().map(Self::ByteString).or_else(|| {
+                    StdInteger::recognize().map(|integer| Self::InlineKeyTrait {
+                        inline_key_at: integer.inline_key_at(),
+                        width: integer.width(),
+                    })
+                })
+            }
             InlineKeySource::InlineKeyTrait {
                 inline_key_at,
                 width,
@@ -530,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_gives_std_byte_strings_inline_keys() {
+    fn auto_gives_std_byte_strings_and_integers_inline_keys() {
         assert!(has_inline_keys::<String, Auto>());
         assert!(has_inline_keys::<Vec<u8>, Auto>());
         assert!(has_inline_keys::<Box<str>, Auto>());
@@ -540,8 +549,12 @@ mod tests {
         assert!(has_inline_keys::<[u8; 16], Auto>());
         assert!(has_inline_keys::<[u8; 20], Auto>());
         assert!(has_inline_keys::<[u8; 32], Auto>());
+        assert!(has_inline_keys::<u64, Auto>());
+        assert!(has_inline_keys::<i64, Auto>());
+        assert!(has_inline_keys::<u128, Auto>());
+        assert!(has_inline_keys::<i128, Auto>());
 
-        assert!(!has_inline_keys::<u64, Auto>());
+        assert!(!has_inline_keys::<u32, Auto>());
         assert!(!has_inline_keys::<[u8; 8], Auto>());
         assert!(!has_inline_keys::<Vec<u16>, Auto>());
         assert!(!has_inline_keys::<&String, Auto>());
@@ -557,8 +570,8 @@ mod tests {
         assert!(has_inline_keys::<i128, WithInlineKey>());
     }
 
-    /// Std byte strings keep all 8 bytes; keys with their own impl, what
-    /// it says.
+    /// Std byte strings keep all 8 bytes; integers and keys with their own
+    /// impl, what it says.
     #[test]
     fn strategies_keep_their_keys_widths() {
         fn width<K, S: crate::InlineKeyStrategy<K>>() -> Option<InlineWidth> {
@@ -566,7 +579,9 @@ mod tests {
         }
         assert_eq!(width::<String, Auto>(), Some(InlineWidth::Eight));
         assert_eq!(width::<[u8; 16], Auto>(), Some(InlineWidth::Eight));
-        assert_eq!(width::<u64, Auto>(), None);
+        assert_eq!(width::<u64, Auto>(), Some(InlineWidth::Two));
+        assert_eq!(width::<i128, Auto>(), Some(InlineWidth::Two));
+        assert_eq!(width::<u32, Auto>(), None);
         assert_eq!(width::<u64, WithInlineKey>(), Some(InlineWidth::Two));
         assert_eq!(width::<i64, WithInlineKey>(), Some(InlineWidth::Two));
         assert_eq!(width::<UserName, WithInlineKey>(), Some(InlineWidth::Eight));
@@ -599,8 +614,9 @@ mod tests {
             target::<[u8; 16], Auto, [u8]>(&array),
             Some(array.inline_key_at(0))
         );
+        assert_eq!(target::<u64, Auto, u64>(&7), Some(7_u64.inline_key_at(0)));
         // Keys without inline keys have no target.
-        assert_eq!(target::<u64, Auto, u64>(&7), None);
+        assert_eq!(target::<u32, Auto, u32>(&7), None);
     }
 
     #[test]
@@ -715,7 +731,10 @@ mod tests {
             .map(|target| target.inline_key());
         assert_eq!(target, Some(key.window().inline_key()));
 
-        let plain: InlinedKey<u64, Auto> = InlinedKey::new(7, 3);
+        let integer: InlinedKey<u64, Auto> = InlinedKey::new(7, 3);
+        assert_eq!(integer.window(), Window::new(3, 7_u64.inline_key_at(3)));
+
+        let plain: InlinedKey<u32, Auto> = InlinedKey::new(7, 3);
         assert_eq!(plain.into_parts(), (7, Window::NONE));
     }
 

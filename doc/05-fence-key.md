@@ -3,8 +3,8 @@
 Status: implemented (2026-10-08), exact since 2026-10-09, in `node/prefix.rs`
 and the node operations of `node/handle.rs`; measured in "Measured". Builds on inline keys
 (04-inline-key.md). Applies to every key with inline keys: std byte strings
-under `Auto`, and keys with an `InlineKey` impl under `WithInlineKey`, through
-their encoding.
+and the 64- and 128-bit integers under `Auto`, and keys with an `InlineKey`
+impl under `WithInlineKey`, through their encoding.
 
 ## Problem
 
@@ -494,9 +494,11 @@ Every set ties 0% at 4 bytes.
   `get` now builds the search key's padded copy with 8-byte stores and
   then copies it with 64-byte loads, which can't be forwarded from them;
   before, it built it with vector stores.
-- **So integers stay opt-in for now,** and `Auto` keeps giving them none,
-  until sequential inserts and the string lookups above are understood;
-  every entry also takes 2 bytes more.
+- **So integers stayed opt-in,** until the sequential inserts were
+  understood: the loss was the insert path's append check, which compared
+  the key's window with each node's last inline key (D30). Without it,
+  inline keys win there too, 40.1 against 44.5 ns per 10M insert, and
+  `Auto` gives integers inline keys (D31); every entry takes 2 bytes more.
 
 ## Plan
 
@@ -515,7 +517,8 @@ Every set ties 0% at 4 bytes.
    gate, no test-only rule that grows every prefix, no separate "at least
    the parent's" invariant, and nothing decays.
 7. **Done (2026-10-09).** Per-type widths: 8-byte windows, of which nodes
-   keep 2, 4 or 8 bytes; integers with 2, opt-in (see "Width").
+   keep 2, 4 or 8 bytes; integers with 2, under `Auto` since D31 (see
+   "Width").
 
 ## Open questions
 
@@ -530,8 +533,10 @@ Every set ties 0% at 4 bytes.
 - **The window's load per level** (`hash32`, 8–9%): a target that doesn't
   wait on the node's `prefix_len`, such as the windows at a few prefix
   lengths kept in registers and picked by a shift, might hide it.
-- **The fuzzer has no inline keys:** it fuzzes `u64` keys only. A target with
-  string keys sharing prefixes would fuzz all of the above.
+- **The fuzzer fuzzes `u64` keys only,** which have 2-byte inline keys
+  since D31: nothing fuzzes 8-byte windows or the path without inline keys.
+  A target with string keys sharing prefixes would fuzz the first, one with
+  a key `Auto` doesn't recognize the second.
 - **1k string lookups** (see "Width"): about 20% slower than before the
   per-type widths, with fewer instructions.
 - **The padding past `len`** (invariant 6) is now needed only by LLVM's
@@ -539,4 +544,3 @@ Every set ties 0% at 4 bytes.
   for those, masking by `len` as the AVX-512 one does (AVX2's
   `movemask`, NEON's lane compares), would let the nodes drop it, and its
   upkeep on every shrink.
-- **Integers by default:** not before the losses above are understood.

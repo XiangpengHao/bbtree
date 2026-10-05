@@ -212,11 +212,10 @@ Design in 04-inline-key.md.
 - **Width:** windows are 8 bytes (`InlineWord = u64`), and a key type says
   how many of their first bytes nodes keep, `InlineKey::WIDTH`, 2, 4 or 8
   (2026-10-09): 8 for std byte strings, whose ties read the heap; 2 for
-  `u64`, `i64`, `u128` and `i128`, which implement `InlineKey` and opt in
-  with `WithInlineKey`. At 8 bytes, real neighbours tie 24–70% of the time;
-  at 16 bytes, 1–20% (04-inline-key.md Q7). Integers stay opt-in: their
-  gains depend on how the count over their slots vectorizes, which depends
-  on the node's capacity (05-fence-key.md, "Width").
+  `u64`, `i64`, `u128` and `i128`, which implement `InlineKey`. At 8 bytes,
+  real neighbours tie 24–70% of the time; at 16 bytes, 1–20%
+  (04-inline-key.md Q7). The integers first opted in with `WithInlineKey`;
+  `Auto` gives them inline keys since D31.
 - **The trait gives windows** (2026-10-08): `inline_key_at(offset)`, bytes
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
@@ -495,8 +494,8 @@ Refines D20.
 - **The rule:** a traversal decides whether a node is a leaf or internal
   once, at the top of each step (`NodeRef::force`, or the height a loop
   already knows), and the code after it is for that kind. Likewise a choice
-  fixed for a whole loop, such as the node search an insert uses or the end
-  a border is on, is made before the loop, as a type.
+  fixed for a whole loop, such as the end a border is on, is made before
+  the loop, as a type.
 - **Enforced by the types:** what depends on the kind, a node's capacity
   and where its slots are, is only for `PageKind` handles (`Leaf`,
   `Internal`); a `LeafOrInternal` handle can only be told its kind. Before,
@@ -533,6 +532,102 @@ Refines D20.
 - **Open:** a single 8-byte count over 28 to 31 slots, as a `String` set's
   31-slot leaf has, still sums the bits one at a time (31 slots: 222
   instructions, 25: 34).
+
+**D29. Nodes with inline keys pair each key with its trailing slot.** (2026-10-09)
+Supersedes D9's layout and D12's edges at the end of the node.
+
+- **Layout** (`layout.rs`): a node's trailing slots are a leaf's head and
+  values, or an internal node's edges, slot `i + 1` beside key `i`. With
+  inline keys, keys and trailing slots are `(key, slot)` entries growing up
+  after the inline keys, slot 0 alone in an entry before entry 0, its key's
+  place unused. Without inline keys, the keys are an array, and the
+  trailing slots one right after the keys' capacity; nothing grows down.
+- **Why:** a search runs over the inline keys, and in a leaf it then reads
+  the key it ends at, which brings its value along.
+- **Cost:** an entry pads its key to its slot's alignment, and the extra
+  entry takes one key's room: `String` → `u64` holds 24 keys instead of 25,
+  `u64` with inline keys 55 instead of 56, `u128` with inline keys 28
+  instead of 38.
+- **Measured** against D28, prefetch off, medians of three interleaved
+  runs (ns per op), with leaves alone paired as an experiment, and both
+  kinds as built:
+
+  | cell | separate | leaves paired | both paired |
+  |---|--:|--:|--:|
+  | `hash32`, 10M `get_hit` | 312 | 298 | 316 |
+  | `str-json`, 10M `get_hit` | 426 | 418 | 444 |
+  | `u64` with inline keys, 10M `get_hit` | 139 | 128 | 134 |
+  | `u64` with inline keys, 10M `insert_random` | 133 | 150 | 145 |
+  | `u64` with inline keys, 10M `remove_random` | 252 | 246 | 260 |
+  | `u64` with inline keys, 10M `range64` | 715 | 742 | 739 |
+  | `u64`, no inline keys, 10M `get_hit` | 199 | 179 | 181 |
+  | `u64`, no inline keys, 10M `insert_random` | 165 | 180 | 180 |
+
+- **Open:** pairing internal nodes costs lookups what pairing leaves gains
+  (`hash32` DRAM fills per lookup: 11.4 separate, 8.3 leaves paired, 10.9
+  both). An internal node usually reads only an edge after its inline
+  keys, and edges side by side may keep each node's few edge lines in
+  cache; not profiled yet. Inserts are slower in every paired layout.
+
+**D30. Inserts search like lookups: no append fast path.** (2026-10-09)
+
+- **Before:** `insert` and `entry` searched each node expecting the key to
+  go after its last: a key greater than the node's last key went straight
+  down the last edge, skipping the node's search. With inline keys, that
+  check built the key's window at the node's prefix length and compared it
+  with the last inline key, and the full key only on a tie.
+- **Why removed:** a shortcut for one workload, ascending keys, that every
+  other insert pays for: with inline keys, 41 instructions more per random
+  insert at 10M. And it was all of what looked like inline keys' loss on
+  sequential inserts: its check, not the search.
+- **Measured** on the commit before, prefetch off, one run, ns per insert,
+  instructions in brackets:
+
+  | cell | with the check | without |
+  |---|--:|--:|
+  | `u64`, 10M `insert_sequential` | 8.2 [185] | 44.5 [473] |
+  | `u64` with inline keys, 10M `insert_sequential` | 13.3 [330] | 40.1 [481] |
+  | `u64`, 1k `insert_sequential` | 4.9 [146] | 14.4 [256] |
+  | `u64` with inline keys, 1k `insert_sequential` | 7.8 [233] | 11.6 [249] |
+  | `u64`, 10M `insert_random` | 179 [442] | 169 [441] |
+  | `u64` with inline keys, 10M `insert_random` | 132 [415] | 131 [374] |
+
+- **Open:** sequential inserts are 3–5× slower than with the check. With
+  inline keys and D29's layout, a 10M sequential insert takes 41.6 ns
+  [506], std's `BTreeMap` 38.7 ns [751]; at 1k, 11.9 and 12.2 ns.
+
+**D31. `Auto` gives the 64- and 128-bit integers inline keys.** (2026-10-09)
+Supersedes D18's integers opting in.
+
+- **What:** `Auto` recognizes `u64`, `i64`, `u128` and `i128` by their type,
+  as it does std byte strings, and uses their own `InlineKey` impls:
+  2-byte inline keys, as `WithInlineKey` gives them. Other integers have
+  no impl and get none; a newtype around one of the four gets none either,
+  unless it implements `InlineKey` and the map uses `WithInlineKey`.
+- **Why now:** sequential inserts were the loss that kept them opt-in, and
+  that was the append check (D30). The count over 2-byte slots runs in
+  explicit AVX-512 vectors whatever the capacity, and since D28 no count
+  is compiled for two node kinds at once.
+- **Measured,** `u64` → `u64` without and with inline keys, on D28's
+  layout, `insert_sequential` with D30 applied, prefetch off, ns per op,
+  one run (three for the 10M `remove_random`, `pop_first` and `range64`):
+
+  | cell | none | 2 B |
+  |---|--:|--:|
+  | 10M `get_hit` / `get_miss` | 198 / 180 | 138 / 96 |
+  | 10M `insert_random` / `insert_sequential` | 183 / 44.5 | 133 / 40.1 |
+  | 10M `remove_random` / `pop_first` / `range64` | 261 / 33.1 / 708 | 252 / 34.1 / 728 |
+  | 1k `get_hit` / `get_miss` | 14.2 / 12.7 | 5.9 / 4.1 |
+  | 1k `insert_random` / `remove_random` | 16.3 / 46.1 | 14.5 / 43.2 |
+  | bytes per entry, map / set | 23.4 / 11.8 | 26.5 / 14.9 |
+
+  Dense keys (`u64-seq`, 0 to N) gain less: 10M `get_hit` 26%,
+  `insert_random` 13%, 1M `get_hit` 10%. Nodes on the tree's borders, the
+  root among them, have no prefix (D26), so their inline keys are the top
+  bytes of the integers, all zero for small ones.
+- **Cost:** 2 bytes more per entry, 3 at the leaves' fill: 13% more for
+  `u64` → `u64`, 26% for a `u64` set. A node holds 55 `u64` keys
+  instead of 63.
 
 ## Navigation
 

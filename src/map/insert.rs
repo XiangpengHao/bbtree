@@ -55,7 +55,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         K: Ord,
     {
         let mut path = PathMut::new(self);
-        if path.search_expecting_append(&SearchKey::new(&key)) {
+        if path.search(&SearchKey::new(&key)) {
             // As in std, the new key is dropped before the value changes: if
             // its `Drop` panics, the map is unchanged.
             drop(key);

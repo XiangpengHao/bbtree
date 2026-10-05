@@ -1,76 +1,80 @@
 //! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
-//! only code that moves keys, values and edges around (D9, D12, D14).
-//! [`InlineKeySlots`] are a node's inline keys at the map's width, and
-//! [`KeySlots`] moves a node's keys together with them (D18).
+//! only code that moves keys, values and edges around (D9, D12, D14, D29).
+//! [`InlineKeySlots`] are a node's inline keys at the map's width,
+//! [`KeySlots`] moves a node's keys together with them (D18), and
+//! [`NodeKeys`] lends a node's keys in place.
 
 use core::marker::PhantomData;
+use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
 use super::inline_keys::{InlineSlot, InlinedKey, Window};
 use crate::inline_key::{InlineWidth, InlineWord};
 
-/// The direction in which an array of slots grows from its anchor.
-pub(super) trait Direction {
-    /// `true`: slot `i` sits at `anchor + i`.
-    /// `false`: slot `i` sits at `anchor - (i + 1)`.
-    const GROWS_UP: bool;
-}
-
-/// Slot `i` sits at `anchor + i`: keys and edges.
-pub(super) enum Up {}
-
-/// Slot `i` sits at `anchor - (i + 1)`: values, which grow down from the
-/// end of the node (D9).
-pub(super) enum Down {}
-
-impl Direction for Up {
-    const GROWS_UP: bool = true;
-}
-
-impl Direction for Down {
-    const GROWS_UP: bool = false;
-}
-
-/// Where `capacity` slots of `T` sit in memory, growing in direction `Dir`
-/// from `anchor`.
+/// Where `capacity` slots of `T` sit in memory: slot `i` at `stride * i`
+/// bytes past `anchor`. The slots of an array of their own sit side by
+/// side, `size_of::<T>()` apart; the keys and the trailing slots of a node
+/// of `(key, value)` or `(key, edge)` entries are fields of its entries,
+/// an entry's size apart (D29).
 ///
 /// A `Slots` neither owns nor borrows its slots and tracks no length: which
 /// slots are initialized is the caller's business, so every operation is
 /// `unsafe` and states which slots it expects to be initialized.
 ///
-/// A run of slots `start..end` is contiguous in memory: in index order when
-/// growing up, in reverse index order when growing down. Two arrays of the
-/// same direction store a run in the same order, so moving a run from one to
-/// the other is a single copy that keeps the order.
+/// Slots side by side move a run with one copy; strided ones move slot by
+/// slot, the bytes between them belonging to other fields. Moving whole
+/// strides, the other fields with them, is [`Self::shift_strides_up`] and
+/// [`Self::shift_strides_down`]: how a node shifts its entries in one copy.
 ///
-/// Invariant: the `capacity` slots are aligned for `T` and lie inside one
-/// allocation, at `anchor..anchor + capacity` when growing up and at
-/// `anchor - capacity..anchor` when growing down.
-pub(super) struct Slots<T, Dir> {
+/// Invariant: `stride` is at least `size_of::<T>()` and a multiple of
+/// `align_of::<T>()`, and the `capacity` slots are aligned for `T` and lie
+/// inside one allocation.
+pub(super) struct Slots<T> {
     anchor: NonNull<T>,
     capacity: usize,
-    _direction: PhantomData<Dir>,
+    /// Bytes from one slot to the next.
+    stride: usize,
 }
 
-impl<T, Dir> Clone for Slots<T, Dir> {
+impl<T> Clone for Slots<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T, Dir> Copy for Slots<T, Dir> {}
+impl<T> Copy for Slots<T> {}
 
-impl<T, Dir: Direction> Slots<T, Dir> {
+impl<T> Slots<T> {
+    /// `capacity` slots side by side from `anchor`.
+    ///
     /// # Safety
     ///
-    /// The type invariant holds for `anchor` and `capacity`, and the slots
-    /// stay allocated while this `Slots` or any copy of it is used.
+    /// The type invariant holds for `anchor` and `capacity`, with a stride
+    /// of `size_of::<T>()`, and the slots stay allocated while this `Slots`
+    /// or any copy of it is used.
     pub(super) unsafe fn new(anchor: NonNull<T>, capacity: usize) -> Self {
+        // SAFETY: forwarded.
+        unsafe { Self::with_stride(anchor, capacity, size_of::<T>()) }
+    }
+
+    /// `capacity` slots from `anchor`, `stride` bytes apart.
+    ///
+    /// # Safety
+    ///
+    /// The type invariant holds for `anchor`, `capacity` and `stride`, and
+    /// the slots stay allocated while this `Slots` or any copy of it is used.
+    pub(super) unsafe fn with_stride(anchor: NonNull<T>, capacity: usize, stride: usize) -> Self {
+        debug_assert!(stride >= size_of::<T>() && stride.is_multiple_of(align_of::<T>()));
         Self {
             anchor,
             capacity,
-            _direction: PhantomData,
+            stride,
         }
+    }
+
+    /// Whether the slots sit side by side, with nothing between them.
+    fn is_contiguous(self) -> bool {
+        self.stride == size_of::<T>()
     }
 
     /// A pointer to slot `index`.
@@ -80,21 +84,36 @@ impl<T, Dir: Direction> Slots<T, Dir> {
     /// `index < capacity`.
     pub(super) unsafe fn slot(self, index: usize) -> NonNull<T> {
         debug_assert!(index < self.capacity);
-        // SAFETY: `index + 1 <= capacity`, forwarded.
-        unsafe { self.run_start(index, index + 1) }
+        // SAFETY: slot `index` is one of the slots, inside the allocation
+        // (type invariant).
+        unsafe { self.anchor.byte_add(index * self.stride) }
     }
 
-    /// Slots `start..end` as one slice in memory order: index order when
-    /// growing up, reverse index order when growing down. With `start == 0`,
-    /// this is the initialized prefix of an array of length `end`, ready to
-    /// be borrowed or dropped in place.
+    /// Where slot `index` of slots side by side is, the end of the last one
+    /// included.
     ///
     /// # Safety
     ///
-    /// `start <= end <= capacity`.
+    /// `index <= capacity`, and the slots are side by side.
+    unsafe fn contiguous_slot(self, index: usize) -> NonNull<T> {
+        debug_assert!(index <= self.capacity && self.is_contiguous());
+        // SAFETY: slots side by side lie within the allocation, end to end
+        // (type invariant), so the result is within it or one past its last
+        // slot.
+        unsafe { self.anchor.add(index) }
+    }
+
+    /// Slots `start..end` of slots side by side, as one slice in index
+    /// order. With `start == 0`, this is the initialized prefix of an array
+    /// of length `end`, ready to be borrowed or dropped in place.
+    ///
+    /// # Safety
+    ///
+    /// `start <= end <= capacity`, and the slots are side by side.
     pub(super) unsafe fn run(self, start: usize, end: usize) -> NonNull<[T]> {
+        debug_assert!(start <= end);
         // SAFETY: forwarded.
-        let first = unsafe { self.run_start(start, end) };
+        let first = unsafe { self.contiguous_slot(start) };
         NonNull::slice_from_raw_parts(first, end - start)
     }
 
@@ -110,14 +129,20 @@ impl<T, Dir: Direction> Slots<T, Dir> {
     /// Afterwards slots `index..len + 1` are initialized.
     pub(super) unsafe fn insert(self, index: usize, len: usize, value: T) {
         debug_assert!(index <= len && len < self.capacity);
-        // SAFETY: `index <= len < len + 1 <= capacity`, so both runs and the
-        // slot are in bounds. The tail `index..len` is initialized and moves
-        // into `index + 1..len + 1` (overlapping, hence `copy_to`), which
-        // frees slot `index` for `value`.
+        // SAFETY: `index <= len < len + 1 <= capacity`, so every slot named
+        // is in bounds. The tail `index..len` is initialized and moves into
+        // `index + 1..len + 1`, which frees slot `index` for `value`: side by
+        // side in one copy (overlapping, hence `copy_to`), strided from the
+        // top, so that each slot is read before it is written over.
         unsafe {
-            let tail = self.run_start(index, len);
-            let shifted_tail = self.run_start(index + 1, len + 1);
-            tail.copy_to(shifted_tail, len - index);
+            if self.is_contiguous() {
+                let tail = self.contiguous_slot(index);
+                tail.copy_to(self.contiguous_slot(index + 1), len - index);
+            } else {
+                for from in (index..len).rev() {
+                    self.move_slot(from, from + 1);
+                }
+            }
             self.slot(index).write(value);
         }
     }
@@ -134,15 +159,22 @@ impl<T, Dir: Direction> Slots<T, Dir> {
     /// holds nothing (its bytes are a stale copy).
     pub(super) unsafe fn remove(self, index: usize, len: usize) -> T {
         debug_assert!(index < len && len <= self.capacity);
-        // SAFETY: `index < len <= capacity`, so the slot and both runs are in
+        // SAFETY: `index < len <= capacity`, so every slot named is in
         // bounds. Slot `index` is initialized and is read out; the
-        // initialized tail `index + 1..len` then moves into `index..len - 1`
-        // (overlapping, hence `copy_to`).
+        // initialized tail `index + 1..len` then moves into `index..len - 1`:
+        // side by side in one copy (overlapping, hence `copy_to`), strided
+        // from the bottom, so that each slot is read before it is written
+        // over.
         unsafe {
             let removed = self.slot(index).read();
-            let tail = self.run_start(index + 1, len);
-            let shifted_tail = self.run_start(index, len - 1);
-            tail.copy_to(shifted_tail, len - index - 1);
+            if self.is_contiguous() {
+                let tail = self.contiguous_slot(index + 1);
+                tail.copy_to(self.contiguous_slot(index), len - index - 1);
+            } else {
+                for from in index + 1..len {
+                    self.move_slot(from, from - 1);
+                }
+            }
             removed
         }
     }
@@ -164,37 +196,177 @@ impl<T, Dir: Direction> Slots<T, Dir> {
         dest: Self,
         dest_start: usize,
     ) {
+        debug_assert!(start + count <= self.capacity && dest_start + count <= dest.capacity);
         // SAFETY: both runs are in bounds, initialized at the source and
-        // disjoint, as the caller guarantees. Both arrays grow the same way,
-        // so one copy keeps the order.
+        // disjoint, as the caller guarantees: two arrays side by side copy
+        // the run in one go, keeping its order; otherwise slot by slot.
         unsafe {
-            let source = self.run_start(start, start + count);
-            let destination = dest.run_start(dest_start, dest_start + count);
-            source.copy_to_nonoverlapping(destination, count);
-        }
-    }
-
-    /// The lowest address of the run `start..end`.
-    ///
-    /// # Safety
-    ///
-    /// `start <= end <= capacity`.
-    unsafe fn run_start(self, start: usize, end: usize) -> NonNull<T> {
-        debug_assert!(start <= end && end <= self.capacity);
-        // SAFETY: by the type invariant, the result lies within the slots or
-        // one past the last one when growing up (`start <= capacity`), and
-        // within the slots when growing down (`end <= capacity`).
-        unsafe {
-            if Dir::GROWS_UP {
-                self.anchor.add(start)
+            if self.is_contiguous() && dest.is_contiguous() {
+                let source = self.contiguous_slot(start);
+                source.copy_to_nonoverlapping(dest.contiguous_slot(dest_start), count);
             } else {
-                self.anchor.sub(end)
+                for offset in 0..count {
+                    let source = self.slot(start + offset);
+                    source.copy_to_nonoverlapping(dest.slot(dest_start + offset), 1);
+                }
             }
         }
     }
+
+    /// Shifts the whole strides of slots `index..len` up by one slot, into
+    /// `index + 1..len + 1`, with the other fields between them: the entries
+    /// of a node whose slots these are the first fields of. Slot `index`'s
+    /// stride holds stale bytes afterwards.
+    ///
+    /// # Safety
+    ///
+    /// - `index <= len < capacity`.
+    /// - The strides of slots `index..len + 1` lie inside the allocation,
+    ///   and what those of `index..len` hold may move as bytes; what that of
+    ///   `len` holds needs no dropping: it is overwritten.
+    pub(super) unsafe fn shift_strides_up(self, index: usize, len: usize) {
+        debug_assert!(index <= len && len < self.capacity);
+        // SAFETY: the strides of slots `index..len + 1` are in the allocation
+        // (caller); `copy` allows the overlap.
+        unsafe {
+            let first = self.slot(index).cast::<u8>();
+            first.copy_to(first.add(self.stride), (len - index) * self.stride);
+        }
+    }
+
+    /// Shifts the whole strides of slots `index + 1..len` down by one slot,
+    /// into `index..len - 1`, with the other fields between them, over the
+    /// stride of slot `index`; that of `len - 1` holds stale bytes
+    /// afterwards.
+    ///
+    /// # Safety
+    ///
+    /// - `index < len <= capacity`.
+    /// - The strides of slots `index..len` lie inside the allocation, what
+    ///   those of `index + 1..len` hold may move as bytes, and what that of
+    ///   `index` holds needs no dropping: it is overwritten.
+    pub(super) unsafe fn shift_strides_down(self, index: usize, len: usize) {
+        debug_assert!(index < len && len <= self.capacity);
+        // SAFETY: the strides of slots `index..len` are in the allocation
+        // (caller); `copy` allows the overlap.
+        unsafe {
+            let first = self.slot(index).cast::<u8>();
+            first
+                .add(self.stride)
+                .copy_to(first, (len - index - 1) * self.stride);
+        }
+    }
+
+    /// Moves slot `from` into slot `to`, which holds nothing that needs
+    /// dropping; `from` holds nothing afterwards.
+    ///
+    /// # Safety
+    ///
+    /// Both are below `capacity` and distinct, and `from` is initialized.
+    unsafe fn move_slot(self, from: usize, to: usize) {
+        // SAFETY: forwarded; distinct slots don't overlap, being at least
+        // `size_of::<T>()` apart.
+        unsafe { self.slot(from).copy_to_nonoverlapping(self.slot(to), 1) }
+    }
 }
 
-/// A node's inline-key slots (D18): `capacity` of them, growing up, each
+/// A node's keys `0..len`, in order, lent for `'a`: side by side in a node
+/// whose keys are an array of their own, or each the key of an entry in a
+/// node of `(key, value)` or `(key, edge)` entries (D29).
+pub(crate) struct NodeKeys<'a, K> {
+    first: NonNull<K>,
+    /// Bytes from one key to the next.
+    stride: usize,
+    len: usize,
+    _keys: PhantomData<&'a [K]>,
+}
+
+impl<K> Clone for NodeKeys<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K> Copy for NodeKeys<'_, K> {}
+
+impl<'a, K> NodeKeys<'a, K> {
+    /// Slots `0..len` of `keys`.
+    ///
+    /// # Safety
+    ///
+    /// `len <= capacity`, slots `0..len` are initialized and stay unchanged
+    /// for `'a`, and the end of the last slot's stride lies within the
+    /// allocation or one past its end, as a node's keys' do (`layout.rs`).
+    pub(super) unsafe fn new(keys: Slots<K>, len: usize) -> Self {
+        debug_assert!(len <= keys.capacity);
+        Self {
+            first: keys.anchor,
+            stride: keys.stride,
+            len,
+            _keys: PhantomData,
+        }
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.len
+    }
+
+    /// Key `index`.
+    ///
+    /// # Safety
+    ///
+    /// `index < len`.
+    pub(crate) unsafe fn get_unchecked(self, index: usize) -> &'a K {
+        debug_assert!(index < self.len);
+        // SAFETY: key `index` is initialized and unchanged for `'a` (`new`).
+        unsafe { self.first.byte_add(index * self.stride).as_ref() }
+    }
+
+    /// Key `index`, or `None` if `index >= len`.
+    pub(crate) fn get(self, index: usize) -> Option<&'a K> {
+        // SAFETY: `index < len`.
+        (index < self.len).then(|| unsafe { self.get_unchecked(index) })
+    }
+
+    pub(crate) fn first(self) -> Option<&'a K> {
+        self.get(0)
+    }
+
+    /// Keys `range` of these.
+    ///
+    /// # Panics
+    ///
+    /// If `range` is not within `0..len`.
+    pub(crate) fn slice(self, range: Range<usize>) -> Self {
+        assert!(
+            range.start <= range.end && range.end <= self.len,
+            "keys out of bounds"
+        );
+        Self {
+            // SAFETY: `range.start <= len`: a key's slot, or the end of the
+            // last key's stride, within the allocation or one past it
+            // (`new`).
+            first: unsafe { self.first.byte_add(range.start * self.stride) },
+            len: range.end - range.start,
+            ..self
+        }
+    }
+
+    pub(crate) fn iter(self) -> impl DoubleEndedIterator<Item = &'a K> + ExactSizeIterator {
+        // SAFETY: `index < len`.
+        (0..self.len).map(move |index| unsafe { self.get_unchecked(index) })
+    }
+}
+
+impl<K> Index<usize> for NodeKeys<'_, K> {
+    type Output = K;
+
+    fn index(&self, index: usize) -> &K {
+        self.get(index).expect("key index out of bounds")
+    }
+}
+
+/// A node's inline-key slots (D18): `capacity` of them, side by side, each
 /// the first bytes of a window, as many as the map's [`InlineWidth`], stored
 /// as the [`InlineSlot`] of that width. The operations mirror those of
 /// [`Slots`], with the same contracts, and speak in windows: a write keeps a
@@ -204,9 +376,9 @@ impl<T, Dir: Direction> Slots<T, Dir> {
 /// strategy, so after monomorphization each operation is that of one width.
 #[derive(Clone, Copy)]
 pub(super) enum InlineKeySlots {
-    Two(Slots<u16, Up>),
-    Four(Slots<u32, Up>),
-    Eight(Slots<u64, Up>),
+    Two(Slots<u16>),
+    Four(Slots<u32>),
+    Eight(Slots<u64>),
 }
 
 /// `$body`, with `$slots` bound to the slots of `$inline_keys`, whichever
@@ -222,7 +394,7 @@ macro_rules! with_slots_of_width {
 }
 
 impl InlineKeySlots {
-    /// `capacity` slots of `width` growing up from `anchor`.
+    /// `capacity` slots of `width` side by side from `anchor`.
     ///
     /// # Safety
     ///
@@ -348,7 +520,7 @@ impl InlineKeySlots {
 ///
 /// Invariant: `inline_keys`, if any, has the capacity of `keys`.
 pub(super) struct KeySlots<K, S> {
-    keys: Slots<K, Up>,
+    keys: Slots<K>,
     inline_keys: Option<InlineKeySlots>,
     /// The node's prefix length; 0 without inline keys.
     prefix_len: usize,
@@ -368,7 +540,7 @@ impl<K, S> KeySlots<K, S> {
     ///
     /// `inline_keys`, if any, has the capacity of `keys`.
     pub(super) unsafe fn new(
-        keys: Slots<K, Up>,
+        keys: Slots<K>,
         inline_keys: Option<InlineKeySlots>,
         prefix_len: usize,
     ) -> Self {
@@ -384,7 +556,7 @@ impl<K, S> KeySlots<K, S> {
     }
 
     /// The key slots alone, to read keys in place.
-    pub(super) fn keys(self) -> Slots<K, Up> {
+    pub(super) fn keys(self) -> Slots<K> {
         self.keys
     }
 
@@ -485,6 +657,35 @@ impl<K, S> KeySlots<K, S> {
         }
     }
 
+    /// [`Self::insert`] in a node of entries whose first fields the keys
+    /// are (D29): shifts entries `index..len` up whole, with what they pair
+    /// the keys with, in one copy, then writes the key. The caller writes
+    /// what pairs with it.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::insert`], and as for [`Slots::shift_strides_up`] for
+    /// the keys: the strides of keys `index..len + 1`, their entries, lie in
+    /// the node.
+    pub(super) unsafe fn insert_shifting_entries(
+        self,
+        index: usize,
+        len: usize,
+        key: InlinedKey<K, S>,
+    ) {
+        let inline_key = self.inline_key_of(&key);
+        let (key, _) = key.into_parts();
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
+        // are initialized like them (type invariant).
+        unsafe {
+            self.keys.shift_strides_up(index, len);
+            self.keys.slot(index).write(key);
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.insert(index, len, inline_key);
+            }
+        }
+    }
+
     /// See [`Slots::remove`].
     ///
     /// # Safety
@@ -499,6 +700,35 @@ impl<K, S> KeySlots<K, S> {
                 Some(inline_keys) => inline_keys.remove(index, len),
                 None => 0,
             };
+            InlinedKey::from_parts(key, self.window(inline_key))
+        }
+    }
+
+    /// [`Self::remove`] in a node of entries whose first fields the keys
+    /// are (D29): takes key `index` out, then shifts entries `index + 1..len`
+    /// down whole, with what they pair the keys with, in one copy. The
+    /// caller has taken out what pairs with key `index` first.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::remove`], and as for [`Slots::shift_strides_down`] for
+    /// the keys: the strides of keys `index..len`, their entries, lie in the
+    /// node, and what pairs with key `index` holds nothing that needs
+    /// dropping.
+    pub(super) unsafe fn remove_shifting_entries(
+        self,
+        index: usize,
+        len: usize,
+    ) -> InlinedKey<K, S> {
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
+        // are initialized like them (type invariant).
+        unsafe {
+            let key = self.keys.slot(index).read();
+            let inline_key = match self.inline_keys {
+                Some(inline_keys) => inline_keys.remove(index, len),
+                None => 0,
+            };
+            self.keys.shift_strides_down(index, len);
             InlinedKey::from_parts(key, self.window(inline_key))
         }
     }
@@ -542,40 +772,64 @@ mod tests {
     use core::ptr::NonNull;
     use std::vec::Vec;
 
-    use super::{Direction, Down, Slots, Up};
+    use super::{NodeKeys, Slots};
     use crate::node::test_support::{DropLedger, Tracked};
 
     /// Small enough to try every index combination, also under Miri.
     const CAPACITY: usize = 5;
 
-    /// A `Slots` over a buffer it owns, next to a model of which tracked
-    /// value each slot holds (`None`: nothing).
-    struct ModelledSlots<'l, Dir> {
-        _buffer: Vec<MaybeUninit<Tracked<'l>>>,
-        slots: Slots<Tracked<'l>, Dir>,
-        model: Vec<Option<usize>>,
+    /// A buffer of `len` elements, kept alive while the returned pointer to
+    /// its first one is used; every access goes through that pointer, which
+    /// nothing else invalidates.
+    fn buffer<'l>(len: usize) -> (Vec<MaybeUninit<Tracked<'l>>>, NonNull<Tracked<'l>>) {
+        let mut buffer: Vec<MaybeUninit<Tracked<'l>>> = Vec::new();
+        buffer.resize_with(len, MaybeUninit::uninit);
+        let base = NonNull::new(buffer.as_mut_ptr().cast::<Tracked<'l>>()).unwrap();
+        (buffer, base)
     }
 
-    impl<'l, Dir: Direction> ModelledSlots<'l, Dir> {
-        /// Slots `0..len` hold fresh tracked values.
-        fn with_len(ledger: &'l DropLedger, len: usize) -> Self {
-            let mut buffer: Vec<MaybeUninit<Tracked<'l>>> = Vec::with_capacity(CAPACITY);
-            buffer.resize_with(CAPACITY, MaybeUninit::uninit);
-            let base = NonNull::new(buffer.as_mut_ptr().cast::<Tracked<'l>>()).unwrap();
-            let anchor = if Dir::GROWS_UP {
-                base
-            } else {
-                // SAFETY: one past the end of the buffer.
-                unsafe { base.add(CAPACITY) }
-            };
-            // SAFETY: `CAPACITY` aligned slots of the buffer, which outlives
-            // `slots` and is not otherwise accessed.
-            let slots = unsafe { Slots::new(anchor, CAPACITY) };
+    /// `CAPACITY` slots, `spacing` elements apart, over a buffer of tracked
+    /// values they own, next to a model of which tracked value each slot
+    /// holds (`None`: nothing). With a spacing of 2, the element after each
+    /// slot is another field, as an entry's value is to its key, which
+    /// always holds a tracked value of its own: moving the slots must leave
+    /// those where they are.
+    struct ModelledSlots<'l> {
+        _buffer: Vec<MaybeUninit<Tracked<'l>>>,
+        base: NonNull<Tracked<'l>>,
+        slots: Slots<Tracked<'l>>,
+        spacing: usize,
+        model: Vec<Option<usize>>,
+        /// For a spacing of 2, the tracked value of the field after each
+        /// slot.
+        others: Vec<usize>,
+    }
+
+    impl<'l> ModelledSlots<'l> {
+        /// Slots `0..len` hold fresh tracked values, and so does every other
+        /// field.
+        fn with_len(ledger: &'l DropLedger, len: usize, spacing: usize) -> Self {
+            let (buffer, base) = buffer(CAPACITY * spacing);
+            let stride = spacing * size_of::<Tracked<'l>>();
+            // SAFETY: `CAPACITY` aligned slots of the buffer, `stride` apart,
+            // which outlives `slots`.
+            let slots = unsafe { Slots::with_stride(base, CAPACITY, stride) };
             let mut this = Self {
                 _buffer: buffer,
+                base,
                 slots,
+                spacing,
                 model: std::vec![None; CAPACITY],
+                others: Vec::new(),
             };
+            if spacing == 2 {
+                for index in 0..CAPACITY {
+                    let other = ledger.track();
+                    this.others.push(other.id());
+                    // SAFETY: the field is in the buffer, and empty.
+                    unsafe { this.other(index).write(other) };
+                }
+            }
             for index in 0..len {
                 let value = ledger.track();
                 this.model[index] = Some(value.id());
@@ -585,8 +839,16 @@ mod tests {
             this
         }
 
+        /// The field after slot `index`, for a spacing of 2.
+        fn other(&self, index: usize) -> NonNull<Tracked<'l>> {
+            debug_assert_eq!(self.spacing, 2);
+            // SAFETY: element `2 * index + 1` is in the buffer.
+            unsafe { self.base.add(2 * index + 1) }
+        }
+
         /// Checks every initialized slot against the model, through `slot`
-        /// and through `run` over the initialized prefix.
+        /// and, for slots side by side, through `run` over the initialized
+        /// prefix; and that every other field is where it was.
         fn assert_matches_model(&self) {
             for (index, expected) in self.model.iter().enumerate() {
                 if let Some(id) = expected {
@@ -594,18 +856,21 @@ mod tests {
                     assert_eq!(unsafe { self.slots.slot(index).as_ref() }.id(), *id);
                 }
             }
-            let len = self.model.iter().take_while(|id| id.is_some()).count();
-            // SAFETY: slots `0..len` are initialized.
-            let prefix = unsafe { self.slots.run(0, len).as_ref() };
-            let mut in_memory: Vec<usize> = prefix.iter().map(Tracked::id).collect();
-            if !Dir::GROWS_UP {
-                in_memory.reverse();
+            if self.spacing == 1 {
+                let len = self.model.iter().take_while(|id| id.is_some()).count();
+                // SAFETY: slots `0..len` are initialized, side by side.
+                let prefix = unsafe { self.slots.run(0, len).as_ref() };
+                let in_memory: Vec<usize> = prefix.iter().map(Tracked::id).collect();
+                let expected: Vec<usize> = self.model[..len].iter().flatten().copied().collect();
+                assert_eq!(in_memory, expected);
             }
-            let expected: Vec<usize> = self.model[..len].iter().flatten().copied().collect();
-            assert_eq!(in_memory, expected);
+            for (index, &id) in self.others.iter().enumerate() {
+                // SAFETY: every other field holds a tracked value.
+                assert_eq!(unsafe { self.other(index).as_ref() }.id(), id);
+            }
         }
 
-        /// Drops every initialized slot.
+        /// Drops every initialized slot and every other field.
         fn drop_all(mut self) {
             for (index, id) in self.model.iter_mut().enumerate() {
                 if id.take().is_some() {
@@ -614,67 +879,33 @@ mod tests {
                     unsafe { self.slots.slot(index).drop_in_place() };
                 }
             }
-        }
-    }
-
-    fn insert_at_every_index<Dir: Direction>() {
-        let ledger = DropLedger::new();
-        for len in 0..CAPACITY {
-            for index in 0..=len {
-                let mut slots = ModelledSlots::<Dir>::with_len(&ledger, len);
-                let value = ledger.track();
-                let id = value.id();
-                // SAFETY: `index <= len < CAPACITY`; slots `0..len` are
-                // initialized and slot `len` is empty.
-                unsafe { slots.slots.insert(index, len, value) };
-                slots.model.insert(index, Some(id));
-                slots.model.truncate(CAPACITY);
-                slots.assert_matches_model();
-                slots.drop_all();
+            for index in 0..self.others.len() {
+                // SAFETY: every other field holds a tracked value, dropped
+                // once here.
+                unsafe { self.other(index).drop_in_place() };
             }
         }
-        ledger.assert_all_dropped_once();
     }
 
-    fn remove_at_every_index<Dir: Direction>() {
-        let ledger = DropLedger::new();
-        for len in 1..=CAPACITY {
-            for index in 0..len {
-                let mut slots = ModelledSlots::<Dir>::with_len(&ledger, len);
-                // SAFETY: `index < len <= CAPACITY`; slots `0..len` are initialized.
-                let removed = unsafe { slots.slots.remove(index, len) };
-                assert_eq!(Some(removed.id()), slots.model.remove(index));
-                slots.model.push(None);
-                slots.assert_matches_model();
-                slots.drop_all();
-            }
-        }
-        ledger.assert_all_dropped_once();
-    }
+    /// Both spacings: slots side by side, and strided.
+    const SPACINGS: [usize; 2] = [1, 2];
 
-    /// Moves every run of a full array into every place of an empty one.
-    fn move_every_run<Dir: Direction>() {
+    #[test]
+    fn insert_at_every_index() {
         let ledger = DropLedger::new();
-        for start in 0..=CAPACITY {
-            for count in 0..=CAPACITY - start {
-                for dest_start in 0..=CAPACITY - count {
-                    let mut source = ModelledSlots::<Dir>::with_len(&ledger, CAPACITY);
-                    let mut dest = ModelledSlots::<Dir>::with_len(&ledger, 0);
-                    // SAFETY: both runs are in bounds, the source run is
-                    // initialized, the destination is empty, and the two
-                    // buffers are distinct.
-                    unsafe {
-                        source
-                            .slots
-                            .move_run_to(start, count, dest.slots, dest_start)
-                    };
-                    for offset in 0..count {
-                        dest.model[dest_start + offset] = source.model[start + offset].take();
-                    }
-                    source.assert_matches_model();
-                    dest.assert_matches_model();
-                    source.drop_all();
-                    dest.drop_all();
+        for spacing in SPACINGS {
+            for len in 0..CAPACITY {
+                for index in 0..=len {
+                    let mut slots = ModelledSlots::with_len(&ledger, len, spacing);
+                    let value = ledger.track();
+                    let id = value.id();
+                    // SAFETY: `index <= len < CAPACITY`; slots `0..len` are
+                    // initialized and slot `len` is empty.
+                    unsafe { slots.slots.insert(index, len, value) };
+                    slots.model.insert(index, Some(id));
+                    slots.model.truncate(CAPACITY);
+                    slots.assert_matches_model();
+                    slots.drop_all();
                 }
             }
         }
@@ -682,74 +913,217 @@ mod tests {
     }
 
     #[test]
-    fn insert_grows_up() {
-        insert_at_every_index::<Up>();
-    }
-
-    #[test]
-    fn insert_grows_down() {
-        insert_at_every_index::<Down>();
-    }
-
-    #[test]
-    fn remove_grows_up() {
-        remove_at_every_index::<Up>();
-    }
-
-    #[test]
-    fn remove_grows_down() {
-        remove_at_every_index::<Down>();
-    }
-
-    #[test]
-    fn move_run_grows_up() {
-        move_every_run::<Up>();
-    }
-
-    #[test]
-    fn move_run_grows_down() {
-        move_every_run::<Down>();
-    }
-
-    #[test]
-    fn down_slots_end_at_the_anchor() {
+    fn remove_at_every_index() {
         let ledger = DropLedger::new();
-        let slots = ModelledSlots::<Down>::with_len(&ledger, 2);
-        // SAFETY: indices are within capacity; no pointer is dereferenced.
-        let (slot_0, slot_1, anchor) = unsafe {
-            (
-                slots.slots.slot(0).addr().get(),
-                slots.slots.slot(1).addr().get(),
-                slots.slots.run(0, 0).cast::<Tracked<'_>>().addr().get(),
-            )
-        };
-        let size = size_of::<Tracked<'_>>();
-        assert_eq!(slot_0 + size, anchor);
-        assert_eq!(slot_1 + size, slot_0);
-        slots.drop_all();
+        for spacing in SPACINGS {
+            for len in 1..=CAPACITY {
+                for index in 0..len {
+                    let mut slots = ModelledSlots::with_len(&ledger, len, spacing);
+                    // SAFETY: `index < len <= CAPACITY`; slots `0..len` are
+                    // initialized.
+                    let removed = unsafe { slots.slots.remove(index, len) };
+                    assert_eq!(Some(removed.id()), slots.model.remove(index));
+                    slots.model.push(None);
+                    slots.assert_matches_model();
+                    slots.drop_all();
+                }
+            }
+        }
         ledger.assert_all_dropped_once();
     }
 
-    fn zero_sized_slots<Dir: Direction>() {
-        // SAFETY: zero-sized slots occupy no memory, so any aligned anchor works.
-        let slots = unsafe { Slots::<(), Dir>::new(NonNull::dangling(), CAPACITY) };
-        for len in 0..CAPACITY {
-            // SAFETY: `len < CAPACITY`; `()` is always initialized.
+    /// Moves every run of a full array into every place of an empty one,
+    /// between every pair of spacings.
+    #[test]
+    fn move_every_run() {
+        let ledger = DropLedger::new();
+        for (from, to) in [(1, 1), (2, 2), (1, 2), (2, 1)] {
+            for start in 0..=CAPACITY {
+                for count in 0..=CAPACITY - start {
+                    for dest_start in 0..=CAPACITY - count {
+                        let mut source = ModelledSlots::with_len(&ledger, CAPACITY, from);
+                        let mut dest = ModelledSlots::with_len(&ledger, 0, to);
+                        // SAFETY: both runs are in bounds, the source run is
+                        // initialized, the destination is empty, and the two
+                        // buffers are distinct.
+                        unsafe {
+                            source
+                                .slots
+                                .move_run_to(start, count, dest.slots, dest_start);
+                        };
+                        for offset in 0..count {
+                            dest.model[dest_start + offset] = source.model[start + offset].take();
+                        }
+                        source.assert_matches_model();
+                        dest.assert_matches_model();
+                        source.drop_all();
+                        dest.drop_all();
+                    }
+                }
+            }
+        }
+        ledger.assert_all_dropped_once();
+    }
+
+    /// `CAPACITY` entries of two tracked values each, a key and what pairs
+    /// with it, over a buffer they own, the keys as slots an entry apart;
+    /// entries `0..len` are initialized.
+    struct ModelledEntries<'l> {
+        _buffer: Vec<MaybeUninit<Tracked<'l>>>,
+        base: NonNull<Tracked<'l>>,
+        keys: Slots<Tracked<'l>>,
+        /// The ids of each entry's key and other field, `None` if empty.
+        model: Vec<Option<(usize, usize)>>,
+    }
+
+    impl<'l> ModelledEntries<'l> {
+        fn with_len(ledger: &'l DropLedger, len: usize) -> Self {
+            let (buffer, base) = buffer(2 * CAPACITY);
+            // SAFETY: the keys, every other element of the buffer, which
+            // outlives them.
+            let keys = unsafe { Slots::with_stride(base, CAPACITY, 2 * size_of::<Tracked<'l>>()) };
+            let mut this = Self {
+                _buffer: buffer,
+                base,
+                keys,
+                model: std::vec![None; CAPACITY],
+            };
+            for index in 0..len {
+                this.write(index, ledger.track(), ledger.track());
+            }
+            this
+        }
+
+        /// The key and the other field of entry `index`.
+        fn fields(&self, index: usize) -> (NonNull<Tracked<'l>>, NonNull<Tracked<'l>>) {
+            // SAFETY: elements `2 * index` and `2 * index + 1` are in the
+            // buffer.
+            unsafe { (self.base.add(2 * index), self.base.add(2 * index + 1)) }
+        }
+
+        /// Writes entry `index`, which holds nothing.
+        fn write(&mut self, index: usize, key: Tracked<'l>, other: Tracked<'l>) {
+            self.model[index] = Some((key.id(), other.id()));
+            let (key_field, other_field) = self.fields(index);
+            // SAFETY: both fields are in the buffer, and empty.
             unsafe {
-                slots.insert(0, len, ());
-                assert_eq!(slots.run(0, len + 1).len(), len + 1);
-                slots.remove(len, len + 1);
+                key_field.write(key);
+                other_field.write(other);
+            }
+        }
+
+        /// Reads entry `index` out, which then holds nothing.
+        fn read(&mut self, index: usize) -> (Tracked<'l>, Tracked<'l>) {
+            self.model[index] = None;
+            let (key_field, other_field) = self.fields(index);
+            // SAFETY: the entry is initialized, and read out once.
+            unsafe { (key_field.read(), other_field.read()) }
+        }
+
+        fn assert_matches_model(&self) {
+            for (index, expected) in self.model.iter().enumerate() {
+                if let Some((key, other)) = expected {
+                    let (_, other_field) = self.fields(index);
+                    // SAFETY: the model says the entry is initialized.
+                    unsafe {
+                        assert_eq!(self.keys.slot(index).as_ref().id(), *key);
+                        assert_eq!(other_field.as_ref().id(), *other);
+                    }
+                }
+            }
+        }
+
+        fn drop_all(mut self) {
+            for index in 0..CAPACITY {
+                if self.model[index].is_some() {
+                    drop(self.read(index));
+                }
             }
         }
     }
 
+    /// Shifting the keys' strides moves whole entries: a key and what pairs
+    /// with it go together.
     #[test]
-    fn zero_sized_slots_grow_up() {
-        zero_sized_slots::<Up>();
+    fn shifting_strides_moves_whole_entries() {
+        let ledger = DropLedger::new();
+        for len in 0..CAPACITY {
+            for index in 0..=len {
+                let mut entries = ModelledEntries::with_len(&ledger, len);
+                // SAFETY: `index <= len < CAPACITY`, the strides of keys
+                // `0..CAPACITY` lie in the buffer, entries `index..len` are
+                // initialized and entry `len` holds nothing.
+                unsafe { entries.keys.shift_strides_up(index, len) };
+                entries.model.insert(index, None);
+                entries.model.truncate(CAPACITY);
+                entries.write(index, ledger.track(), ledger.track());
+                entries.assert_matches_model();
+                entries.drop_all();
+            }
+        }
+        for len in 1..=CAPACITY {
+            for index in 0..len {
+                let mut entries = ModelledEntries::with_len(&ledger, len);
+                drop(entries.read(index));
+                // SAFETY: `index < len <= CAPACITY`, the strides of keys
+                // `0..CAPACITY` lie in the buffer, entries `index + 1..len`
+                // are initialized and entry `index` holds nothing.
+                unsafe { entries.keys.shift_strides_down(index, len) };
+                entries.model.remove(index);
+                entries.model.push(None);
+                entries.assert_matches_model();
+                entries.drop_all();
+            }
+        }
+        ledger.assert_all_dropped_once();
     }
 
     #[test]
-    fn zero_sized_slots_grow_down() {
-        zero_sized_slots::<Down>();
+    fn node_keys_lend_strided_keys() {
+        let ledger = DropLedger::new();
+        let entries = ModelledEntries::with_len(&ledger, 4);
+        let ids: Vec<usize> = entries
+            .model
+            .iter()
+            .flatten()
+            .map(|&(key, _)| key)
+            .collect();
+        // SAFETY: keys `0..4` are initialized and unchanged while the keys
+        // are lent, and their strides lie in the buffer.
+        let keys = unsafe { NodeKeys::new(entries.keys, 4) };
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys.iter().map(Tracked::id).collect::<Vec<_>>(), ids);
+        assert_eq!(keys.first().map(Tracked::id), Some(ids[0]));
+        assert_eq!(keys[3].id(), ids[3]);
+        assert!(keys.get(4).is_none());
+        let middle = keys.slice(1..3);
+        assert_eq!(
+            middle.iter().map(Tracked::id).collect::<Vec<_>>(),
+            ids[1..3]
+        );
+        assert_eq!(keys.slice(4..4).len(), 0);
+        entries.drop_all();
+        ledger.assert_all_dropped_once();
+    }
+
+    #[test]
+    fn zero_sized_slots() {
+        // Strided zero-sized slots, as the keys of a node of `((), V)`
+        // entries are, sit in a buffer of their stride; side by side, they
+        // occupy no memory.
+        let mut strides = [0_u64; CAPACITY];
+        let anchor = NonNull::from(&mut strides).cast::<()>();
+        for stride in [0, size_of::<u64>()] {
+            // SAFETY: the slots, of no size, lie in `strides`, which outlives
+            // them, at either stride.
+            let slots = unsafe { Slots::with_stride(anchor, CAPACITY, stride) };
+            for len in 0..CAPACITY {
+                // SAFETY: `len < CAPACITY`; `()` is always initialized.
+                unsafe {
+                    slots.insert(0, len, ());
+                    slots.remove(len, len + 1);
+                }
+            }
+        }
     }
 }

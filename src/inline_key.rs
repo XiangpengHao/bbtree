@@ -7,9 +7,9 @@
 //!   strings and the 64- and 128-bit integers implement it.
 //! - [`InlineWidth`] is how many bytes of each inline key the nodes keep.
 //! - The map's strategy parameter, [`InlineKeyStrategy`], decides which keys
-//!   have them: with [`Auto`], the default, std byte strings do, recognized
-//!   by their type; with [`WithInlineKey`], every key does, through its
-//!   [`InlineKey`] impl.
+//!   have them: with [`Auto`], the default, std byte strings and the 64- and
+//!   128-bit integers do, recognized by their type; with [`WithInlineKey`],
+//!   every key does, through its [`InlineKey`] impl.
 
 #![forbid(unsafe_code)]
 
@@ -76,8 +76,8 @@ impl InlineWidth {
 /// string as the integer's big-endian bytes followed by the string's.
 ///
 /// Implementing it is not enough for a map to use it: the map also needs the
-/// [`WithInlineKey`] strategy. Std byte strings get inline keys by default
-/// ([`Auto`]).
+/// [`WithInlineKey`] strategy. Std byte strings and the 64- and 128-bit
+/// integers get inline keys by default ([`Auto`]).
 ///
 /// A wrong implementation, like a wrong `Ord`, gives wrong answers but never
 /// undefined behavior: whatever it returns, the map reads only its own
@@ -239,15 +239,17 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
     }
 }
 
-/// The default strategy: std byte-string keys have inline keys, other keys
-/// have none, at no cost.
+/// The default strategy: std byte-string and integer keys have inline keys,
+/// other keys have none, at no cost.
 ///
-/// The key types recognized are `String`, `str`, `Vec<u8>`, `[u8]`,
-/// `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`, `[u8; 20]` and
-/// `[u8; 32]`, by their type alone: a newtype around one of them is another
-/// type, and needs [`WithInlineKey`]. A lookup uses the inline keys when the
-/// type it looks up with is recognized too, as `&str` is for `String` keys;
-/// otherwise it compares full keys, as a map without inline keys does.
+/// The key types recognized are the byte strings `String`, `str`,
+/// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,
+/// `[u8; 20]` and `[u8; 32]`, and the integers `u64`, `i64`, `u128` and
+/// `i128`, through their [`InlineKey`] impls, by their type alone: a newtype
+/// around one of them is another type, and needs [`WithInlineKey`]. A lookup
+/// uses the inline keys when the type it looks up with is recognized too, as
+/// `&str` is for `String` keys; otherwise it compares full keys, as a map
+/// without inline keys does.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Auto;
 
@@ -280,9 +282,10 @@ pub(crate) mod sealed {
     /// resolves it for a key type (`node/inline_keys.rs`), and page layouts
     /// depend on the answer.
     pub enum InlineKeySource<K> {
-        /// Std byte strings, recognized by their type, have windows of their
-        /// bytes as inline keys; other keys have none ([`Auto`]).
-        StdByteStrings,
+        /// Std byte strings and integers, recognized by their type, have
+        /// inline keys: windows of a byte string's bytes, and an integer's
+        /// own [`InlineKey`] impl. Other keys have none ([`Auto`]).
+        RecognizedStdTypes,
         /// Every key has the inline keys its [`InlineKey`] impl gives, of
         /// which the nodes keep `width` bytes ([`WithInlineKey`]).
         InlineKeyTrait {
@@ -296,7 +299,7 @@ pub(crate) mod sealed {
     }
 
     impl<K> Sealed<K> for Auto {
-        const SOURCE: InlineKeySource<K> = InlineKeySource::StdByteStrings;
+        const SOURCE: InlineKeySource<K> = InlineKeySource::RecognizedStdTypes;
     }
 
     impl<K: InlineKey> Sealed<K> for WithInlineKey {

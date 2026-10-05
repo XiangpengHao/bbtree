@@ -123,12 +123,15 @@ mod tests {
             assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
             let mut leaf = Subtree::new_leaf(pages.fresh());
             let key = |number: usize| format!("{prefix}{number:0width$}");
-            let keys: Vec<String> = (0..25).map(|number| key(number * 2)).collect();
+            // A full leaf of every other number, probed with every number
+            // from below its first key to past its last.
+            let capacity = NodePtr::<String, u64, Auto>::capacity::<Leaf>();
+            let keys: Vec<String> = (0..capacity).map(|number| key(number * 2)).collect();
             for (number, key) in keys.iter().enumerate() {
                 push_back(leaf.borrow_mut(), key.clone(), number as u64);
             }
             leaf.borrow().assert_inline_keys_match();
-            for probe in (0..53).map(key) {
+            for probe in (0..2 * capacity + 3).map(key) {
                 let expected = keys.binary_search(&probe);
                 assert_eq!(search_position(leaf.borrow(), probe.as_str()), expected);
                 assert_eq!(search_position(leaf.borrow(), &probe), expected);
@@ -219,12 +222,7 @@ mod tests {
         let searches = if cfg!(miri) { 60 } else { 1000 };
         for _ in 0..searches {
             let probe = Chaotic::new(&rng);
-            let found = if rng.below(2) == 0 {
-                leaf.borrow_mut().search(&SearchKey::new(&probe))
-            } else {
-                leaf.borrow_mut()
-                    .search_expecting_append(&SearchKey::new(&probe))
-            };
+            let found = leaf.borrow_mut().search(&SearchKey::new(&probe));
             let edge = match found {
                 SearchResult::Found(kv) => {
                     assert!(kv.index() < kv.reborrow().into_node().len());
@@ -590,7 +588,7 @@ mod tests {
 
     #[test]
     fn checked_positions_reject_out_of_bounds_indices() {
-        let pages = TestPages::<u64, u64>::new();
+        let pages = TestPages::<u32, u64>::new();
         let mut leaf = Subtree::new_leaf(pages.fresh());
         assert!(leaf.borrow().first_kv().is_none());
         assert!(leaf.borrow().last_kv().is_none());
@@ -601,7 +599,10 @@ mod tests {
         assert!(catch_unwind(AssertUnwindSafe(|| leaf.borrow_mut().kv_at(2).index())).is_err());
         assert!(leaf.borrow().first_edge().left_kv().is_err());
         assert!(leaf.borrow().last_edge().right_kv().is_err());
-        assert_eq!(leaf.borrow().keys(), &[1, 2]);
+        assert_eq!(
+            leaf.borrow().keys().iter().copied().collect::<Vec<_>>(),
+            [1, 2]
+        );
         assert!(leaf.borrow().inline_keys().is_none());
         leaf.destroy(|page| pages.release(page));
         pages.assert_all_released();

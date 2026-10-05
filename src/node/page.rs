@@ -12,10 +12,10 @@ use core::ptr::NonNull;
 use super::handle::{ForceResult, Internal, Leaf, NodeKind};
 use super::inline_keys::KeyInliner;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
-use super::slots::{Down, InlineKeySlots, KeySlots, Slots, Up};
+use super::slots::{InlineKeySlots, KeySlots, Slots};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
-pub(super) use type_identity::{ByteString, SameType};
+pub(super) use type_identity::{ByteString, SameType, StdInteger};
 
 /// A node kind that pages are allocated for, known at compile time: [`Leaf`]
 /// or [`Internal`]. Each kind has a page layout of its own (D21), and a page
@@ -354,6 +354,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         Self::key_area::<Kind>().capacity
     }
 
+    /// Whether a node of kind `Kind` pairs its keys with its trailing slots
+    /// in entries (D29), which then move whole: in a node with inline keys,
+    /// unless the trailing slots take no room, which leaves the keys side by
+    /// side.
+    pub(super) fn has_paired_entries<Kind: PageKind>() -> bool {
+        Self::key_area::<Kind>().key_stride != size_of::<K>()
+    }
+
     /// Turns a fresh page into an empty node of the page's kind: no keys
     /// and, for a leaf, no head. An internal node still needs its first edge
     /// written.
@@ -442,9 +450,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         unsafe { (*self.header()).len = len }
     }
 
-    /// The key slots, `capacity` of them growing up from the keys' offset,
-    /// and in a node with inline keys, as many inline-key slots growing up
-    /// from theirs (D18), at the node's prefix length.
+    /// The key slots, `capacity` of them from the keys' offset, a key or an
+    /// entry apart (D29), and in a node with inline keys, as many inline-key
+    /// slots from theirs (D18), at the node's prefix length.
     ///
     /// # Safety
     ///
@@ -454,13 +462,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         let area = Self::key_area::<Kind>();
         // SAFETY: forwarded.
         let prefix_len = unsafe { self.prefix_len() }.unwrap_or(0);
-        // SAFETY: the keys' offset is aligned for `K`, the inline keys' for
-        // inline keys of any width, and `capacity` of each from there stay
-        // within a page of the node's kind, `Kind`, and clear of each other
-        // (layout invariants); the inline keys are of the width the layout
-        // was made for; the page is allocated (caller).
+        // SAFETY: the keys' offset is aligned for `K`, and so is their
+        // stride, the inline keys' offset for inline keys of any width, and
+        // `capacity` of each from there stay within a page of the node's
+        // kind, `Kind`, and clear of each other (layout invariants); the
+        // inline keys are of the width the layout was made for; the page is
+        // allocated (caller).
         unsafe {
-            let keys = Slots::new(self.page.byte_add(area.keys_offset).cast(), area.capacity);
+            let keys = Slots::with_stride(
+                self.page.byte_add(area.keys_offset).cast(),
+                area.capacity,
+                area.key_stride,
+            );
             let inline_keys = Option::zip(Self::inline_width(), area.inline_keys_offset).map(
                 |(width, offset)| {
                     InlineKeySlots::new(width, self.page.byte_add(offset), area.capacity)
@@ -470,65 +483,71 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         }
     }
 
-    /// A leaf's value slots: `capacity` of them, growing down from the head
-    /// (D17). They are [`Self::head_and_value_slots`] without the head:
+    /// A leaf's value slots: `capacity` of them, value `i` beside key `i`
+    /// (D29). They are [`Self::head_and_value_slots`] without the head:
     /// value slot `i` is head-and-value slot `i + 1`.
     ///
     /// # Safety
     ///
     /// The node is a leaf that has not been released.
-    pub(super) unsafe fn value_slots(self) -> Slots<V, Down> {
+    pub(super) unsafe fn value_slots(self) -> Slots<V> {
         let layout = Self::leaf_layout();
-        // SAFETY: the page is a leaf's (caller), of this layout. Its head
-        // offset is aligned for `V`, and `capacity` values below it stay
+        // SAFETY: the page is a leaf's (caller), of this layout. Value 0 is
+        // a stride past the head, both aligned for `V`, and so is the
+        // stride, and `capacity` values from there stay in the page and
         // clear of the keys (layout invariants); the page is allocated
         // (caller).
         unsafe {
-            Slots::new(
-                self.page.byte_add(layout.head_offset).cast(),
+            Slots::with_stride(
+                self.page
+                    .byte_add(layout.head_offset + layout.value_stride)
+                    .cast(),
                 layout.keys.capacity,
+                layout.value_stride,
             )
         }
     }
 
-    /// A leaf's head and value slots as one array: `capacity + 1` slots
-    /// growing down from the end of the node, slot 0 the head and slot
-    /// `i + 1` value `i` (D17). Moves that carry a head along with values use
-    /// it.
+    /// A leaf's head and value slots as one array, its trailing slots:
+    /// `capacity + 1` of them, slot 0 the head and slot `i + 1` value `i`
+    /// (D17). Moves that carry a head along with values use it.
     ///
     /// # Safety
     ///
     /// The node is a leaf that has not been released.
-    pub(super) unsafe fn head_and_value_slots(self) -> Slots<V, Down> {
+    pub(super) unsafe fn head_and_value_slots(self) -> Slots<V> {
         let layout = Self::leaf_layout();
-        // SAFETY: the page is a leaf's (caller), of this layout, so its end
-        // is aligned for `V`, and the head and `capacity` values below it
-        // stay clear of the keys (layout invariants); the page is allocated
-        // (caller).
+        // SAFETY: the page is a leaf's (caller), of this layout: the head
+        // and `capacity` values after it, a stride apart, are aligned for
+        // `V`, in the page and clear of the keys (layout invariants); the
+        // page is allocated (caller).
         unsafe {
-            Slots::new(
-                self.page.byte_add(layout.page.size()).cast(),
+            Slots::with_stride(
+                self.page.byte_add(layout.head_offset).cast(),
                 layout.keys.capacity + 1,
+                layout.value_stride,
             )
         }
     }
 
-    /// The `capacity + 1` edge slots of an internal node, growing up from
-    /// the edges' offset to the end of the node (D12).
+    /// The `capacity + 1` edge slots of an internal node, its trailing
+    /// slots: edge `i + 1` beside key `i` (D12, D29).
     ///
     /// # Safety
     ///
     /// The node is an internal node that has not been released.
-    pub(super) unsafe fn edge_slots(self) -> Slots<Self, Up> {
+    pub(super) unsafe fn edge_slots(self) -> Slots<Self> {
         let layout = Self::internal_layout();
         // SAFETY: the page is an internal node's (caller), of this layout.
-        // The edges' offset is aligned for an edge, a `NodePtr` whatever the
-        // strategy, and the `capacity + 1` edges end exactly at the end of
-        // the page (layout invariants); the page is allocated (caller).
+        // The edges' offset and stride are aligned for an edge, a `NodePtr`
+        // whatever the strategy, and the `capacity + 1` edges stay in the
+        // page and clear of the keys (layout invariants); the page is
+        // allocated (caller).
         unsafe {
-            Slots::new(
+            Slots::with_stride(
                 self.page.byte_add(layout.edges_offset).cast(),
                 layout.keys.capacity + 1,
+                layout.edge_stride,
             )
         }
     }
@@ -536,7 +555,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
 /// Lifetime-erased type identity, and the views of a value that it proves
 /// sound: how [`Auto`] recognizes std byte strings and reads their bytes,
-/// and how [`WithInlineKey`] uses a lookup key as a key (D18).
+/// how it recognizes std integers and uses their [`InlineKey`] impls, and
+/// how [`WithInlineKey`] uses a lookup key as a key (D18, D31).
+///
+/// [`InlineKey`]: crate::InlineKey
 ///
 /// [`Auto`]: crate::Auto
 /// [`WithInlineKey`]: crate::WithInlineKey
@@ -548,6 +570,8 @@ mod type_identity {
     use core::borrow::Borrow;
     use core::marker::PhantomData;
     use core::{mem, ptr, slice};
+
+    use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
 
     /// A type's identity with its lifetimes erased: `&'a str` and
     /// `&'static str` have the same one. `TypeId::of` needs `'static` types,
@@ -695,6 +719,80 @@ mod type_identity {
                     ByteStringType::BytesRef => *value.cast::<&'v [u8]>(),
                 }
             }
+        }
+    }
+
+    /// Proof that `T` is one of the std integer types that [`Auto`] gives
+    /// inline keys, `u64`, `i64`, `u128` or `i128`, with that type's
+    /// [`InlineKey`] impl as one for `T`.
+    ///
+    /// [`Auto`]: crate::Auto
+    pub(in crate::node) struct StdInteger<T> {
+        inline_key_at: fn(&T, usize) -> InlineWord,
+        width: InlineWidth,
+    }
+
+    impl<T> Clone for StdInteger<T> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+
+    impl<T> Copy for StdInteger<T> {}
+
+    impl<T> StdInteger<T> {
+        /// The proof, if `T` is `u64`, `i64`, `u128` or `i128`. Folds to a
+        /// constant after monomorphization.
+        #[inline(always)]
+        pub(in crate::node) fn recognize() -> Option<Self> {
+            // SAFETY: each arm passes the type that `T` was just found to be;
+            // integers have no lifetimes to erase.
+            unsafe {
+                if ErasedTypeId::is::<T, u64>() {
+                    Some(Self::of::<u64>())
+                } else if ErasedTypeId::is::<T, i64>() {
+                    Some(Self::of::<i64>())
+                } else if ErasedTypeId::is::<T, u128>() {
+                    Some(Self::of::<u128>())
+                } else if ErasedTypeId::is::<T, i128>() {
+                    Some(Self::of::<i128>())
+                } else {
+                    None
+                }
+            }
+        }
+
+        /// `Integer`'s impl, as one for `T`.
+        ///
+        /// # Safety
+        ///
+        /// `T` is `Integer`.
+        #[inline(always)]
+        unsafe fn of<Integer: InlineKey>() -> Self {
+            let inline_key_at: fn(&Integer, usize) -> InlineWord = Integer::inline_key_at;
+            // SAFETY: `T` is `Integer` (the caller's promise), so the two
+            // function pointer types are one type.
+            let inline_key_at = unsafe {
+                mem::transmute::<fn(&Integer, usize) -> InlineWord, fn(&T, usize) -> InlineWord>(
+                    inline_key_at,
+                )
+            };
+            Self {
+                inline_key_at,
+                width: Integer::WIDTH,
+            }
+        }
+
+        /// The integer's [`InlineKey::inline_key_at`].
+        #[inline(always)]
+        pub(in crate::node) fn inline_key_at(self) -> fn(&T, usize) -> InlineWord {
+            self.inline_key_at
+        }
+
+        /// The integer's [`InlineKey::WIDTH`].
+        #[inline(always)]
+        pub(in crate::node) fn width(self) -> InlineWidth {
+            self.width
         }
     }
 
@@ -866,11 +964,12 @@ mod tests {
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWord, WithInlineKey};
     use crate::node::handle::{Internal, Leaf};
     use crate::node::layout::NodeLayout;
-    use crate::node::slots::{Direction, InlineKeySlots, Slots};
+    use crate::node::slots::{InlineKeySlots, Slots};
     use crate::node::test_support::{CacheLineAligned, PageAligned, Tracked};
 
-    /// The bytes `[start, end)` that an array of slots occupies.
-    struct SlotRange(Range<usize>);
+    /// The bytes `[start, end)` that an array of slots spans, and those of
+    /// each of its slots, which may lie a stride apart (D29).
+    struct SlotRange(Range<usize>, Vec<Range<usize>>);
 
     impl SlotRange {
         /// The bytes of the page of `node`, a node of kind `Kind`, checked to
@@ -885,16 +984,18 @@ mod tests {
         }
 
         /// The bytes of all `capacity` slots, each checked to be aligned.
-        fn of<T, Dir: Direction>(slots: Slots<T, Dir>, capacity: usize) -> Self {
-            for index in 0..capacity {
-                // SAFETY: `index < capacity`; nothing is dereferenced.
-                let slot = unsafe { slots.slot(index) };
-                assert!(slot.addr().get().is_multiple_of(align_of::<T>()));
-            }
-            // SAFETY: `capacity` is the slots' own capacity; nothing is
-            // dereferenced.
-            let start = unsafe { slots.run(0, capacity) }.cast::<T>().addr().get();
-            Self(start..start + capacity * size_of::<T>())
+        fn of<T>(slots: Slots<T>, capacity: usize) -> Self {
+            let each: Vec<Range<usize>> = (0..capacity)
+                .map(|index| {
+                    // SAFETY: `index < capacity`; nothing is dereferenced.
+                    let start = unsafe { slots.slot(index) }.addr().get();
+                    assert!(start.is_multiple_of(align_of::<T>()));
+                    start..start + size_of::<T>()
+                })
+                .collect();
+            let start = each.iter().map(|slot| slot.start).min().unwrap();
+            let end = each.iter().map(|slot| slot.end).max().unwrap();
+            Self(start..end, each)
         }
 
         /// The bytes of all `capacity` inline-key slots, at their width.
@@ -910,16 +1011,21 @@ mod tests {
             assert!(page.start <= self.0.start && self.0.end <= page.end);
         }
 
+        /// Checks that no slot of `self` overlaps one of `other`.
         fn assert_disjoint(&self, other: &Self) {
-            assert!(self.0.end <= other.0.start || other.0.end <= self.0.start);
+            for a in &self.1 {
+                for b in &other.1 {
+                    assert!(a.end <= b.start || b.end <= a.start);
+                }
+            }
         }
     }
 
     /// Checks the slot arrays of both node kinds, each in a page of its own
-    /// kind: inside the page, aligned, after the header, and pairwise
-    /// disjoint, with a leaf's head the last `V` of its page and its values
-    /// right below it (D17), an internal node's edges at the end of its page,
-    /// and without inline keys, the keys at the same offset in both kinds.
+    /// kind: inside the page, aligned, after the header, and no slot over
+    /// another, with a leaf's values its head-and-value slots past the head
+    /// (D17), and without inline keys, the keys at the same offset in both
+    /// kinds.
     fn assert_slots_are_aligned_and_disjoint<K, V, S: InlineKeyStrategy<K>>() {
         let pages = TestPages::<K, V, S>::new();
         let leaf = NodePtr::from_fresh_page(pages.fresh::<Leaf>());
@@ -964,13 +1070,8 @@ mod tests {
         }
         let keys_offset = leaf_keys.0.start - leaf_page.start;
         assert!(size_of::<NodeHeader>() <= keys_offset);
-        assert_eq!(head_and_values.0.end, leaf_page.end);
-        assert_eq!(
-            values.0,
-            head_and_values.0.start..head_and_values.0.end - size_of::<V>()
-        );
+        assert_eq!(values.1, head_and_values.1[1..]);
         leaf_keys.assert_disjoint(&head_and_values);
-        assert_eq!(edges.0.end, internal_page.end);
         internal_keys.assert_disjoint(&edges);
         match (leaf_inline_keys, internal_inline_keys) {
             (None, None) => {
@@ -1022,24 +1123,25 @@ mod tests {
         assert_slots_are_aligned_and_disjoint::<i128, CacheLineAligned, WithInlineKey>();
     }
 
-    /// Zero overhead without inline keys (D18): `u64` → `u64` keeps the
-    /// layout it had before inline keys, and std byte-string keys get the
-    /// layout with them.
+    /// Zero overhead without inline keys (D18): an 8-byte key that `Auto`
+    /// doesn't recognize, `[u64; 1]`, keeps the layout `u64` → `u64` had
+    /// before inline keys; std byte strings and integers get the layout
+    /// with them.
     #[test]
     fn only_inline_keys_change_the_layout() {
-        assert!(!NodePtr::<u64, u64, Auto>::has_inline_keys());
+        assert!(!NodePtr::<[u64; 1], u64, Auto>::has_inline_keys());
         assert_eq!(
-            NodePtr::<u64, u64, Auto>::leaf_layout(),
-            NodeLayout::<u64, u64>::PLAIN_LEAF
+            NodePtr::<[u64; 1], u64, Auto>::leaf_layout(),
+            NodeLayout::<[u64; 1], u64>::PLAIN_LEAF
         );
         assert_eq!(
-            NodePtr::<u64, u64, Auto>::internal_layout(),
-            NodeLayout::<u64, u64>::PLAIN_INTERNAL
+            NodePtr::<[u64; 1], u64, Auto>::internal_layout(),
+            NodeLayout::<[u64; 1], u64>::PLAIN_INTERNAL
         );
-        // The numbers from before inline keys: 1 KB, 63 keys at offset 8,
-        // the head at 1016, the edges at 1024 − 64·8 = 512.
-        let leaf = NodePtr::<u64, u64, Auto>::leaf_layout();
-        let internal = NodePtr::<u64, u64, Auto>::internal_layout();
+        // 1 KB, 63 keys at offset 8, as before inline keys, and the head, or
+        // the edges, right after them, at 8 + 63·8 = 512.
+        let leaf = NodePtr::<[u64; 1], u64, Auto>::leaf_layout();
+        let internal = NodePtr::<[u64; 1], u64, Auto>::internal_layout();
         assert_eq!((leaf.page.size(), leaf.page.align()), (1024, 1024));
         assert_eq!((internal.page.size(), internal.page.align()), (1024, 1024));
         assert_eq!(leaf.keys, internal.keys);
@@ -1051,7 +1153,7 @@ mod tests {
             ),
             (63, 8, None)
         );
-        assert_eq!((leaf.head_offset, internal.edges_offset), (1016, 512));
+        assert_eq!((leaf.head_offset, internal.edges_offset), (512, 512));
         assert_eq!(size_of::<NodeHeader>(), 4);
 
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
@@ -1066,8 +1168,13 @@ mod tests {
         assert!(NodePtr::<Tracked<'_>, u64, WithInlineKey>::has_inline_keys());
         assert!(!NodePtr::<Tracked<'_>, u64, Auto>::has_inline_keys());
 
-        // Integers opt in, with two-byte inline keys.
-        assert!(!NodePtr::<i64, u64, Auto>::has_inline_keys());
+        // Integers have two-byte inline keys, under `Auto` as under
+        // `WithInlineKey`.
+        assert!(NodePtr::<i64, u64, Auto>::has_inline_keys());
+        assert_eq!(
+            NodePtr::<u64, u64, Auto>::leaf_layout(),
+            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
+        );
         assert_eq!(
             NodePtr::<u64, u64, WithInlineKey>::leaf_layout(),
             NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
@@ -1080,7 +1187,7 @@ mod tests {
 
     #[test]
     fn a_new_node_is_empty() {
-        let pages = TestPages::<u64, u64>::new();
+        let pages = TestPages::<u32, u64>::new();
         let node = NodePtr::from_fresh_page(pages.fresh::<Leaf>());
         // SAFETY: the page is allocated and holds a node.
         assert_eq!(unsafe { (node.len(), node.has_head()) }, (0, false));

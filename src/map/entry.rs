@@ -550,7 +550,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             });
         }
         let mut path = PathMut::new(root.as_mut().expect("checked just above"));
-        if path.search_expecting_append(&SearchKey::new(&key)) {
+        if path.search(&SearchKey::new(&key)) {
             Entry::Occupied(OccupiedEntry { length, path })
         } else {
             Entry::Vacant(VacantEntry {

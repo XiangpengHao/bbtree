@@ -55,7 +55,8 @@ use core::ops::Range;
 
 use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, KeyInliner, SearchKey, Window};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
-use super::slots::{Down, InlineKeySlots, KeySlots, Slots, Up};
+pub(crate) use super::slots::NodeKeys;
+use super::slots::{InlineKeySlots, KeySlots, Slots};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// Node kind: a leaf, at height 0.
@@ -520,7 +521,12 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         Q: Ord + ?Sized,
     {
         self.prefetch_search_area();
-        self.search_prefetched(key)
+        match self.search_index(key) {
+            // SAFETY: `search_index` returns `Ok(index)` with `index < len`.
+            Ok(index) => SearchResult::Found(unsafe { Kv::new_unchecked(self, index) }),
+            // SAFETY: `search_index` returns `Err(index)` with `index <= len`.
+            Err(index) => SearchResult::GoDown(unsafe { Edge::new_unchecked(self, index) }),
+        }
     }
 
     /// `key`'s inline key at this node's prefix length, if the node has
@@ -541,67 +547,6 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         } else {
             None
         }
-    }
-
-    /// [`Self::search`] once [`Self::prefetch_search_area`] has run.
-    fn search_prefetched<Q>(self, key: &SearchKey<'_, K, S, Q>) -> SearchResult<Self>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        match self.search_index(key) {
-            // SAFETY: `search_index` returns `Ok(index)` with `index < len`.
-            Ok(index) => SearchResult::Found(unsafe { Kv::new_unchecked(self, index) }),
-            // SAFETY: `search_index` returns `Err(index)` with `index <= len`.
-            Err(index) => SearchResult::GoDown(unsafe { Edge::new_unchecked(self, index) }),
-        }
-    }
-
-    /// [`Self::search`] with an append fast path for inserts: a key greater
-    /// than the node's last key goes straight to the last edge.
-    ///
-    /// Branchless search pays a chain of dependent loads even when keys
-    /// arrive in order, which a branchy search would predict perfectly. The
-    /// one comparison against the last key is a well-predicted branch for
-    /// ascending inserts, and an independent load (no extra dependency) for
-    /// random ones. With inline keys, it compares the last inline key, and
-    /// the last key only if they tie.
-    pub(crate) fn search_expecting_append<Q>(
-        self,
-        key: &SearchKey<'_, K, S, Q>,
-    ) -> SearchResult<Self>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.prefetch_search_area();
-        let len = self.len();
-        if len > 0 && self.is_after_last_key(key, len) {
-            // SAFETY: `len <= len`.
-            return SearchResult::GoDown(unsafe { Edge::new_unchecked(self, len) });
-        }
-        self.search_prefetched(key)
-    }
-
-    /// Whether `key` is greater than the last of the node's `len > 0` keys.
-    /// Inline keys that differ tell without reading the key (D18), and tied
-    /// ones compare as a search's do ([`SearchKey::cmp_tied`]).
-    fn is_after_last_key<Q>(&self, key: &SearchKey<'_, K, S, Q>, len: usize) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        // SAFETY: `len - 1 < len`.
-        let last_key = unsafe { self.reborrow().keys().get_unchecked(len - 1) };
-        if let Some(inline_keys) = self.reborrow().inline_keys()
-            && let Some(target) = self.inline_target(key)
-        {
-            return match inline_keys.cmp_at(len - 1, target.inline_key()) {
-                Ordering::Equal => key.cmp_tied(target, last_key).is_gt(),
-                unequal => unequal.is_lt(),
-            };
-        }
-        last_key.borrow() < key.key()
     }
 
     /// Starts loading every cache line a search of the node may read, up to
@@ -626,7 +571,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
             const CACHE_LINE_SIZE: usize = 64;
             let area = NodePtr::<K, V, S>::key_area::<Kind>();
             let start = area.inline_keys_offset.unwrap_or(area.keys_offset);
-            let end = area.keys_offset + area.capacity * mem::size_of::<K>();
+            let end = area.keys_offset + area.capacity * area.key_stride;
             let first_line = start - start % CACHE_LINE_SIZE;
             let page = self.node.page_start();
             for line in (first_line..end).step_by(CACHE_LINE_SIZE) {
@@ -713,7 +658,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let candidates = &self.reborrow().keys()[run.clone()];
+        let candidates = self.reborrow().keys().slice(run.clone());
         let found = match (KeyInliner::<K>::resolve::<S>(), Self::KEY_SEARCH) {
             (Some(KeyInliner::InlineKeyTrait { .. }), KeySearch::Branchless) => {
                 Self::branchless_search_index(candidates, key.key())
@@ -735,7 +680,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
     /// so `base < len` at the end. `Ok(base)` is then `< len`, and
     /// `Err(base)`/`Err(base + 1)` are `<= len`.
-    fn branchless_search_index<Q>(keys: &[K], key: &Q) -> Result<usize, usize>
+    fn branchless_search_index<Q>(keys: NodeKeys<'_, K>, key: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -769,7 +714,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// In bounds by construction, whatever `cmp_key` answers: the loop keeps
     /// `low <= high <= len` and probes only `mid` with `low <= mid < high`,
     /// so `Ok(mid)` is `< len` and `Err(low)` is `<= len`.
-    fn binary_search_index(keys: &[K], cmp_key: impl Fn(&K) -> Ordering) -> Result<usize, usize> {
+    fn binary_search_index(
+        keys: NodeKeys<'_, K>,
+        cmp_key: impl Fn(&K) -> Ordering,
+    ) -> Result<usize, usize> {
         let (mut low, mut high) = (0, keys.len());
         while low < high {
             let mid = low + (high - low) / 2;
@@ -1037,13 +985,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Lea
         has_head.then_some(Head { leaf: self })
     }
 
-    fn value_slots(&self) -> Slots<V, Down> {
+    fn value_slots(&self) -> Slots<V> {
         // SAFETY: the node is an allocated leaf (invariant 1).
         unsafe { self.node.value_slots() }
     }
 
     /// Slot 0 is the head, slot `i + 1` value `i`.
-    fn head_and_value_slots(&self) -> Slots<V, Down> {
+    fn head_and_value_slots(&self) -> Slots<V> {
         // SAFETY: the node is an allocated leaf (invariant 1).
         unsafe { self.node.head_and_value_slots() }
     }
@@ -1090,7 +1038,7 @@ impl<BorrowType, K, V, S> NodeRef<BorrowType, K, V, S, Internal> {
 }
 
 impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Internal> {
-    fn edge_slots(&self) -> Slots<NodePtr<K, V, S>, Up> {
+    fn edge_slots(&self) -> Slots<NodePtr<K, V, S>> {
         // SAFETY: the node is an allocated internal node (invariant 1).
         unsafe { self.node.edge_slots() }
     }
@@ -1112,10 +1060,11 @@ impl<BorrowType, K, V, S> NodeRef<BorrowType, K, V, S, LeafOrInternal> {
 
 impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V, S, Kind> {
     /// The keys `0..len`, in order.
-    pub(crate) fn keys(self) -> &'a [K] {
+    pub(crate) fn keys(self) -> NodeKeys<'a, K> {
         // SAFETY: keys `0..len` are initialized and unchanged for `'a`
-        // (invariant 1); they grow up, so memory order is index order.
-        unsafe { self.key_slots().keys().run(0, self.len()).as_ref() }
+        // (invariant 1), and the last key's stride ends within the page
+        // (`layout.rs`).
+        unsafe { NodeKeys::new(self.key_slots().keys(), self.len()) }
     }
 
     /// The node's inline keys, if it has them (D18): inline key `i` is key
@@ -1684,11 +1633,18 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Leaf>> {
         } = self;
         let len = leaf.len();
         // SAFETY: `index < len`, and keys (with their inline keys) and values
-        // `0..len` are initialized; afterwards `0..len - 1` are. The edge has
-        // `index <= len - 1`.
+        // `0..len` are initialized; afterwards `0..len - 1` are. Paired, key
+        // and value `index` share an entry, read out before the entries after
+        // it shift down whole (D29). The edge has `index <= len - 1`.
         unsafe {
-            let key = leaf.key_slots().remove(index, len).into_key();
-            let value = leaf.value_slots().remove(index, len);
+            let (key, value) = if NodePtr::<K, V, S>::has_paired_entries::<Leaf>() {
+                let value = leaf.value_slots().slot(index).read();
+                let key = leaf.key_slots().remove_shifting_entries(index, len);
+                (key.into_key(), value)
+            } else {
+                let key = leaf.key_slots().remove(index, len);
+                (key.into_key(), leaf.value_slots().remove(index, len))
+            };
             leaf.set_len(len - 1);
             ((key, value), Edge::new_unchecked(leaf, index))
         }
@@ -1707,12 +1663,22 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Internal>> {
         let len = parent.len();
         // SAFETY: `index < len`, so key `index` (with its inline key) and edge
         // `index + 1` are initialized; afterwards keys `0..len - 1` and edges
-        // `0..len` are. The edge was the root of a well-formed subtree one
-        // level down that the node owned, and the returned `Subtree` owns now
-        // (invariant 2).
+        // `0..len` are. Paired, they share an entry, read out before the
+        // entries after it shift down whole (D29). The edge was the root of a
+        // well-formed subtree one level down that the node owned, and the
+        // returned `Subtree` owns now (invariant 2).
         unsafe {
-            let key = parent.key_slots().remove(index, len).into_key();
-            let child = parent.edge_slots().remove(index + 1, len + 1);
+            let (key, child) = if NodePtr::<K, V, S>::has_paired_entries::<Internal>() {
+                let child = parent.edge_slots().slot(index + 1).read();
+                let key = parent.key_slots().remove_shifting_entries(index, len);
+                (key.into_key(), child)
+            } else {
+                let key = parent.key_slots().remove(index, len);
+                (
+                    key.into_key(),
+                    parent.edge_slots().remove(index + 1, len + 1),
+                )
+            };
             parent.set_len(len - 1);
             (key, Subtree::from_raw_parts(child, parent.height - 1))
         }
@@ -1955,10 +1921,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Leaf>> 
         let len = leaf.len();
         // SAFETY: `index <= len < capacity` (invariants 3 and 4); keys (with
         // their inline keys) and values `0..len` are initialized, and
-        // `0..len + 1` are afterwards.
+        // `0..len + 1` are afterwards. Paired, the entries from key and value
+        // `index` on shift up whole, and the new pair goes into the entry
+        // that frees (D29).
         unsafe {
-            leaf.key_slots().insert(index, len, key);
-            leaf.value_slots().insert(index, len, value);
+            if NodePtr::<K, V, S>::has_paired_entries::<Leaf>() {
+                leaf.key_slots().insert_shifting_entries(index, len, key);
+                leaf.value_slots().slot(index).write(value);
+            } else {
+                leaf.key_slots().insert(index, len, key);
+                leaf.value_slots().insert(index, len, value);
+            }
             leaf.set_len(len + 1);
             Kv::new_unchecked(leaf, index)
         }
@@ -2004,12 +1977,19 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
         // `0..len` and edges `0..=len` are initialized, and one more of each
         // afterwards. The new edge is the root of a well-formed subtree one
         // level down (the caller), owned by the `Subtree` given up here
-        // (invariant 2).
+        // (invariant 2). Paired, the entries from key `index` and edge
+        // `index + 1` on shift up whole, and the new pair goes into the entry
+        // that frees (D29).
         unsafe {
-            parent.key_slots().insert(index, len, key);
-            parent
-                .edge_slots()
-                .insert(index + 1, len + 1, right_child.node);
+            if NodePtr::<K, V, S>::has_paired_entries::<Internal>() {
+                parent.key_slots().insert_shifting_entries(index, len, key);
+                parent.edge_slots().slot(index + 1).write(right_child.node);
+            } else {
+                parent.key_slots().insert(index, len, key);
+                parent
+                    .edge_slots()
+                    .insert(index + 1, len + 1, right_child.node);
+            }
             parent.set_len(len + 1);
             Kv::new_unchecked(parent, index)
         }
