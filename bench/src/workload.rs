@@ -222,6 +222,18 @@ impl Workload {
     pub(crate) fn operation(self) -> Operation {
         self.operation
     }
+
+    /// The benchmark's name in reports: key, value, operation and size, as
+    /// in `u64_u64_random_insert_10M`.
+    pub(crate) fn name(self) -> String {
+        format!(
+            "{}_{}_{}_{}",
+            self.key.name(),
+            self.value.name(),
+            self.operation.name(),
+            self.size.name()
+        )
+    }
 }
 
 /// One workload on one map: the unit the suite runner starts a child
@@ -243,6 +255,11 @@ impl Cell {
 
     pub(crate) fn workload(self) -> Workload {
         self.workload
+    }
+
+    /// The map and the benchmark, as progress lines print them.
+    pub(crate) fn label(self) -> String {
+        format!("{} {}", self.map.name(), self.workload.name())
     }
 
     /// Whether the map has the API the operation needs, and runs on the

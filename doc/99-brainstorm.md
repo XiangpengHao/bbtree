@@ -15,4 +15,3 @@ This way, each search pay one cache line miss and linear search the group head, 
 - [ ] the 8-byte inline-key count still compiles to the slow bit-by-bit form at 28–31 slots. That's why a String set
   (31-slot leaves) is at 702 instructions per lookup against 534 for String→u64.
 
-- [ ] we should rename the benchmark names to be more descriptive, rather than current `headline`, do `u64_u64_random_insert_1M` and `u64_u64_sequential_insert_10M`.

@@ -273,7 +273,7 @@ impl RunRecord {
             RunOutcome::Measured { .. } => "ok",
         };
         let identity = [
-            self.row.suite().name().to_owned(),
+            workload.name(),
             self.map.name().to_owned(),
             workload.key().name().to_owned(),
             workload.value().name().to_owned(),
@@ -355,7 +355,7 @@ pub(crate) struct RunLog {
 
 impl RunLog {
     const IDENTITY_COLUMNS: [&str; 8] = [
-        "suite",
+        "benchmark",
         "map",
         "key",
         "value",
@@ -490,10 +490,10 @@ impl<'run> Summary<'run> {
 
     fn table(&self, title: &str, statistic: Statistic) -> String {
         let comparison = self.comparison_title();
-        let mut columns = vec!["suite", "key", "value", "size", "operation"];
+        let mut columns = vec!["benchmark"];
         columns.extend(self.maps.iter().map(|map| map.title()));
         columns.extend(comparison);
-        let mut alignments = vec!["---"; 5];
+        let mut alignments = vec!["---"];
         alignments.resize(columns.len(), "--:");
 
         let mut text = format!(
@@ -502,14 +502,7 @@ impl<'run> Summary<'run> {
             alignments.join("|")
         );
         for &row in self.rows {
-            let workload = row.workload();
-            let mut cells = vec![
-                row.suite().name().to_owned(),
-                workload.key().name().to_owned(),
-                workload.value().name().to_owned(),
-                workload.size().name().to_owned(),
-                workload.operation().name().to_owned(),
-            ];
+            let mut cells = vec![row.workload().name()];
             cells.extend(
                 self.maps
                     .iter()

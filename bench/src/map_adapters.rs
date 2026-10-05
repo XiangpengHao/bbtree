@@ -126,7 +126,7 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
     }
 
     fn remove(&mut self, _key: &K) -> Option<V> {
-        Self::lacks(Operation::RemoveRandom)
+        Self::lacks(Operation::RandomRemove)
     }
 
     /// The counter-increment pattern: `*map.entry(key).or_default() += 1`.

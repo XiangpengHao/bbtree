@@ -269,7 +269,7 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
         stopwatch: &mut Stopwatch,
     ) -> usize {
         match operation {
-            Operation::InsertRandom | Operation::InsertSequential | Operation::BulkBuild => {
+            Operation::RandomInsert | Operation::SequentialInsert | Operation::BulkBuild => {
                 self.time_builds::<M>(operation, stopwatch)
             }
             Operation::GetHit => {
@@ -285,7 +285,7 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
             }
             Operation::Iterate => self.time_iteration::<M>(stopwatch),
             Operation::Range64 => self.time_range_scans::<M>(stopwatch),
-            Operation::RemoveRandom => self.time_removals::<M>(stopwatch),
+            Operation::RandomRemove => self.time_removals::<M>(stopwatch),
             Operation::EntryUpsert => self.time_upserts::<M>(stopwatch),
             Operation::PopFirst => self.time_pops::<M>(stopwatch),
             Operation::BuildMany | Operation::GetMany | Operation::GetManyMiss => {
@@ -296,8 +296,8 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
 
     fn build_input(&self, operation: Operation) -> Vec<(K, V)> {
         match operation {
-            Operation::InsertRandom => self.entries_in_insertion_order(),
-            Operation::InsertSequential | Operation::BulkBuild => self.entries_in_key_order(),
+            Operation::RandomInsert => self.entries_in_insertion_order(),
+            Operation::SequentialInsert | Operation::BulkBuild => self.entries_in_key_order(),
             _ => unreachable!("{} doesn't build a map", operation.name()),
         }
     }

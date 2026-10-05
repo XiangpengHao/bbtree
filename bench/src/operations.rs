@@ -23,9 +23,9 @@ pub(crate) use single_map::{SingleMapCell, SingleMapKeys};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Operation {
     /// Inserts every key into an empty map, in random order.
-    InsertRandom,
+    RandomInsert,
     /// Inserts every key into an empty map, in ascending order.
-    InsertSequential,
+    SequentialInsert,
     /// Looks up keys that are in the map.
     GetHit,
     /// Looks up keys that aren't in the map, which fall between keys that are.
@@ -35,7 +35,7 @@ pub(crate) enum Operation {
     /// Visits 64 entries in key order from a random key in the map. Per scan.
     Range64,
     /// Removes every key, in random order.
-    RemoveRandom,
+    RandomRemove,
     /// The counter-increment pattern, `*map.entry(key).or_default() += 1`,
     /// for every key twice in random order: half inserts, half updates.
     EntryUpsert,
@@ -58,13 +58,13 @@ pub(crate) enum Operation {
 
 impl Named for Operation {
     const ALL: &'static [Self] = &[
-        Self::InsertRandom,
-        Self::InsertSequential,
+        Self::RandomInsert,
+        Self::SequentialInsert,
         Self::GetHit,
         Self::GetMiss,
         Self::Iterate,
         Self::Range64,
-        Self::RemoveRandom,
+        Self::RandomRemove,
         Self::EntryUpsert,
         Self::PopFirst,
         Self::BulkBuild,
@@ -75,13 +75,13 @@ impl Named for Operation {
 
     fn name(self) -> &'static str {
         match self {
-            Self::InsertRandom => "insert_random",
-            Self::InsertSequential => "insert_sequential",
+            Self::RandomInsert => "random_insert",
+            Self::SequentialInsert => "sequential_insert",
             Self::GetHit => "get_hit",
             Self::GetMiss => "get_miss",
             Self::Iterate => "iterate",
             Self::Range64 => "range64",
-            Self::RemoveRandom => "remove_random",
+            Self::RandomRemove => "random_remove",
             Self::EntryUpsert => "entry_upsert",
             Self::PopFirst => "pop_first",
             Self::BulkBuild => "bulk_build",
@@ -95,13 +95,13 @@ impl Named for Operation {
 impl Operation {
     /// The operations on one map, all of which the headline suite runs.
     pub(crate) const ON_ONE_MAP: &'static [Self] = &[
-        Self::InsertRandom,
-        Self::InsertSequential,
+        Self::RandomInsert,
+        Self::SequentialInsert,
         Self::GetHit,
         Self::GetMiss,
         Self::Iterate,
         Self::Range64,
-        Self::RemoveRandom,
+        Self::RandomRemove,
         Self::EntryUpsert,
         Self::PopFirst,
         Self::BulkBuild,
@@ -132,7 +132,7 @@ impl Operation {
     pub(crate) fn builds_maps(self) -> bool {
         matches!(
             self,
-            Self::InsertRandom | Self::InsertSequential | Self::BulkBuild | Self::BuildMany
+            Self::RandomInsert | Self::SequentialInsert | Self::BulkBuild | Self::BuildMany
         )
     }
 }

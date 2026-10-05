@@ -98,7 +98,7 @@ impl SuiteRunner {
                 let run_number = repetition * runnable.len() + index + 1;
                 eprintln!(
                     "[{run_number}/{run_count}] {}: {}",
-                    Self::cell_label(row, cell),
+                    cell.label(),
                     outcome.brief()
                 );
                 let record = RunRecord::run(row, cell.map(), repetition, outcome);
@@ -171,14 +171,14 @@ impl SuiteRunner {
         not_applicable: &[(SuiteRow, Cell)],
         missing_data: &[(SuiteRow, Cell)],
     ) {
-        for &(row, cell) in runnable {
-            println!("{}", Self::cell_label(row, cell));
+        for &(_, cell) in runnable {
+            println!("{}", cell.label());
         }
-        for &(row, cell) in not_applicable {
-            println!("{} (n/a)", Self::cell_label(row, cell));
+        for &(_, cell) in not_applicable {
+            println!("{} (n/a)", cell.label());
         }
-        for &(row, cell) in missing_data {
-            println!("{} (missing data)", Self::cell_label(row, cell));
+        for &(_, cell) in missing_data {
+            println!("{} (missing data)", cell.label());
         }
         println!(
             "{} cells × {} repetition(s) = {} processes; {} cells n/a; {} cells missing data",
@@ -188,19 +188,6 @@ impl SuiteRunner {
             not_applicable.len(),
             missing_data.len()
         );
-    }
-
-    fn cell_label(row: SuiteRow, cell: Cell) -> String {
-        let workload = cell.workload();
-        format!(
-            "{} {} {}→{} {} {}",
-            row.suite().name(),
-            cell.map().name(),
-            workload.key().name(),
-            workload.value().name(),
-            workload.size().name(),
-            workload.operation().name()
-        )
     }
 
     /// Runs one cell in a child process of this executable, under `perf

@@ -102,9 +102,9 @@ impl Suite {
     }
 
     pub(crate) fn workloads(self) -> Vec<Workload> {
-        let inserts_and_lookups = [Operation::InsertRandom, Operation::GetHit];
+        let inserts_and_lookups = [Operation::RandomInsert, Operation::GetHit];
         let inserts_hits_and_misses = [
-            Operation::InsertRandom,
+            Operation::RandomInsert,
             Operation::GetHit,
             Operation::GetMiss,
         ];
@@ -162,7 +162,7 @@ impl Suite {
                 &[ValueKind::Bytes100],
                 &[MapSize::OneMillion],
                 &[
-                    Operation::InsertRandom,
+                    Operation::RandomInsert,
                     Operation::GetHit,
                     Operation::Range64,
                 ],
