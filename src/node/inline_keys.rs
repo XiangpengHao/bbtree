@@ -4,7 +4,7 @@
 //! A node stores each key's inline key at the node's prefix length: the
 //! first bytes of the 8 of the key's encoding past the bytes that the node's
 //! fences share, and so every key in it (05-fence-key.md), as many as the
-//! map's [`InlineWidth`]. Windows are always 8 bytes; only a node narrows
+//! node kind's [`InlineWidth`]. Windows are always 8 bytes; only a node narrows
 //! them, as it stores them, and as it compares a search's with them.
 //!
 //! - [`KeyInliner`] resolves a map's strategy for its key type, once and for
@@ -26,7 +26,7 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use super::page::{ByteString, InlineKeyNodeHeader, SameType, StdInteger};
+use super::page::{ByteString, InlineKeyNodeHeader, PageKind, SameType, StdInteger};
 use super::vector_count::VectorCount;
 use crate::inline_key::sealed::InlineKeySource;
 use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
@@ -91,13 +91,29 @@ impl<K> KeyInliner<K> {
         }
     }
 
-    /// How many bytes of each inline key the nodes keep: all 8 for std byte
-    /// strings, whose ties read the heap.
+    /// The encoding's default width: eight for heap byte strings, two for
+    /// fixed arrays, or the explicit strategy's width. `node_width` selects
+    /// the narrower storage used by heap-byte internal nodes.
     #[inline]
     pub(super) fn width(self) -> InlineWidth {
         match self {
-            Self::ByteString(_) => InlineWidth::Eight,
+            Self::ByteString(byte_string) => byte_string.inline_width(),
             Self::InlineKeyTrait { width, .. } => width,
+        }
+    }
+
+    /// The bytes this node kind stores. Heap-byte leaves retain full
+    /// windows for terminal confirmation; routing nodes keep four bytes.
+    /// Explicit encodings and fixed-size keys retain their chosen width.
+    #[inline]
+    pub(super) fn node_width<Kind: PageKind>(self) -> InlineWidth {
+        if !Kind::IS_LEAF
+            && matches!(self, Self::ByteString(_))
+            && self.width() == InlineWidth::Eight
+        {
+            InlineWidth::Four
+        } else {
+            self.width()
         }
     }
 
@@ -144,7 +160,7 @@ impl<K> KeyInliner<K> {
 }
 
 /// What a node stores an inline key as (D18): the first bytes of its window,
-/// as many as the map's [`InlineWidth`], in an unsigned integer of as many
+/// as many as the node kind's [`InlineWidth`], in an unsigned integer of as many
 /// bytes, which orders like them.
 pub(super) trait InlineSlot: Copy + Ord + VectorCount {
     /// Whether one pass that counts every slot up to the capacity compiles
@@ -203,11 +219,12 @@ impl InlineSlot for u64 {
 /// `prefix_len..prefix_len + 8` of a key's encoding, of which a node with
 /// that prefix length stores the first (05-fence-key.md).
 ///
-/// A window read out of a node holds only the bytes the node kept, zeros
-/// after them, and every node of the map keeps as many. That is all any node
-/// reads of it: moved back to a shorter prefix length, it keeps at least as
-/// many right bytes (see [`Self::moved_back_to`]), and nothing moves a window
-/// to a longer one; a node whose prefix grows reads its keys.
+/// Raw inline slots yield their kept bytes, zeros after them. A window
+/// exported with a heap-byte key or bound is rehydrated to all eight bytes,
+/// even from a four-byte internal node, so it can fill a leaf window. Other
+/// encodings keep the same width in both node kinds. Moving to a shorter
+/// prefix preserves that many correct bytes (`moved_back_to`); a node whose
+/// prefix grows reads its keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Window {
     prefix_len: usize,
@@ -240,7 +257,7 @@ impl Window {
     /// and how a key moves into a node with a shorter one.
     ///
     /// If only the first `n` bytes of this window and of `fill` are right,
-    /// as for windows read out of nodes, which keep `n`, at least the first
+    /// as for raw windows read out of slots that keep `n`, at least the first
     /// `n` of the result are: the `shift` bytes that move in are `fill`'s
     /// first, and this window's `n` follow them, or, for a shift past `n`,
     /// all are `fill`'s.
@@ -267,53 +284,99 @@ impl Window {
     }
 }
 
-/// How many leading bytes of a std byte string being searched for
-/// [`SearchBytes`] copies: enough for the prefixes of the keys measured
-/// (05-fence-key.md), of which paths share the most, 64 to 100 bytes in a
-/// leaf. A node with a longer prefix reads the key itself.
-const SEARCH_COPY_LEN: usize = 128;
-
-/// The bytes of a std byte string being searched for, and a copy of the
-/// first [`SEARCH_COPY_LEN`] of them, zero-padded past its end, made once
-/// per search: the key's inline key at a node's prefix length is then one
-/// load from the copy, with no length to check and nothing to pad.
+/// The bytes of a std byte string being searched for. Windows read these
+/// bytes directly: a search visits only a few prefix lengths, so preparing
+/// every possible window would copy mostly bytes that it never reads.
 struct SearchBytes<'q> {
     bytes: &'q [u8],
-    padded: [u8; SEARCH_COPY_LEN],
+}
+
+/// A fixed-size part of a local prefix guard. Guards usually match, so
+/// test all four words together before ordering a differing word.
+#[derive(Clone, Copy)]
+struct PrefixChunk<'a>(&'a [u8; 4 * WINDOW_LEN]);
+
+impl<'a> PrefixChunk<'a> {
+    const LEN: usize = 4 * WINDOW_LEN;
+
+    #[inline]
+    fn new(bytes: &'a [u8; 4 * WINDOW_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    #[inline]
+    fn word(&self, index: usize) -> u64 {
+        let start = index * WINDOW_LEN;
+        u64::from_ne_bytes(self.0[start..start + WINDOW_LEN].try_into().unwrap())
+    }
+
+    #[inline]
+    fn matches(self, other: Self) -> bool {
+        let different = (self.word(0) ^ other.word(0))
+            | (self.word(1) ^ other.word(1))
+            | (self.word(2) ^ other.word(2))
+            | (self.word(3) ^ other.word(3));
+        different == 0
+    }
+
+    /// Keeping the rare ordering decision separate lets equality discard
+    /// individual words instead of keeping eight of them live in registers.
+    #[cold]
+    #[inline(never)]
+    fn cmp_different(self, other: Self) -> Ordering {
+        SearchBytes::new(self.0).cmp_from(other.0, 0)
+    }
+}
+
+/// A recognized byte query for a stored fixed array. Point lookup can
+/// compare the whole array for equality once its ordered summary selects
+/// a single candidate; no lexicographic result is needed at a leaf.
+pub(super) struct FixedArrayQuery<'q, K> {
+    query: &'q [u8],
+    stored: ByteString<K>,
+}
+
+impl<K> FixedArrayQuery<'_, K> {
+    #[inline]
+    pub(super) fn matches(&self, key: &K) -> bool {
+        self.query == self.stored.bytes(key)
+    }
 }
 
 impl<'q> SearchBytes<'q> {
-    /// Copies `bytes` a window at a time, each a load of a fixed size, with
-    /// no call to `memcpy`.
     #[inline]
     fn new(bytes: &'q [u8]) -> Self {
-        let mut padded = [0; SEARCH_COPY_LEN];
-        let (words, _) = padded.as_chunks_mut::<WINDOW_LEN>();
-        for (index, word) in words.iter_mut().enumerate() {
-            let offset = index * WINDOW_LEN;
-            if offset >= bytes.len() {
-                break;
-            }
-            *word = bytes.inline_key_at(offset).to_be_bytes();
-        }
-        Self { bytes, padded }
+        Self { bytes }
     }
 
     /// The key's inline key at `offset`.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        match self
-            .padded
-            .get(offset..)
-            .and_then(<[u8]>::first_chunk::<WINDOW_LEN>)
-        {
-            Some(window) => InlineWord::from_be_bytes(*window),
-            None => self.bytes.inline_key_at(offset),
+        self.bytes.inline_key_at(offset)
+    }
+
+    /// Local prefix guards normally agree over their full length. Group
+    /// complete chunks without reading past either slice; a differing
+    /// chunk still decides by its first unequal byte. Terminal key ties
+    /// keep `cmp_from`, whose early mismatches favor individual words.
+    #[inline]
+    fn cmp_guard(&self, stored: &[u8]) -> Ordering {
+        let mut equal_len = 0;
+        let (search_chunks, _) = self.bytes.as_chunks::<{ PrefixChunk::LEN }>();
+        let (stored_chunks, _) = stored.as_chunks::<{ PrefixChunk::LEN }>();
+        for (search, stored) in search_chunks.iter().zip(stored_chunks) {
+            let search = PrefixChunk::new(search);
+            let stored = PrefixChunk::new(stored);
+            if !search.matches(stored) {
+                return search.cmp_different(stored);
+            }
+            equal_len += PrefixChunk::LEN;
         }
+        self.cmp_from(stored, equal_len)
     }
 
     /// Orders the key against `stored`, a std byte string, as `<[u8]>::cmp`
-    /// does, given that their first `equal_len` bytes, at least 8, are equal
+    /// does, given that their first `equal_len` bytes are equal
     /// when padded with zeros: 8 bytes at a time from there, as big-endian
     /// words, then by length. Every load is of a fixed size, so there is no
     /// call to `memcmp`, and a string that ends within the equal bytes isn't
@@ -323,9 +386,17 @@ impl<'q> SearchBytes<'q> {
     /// the bytes left to compare: the bytes it repeats are equal.
     #[inline]
     fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
-        debug_assert!(equal_len >= WINDOW_LEN, "the last word may start at 0");
         let search = self.bytes;
         let both_len = search.len().min(stored.len());
+        if equal_len < both_len && both_len < WINDOW_LEN {
+            // A fixed array's two-byte inline key can tie with a borrowed
+            // slice shorter than a word. Zero-padded windows decide every
+            // differing byte; length breaks ties consisting only of zeros.
+            return search
+                .inline_key_at(0)
+                .cmp(&stored.inline_key_at(0))
+                .then_with(|| search.len().cmp(&stored.len()));
+        }
         let mut compared = equal_len;
         while compared < both_len {
             let word_end = (compared + WINDOW_LEN).min(both_len);
@@ -427,9 +498,11 @@ impl<K, S> InlinedKey<K, S> {
 /// it is made, a constant: the nodes of a map run only its own way.
 pub(crate) struct SearchKey<'q, K, S, Q: ?Sized> {
     key: &'q Q,
-    /// For std byte-string keys, the bytes of `key`, if it is a std byte
-    /// string too; `None` for keys with their own impl.
-    bytes: Option<SearchBytes<'q>>,
+    /// The query's bytes when both types use the built-in byte encoding;
+    /// an unused empty slice otherwise. Availability is a type property,
+    /// checked by `recognized_bytes`, not a runtime tag carried into each
+    /// outlined node search.
+    bytes: SearchBytes<'q>,
     _map: PhantomData<fn() -> (K, S)>,
 }
 
@@ -442,14 +515,12 @@ where
     /// Looks for `key`.
     #[inline]
     pub(crate) fn new(key: &'q Q) -> Self {
-        let bytes = match KeyInliner::<K>::resolve::<S>() {
-            Some(KeyInliner::ByteString(_)) => ByteString::<Q>::recognize()
-                .map(|byte_string| SearchBytes::new(byte_string.bytes(key))),
-            Some(KeyInliner::InlineKeyTrait { .. }) | None => None,
-        };
+        let bytes = Self::byte_string_query()
+            .map(|byte_string| byte_string.bytes(key))
+            .unwrap_or(&[]);
         Self {
             key,
-            bytes,
+            bytes: SearchBytes::new(bytes),
             _map: PhantomData,
         }
     }
@@ -460,7 +531,7 @@ where
     #[inline]
     pub(super) fn inline_target(&self, prefix_len: usize) -> Option<InlineTarget> {
         let inline_key = match KeyInliner::<K>::resolve::<S>()? {
-            KeyInliner::ByteString(_) => self.bytes.as_ref()?.inline_key_at(prefix_len),
+            KeyInliner::ByteString(_) => self.recognized_bytes()?.inline_key_at(prefix_len),
             inliner @ KeyInliner::InlineKeyTrait { .. } => {
                 let key = SameType::<K, Q>::check()?.cast(self.key);
                 inliner.inline_key_at(key, prefix_len)
@@ -474,28 +545,102 @@ where
 }
 
 impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
+    /// The existing proofs establish byte ordering for both stored keys
+    /// and queries. A custom strategy must keep its `Ord` comparisons even
+    /// when the query itself is a recognized string type.
+    #[inline]
+    fn byte_string_query() -> Option<ByteString<Q>> {
+        let KeyInliner::ByteString(_) = KeyInliner::<K>::resolve::<S>()? else {
+            return None;
+        };
+        ByteString::<Q>::recognize()
+    }
+
+    #[inline]
+    fn recognized_bytes(&self) -> Option<&SearchBytes<'_>> {
+        Self::byte_string_query()?;
+        Some(&self.bytes)
+    }
+
     pub(super) fn key(&self) -> &Q {
         self.key
+    }
+
+    /// Orders complete keys, without assuming any equal prefix or summary.
+    /// Only recognized built-in byte orderings use fixed-word comparison;
+    /// explicit strategies and unrecognized queries retain their `Ord`.
+    #[inline]
+    pub(super) fn cmp_full(&self, stored: &K) -> Ordering
+    where
+        K: Borrow<Q>,
+        Q: Ord,
+    {
+        if let Some(KeyInliner::ByteString(stored_bytes)) = KeyInliner::<K>::resolve::<S>()
+            && let Some(search) = self.recognized_bytes()
+        {
+            return search.cmp_from(stored_bytes.bytes(stored), 0);
+        }
+        self.key.cmp(stored.borrow())
+    }
+
+    /// Available only for built-in fixed byte arrays and recognized byte
+    /// queries. Custom ordering and heap strings retain ordered suffix
+    /// comparisons, including their known common-prefix skip.
+    #[inline]
+    pub(super) fn fixed_array_query(&self) -> Option<FixedArrayQuery<'_, K>> {
+        let KeyInliner::ByteString(stored) = KeyInliner::<K>::resolve::<S>()? else {
+            return None;
+        };
+        if stored.inline_width() != InlineWidth::Two {
+            return None;
+        }
+        Some(FixedArrayQuery {
+            query: self.recognized_bytes()?.bytes,
+            stored,
+        })
+    }
+
+    /// Equality may reject a different byte length without reading the
+    /// query's contents. Truncation only creates harmless collisions.
+    #[inline]
+    pub(super) fn length_tag(&self) -> Option<u16> {
+        self.recognized_bytes()
+            .map(|bytes| bytes.bytes.len() as u16)
+    }
+
+    /// Validates bytes beyond a node's conservative fence prefix before
+    /// its local windows may order the query. A short query sorts before
+    /// the stored prefix. Whole chunks test equality together; differing
+    /// chunks and short tails use the fixed-word comparator.
+    #[inline]
+    pub(super) fn cmp_prefix(&self, stored: &K, start: usize, end: usize) -> Option<Ordering> {
+        let KeyInliner::ByteString(stored_bytes) = KeyInliner::<K>::resolve::<S>()? else {
+            return None;
+        };
+        let query = self.recognized_bytes()?.bytes;
+        let stored = stored_bytes.bytes(stored).get(start..end)?;
+        let query = query.get(start..query.len().min(end)).unwrap_or_default();
+        Some(SearchBytes::new(query).cmp_guard(stored))
     }
 
     /// How this key orders against `stored`, a key of the node `target` is
     /// for whose inline key equals this key's in the bytes the node keeps.
     /// For std byte strings, from past the bytes known equal, the node's
-    /// prefix and those it keeps of the inline key, all 8
+    /// prefix and the actual stored width of its inline key
     /// ([`SearchBytes::cmp_from`]): the search key shares the prefix,
     /// lying between the node's fences, as every key in it does. Otherwise
     /// by `Q`'s `Ord`.
     #[inline]
-    pub(super) fn cmp_tied(&self, target: InlineTarget, stored: &K) -> Ordering
+    pub(super) fn cmp_tied<Kind: PageKind>(&self, target: InlineTarget, stored: &K) -> Ordering
     where
         K: Borrow<Q>,
         Q: Ord,
     {
-        if let Some(inliner @ KeyInliner::ByteString(stored_bytes)) =
-            KeyInliner::<K>::resolve::<S>()
-            && let Some(search) = &self.bytes
+        if let Some(KeyInliner::ByteString(stored_bytes)) = KeyInliner::<K>::resolve::<S>()
+            && let Some(search) = self.recognized_bytes()
         {
-            let equal_len = target.prefix_len + inliner.width().bytes();
+            let width = KeyInliner::ByteString(stored_bytes).node_width::<Kind>();
+            let equal_len = target.prefix_len + width.bytes();
             return search.cmp_from(stored_bytes.bytes(stored), equal_len);
         }
         self.key.cmp(stored.borrow())
@@ -516,7 +661,79 @@ mod tests {
         WINDOW_LEN, Window,
     };
     use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
+    use crate::node::handle::{Internal, Leaf};
     use crate::node::test_support::TestRng;
+
+    #[test]
+    fn complete_comparisons_respect_short_zero_bytes_and_strategy_proofs() {
+        let texts = [
+            "",
+            "\0",
+            "a",
+            "a\0",
+            "a\0\0",
+            "ab",
+            "abcdefgh",
+            "abcdefgh\0",
+        ];
+        for query in texts {
+            for stored in texts.map(String::from) {
+                let expected = query.cmp(stored.as_str());
+                assert_eq!(
+                    SearchKey::<String, Auto, str>::new(query).cmp_full(&stored),
+                    expected
+                );
+                assert_eq!(
+                    SearchKey::<String, WithInlineKey, str>::new(query).cmp_full(&stored),
+                    expected
+                );
+            }
+        }
+        assert!(SearchKey::<String, WithInlineKey, str>::byte_string_query().is_none());
+
+        // A query whose ordering is unknown to Auto must still supply the
+        // whole comparison, even when the stored key is a recognized String.
+        trait ReverseText {
+            fn text(&self) -> &str;
+        }
+        impl ReverseText for String {
+            fn text(&self) -> &str {
+                self
+            }
+        }
+        impl PartialEq for dyn ReverseText {
+            fn eq(&self, other: &Self) -> bool {
+                self.text() == other.text()
+            }
+        }
+        impl Eq for dyn ReverseText {}
+        impl PartialOrd for dyn ReverseText {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+        impl Ord for dyn ReverseText {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other.text().cmp(self.text())
+            }
+        }
+        impl core::borrow::Borrow<dyn ReverseText> for String {
+            fn borrow(&self) -> &(dyn ReverseText + 'static) {
+                self
+            }
+        }
+        let query = String::from("a");
+        let stored = String::from("b");
+        let borrowed: &dyn ReverseText = &query;
+        assert_eq!(
+            SearchKey::<String, Auto, dyn ReverseText>::new(borrowed).cmp_full(&stored),
+            Ordering::Greater
+        );
+        assert_eq!(
+            SearchKey::<String, WithInlineKey, dyn ReverseText>::new(borrowed).cmp_full(&stored),
+            Ordering::Greater
+        );
+    }
 
     /// A newtype with its own inline key, which looks up by `str` too.
     #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -570,15 +787,17 @@ mod tests {
         assert!(has_inline_keys::<i128, WithInlineKey>());
     }
 
-    /// Std byte strings keep all 8 bytes; integers and keys with their own
-    /// impl, what it says.
+    /// Heap-backed byte strings keep all 8 bytes, arrays keep 2; integers
+    /// and keys with their own impl keep what it says.
     #[test]
     fn strategies_keep_their_keys_widths() {
         fn width<K, S: crate::InlineKeyStrategy<K>>() -> Option<InlineWidth> {
             KeyInliner::<K>::resolve::<S>().map(KeyInliner::width)
         }
         assert_eq!(width::<String, Auto>(), Some(InlineWidth::Eight));
-        assert_eq!(width::<[u8; 16], Auto>(), Some(InlineWidth::Eight));
+        assert_eq!(width::<[u8; 16], Auto>(), Some(InlineWidth::Two));
+        assert_eq!(width::<[u8; 20], Auto>(), Some(InlineWidth::Two));
+        assert_eq!(width::<[u8; 32], Auto>(), Some(InlineWidth::Two));
         assert_eq!(width::<u64, Auto>(), Some(InlineWidth::Two));
         assert_eq!(width::<i128, Auto>(), Some(InlineWidth::Two));
         assert_eq!(width::<u32, Auto>(), None);
@@ -644,8 +863,7 @@ mod tests {
         )
     }
 
-    /// A search's inline key at any offset is the key's, from its padded
-    /// copy or, past it, from the key.
+    /// A search's inline key at any offset is the key's.
     #[test]
     fn search_bytes_take_the_keys_windows() {
         for len in [0, 1, 7, 8, 9, 15, 16, 127, 128, 129, 200] {
@@ -679,11 +897,81 @@ mod tests {
             } else {
                 padded_equal
             };
-            for equal_len in WINDOW_LEN..=max_equal_len {
+            for equal_len in 0..=max_equal_len {
                 assert_eq!(
                     SearchBytes::new(&search).cmp_from(&stored, equal_len),
                     search.cmp(&stored),
                     "{search:?} vs {stored:?} from {equal_len}"
+                );
+            }
+        }
+    }
+
+    /// Every byte can decide a guard's order, including chunk boundaries,
+    /// zero bytes and bytes whose signed order differs. Later differences
+    /// must never override the first one.
+    #[test]
+    fn prefix_guards_compare_like_slices() {
+        for len in [0, 1, 7, 8, 9, 31, 32, 33, 63, 64, 65, 95, 96, 97] {
+            let stored: Vec<u8> = (0..len)
+                .map(|index| [0, 1, 0x7f, 0x80, 0xff][index % 5])
+                .collect();
+            let check = |query: &[u8]| {
+                assert_eq!(
+                    SearchBytes::new(query).cmp_guard(&stored),
+                    query.cmp(&stored),
+                    "{query:?} vs {stored:?}"
+                );
+                assert_eq!(
+                    SearchBytes::new(&stored).cmp_guard(query),
+                    stored.as_slice().cmp(query),
+                );
+            };
+            for short in 0..=len {
+                check(&stored[..short]);
+            }
+            let mut query = stored.clone();
+            query.extend_from_slice(&[0, 0]);
+            check(&query);
+            for differing in 0..len {
+                for byte in [0, 1, 0x7f, 0x80, 0xff] {
+                    let mut query = stored.clone();
+                    query[differing..].fill(byte);
+                    check(&query);
+                }
+            }
+        }
+    }
+
+    /// Prefix guards compare only the requested interval. A query ending
+    /// before or inside it sorts first; bytes beyond it are irrelevant.
+    #[test]
+    fn local_prefix_guards_respect_bounds_and_short_queries() {
+        let stored = (0..193)
+            .map(|i| [0, 0x80, 0xff, 1][i % 4])
+            .collect::<Vec<_>>();
+        for start in [0, 1, 7, 31, 32, 63] {
+            for len in [8, 31, 32, 33, 63, 64, 65, 96] {
+                let end = start + len;
+                for query_len in 0..=stored.len() {
+                    let query = &stored[..query_len];
+                    let expected = if query_len < end {
+                        Ordering::Less
+                    } else {
+                        Ordering::Equal
+                    };
+                    assert_eq!(
+                        SearchKey::<Vec<u8>, Auto, [u8]>::new(query)
+                            .cmp_prefix(&stored, start, end),
+                        Some(expected),
+                        "guard {start}..{end}, query length {query_len}"
+                    );
+                }
+                let mut query = stored.clone();
+                query[end..].fill(0x77);
+                assert_eq!(
+                    SearchKey::<Vec<u8>, Auto, [u8]>::new(&query).cmp_prefix(&stored, start, end),
+                    Some(Ordering::Equal),
                 );
             }
         }
@@ -702,19 +990,29 @@ mod tests {
                 .take_while(|(left, right)| left == right)
                 .count();
             for prefix_len in 0..=shared {
-                if search.inline_key_at(prefix_len) != stored.inline_key_at(prefix_len) {
-                    continue;
+                for width in [InlineWidth::Four, InlineWidth::Eight] {
+                    let shift = 8 * (InlineWidth::Eight.bytes() - width.bytes());
+                    if search.inline_key_at(prefix_len) >> shift
+                        != stored.inline_key_at(prefix_len) >> shift
+                    {
+                        continue;
+                    }
+                    let key = SearchKey::<Vec<u8>, Auto, [u8]>::new(&search);
+                    let target = key.inline_target(prefix_len).unwrap();
+                    let compared = match width {
+                        InlineWidth::Four => key.cmp_tied::<Internal>(target, &stored),
+                        InlineWidth::Eight => key.cmp_tied::<Leaf>(target, &stored),
+                        InlineWidth::Two => unreachable!(),
+                    };
+                    assert_eq!(compared, search.cmp(&stored));
                 }
-                let key = SearchKey::<Vec<u8>, Auto, [u8]>::new(&search);
-                let target = key.inline_target(prefix_len).unwrap();
-                assert_eq!(key.cmp_tied(target, &stored), search.cmp(&stored));
             }
         }
         let name = UserName("ferris".to_owned());
         let key = SearchKey::<UserName, WithInlineKey, UserName>::new(&name);
         let target = key.inline_target(0).unwrap();
         assert_eq!(
-            key.cmp_tied(target, &UserName("ferrit".to_owned())),
+            key.cmp_tied::<Internal>(target, &UserName("ferrit".to_owned())),
             Ordering::Less
         );
     }
@@ -879,11 +1177,39 @@ mod tests {
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
             let mut search = [7_u8; 20];
             let mut stored = search;
-            search[WINDOW_LEN + rng.below(20 - WINDOW_LEN)] = rng.below(256) as u8;
-            stored[WINDOW_LEN + rng.below(20 - WINDOW_LEN)] = rng.below(256) as u8;
+            search[2 + rng.below(18)] = rng.below(256) as u8;
+            stored[2 + rng.below(18)] = rng.below(256) as u8;
             let key: SearchKey<'_, [u8; 20], Auto, [u8; 20]> = SearchKey::new(&search);
             let target = key.inline_target(0).unwrap();
-            assert_eq!(key.cmp_tied(target, &stored), search.cmp(&stored));
+            assert_eq!(key.cmp_tied::<Leaf>(target, &stored), search.cmp(&stored));
+        }
+    }
+
+    /// An array's narrow prefix also accepts borrowed slices shorter than
+    /// one word, including a proper prefix ending in zeros.
+    #[test]
+    fn arrays_compare_short_borrowed_slices() {
+        let key = SearchKey::<[u8; 20], Auto, [u8]>::new(&[0, 0, 1]);
+        assert_eq!(
+            key.cmp_tied::<Leaf>(key.inline_target(0).unwrap(), &[0; 20]),
+            Ordering::Greater,
+            "a shorter slice can sort after the array despite a tied prefix"
+        );
+        for len in 0..WINDOW_LEN {
+            for changed in 2..WINDOW_LEN {
+                for byte in [0, 1, 0x80, 0xff] {
+                    let mut stored = [0_u8; 20];
+                    stored[changed] = byte;
+                    let search = &stored[..len];
+                    let key = SearchKey::<[u8; 20], Auto, [u8]>::new(search);
+                    let target = key.inline_target(0).unwrap();
+                    assert_eq!(
+                        key.cmp_tied::<Internal>(target, &stored),
+                        search.cmp(&stored),
+                        "{len} bytes, byte {changed} = {byte}"
+                    );
+                }
+            }
         }
     }
 }

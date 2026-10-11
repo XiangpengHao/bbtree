@@ -1,7 +1,10 @@
-//! Inserting into a tree: the entry goes in at the leaf edge where a path to
-//! it ends (`node/path.rs`), which a search for the key found. If the leaf
-//! is full, it splits, and going back up the path, each node takes its split
-//! child's separator key and right half, splitting in turn if it is full; a
+//! Inserting into a tree: an owner may remember the last leaf after a split,
+//! allowing a greater key to append directly while it has room. Otherwise a
+//! downward search finds the entry or vacant leaf edge. A fitting insertion
+//! needs no ancestors. If the leaf is full, a
+//! second search records its path (`node/path.rs`) for splitting. Going
+//! back up the path, each node takes its split child's separator key and
+//! right half, splitting in turn if it is full; a
 //! root that splits grows a new root above it. A separator's value stays in
 //! the right half, as the head of its leftmost leaf (D17), and its inline key
 //! goes up with it (D18), moved back to its new node's prefix length. Once
@@ -17,7 +20,7 @@
 use core::mem;
 
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::{Insertion, Internal, Leaf, Subtree};
+use crate::node::handle::{EdgeRoom, Insertion, Internal, Leaf, Subtree};
 use crate::node::inline_keys::{InlinedKey, SearchKey};
 use crate::node::page::FreshPage;
 use crate::node::path::{MAX_HEIGHT, PathMut};
@@ -34,8 +37,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// at the time of the split; a new root's page comes from
     /// `new_internal_page`.
     ///
-    /// Every `Ord` call happens in the search, and the key's inline key is
-    /// computed next, before anything changes, so a panicking `Ord` or
+    /// Every `Ord` call happens while validating an append or searching,
+    /// and the key's inline key is computed next, before anything changes,
+    /// so a panicking `Ord` or
     /// `InlineKey` there leaves the tree unchanged. After a split, the split
     /// nodes' prefixes fit their new fences, which calls `InlineKey` again,
     /// once the entry is in and counted (`node/prefix.rs`): a panic then
@@ -54,14 +58,59 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     where
         K: Ord,
     {
+        if let Some(append) = self.rightmost_append(&key) {
+            append.insert(key, value);
+            *length += 1;
+            return None;
+        }
+        match self
+            .borrow_mut()
+            .search_tree_for_insert(&SearchKey::new(&key))
+        {
+            Ok(kv) => {
+                // Keep std's drop-before-replacement behavior on this path
+                // too: a panicking key destructor leaves the value intact.
+                drop(key);
+                return Some(mem::replace(kv.into_value_mut(), value));
+            }
+            Err(edge) => {
+                let prefix_len = edge.reborrow().into_node().prefix_len();
+                if let EdgeRoom::Fits(edge) = edge.check_room() {
+                    // Compute the summary before the first mutation.
+                    edge.insert_fit(InlinedKey::new(key, prefix_len), value);
+                    *length += 1;
+                    return None;
+                }
+            }
+        }
+        self.insert_with_path(key, value, new_leaf_page, new_internal_page, length)
+    }
+
+    /// A full leaf needs ancestors to split. Keep that path and its stack
+    /// space out of fitting inserts. Search again rather than trusting the
+    /// first result: even an inconsistent `Ord` may now find an existing key
+    /// or a different leaf with room, both handled by the ordinary path.
+    #[inline(never)]
+    fn insert_with_path(
+        &mut self,
+        key: K,
+        value: V,
+        new_leaf_page: impl FnMut() -> FreshPage<K, V, S, Leaf>,
+        new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
+        length: &mut usize,
+    ) -> Option<V>
+    where
+        K: Ord,
+    {
         let mut path = PathMut::new(self);
         if path.search(&SearchKey::new(&key)) {
             // As in std, the new key is dropped before the value changes: if
             // its `Drop` panics, the map is unchanged.
             drop(key);
-            Some(mem::replace(path.into_value_mut(), value))
+            Some(mem::replace(path.value_mut(), value))
         } else {
             path.insert(key, value, new_leaf_page, new_internal_page, length);
+            path.finish_insertion();
             None
         }
     }
@@ -76,7 +125,35 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// # Panics
     ///
     /// If the path ends at no leaf edge.
+    #[inline]
     pub(crate) fn insert(
+        &mut self,
+        key: K,
+        value: V,
+        new_leaf_page: impl FnMut() -> FreshPage<K, V, S, Leaf>,
+        new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
+        length: &mut usize,
+    ) {
+        let index = self.index();
+        let leaf = self.leaf_mut();
+        let prefix_len = leaf.prefix_len();
+        match leaf.edge_at(index).check_room() {
+            EdgeRoom::Fits(edge) => {
+                // Compute the inline key before the first change, as on
+                // the split path, so a panic leaves the tree unchanged.
+                edge.insert_fit(InlinedKey::new(key, prefix_len), value);
+                *length += 1;
+            }
+            EdgeRoom::Full(_) => {
+                self.insert_splitting(key, value, new_leaf_page, new_internal_page, length);
+            }
+        }
+    }
+
+    /// Keeps allocation, split propagation and its temporary arrays out
+    /// of the ordinary insertion's stack frame and instruction stream.
+    #[inline(never)]
+    fn insert_splitting(
         &mut self,
         key: K,
         value: V,

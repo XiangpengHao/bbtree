@@ -13,7 +13,11 @@ use core::ops::RangeBounds;
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::Immut;
-use crate::node::walk::{FullWalk, RangeWalk};
+use crate::node::walk::{BorrowedWalk, RangeWalk};
+
+#[cfg(test)]
+#[path = "iterator_tests.rs"]
+mod tests;
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
 ///
@@ -23,7 +27,7 @@ use crate::node::walk::{FullWalk, RangeWalk};
 /// [`iter`]: BBTreeMap::iter
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct Iter<'a, K: 'a, V: 'a, S = Auto> {
-    walk: FullWalk<Immut<'a>, K, V, S>,
+    walk: BorrowedWalk<Immut<'a>, K, V, S>,
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for Iter<'a, K, V, S> {
@@ -31,6 +35,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for Iter<'a, K, V, S> {
 
     fn next(&mut self) -> Option<(&'a K, &'a V)> {
         self.walk.next()
+    }
+
+    fn fold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.fold(accumulator, fold)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -59,6 +70,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for Iter<'a, K, V, S> {
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> DoubleEndedIterator for Iter<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a V)> {
         self.walk.next_back()
+    }
+
+    fn rfold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.rfold(accumulator, fold)
     }
 }
 
@@ -94,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Iter<'_, K, V, S> {
     /// ```
     fn default() -> Self {
         Self {
-            walk: FullWalk::EMPTY,
+            walk: BorrowedWalk::EMPTY,
         }
     }
 }
@@ -115,6 +133,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Keys<'a, K, V, S> {
 
     fn next(&mut self) -> Option<&'a K> {
         self.inner.next().map(|(key, _)| key)
+    }
+
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner
+            .fold(accumulator, |accumulator, (key, _)| fold(accumulator, key))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -143,6 +169,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Keys<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for Keys<'a, K, V, S> {
     fn next_back(&mut self) -> Option<&'a K> {
         self.inner.next_back().map(|(key, _)| key)
+    }
+
+    fn rfold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner
+            .rfold(accumulator, |accumulator, (key, _)| fold(accumulator, key))
     }
 }
 
@@ -201,6 +235,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Values<'a, K, V, S> {
         self.inner.next().map(|(_, value)| value)
     }
 
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner.fold(accumulator, |accumulator, (_, value)| {
+            fold(accumulator, value)
+        })
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
@@ -213,6 +256,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Values<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for Values<'a, K, V, S> {
     fn next_back(&mut self) -> Option<&'a V> {
         self.inner.next_back().map(|(_, value)| value)
+    }
+
+    fn rfold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner.rfold(accumulator, |accumulator, (_, value)| {
+            fold(accumulator, value)
+        })
     }
 }
 
@@ -272,6 +324,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Range<'a, K, V, S> {
         self.walk.next()
     }
 
+    fn fold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.fold(accumulator, fold)
+    }
+
     fn last(mut self) -> Option<(&'a K, &'a V)> {
         self.next_back()
     }
@@ -294,6 +353,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for Range<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for Range<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a V)> {
         self.walk.next_back()
+    }
+
+    fn rfold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.rfold(accumulator, fold)
     }
 }
 
@@ -351,7 +417,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     pub fn iter(&self) -> Iter<'_, K, V, S> {
         let root = self.root.as_ref().map(|root| root.borrow());
         Iter {
-            walk: FullWalk::new(root, self.length),
+            walk: BorrowedWalk::new(root, self.length),
         }
     }
 

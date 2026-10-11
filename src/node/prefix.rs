@@ -19,8 +19,10 @@
 //! whose fences changed then read their keys for their new windows
 //! ([`NodeMut::refit_prefix`]).
 //!
-//! An operation changes the tree's shape without reading a key, so that a
-//! panicking `InlineKey` can't stop it halfway. A prefix may have to shrink
+//! An operation changes the tree's shape without calling user encodings,
+//! so that a panicking `InlineKey` can't stop it halfway. Active local
+//! search windows first read one built-in byte string to restore the
+//! fence windows (`local_prefix.rs`). A prefix may have to shrink
 //! during it: it shrinks to the parent's, the shift of a window filled from
 //! the parent's separator ([`Window::moved_back_to`]), which bounds the node
 //! (`handle.rs`). Once it is done, and its entry counted, the nodes whose
@@ -96,6 +98,9 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
     /// skip reading them. Fitting only grows a prefix: every change that
     /// shrinks one shrinks it to fit already.
     fn keys_differ_past_prefix(self) -> bool {
+        if self.local_prefix_len().is_some() {
+            return false;
+        }
         let len = self.len();
         self.inline_keys().is_some_and(|inline_keys| {
             len > 0
@@ -154,10 +159,11 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PrefixGrowth> NodeMut<'_, K, V, S, Kin
         let node = self.reborrow();
         let prefix_len = Kind::grown_prefix_len(node, prefix_len);
         if prefix_len == node.prefix_len() {
+            self.refresh_local_prefix();
             return;
         }
         let keys = node.keys();
-        let mut inline_keys = RefitBuffer::new(inliner.width());
+        let mut inline_keys = RefitBuffer::new(inliner.node_width::<Kind>());
         for (index, key) in keys.iter().enumerate() {
             inline_keys.set(index, inliner.inline_key_at(key, prefix_len));
         }
@@ -238,7 +244,15 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                     Some(left) => keys.get(left),
                     None => low,
                 };
-                Some(inliner.fence_prefix_len(child_low, keys.get(edge).or(high)))
+                // Well-ordered encodings already imply this floor. Keep
+                // the numerical parent/child invariant even when a user
+                // encoding lies: later structural moves must only move
+                // windows backwards, without invoking that encoding.
+                Some(
+                    inliner
+                        .fence_prefix_len(child_low, keys.get(edge).or(high))
+                        .max(node.prefix_len()),
+                )
             })
         };
         let mut node = self.internal_mut();
@@ -277,7 +291,12 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 };
             }
             .expect("the leaf right of a separator has keys");
-            inliner.common_prefix_len(&node.keys()[index], successor)
+            // Arbitrary user encodings may report fewer shared bytes than
+            // the parent's current prefix. Shrinking the border below it
+            // would break the numerical invariant used by key movement.
+            inliner
+                .common_prefix_len(&node.keys()[index], successor)
+                .max(node.prefix_len())
         };
         let mut left = self.internal_mut().edge_at(index).descend();
         loop {
@@ -298,7 +317,8 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// down, each filled from its parent's key beside the path, which is one
     /// of its fences, once the parent's is 0 too. Before a cut along the
     /// path, whose nodes become the borders of two trees, where every
-    /// prefix is 0. Reads no key; the path ends where it did.
+    /// prefix is 0. Local search windows may read one built-in byte string
+    /// when normalized; no user encoding runs. The path ends where it did.
     pub(crate) fn clear_prefixes(&mut self) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;

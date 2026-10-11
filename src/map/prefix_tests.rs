@@ -186,3 +186,135 @@ fn cuts_refit_the_nodes_beside_their_borders() {
         }
     }
 }
+
+/// A local prefix is not a fence: short and differently prefixed queries
+/// must still choose the correct edge. Separator replacement, cuts and
+/// rebuilding must preserve this distinction, including embedded zeros.
+#[test]
+fn local_prefix_queries_and_mutations_match_std() {
+    use std::collections::BTreeMap;
+    use std::ops::Bound::{Included, Unbounded};
+
+    let prefix = "path\0prefix/".repeat(8);
+    let entries = (0..2048).map(|index| (format!("{prefix}{index:06}"), index));
+    let mut expected: BTreeMap<_, _> = entries.clone().collect();
+    let mut actual: BBTreeMap<_, _> = entries.collect();
+    let mut queries = (0..=prefix.len())
+        .map(|len| String::from(&prefix[..len]))
+        .collect::<Vec<_>>();
+    for index in [
+        0,
+        7,
+        8,
+        15,
+        16,
+        31,
+        32,
+        33,
+        47,
+        48,
+        63,
+        64,
+        65,
+        prefix.len() - 1,
+    ] {
+        for byte in *b"!~" {
+            let mut query = prefix.as_bytes().to_vec();
+            query[index] = byte;
+            queries.push(String::from_utf8(query).unwrap());
+        }
+    }
+    for query in &queries {
+        assert_eq!(actual.get(query.as_str()), expected.get(query.as_str()));
+        let range = (Included(query.as_str()), Unbounded);
+        assert_eq!(
+            actual.range::<str, _>(range).take(4).collect::<Vec<_>>(),
+            expected.range::<str, _>(range).take(4).collect::<Vec<_>>()
+        );
+    }
+    let separators = actual
+        .separator_keys()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in separators.iter().step_by(3) {
+        assert_eq!(actual.remove(key.as_str()), expected.remove(key.as_str()));
+        actual.check_invariants();
+    }
+    for (value, key) in queries.into_iter().enumerate() {
+        assert_eq!(
+            actual.insert(key.clone(), value),
+            expected.insert(key, value)
+        );
+        actual.check_invariants();
+    }
+    let cut = format!("{prefix}001000");
+    let mut actual_upper = actual.split_off(cut.as_str());
+    let mut expected_upper = expected.split_off(cut.as_str());
+    actual.check_invariants();
+    actual_upper.check_invariants();
+    actual.append(&mut actual_upper);
+    expected.append(&mut expected_upper);
+    actual = actual.clone();
+    actual.check_invariants();
+    assert!(actual.iter().eq(expected.iter()));
+
+    // Distinct lengths can have identical zero-padded encodings. A local
+    // prefix is bounded by actual bytes, even when the fence prefix is not.
+    let mut zeros = BBTreeMap::new();
+    for length in 0..128 {
+        zeros.insert(format!("a{}", "\0".repeat(length)), length);
+    }
+    zeros.check_invariants();
+    for length in 0..128 {
+        assert_eq!(
+            zeros.get(format!("a{}", "\0".repeat(length)).as_str()),
+            Some(&length)
+        );
+    }
+}
+
+/// A seven-byte shared prefix cannot activate the eight-byte local guard.
+/// Its narrow parent must still export bytes four through seven when a
+/// separator moves down or fills the window of a leaf whose fence shrinks.
+#[test]
+fn narrow_parent_windows_survive_demotion_and_fence_changes() {
+    use std::collections::BTreeMap;
+
+    let mut actual = BBTreeMap::new();
+    let mut expected = BTreeMap::new();
+    let mut keys = (0..2048)
+        .map(|index| format!("abc/def{:04x}/tail\0", (index * 40503) % 65536))
+        .collect::<Vec<_>>();
+    TestRng::new(93).shuffle(&mut keys);
+    for (index, key) in keys.iter().enumerate() {
+        actual.insert(key.clone(), index);
+        expected.insert(key.clone(), index);
+    }
+    actual.check_invariants();
+    let separators = actual
+        .separator_keys()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in separators.iter().step_by(2) {
+        assert_eq!(actual.remove(key), expected.remove(key));
+        actual.check_invariants();
+    }
+    for key in keys.iter().step_by(3) {
+        assert_eq!(actual.remove(key), expected.remove(key));
+    }
+    actual.check_invariants();
+    let mut upper = actual.split_off("abc/def8000");
+    let mut expected_upper = expected.split_off("abc/def8000");
+    actual.check_invariants();
+    upper.check_invariants();
+    actual.append(&mut upper);
+    expected.append(&mut expected_upper);
+    let copy = actual.clone();
+    copy.check_invariants();
+    assert!(copy.iter().eq(expected.iter()));
+    for key in &keys {
+        assert_eq!(copy.get(key.as_str()), expected.get(key.as_str()));
+    }
+}

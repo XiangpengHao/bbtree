@@ -1,7 +1,7 @@
 //! Paths down a tree: the node at each height, from the root down to a
 //! position in one of them, and the index taken at each (D11, D24). Every
-//! walk, entry, insert and removal goes by one. The iterators' walks move two
-//! of them through the tree (`walk.rs`), an entry keeps the one its search
+//! range, entry and removal keeps one, as do inserts that split. Iterators
+//! move two of them through the tree (`walk.rs`), an entry keeps the one its search
 //! found (`map/entry.rs`), and inserting and removing go back up the one
 //! that led to the key, splitting or fixing the nodes on it
 //! (`map/insert.rs`, `map/remove.rs`).
@@ -269,8 +269,8 @@ impl<B, K, V, S> Path<B, K, V, S> {
     }
 
     /// Whether `self` and `other`, paths in the same tree, end at the same
-    /// position of the same node. Called on every step of a range, whose
-    /// ends are attached from the start, so it checks nothing.
+    /// position of the same node. A range checks that both ends have
+    /// started before calling this on each step.
     ///
     /// # Safety
     ///
@@ -595,10 +595,39 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// A detached path in `tree`, for one of the methods that start it.
     #[inline(always)]
     pub(crate) fn new(tree: &'a mut Subtree<K, V, S>) -> Self {
+        tree.clear_insertion_hint();
         Self {
             tree,
             path: Path::detached(),
         }
+    }
+
+    /// Finishes a plain insertion, remembering its leaf only when the path
+    /// proves the new entry is physically last. This consumes the path:
+    /// entry handles that keep their path may still remove or merge nodes,
+    /// so they must never publish the hint while retaining mutation access.
+    /// No ordinary fitting search needs to track ancestors for this proof.
+    pub(crate) fn finish_insertion(self) {
+        if self.path.height() != 0 {
+            return;
+        }
+        let leaf = self.view();
+        if leaf.len() == 0 || self.path.index() != leaf.len() - 1 {
+            return;
+        }
+        let leaf_node = leaf.node_ptr();
+        for height in 1..=self.path.root_height() {
+            // SAFETY: the attached path records an internal node at each
+            // positive height through its root, and no mutation is lent.
+            let node = unsafe { self.path.internal_view(height) };
+            if self.path.index_at(height) != node.len() {
+                return;
+            }
+        }
+        // SAFETY: every ancestor takes its final edge, so this is the
+        // physically last leaf. `self` is consumed and lends no handles;
+        // future exclusive access goes through the owner's invalidation.
+        unsafe { self.tree.remember_rightmost_leaf(leaf_node) };
     }
 
     /// Starts the path at the root, at its first edge.

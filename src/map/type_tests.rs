@@ -294,22 +294,22 @@ fn iterators_are_covariant_in_keys_and_values() {
 /// parents, need 72 bytes.
 #[test]
 fn iterator_sizes() {
-    assert_eq!(size_of::<Iter<'_, u64, u64>>(), 520);
-    assert_eq!(size_of::<Keys<'_, u64, u64>>(), 520);
-    assert_eq!(size_of::<Range<'_, u64, u64>>(), 512);
-    assert_eq!(size_of::<IterMut<'_, u64, u64>>(), 520);
-    assert_eq!(size_of::<RangeMut<'_, u64, u64>>(), 512);
+    assert_eq!(size_of::<Iter<'_, u64, u64>>(), 560);
+    assert_eq!(size_of::<Keys<'_, u64, u64>>(), 560);
+    assert_eq!(size_of::<Range<'_, u64, u64>>(), 552);
+    assert_eq!(size_of::<IterMut<'_, u64, u64>>(), 560);
+    assert_eq!(size_of::<RangeMut<'_, u64, u64>>(), 552);
     assert_eq!(size_of::<btree_map::Iter<'_, u64, u64>>(), 72);
 }
 
 #[test]
-fn three_words_like_std() {
-    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 24);
+fn four_words_with_an_insertion_hint() {
+    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 32);
     assert_eq!(
         size_of::<BBTreeMap<u64, u64>>(),
-        size_of::<BTreeMap<u64, u64>>()
+        size_of::<BTreeMap<u64, u64>>() + size_of::<usize>()
     );
-    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 24);
+    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 32);
 }
 
 #[test]

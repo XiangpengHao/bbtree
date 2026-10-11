@@ -629,6 +629,310 @@ Supersedes D18's integers opting in.
   `u64` → `u64`, 26% for a `u64` set. A node holds 55 `u64` keys
   instead of 63.
 
+**D32. Internal nodes split keys from children; nodes align to 64 bytes.** (2026-10-10)
+Updates D29's internal layout, D15's alignment, D22's split point, D23's
+folds and D24's point lookups. The experiments behind D32–D45 are in
+[06-cost-model.md](06-cost-model.md), the combined results in
+[07-large-map-optimization.md](07-large-map-optimization.md).
+
+- **Internal nodes keep keys and child pointers in separate arrays.**
+  Leaves with inline keys still pair each key with its value (D29). An
+  internal search ends at a child pointer and rarely reads a full key, so
+  child pointers should share cache lines with each other, not with keys.
+  A leaf search reads the key it ends at and then its value, so pairing
+  still pays there. Settles D29's open question.
+- **Nodes align to 64 bytes, not 1 KiB:** `max(64, align_of K, align_of
+  trailing slot)`. Paths keep indexes in their own array, so nothing uses
+  a node pointer's low bits and 1 KiB alignment bought nothing.
+  - **Gain:** with the System allocator, 100,000 touched 1 KiB blocks take
+    110 MB of RSS instead of 206 MB (−47%).
+  - **Cost:** a node can now straddle a 4 KiB page (15 of 64 offsets).
+    Timings moved about 1%, except 1M JSON `get_miss`: +7.6%, same
+    instructions, more DRAM fills.
+- **Point lookups keep no path.** `get` and `get_mut` hold only the
+  current node. Inserts, entries, removals and range bounds keep paths.
+- **Consuming `fold`/`rfold` run one counted loop per leaf** and update
+  the cursor once per leaf; `next` still crosses leaves through the
+  boundary helper. An unbounded range end is set up only when first used;
+  explicit bounds are still searched when the range is made.
+- **A split at a node's end leaves the arriving side
+  `min(2 × minimum, capacity / 2)` entries;** the old node keeps the rest.
+  A split in the middle stays even. Sorted inserts now leave full nodes
+  behind, not half-full ones, and the headroom above the minimum keeps one
+  removal from undoing the split. Inserts that fit pay nothing.
+  At 10M `u64`: sequential insert 37.9 → 23.8 bytes/entry (−37%), random
+  insert 27.0 → 27.2 (+0.7%).
+- **Fixed byte arrays get 2-byte inline keys under `Auto`, down from 8.**
+  `[u8; 16]`, `[u8; 20]` and `[u8; 32]` hold their bytes in the node, so
+  a tie costs a load from the same node, not a heap read; narrower
+  summaries mean fewer cache lines per search. Heap strings keep 8 (D43
+  narrows their internal nodes to 4); `WithInlineKey` keeps each impl's
+  width. 10M `hash32`: hits 318.1 → 300.4 ns, misses 282.1 → 207.4,
+  inserts 336.0 → 310.9; DRAM fills per hit 10.7 → 6.1.
+- **Search details.** A byte-string query's windows are read from its own
+  bytes, not from a 128-byte zero-padded copy. On x86-64 without POPCNT, a
+  sorted SSE2 mask that fits one 64-bit word gives both bounds directly,
+  with no software population count. AVX-512 and POPCNT targets are
+  unchanged.
+
+**D33. Cheaper fitting inserts, a local search prefix, cached range runs.** (2026-10-10)
+
+- **A fitting insert has its own short path.** Allocation and split
+  propagation move to an outlined function with its own stack frame
+  (integer insert frame: 2,216 → 360 bytes). Growing a node keeps the
+  max-valued summary padding already there, and an insert at the end skips
+  the empty tail move. Replacing a value borrows it in place instead of
+  copying the path. 10M ordered `u64` insert: 36.0 → 34.0 ns; random
+  insert unchanged.
+- **An internal byte-string node can keep a longer local search prefix.**
+  - **When:** all of the node's 8-byte windows tie and its keys share at
+    least 8 more bytes past the fence prefix (05-fence-key.md). The longer
+    offset goes in 2 spare header bytes.
+  - **Search:** a query first checks that it has those extra bytes; if not,
+    it goes to the first or last child.
+  - **Mutation:** the fence prefix itself never changes, so child prefixes
+    and moved windows still use it. Before keys move, the node restores its
+    ordinary windows; afterwards it rebuilds the local ones. Windows handed
+    out by split, merge and clone are always the ordinary ones.
+  - **Why:** paths share long prefixes; the root has no fences, so its
+    prefix is 0 and all its windows tie. On 1M paths, full-key comparisons
+    per query fall 7.7 → 3.6. Only seven internal nodes qualify; JSON has
+    none.
+  - **Measured:** 10M paths 3–4% faster for insert, hit and miss; 1M path
+    hits 492 → 455 ns.
+- **A range iterator caches a checked leaf interval.** Repeated
+  `next`/`next_back` step inside it; switching direction, crossing a leaf
+  or folding first syncs the path. `Range`/`RangeMut` grow 512 → 552
+  bytes. 10M `range64`: `u64` 736 → 685 ns (−7%), JSON 1302 → 1204 ns.
+
+**D34. Align leaf pairs so a key and its value share a cache line.** (2026-10-10)
+
+- **What:** when a leaf entry (key and value) is a power of two up to 64
+  bytes, entries start at a multiple of its size. `u64` → `u64` pairs
+  (16 B) now start at byte 144, not 136; `String` → `u64` (32 B) at 256,
+  not 232.
+- **Why:** a quarter of `u64` pairs and half of `String` pairs crossed a
+  cache line, so a hit could load one more line just for the value.
+- **Cost:** none in capacity or allocation. The page size and
+  `(capacity + 1) × entry size` are multiples of the entry size, so
+  rounding the start up only uses tail slack.
+- **Measured** at 10M: DRAM fills per hit 3.86 → 3.68 (`u64`) and
+  9.18 → 8.80 (JSON), same instructions. Latency barely moved: `u64` hits
+  131.5 → 129.6 ns, JSON hits 348.7 → 353.5 ns.
+- **Also:** frees 48 bytes in a `String` → `u64` leaf, which D36 uses.
+
+**D35. Whole-map iterators reuse the range iterator's leaf run.** (2026-10-10)
+
+- **What:** borrowed whole-map iterators wrap D33's range walk plus an
+  exact remaining count. `next`/`next_back` step inside the cached leaf
+  run; a consuming fold hands over to D32's counted per-leaf loop.
+  Owning iteration and drop are unchanged.
+- **Cost:** `Iter`, `IterMut` and `Keys` grow 520 → 560 bytes.
+- **Measured,** manual `next()`, 2M entries, baseline x86-64: `u64`
+  4.50 → 3.99 ns/entry (−11%), `hash32` 9.36 → 8.73 (−7%). The native
+  10M fold is unchanged (2.21 ns/entry).
+
+**D36. String leaves keep 2-byte length tags in spare padding.** (2026-10-10)
+
+- **What:** for recognized heap byte strings, a leaf stores each key's
+  length mod 65,536 in 2 bytes, only where existing padding holds the whole
+  tag array before both the head value and the first key. Capacity and
+  allocation size don't change. `KeySlots` moves tags with their keys.
+- **Search:** tags are read only when the 8-byte summaries leave more than
+  one candidate. No tag matches: absent. One: compare that full key. Two:
+  compare the upper key, then the lower only if the query sorts below it.
+  Three or more: the old binary search, so equal-length keys never cause
+  a linear scan. A tag never decides equality on its own: it's truncated.
+- **Why:** path keys tie in their 8-byte windows inside leaves. On 1M
+  paths, heap key reads per lookup fall from 1.98 to about 1.0 for hits
+  and 2.18 to 0.20 for misses.
+- **Cost:** inserts maintain a third array: 10M path insert +2.0%. JSON
+  leaves never have ambiguous runs, so JSON pays upkeep and gains nothing
+  on lookups; its timings stayed flat.
+- **Measured** at 10M paths: hits −10.7%, misses −31.2%.
+- **Pitfall:** the first version made JSON hits 25% slower. A second
+  caller made LLVM outline a tiny summary-view wrapper, and its population
+  count grew from 26 to 244 instructions. The wrapper is now forced inline.
+
+**D37. Inserts record a path only when the leaf is full.** (2026-10-10)
+
+- **What:** an insert first descends without a path, like a lookup, and
+  either replaces an existing value or inserts into a leaf with room. If
+  the leaf is full, an outlined function searches again, this time
+  recording the path, and splits.
+- **Why:** most inserts fit; at 1M, 2.6% of `u64` inserts and 5.8% of
+  string inserts reach a full leaf. The rest shouldn't record parents and
+  indexes they never use.
+- **Safety:** the second search uses its own result, not the first one's:
+  an inconsistent `Ord` may find an existing key or another leaf the second
+  time. All comparisons happen before anything changes, and the key is
+  still dropped before the value is replaced.
+- **Measured** at 10M: random insert `u64` −4.1%, JSON −19.4%, paths
+  −4.8%; ordered `u64` −8.8%. DRAM fills unchanged: the saving is
+  instructions (JSON 824 → 649), mostly from helpers the old path called
+  at every level.
+
+**D38. A leaf lookup handles zero and one candidates directly.** (2026-10-10)
+
+- **What:** when the summaries leave no candidate, the lookup returns
+  absent at once. One candidate needs only equality, not an ordered binary
+  search. A fixed byte array compares all its bytes together (`[u8; 32]`:
+  one 32-byte load, XOR and test, no `memcmp`); a heap string skips the
+  known prefix. A borrowed query must still match the array's full length,
+  trailing zeros included. Custom strategies keep their comparison.
+- **Also:** extends D36 from one to two matching tags.
+- **Measured** at 10M `hash32`: hits 271.4 → 245.6 ns (instructions
+  527 → 431); misses 193.0 → 195.6 ns.
+
+**D39. Fixed-array internal nodes put children before keys.** (2026-10-10)
+
+- **What:** for `Auto`'s 16-, 20- and 32-byte arrays, an internal node's
+  child array comes right after the summaries, then the full keys. Page
+  size and capacity don't change; a layout that would lose capacity keeps
+  the old order.
+- **Why:** with 32-byte keys, every key now sits inside one cache line
+  (half crossed one before), and summaries plus children take one line
+  fewer.
+- **Not for heap strings:** their local prefix check (D33) reads the first
+  key right after the summaries. Custom strategies keep their layout.
+- **Measured** at 10M `hash32`: hits 240.9 → 225.1 ns, misses
+  190.2 → 168.4, inserts 206.2 → 188.1. Same instructions; fewer L1 and
+  DRAM misses.
+
+**D40. Baseline x86-64 packs 33–64 two-byte summaries into one mask word.** (2026-10-10)
+
+- **What:** without POPCNT or AVX-512, nodes with 33–64 two-byte summaries
+  pack each pair of SSE2 comparison vectors into one bit per slot. Both
+  bounds then come from trailing-one counts on one 64-bit word. Other
+  widths, capacities and targets keep their code.
+- **Why:** above 32 slots, LLVM emitted two software population counts,
+  each with a multiply.
+- **Measured,** 2M entries, baseline x86-64, System allocator: `u64` hits
+  94.3 → 67.1 ns, misses 55.6 → 41.5, inserts 171.9 → 142.5; `u128` hits
+  148.3 → 109.1, misses 74.9 → 55.7, inserts 251.0 → 217.9.
+
+**D41. Byte queries are known at compile time; the search adapter is always inlined.** (2026-10-10)
+
+- **What:**
+  - A recognized byte-string query holds a plain slice view instead of an
+    `Option`; the type checks that recognize it also guard its accessor.
+    Unknown borrowed query types still use `Ord`.
+  - The thin `NodeRef::search` adapter, which only re-attaches the
+    caller's node and height to the found index, is `#[inline(always)]`.
+    The search body itself may still be outlined.
+  - Local-prefix guards (D33) compare 32 bytes at a time; a cold helper
+    orders a mismatch.
+  - Native 8-byte leaf summaries use an equality mask.
+- **Why:** with the `Option`, an outlined helper re-tested for null and
+  kept a generic `memcmp` fallback. Without forced inlining, every internal
+  level returned node, height and index through memory: about 14 memory
+  operations per level for `String`.
+- **Measured** at 10M, all four together: JSON hits 343.8 → 334.4 ns,
+  misses 282.3 → 249.4; path hits 601.0 → 585.0, misses 450.4 → 432.9;
+  `hash32` hits 224.8 → 185.9, misses 169.4 → 140.9. The binary's code is
+  20 KB smaller.
+- **Pitfall:** with a plain `#[inline]` hint instead, the same change made
+  JSON hits 9% slower (374.4 ns).
+
+**D42. Cached scan runs hold key pointers instead of indexes.** (2026-10-10)
+
+- **What:** in a paired leaf with nonzero stride, a cached run (D33, D35)
+  keeps a current and an end key pointer, in the space the redundant leaf
+  handle used. Each step advances one pointer: no leaf load, no index
+  arithmetic. Plain and zero-size layouts keep indexes. The path still
+  holds the leaf, so the index can be recovered at a boundary or a
+  direction change. Iterator sizes don't change.
+- **Safety:** only the key end serves as the end marker. In a full `u64`
+  leaf it is one past the page, which is allowed; the value end would be 8
+  bytes past it, which isn't. A value pointer is formed only once the run
+  proves an entry is left. Mutable iterators keep the same interval
+  argument, so each `&mut V` is handed out once.
+- **Measured:** 10M `u64` `range64` 688.2 → 664.5 ns (the per-item loop
+  goes from 18 to 15 instructions). Manual `next()`, 2M, baseline x86-64:
+  `u64` 3.92 → 3.52 ns, `hash32` 8.74 → 7.52.
+
+**D43. Heap-string internal nodes use 4-byte summaries.** (2026-10-10)
+
+- **What:** under `Auto`, heap byte strings keep 8-byte summaries in
+  leaves and use 4-byte ones in internal nodes. Internal capacity rises
+  25 → 28 for `String` and 31 → 36 for `&str`/`Box<str>`; pages stay
+  1 KiB. Before a key moves from an internal node into a leaf, its full
+  8-byte window is recomputed from the key. Custom strategies and fixed
+  arrays keep their width.
+- **Why:** about 94% of lookups pass through an internal node without
+  ending there, so the extra ties from 4 bytes cost little (JSON: +0.02
+  heap reads per hit), while the summaries shrink from 4 cache lines to 2.
+  In leaves, 4 bytes would more than double JSON's heap comparisons, so
+  leaves stay at 8.
+- **Search on baseline x86-64:** 17–32 four-byte summaries use one SSE2
+  packing step and trailing-one counts; above 32, a branchless binary
+  search. A second packing step for 33–64 cut instructions but was slower
+  on borrowed JSON, so it was dropped.
+- **Measured,** 10M native: JSON inserts 314.1 → 282.5 ns, hits
+  343.8 → 320.4, misses 282.3 → 235.4; paths about 1.3% faster. Baseline
+  x86-64, owned `String`: JSON hits 408.7 → 390.6, misses 335.5 → 297.3.
+- **Cost:** on baseline x86-64 with borrowed keys (2M diagnostic), path
+  misses are 2.2% slower; the other borrowed cells improved about 2%.
+
+**D45. Remember the last leaf after a split, so ascending inserts can append.** (2026-10-10)
+Supersedes D30's rejection of an append fast path; D30's per-node check
+stays rejected.
+
+- **What:** the map owner keeps an optional pointer to the tree's last
+  leaf.
+  - **Set** only by a plain insert that split, when its path shows the new
+    key went into the last slot at every level.
+  - **Used** while set: an insert first checks that the leaf has room and
+    that the key is strictly greater than the leaf's last key, then
+    appends with no descent.
+  - **Cleared** by anything else: an equal or smaller key, a full leaf,
+    or any `&mut` access that can change the tree's structure. The next
+    qualifying split sets it again. `Entry` handles never set it; clones,
+    `split_off` outputs and new maps start without it.
+- **Safety:** the comparison and inline key are computed before anything
+  changes. The check hands back a private token, and only consuming it
+  moves the key and value in, so a panicking `Ord` or `InlineKey` leaves
+  the map unchanged and the pointer cleared.
+- **Why this is not D30:** D30's check ran in every node of every insert
+  (+41 instructions per random insert). This one is a single `Option`
+  test per insert while unset. For random keys it can only be set at a
+  new maximum: about 17 times over 10M inserts. No counters, no tuned
+  thresholds.
+- **Cost:** the map is 32 bytes instead of 24 (std's is 24). JSON random
+  insert +2.3% in one run; other random inserts within ±0.5%. Descending
+  and middle-ordered runs get no shortcut.
+- **Measured,** 10M ordered inserts: `u64` 31.1 → 5.3 ns (std 39.5), JSON
+  121.7 → 45.3 (std 198.9), paths 185.9 → 63.1 (std 256.0).
+
+**D46. No software prefetch.** (2026-10-10)
+Supersedes D20 and D27.
+
+- **What:** the library issues no prefetch instructions, and the `prefetch`
+  feature is gone. Hardware prefetchers work as before. AGENTS.md forbids
+  explicit prefetching anywhere, including benchmarks and prototypes.
+- **Why:**
+  - Prefetch hides what the layout does with memory, so layout changes
+    can't be judged with it on (D27). The benchmarks already ran without
+    it, which made the default build one that no decision was measured on.
+  - It fetched every key line up to capacity, at every level, whatever the
+    search needed. After D32's separate internal arrays, `u64` and
+    `String` internal nodes prefetched their full keys, which a search
+    rarely reads, and not their child pointers, which it always does.
+  - Memory latency is a layout problem: put what an operation needs in
+    the lines it already loads.
+- **Measured** on D45's working copy, 10M, prefetch off → on, one run each
+  (the off and on runs were about 9 hours apart):
+  - Misses got slower: `u64` 92.9 → 116.5 ns (+25%), JSON 235.9 → 263.7
+    (+12%), `hash32` 138.4 → 184.5 (+33%). `hash32` hits too: 183.8 →
+    195.6 (+6%).
+  - DRAM fills per lookup rose 4–6×: `u64` hit 3.8 → 14.9, `hash32` miss
+    3.9 → 25.5.
+- **Cost:** the default build gives up what prefetch did help: random
+  inserts (`u64` 137.1 → 105.0, JSON 276.7 → 240.3, `hash32` 197.9 →
+  158.4), `u64` `range64` (659.3 → 504.9) and some hits (`u64` 130.2 →
+  116.9, JSON 305.2 → 285.0, paths 563.0 → 469.3). These are the
+  prefetch-on numbers the default build no longer reaches.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -670,6 +974,21 @@ requires the token: one check, no duplicates, nothing on the hot path.
 - **Paths lend one mutable node at a time** (built with the tree layer).
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the slots,
   handle and page modules of `node/` and the tree's path module.
+
+**D44. A child's prefix is never shorter than its parent's, even with a lying encoding.** (2026-10-10)
+
+- **What:** when a refit computes a child's prefix, or the border beside a
+  replaced separator shrinks, the target is floored at the parent's
+  current prefix. A valid `InlineKey` already guarantees this; the floor
+  keeps it when a custom encoding breaks its ordering contract. No user
+  callback runs while keys are half moved.
+- **Why:** while testing D45, a reversed encoding asked for a child prefix
+  of 6 under a parent prefix of 7, and split promotion hit a debug
+  assertion. The assertion stays; the missing invariant is now enforced at
+  refit. This fix stands whether or not D45 is kept.
+- **Test:** the adversarial-encoding test checks every parent/child pair
+  after each operation, without calling the lying encoder, and keeps its
+  exactly-once drop ledger.
 
 ## Proposed, not decided
 

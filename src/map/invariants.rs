@@ -73,6 +73,31 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         prefix_lens
     }
 
+    /// Structural prefix monotonicity is independent of key ordering or
+    /// user encodings. Moving a key to its parent only shortens its window,
+    /// even in a tree whose logical answers are wrong.
+    pub(super) fn check_prefix_order(&self) {
+        if let Some(root) = &self.root {
+            Self::check_prefix_order_in(root.borrow(), 0);
+        }
+    }
+
+    fn check_prefix_order_in(
+        node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
+        parent_prefix: usize,
+    ) {
+        let prefix = node.prefix_len();
+        assert!(
+            prefix >= parent_prefix,
+            "child prefix {prefix} < parent {parent_prefix}"
+        );
+        if let ForceResult::Internal(internal) = node.force() {
+            for index in 0..=internal.len() {
+                Self::check_prefix_order_in(internal.edge_at(index).descend(), prefix);
+            }
+        }
+    }
+
     fn collect_prefix_lens(
         node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
         prefix_lens: &mut Vec<usize>,

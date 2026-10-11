@@ -7,8 +7,7 @@ description = "bbtree's benchmark suite: BBTreeMap against std's maps and hashbr
 default-run = "bbtree-bench"
 
 [dependencies]
-# Without the library's default `prefetch` feature: see `prefetch` below.
-bbtree = { path = "..", default-features = false }
+bbtree = { path = ".." }
 bytes = "1"
 hashbrown = "0.17"
 mimalloc = "0.1"
@@ -24,10 +23,6 @@ tikv-jemallocator = { version = "0.7", optional = true }
 [features]
 # Time with jemalloc instead of mimalloc, the default.
 jemalloc = ["dep:tikv-jemallocator"]
-# Time bbtree with its software prefetch, as its users get it by default.
-# Off by default, so that the numbers show what the code itself does with
-# memory (D27).
-prefetch = ["bbtree/prefetch"]
 
 # Times with plain mimalloc.
 [[bin]]

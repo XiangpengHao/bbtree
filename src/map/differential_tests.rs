@@ -807,8 +807,8 @@ pub(super) struct Workload {
     pub(super) key_space: usize,
     pub(super) ordered_entries: usize,
     /// The height ascending and descending inserts must reach. They leave
-    /// the nodes they split about half full, so their height is predictable;
-    /// shuffled inserts fill nodes fuller and may stay a level lower.
+    /// larger nodes densely filled and small ones about half full. The
+    /// workloads keep enough entries to reach this height under either policy.
     pub(super) min_sequential_height: usize,
 }
 
@@ -935,7 +935,7 @@ fn wide_keys_match_std() {
     let workload = if cfg!(miri) {
         // Height 2 already has an internal node split into a parent with
         // room; height 3 only adds depth, which the native run covers.
-        // Ascending inserts leave half-full nodes: height 2 needs about 130.
+        // These small nodes split evenly: height 2 needs about 130 entries.
         Workload {
             random_steps: 300,
             key_space: 300,
@@ -1141,12 +1141,12 @@ fn over_aligned_values_match_std() {
 /// `split_off` at every position of a tree a few levels tall: before the
 /// first key, at each key and between each two, after the last, and so at
 /// every separator. Both halves match std's and keep the invariants, in a
-/// tree of half-full nodes, from ascending inserts, and in one thinned by
+/// tree of half-full small nodes, from ascending inserts, and in one thinned by
 /// removals toward the minimum fill, whose borders have little to spare.
 #[test]
 fn split_off_at_every_position_matches_std() {
-    // 1500 ascending entries, 14 to a node, make a tree 3 levels tall, and
-    // Miri's 60, 2.
+    // These small nodes split evenly: 1500 ascending entries make a tree
+    // 3 levels tall, and the smaller CI-only Miri case reaches 2.
     let (count, height) = if cfg!(miri) { (60, 2) } else { (1500, 3) };
     for thinned in [false, true] {
         let rng = TestRng::new(31);

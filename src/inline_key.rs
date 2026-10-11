@@ -34,6 +34,9 @@ pub type InlineWord = u64;
 /// past the bytes a node's keys share rarely tie on keys whose bytes are
 /// dense. A key behind a pointer, such as a `String`, reads the heap on a
 /// tie: 8 bytes, the default, tie least.
+/// With [`Auto`], heap byte strings keep eight bytes in leaves and four
+/// in internal nodes; explicit [`WithInlineKey`] strategies use their
+/// declared width in both kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineWidth {
     /// The first 2 bytes: the integers' width.
@@ -116,7 +119,8 @@ impl InlineKey for [u8] {
     /// With loads of a fixed size only, so no call to `memcpy`: the 8 bytes
     /// at `offset` if there are as many; otherwise the last 8, shifted so that
     /// the bytes from `offset` lead and zeros follow; or, for a string of
-    /// fewer than 8 bytes, its bytes one by one, shifted the same way.
+    /// fewer than 8 bytes, overlapping 4-, 2- or 1-byte loads, shifted the
+    /// same way.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         const WINDOW_LEN: usize = size_of::<InlineWord>();
@@ -129,8 +133,18 @@ impl InlineKey for [u8] {
         let (word, word_start) = match self.last_chunk::<WINDOW_LEN>() {
             Some(last) => (InlineWord::from_be_bytes(*last), self.len() - WINDOW_LEN),
             None => {
-                let padded = core::array::from_fn(|index| self.get(index).copied().unwrap_or(0));
-                (InlineWord::from_be_bytes(padded), 0)
+                let word = if let Some(first) = self.first_chunk::<4>() {
+                    let last = self.last_chunk::<4>().expect("the first four bytes fit");
+                    (InlineWord::from(u32::from_be_bytes(*first)) << 32)
+                        | (InlineWord::from(u32::from_be_bytes(*last)) << (8 * (8 - self.len())))
+                } else if let Some(first) = self.first_chunk::<2>() {
+                    let last = *self.last().expect("the first two bytes fit");
+                    (InlineWord::from(u16::from_be_bytes(*first)) << 48)
+                        | (InlineWord::from(last) << (8 * (8 - self.len())))
+                } else {
+                    InlineWord::from(self.first().copied().unwrap_or(0)) << 56
+                };
+                (word, 0)
             }
         };
         // The window starts past `word_start`, as it didn't fit.
@@ -250,6 +264,9 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
 /// uses the inline keys when the type it looks up with is recognized too, as
 /// `&str` is for `String` keys; otherwise it compares full keys, as a map
 /// without inline keys does.
+/// Fixed byte arrays keep two bytes per inline key. Heap-backed byte strings
+/// keep eight in leaves to limit allocation reads on prefix ties, and four
+/// in internal nodes to keep routing metadata compact.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Auto;
 

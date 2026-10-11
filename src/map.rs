@@ -3,9 +3,10 @@
 //! B+-tree that stores each key once (D17).
 //!
 //! The map owns at most one [`Subtree`]: none until the first insert, so
-//! that [`BBTreeMap::new`] allocates nothing. Every operation goes by a path
-//! from the root (`node/path.rs`): looking up searches down one; inserting
-//! goes back up the path its search found, for splits (`insert.rs`), and so
+//! that [`BBTreeMap::new`] allocates nothing. Point searches and ordinary
+//! fitting inserts descend from the root; increasing inserts can reuse a
+//! last leaf remembered after a split. An insert that splits records a
+//! path for going back up (`node/path.rs`, `insert.rs`), and so
 //! does removing, for merges (`remove.rs`); an entry keeps its path
 //! (`entry.rs`). Iterating walks the tree from both ends at once, each end a
 //! path (`iter.rs`, `iter_mut.rs`, on `node/walk.rs`); iterating by value
@@ -30,11 +31,15 @@ mod from_entries;
 #[cfg(test)]
 mod inline_key_tests;
 mod insert;
+#[cfg(test)]
+mod insert_tests;
 mod into_iter;
 #[cfg(test)]
 mod invariants;
 mod iter;
 mod iter_mut;
+#[cfg(test)]
+mod length_tag_tests;
 #[cfg(test)]
 mod prefix_tests;
 mod remove;
@@ -55,7 +60,7 @@ use crate::node::build::TreeBuilder;
 use crate::node::handle::Subtree;
 use crate::node::inline_keys::SearchKey;
 use crate::node::page::{FreshPage, PageByKind};
-use crate::node::path::{Path, PathMut};
+use crate::node::path::Path;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use extract_if::ExtractIf;
@@ -236,13 +241,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let mut path = Path::detached();
-        path.attach(self.root.as_ref()?.borrow());
-        if path.search(&SearchKey::new(key)) {
-            Some(path.kv().into_key_value())
-        } else {
-            None
-        }
+        self.root
+            .as_ref()?
+            .borrow()
+            .search_tree(&SearchKey::new(key))
+            .map(|found| found.into_key_value())
     }
 
     /// Returns the first key-value pair in the map. The key in this pair is
@@ -380,12 +383,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let mut path = PathMut::new(self.root.as_mut()?);
-        if path.search(&SearchKey::new(key)) {
-            Some(path.into_value_mut())
-        } else {
-            None
-        }
+        self.root
+            .as_mut()?
+            .borrow_mut()
+            .search_tree(&SearchKey::new(key))
+            .map(|found| found.into_value_mut())
     }
 
     /// Inserts a key-value pair into the map.

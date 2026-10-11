@@ -290,7 +290,7 @@ mod tests {
 
         /// Checks the halves of a split of the modelled leaf: the left keeps
         /// the head, the separator's value is the right half's head, and the
-        /// halves differ by at most two entries.
+        /// halves both meet the minimum occupancy.
         fn assert_split_halves<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
             &self,
             split: &Split<'_, Tracked<'l>, V, S, Leaf>,
@@ -302,7 +302,8 @@ mod tests {
             halves.extend(right.tracked_ids());
             assert_eq!(halves, self.entries);
             assert_eq!(split.left.reborrow().head_id(), self.head);
-            assert!(split.left.len().abs_diff(right.len()) <= 2);
+            assert!(!split.left.is_underfull());
+            assert!(!right.is_underfull());
             assert_eq!(right.height(), 0);
             split.left.reborrow().assert_inline_keys_match();
             right.assert_inline_keys_match();
@@ -584,6 +585,56 @@ mod tests {
             every_position::<Tracked<'_>, WithInlineKey>(&ledger, &[false, true]);
         }
         ledger.assert_all_dropped_once();
+    }
+
+    #[test]
+    fn boundary_insert_remove_keeps_split_headroom() {
+        for at_front in [false, true] {
+            let pages = TestPages::<u64, u64>::new();
+            let mut tree = Subtree::new_leaf(pages.fresh()).forget_type();
+            let mut length = 0;
+            let capacity = NodePtr::<u64, u64, Auto>::capacity::<Leaf>() as u64;
+            for key in 1..=capacity {
+                tree.insert(key, key, || pages.fresh(), || pages.fresh(), &mut length);
+            }
+            let boundary_key = if at_front { 0 } else { capacity + 1 };
+            tree.insert(
+                boundary_key,
+                boundary_key,
+                || pages.fresh(),
+                || pages.fresh(),
+                &mut length,
+            );
+            assert_eq!(tree.height(), 1);
+            let root = tree.borrow().node_ptr();
+            let allocated = pages.allocated_count();
+            let in_use = pages.in_use();
+
+            for _ in 0..16 {
+                let removed = if at_front {
+                    tree.pop_first(|page| pages.release(page), &mut length)
+                } else {
+                    tree.pop_last(|page| pages.release(page), &mut length)
+                };
+                assert_eq!(removed, Some((boundary_key, boundary_key)));
+                assert_eq!(tree.height(), 1, "deletion must not undo the split");
+                assert!(tree.borrow().node_ptr().is(root));
+                assert_eq!(pages.in_use(), in_use, "no node should be merged away");
+                assert_eq!(
+                    tree.insert(
+                        boundary_key,
+                        boundary_key,
+                        || panic!("boundary churn must not allocate a leaf"),
+                        || panic!("boundary churn must not allocate an internal node"),
+                        &mut length,
+                    ),
+                    None,
+                );
+                assert_eq!(pages.allocated_count(), allocated);
+            }
+            tree.destroy(|page| pages.release(page));
+            pages.assert_all_released();
+        }
     }
 
     #[test]

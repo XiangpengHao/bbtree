@@ -7,8 +7,10 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
+use super::handle::Internal;
+use super::inline_keys::KeyInliner;
 use super::page::{InlineKeyNodeHeader, NodeHeader, NodePtr};
-use crate::inline_key::{Auto, InlineWidth, InlineWord};
+use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// Byte layouts of the node pages for keys `K` and values `V`: for leaves
 /// and for internal nodes (D9, D12, D17, D21, D29), each without an array
@@ -20,35 +22,44 @@ use crate::inline_key::{Auto, InlineWidth, InlineWord};
 ///
 /// with inline keys:
 /// leaf      | header | w0 … w_n | (_ head) (k0 v0) (k1 v1) … (k_n v_n)   |
-/// internal  | header | w0 … w_n | (_ e0) (k0 e1) (k1 e2) … (k_n e_n+1)  |
+/// internal  | header | w0 … w_n | k0 k1 … k_n | e0 e1 … e_n+1          |
 ///           0        inline_keys_offset
+/// fixed-array internal | header | w0 … w_n | e0 … e_n+1 | k0 … k_n    |
 /// ```
 ///
-/// - Every layout has one shape: a header at offset 0, keys growing up, and
-///   one more trailing slot than keys: a leaf's head and values, or an
+/// - Every layout has a header at offset 0, keys, and one more trailing
+///   slot than keys: a leaf's head and values, or an
 ///   internal node's edges. Trailing slot 0 is the head, or edge 0, and slot
 ///   `i + 1` goes with key `i`, the one left of it: value `i`, or the edge
-///   right of key `i`. One formula sizes every layout, from the trailing
-///   slot's size and alignment and whether the node has inline keys.
+///   right of key `i`. A common formula sizes each baseline layout from
+///   slot sizes, alignment and inline keys, before the optional reorder.
 /// - Without inline keys, the header is a [`NodeHeader`]; the keys are an
 ///   array of their own, from `keys_offset`, at the same offset in both
 ///   kinds, and the trailing slots an array right after the keys' capacity.
 /// - With inline keys, the header is an [`InlineKeyNodeHeader`], an array of
-///   `capacity` inline keys of the map's width follows it, from offset 8 at
-///   every width, and then the keys and trailing slots, paired in entries
-///   growing up: entry 0 holds trailing slot 0 alone, its key's place
-///   unused, and entry `i + 1` key `i` and trailing slot `i + 1`, each a
-///   `#[repr(C)]` pair. A search reads the dense inline keys first, then the
-///   key it ends at, whose value or edge is in the same entry (D29).
+///   `capacity` inline keys of the kind's width follows it, from offset 8 at
+///   every width. Leaves pair their keys and values: entry 0 holds the head
+///   alone, its key's place unused, and entry `i + 1` key `i` and value `i`,
+///   each a `#[repr(C)]` pair. A leaf search reads the dense inline keys
+///   first, then the key it ends at, whose value is in the same entry (D29).
+///   Power-of-two entries no larger than a cache line start at a multiple
+///   of their size, so each pair stays within one cache line.
+///   Internal nodes keep keys and edges in separate arrays: most searches
+///   read only an edge after the inline keys, so unrelated keys need not
+///   occupy the edge's cache line. Recognized fixed arrays put edges first
+///   when the same capacity fits: early edges share the summaries' last
+///   cache line, and 16- and 32-byte keys become cache-line-contained.
+///   Heap strings keep keys first because local-prefix validation reads
+///   their first key before searching the summaries.
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
 ///   own sizes, or the entries' with inline keys.
-/// - Each kind is the smallest multiple of its alignment that holds
-///   `MIN_CAPACITY` keys, and is aligned to 1 KB or more (D13, D15). A
+/// - Each kind is the smallest multiple of 1 KiB and its alignment that
+///   holds `MIN_CAPACITY` keys, aligned to a cache line or more (D13, D15). A
 ///   leaf's size depends on `K` and `V`; an internal node's on `K` alone, as
 ///   it holds no values (D17, D21).
 ///
-/// The eight layouts are constants. Every invariant the node code relies on
+/// The layouts are constants. Every invariant the node code relies on
 /// for one is asserted at compile time when that constant is evaluated,
 /// which happens before any page of that layout exists. A map picks the
 /// constants of its key type (`NodePtr::inline_width`, in `page.rs`), by a
@@ -88,6 +99,9 @@ pub(super) struct LeafLayout {
     pub(super) head_offset: usize,
     /// Bytes from the head to value 0, and from one value to the next.
     pub(super) value_stride: usize,
+    /// A dense array of `u16` length tags, when the unused space before the
+    /// head holds one per key. Reserving it changes no offset or capacity.
+    pub(super) length_tags_offset: Option<usize>,
 }
 
 /// The layout of an internal node's page.
@@ -107,6 +121,14 @@ pub(super) struct InternalLayout {
 struct TrailingSlot {
     size: usize,
     align: usize,
+    /// Inline-key leaves pair keys with values; internal edges stay dense.
+    pair_with_key: bool,
+}
+
+impl TrailingSlot {
+    const fn paired(self, inline_key_size: usize) -> bool {
+        self.pair_with_key && inline_key_size > 0
+    }
 }
 
 /// One kind's layout, before it is named a leaf's or an internal node's.
@@ -119,16 +141,19 @@ struct KindLayout {
 }
 
 impl<K, V> NodeLayout<K, V> {
-    /// Every node is a multiple of this size and at least this aligned (D15).
+    /// Every node allocation is a multiple of this size (D15).
     const BASE_NODE_SIZE: usize = 1024;
 
+    /// Keep headers and search arrays on cache-line boundaries without
+    /// forcing each allocation to a node-size boundary.
+    const MIN_NODE_ALIGN: usize = 64;
+
     /// Every node kind holds at least this many keys (D13); nodes grow by
-    /// whole alignment steps until it fits.
+    /// whole allocation-size steps until it fits.
     const MIN_CAPACITY: usize = 12;
 
-    /// Upper bound on any node's capacity, so that an index (`0..=capacity`)
-    /// fits in the 10 low bits that 1 KB alignment leaves free. Binds for
-    /// leaves whose keys and values are (nearly) zero-sized.
+    /// Upper bound on any node's capacity. Indexes use `u16`; this existing
+    /// tighter bound keeps nearly zero-sized nodes' search work bounded.
     const MAX_CAPACITY: usize = 1023;
 
     /// Where the inline keys start in a node that has them.
@@ -139,6 +164,7 @@ impl<K, V> NodeLayout<K, V> {
     const VALUE: TrailingSlot = TrailingSlot {
         size: size_of::<V>(),
         align: align_of::<V>(),
+        pair_with_key: true,
     };
 
     /// An internal node's trailing slot: an edge, a pointer to a child node,
@@ -146,6 +172,7 @@ impl<K, V> NodeLayout<K, V> {
     const EDGE: TrailingSlot = TrailingSlot {
         size: size_of::<NodePtr<K, V, Auto>>(),
         align: align_of::<NodePtr<K, V, Auto>>(),
+        pair_with_key: false,
     };
 
     pub(super) const PLAIN_LEAF: LeafLayout = Self::leaf_layout(None);
@@ -168,6 +195,8 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
         Self::internal_layout(Some(InlineWidth::Eight));
 
+    const FIXED_ARRAY_INTERNAL: InternalLayout = Self::fixed_array_internal_layout();
+
     /// The leaf layout without inline keys, or with inline keys of
     /// `inline_width`: one of the four constants, which `inline_width` picks
     /// after monomorphization.
@@ -180,9 +209,23 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
-    /// The internal-node layout without inline keys, or with inline keys of
-    /// `inline_width`; see [`Self::leaf`].
-    pub(super) fn internal(inline_width: Option<InlineWidth>) -> InternalLayout {
+    /// Resolves the strategy once for layout: only recognized fixed byte
+    /// arrays place their edges before their real keys. Custom encodings
+    /// retain their original shape, regardless of the width they request.
+    #[inline]
+    pub(super) fn internal<S: InlineKeyStrategy<K>>() -> InternalLayout {
+        let inliner = KeyInliner::<K>::resolve::<S>();
+        if let Some(KeyInliner::ByteString(bytes)) = inliner
+            && bytes.inline_width() == InlineWidth::Two
+        {
+            // Fixed arrays are the only recognized byte strings with
+            // two-byte summaries; no new type-identity check is needed.
+            return Self::FIXED_ARRAY_INTERNAL;
+        }
+        Self::internal_with_width(inliner.map(KeyInliner::node_width::<Internal>))
+    }
+
+    fn internal_with_width(inline_width: Option<InlineWidth>) -> InternalLayout {
         match inline_width {
             None => Self::PLAIN_INTERNAL,
             Some(InlineWidth::Two) => Self::TWO_BYTE_INLINE_INTERNAL,
@@ -194,11 +237,25 @@ impl<K, V> NodeLayout<K, V> {
     /// Leaves are sized by their keys and values, and the head (D17).
     const fn leaf_layout(inline_width: Option<InlineWidth>) -> LeafLayout {
         let layout = Self::kind_layout(Self::inline_key_size(inline_width), Self::VALUE);
+        let summaries_end =
+            Self::keys_start(Self::inline_key_size(inline_width), layout.keys.capacity);
+        let tags_start = summaries_end.next_multiple_of(align_of::<u16>());
+        let tags_end = tags_start + layout.keys.capacity * size_of::<u16>();
+        let length_tags_offset = if inline_width.is_some()
+            && tags_end <= layout.trailing_offset
+            && tags_end <= layout.keys.keys_offset
+        {
+            // Paired leaves keep no key in the dummy entry before the head.
+            Some(tags_start)
+        } else {
+            None
+        };
         LeafLayout {
             page: layout.page,
             keys: layout.keys,
             head_offset: layout.trailing_offset,
             value_stride: layout.trailing_stride,
+            length_tags_offset,
         }
     }
 
@@ -216,30 +273,71 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
+    /// Reorders the arrays without changing allocation size or fanout.
+    /// Alignment can make this order larger for some key shapes, so retain
+    /// the original layout whenever its capacity would no longer fit.
+    const fn fixed_array_internal_layout() -> InternalLayout {
+        let layout = Self::TWO_BYTE_INLINE_INTERNAL;
+        let capacity = layout.keys.capacity;
+        let summaries_end =
+            Self::keys_start(Self::inline_key_size(Some(InlineWidth::Two)), capacity);
+        let edges_offset = summaries_end.next_multiple_of(Self::EDGE.align);
+        let edges_end = edges_offset + (capacity + 1) * Self::EDGE.size;
+        let keys_offset = edges_end.next_multiple_of(align_of::<K>());
+        if keys_offset + capacity * size_of::<K>() > layout.page.size() {
+            return layout;
+        }
+
+        // The baseline established alignment, capacity, and stride bounds.
+        // Only the arrays' origins change; check their new order here.
+        assert!(summaries_end <= edges_offset);
+        assert!(edges_offset.is_multiple_of(Self::EDGE.align));
+        assert!(edges_end <= keys_offset);
+        assert!(keys_offset.is_multiple_of(align_of::<K>()));
+        InternalLayout {
+            keys: KeyArea {
+                keys_offset,
+                ..layout.keys
+            },
+            edges_offset,
+            ..layout
+        }
+    }
+
     /// The layout of a kind whose trailing slot is `trailing`, with inline
     /// keys of `inline_key_size` bytes, none if 0: the smallest node that
     /// holds `MIN_CAPACITY` keys, and as many keys as fit in it.
     const fn kind_layout(inline_key_size: usize, trailing: TrailingSlot) -> KindLayout {
         let align = Self::node_align(trailing.align);
         let size = Self::bytes_needed(inline_key_size, trailing, Self::MIN_CAPACITY)
-            .next_multiple_of(align);
+            .next_multiple_of(Self::max(Self::BASE_NODE_SIZE, align));
         let capacity = Self::capacity_in(size, inline_key_size, trailing);
         let keys_start = Self::keys_start(inline_key_size, capacity);
-        let (keys_offset, key_stride, trailing_offset, trailing_stride) = if inline_key_size > 0 {
-            let entry_size = Self::entry_size(trailing);
-            let entries_offset = keys_start.next_multiple_of(Self::entry_align(trailing));
-            (
-                entries_offset + entry_size,
-                entry_size,
-                entries_offset + Self::entry_trailing_offset(trailing),
-                entry_size,
-            )
-        } else {
-            let keys_offset = keys_start.next_multiple_of(align_of::<K>());
-            let trailing_offset =
-                (keys_offset + capacity * size_of::<K>()).next_multiple_of(trailing.align);
-            (keys_offset, size_of::<K>(), trailing_offset, trailing.size)
-        };
+        let (keys_offset, key_stride, trailing_offset, trailing_stride) =
+            if trailing.paired(inline_key_size) {
+                let entry_size = Self::entry_size(trailing);
+                // The page and the complete entries both occupy multiples
+                // of this alignment, so rounding their start up still fits
+                // the same capacity. It only uses the unused page tail.
+                let entries_align =
+                    if entry_size.is_power_of_two() && entry_size <= Self::MIN_NODE_ALIGN {
+                        entry_size
+                    } else {
+                        Self::entry_align(trailing)
+                    };
+                let entries_offset = keys_start.next_multiple_of(entries_align);
+                (
+                    entries_offset + entry_size,
+                    entry_size,
+                    entries_offset + Self::entry_trailing_offset(trailing),
+                    entry_size,
+                )
+            } else {
+                let keys_offset = keys_start.next_multiple_of(align_of::<K>());
+                let trailing_offset =
+                    (keys_offset + capacity * size_of::<K>()).next_multiple_of(trailing.align);
+                (keys_offset, size_of::<K>(), trailing_offset, trailing.size)
+            };
         let layout = KindLayout {
             page: Self::page_layout(size, align),
             keys: KeyArea {
@@ -259,7 +357,7 @@ impl<K, V> NodeLayout<K, V> {
         layout
     }
 
-    /// What every layout needs: whole 1 KB steps, a capacity in bounds, the
+    /// What every layout needs: whole 1 KiB steps, a capacity in bounds, the
     /// header, inline keys, keys and trailing slots in place, in that
     /// order, aligned, in the page and clear of each other.
     const fn assert_invariants(layout: KindLayout, inline_key_size: usize, trailing: TrailingSlot) {
@@ -304,7 +402,7 @@ impl<K, V> NodeLayout<K, V> {
         assert!(keys.keys_offset + capacity * key_stride <= size);
         assert!(layout.trailing_offset + capacity * trailing_stride + trailing.size <= size);
 
-        if keys.inline_keys_offset.is_some() {
+        if trailing.paired(inline_key_size) {
             // Entries after the inline keys: trailing slot 0 alone in entry
             // 0, then key `i` and trailing slot `i + 1` in entry `i + 1`, the
             // key first, the slot after it.
@@ -315,6 +413,9 @@ impl<K, V> NodeLayout<K, V> {
             assert!(keys.keys_offset == entries_offset + key_stride);
             assert!(slot_offset >= size_of::<K>());
             assert!(slot_offset + trailing.size <= key_stride);
+            if key_stride.is_power_of_two() && key_stride <= Self::MIN_NODE_ALIGN {
+                assert!(keys.keys_offset.is_multiple_of(key_stride));
+            }
         } else {
             // The keys, then the trailing slots, each an array of its own.
             assert!(key_stride == size_of::<K>() && trailing_stride == trailing.size);
@@ -338,10 +439,10 @@ impl<K, V> NodeLayout<K, V> {
         if a < b { a } else { b }
     }
 
-    /// A node is aligned to 1 KB (D15), and to its keys and trailing slots.
+    /// A node is aligned to a cache line and to its keys and trailing slots.
     const fn node_align(trailing_slot_align: usize) -> usize {
         Self::max(
-            Self::BASE_NODE_SIZE,
+            Self::MIN_NODE_ALIGN,
             Self::max(align_of::<K>(), trailing_slot_align),
         )
     }
@@ -382,16 +483,17 @@ impl<K, V> NodeLayout<K, V> {
             .next_multiple_of(Self::entry_align(trailing))
     }
 
-    /// The bytes a node of `capacity` keys needs: the header, the inline
-    /// keys if any, the keys, and one more trailing slot than keys; with
-    /// inline keys, paired in entries, the first entry's key unused.
+    /// The minimum bytes a node of `capacity` keys needs, before using tail
+    /// slack to align whole pairs: the header, inline keys if any, keys,
+    /// and one more trailing slot than keys; with inline keys, paired in
+    /// leaf entries, the first entry's key unused.
     const fn bytes_needed(
         inline_key_size: usize,
         trailing: TrailingSlot,
         capacity: usize,
     ) -> usize {
         let keys_start = Self::keys_start(inline_key_size, capacity);
-        if inline_key_size > 0 {
+        if trailing.paired(inline_key_size) {
             keys_start.next_multiple_of(Self::entry_align(trailing))
                 + (capacity + 1) * Self::entry_size(trailing)
         } else {
@@ -422,7 +524,7 @@ impl<K, V> NodeLayout<K, V> {
         // key and trailing slot, or its entry. Keys that take no room fit up
         // to the cap.
         let size_per_key = inline_key_size
-            + if inline_key_size > 0 {
+            + if trailing.paired(inline_key_size) {
                 Self::entry_size(trailing)
             } else {
                 size_of::<K>() + trailing.size
@@ -449,15 +551,19 @@ mod tests {
     //!   rounded up to `align_of K`, and the trailing slots right after `n`
     //!   keys, rounded up to their alignment: a node needs
     //!   `keys_offset + n·size_of K`, so rounded, plus `(n + 1)·slot`;
-    //! - with inline keys, the header is 6 bytes, the inline keys start at 8,
-    //!   and the entries at `8 + w·n` rounded up to their alignment, the
+    //! - with inline keys, the header is 6 bytes and the inline keys start
+    //!   at 8; internal keys follow at `8 + w·n`, aligned, with edges after
+    //!   them as above. Leaf entries start at that same offset, rounded up
+    //!   to their alignment, the
     //!   larger of the key's and the slot's: an entry is the key, then the
     //!   slot aligned to its alignment, rounded up to the entry's alignment,
     //!   and a node needs `n + 1` of them, entry 0 holding trailing slot 0
-    //!   after its unused key, so key 0 is in entry 1;
+    //!   after its unused key, so key 0 is in entry 1. Power-of-two entry
+    //!   sizes at most 64 also align the start to the entry size, consuming
+    //!   tail slack without changing the page size or capacity;
     //! - the node size is what 12 keys need, rounded up to the node's
-    //!   alignment, max(1024, align_of K, align_of V) for a leaf and
-    //!   max(1024, align_of K, 8) for an internal node;
+    //!   alignment and 1 KiB. Alignment is max(64, align_of K, align_of V)
+    //!   for a leaf and max(64, align_of K, 8) for an internal node;
     //! - the capacity is the largest `n` that fits, at most 1023, and with
     //!   inline keys at most `1024 / w`.
 
@@ -466,7 +572,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
-    use crate::inline_key::InlineWidth;
+    use crate::inline_key::{Auto, InlineWidth, WithInlineKey};
     use crate::node::test_support::{CacheLineAligned, PageAligned};
 
     /// The expected page of one node kind.
@@ -480,11 +586,11 @@ mod tests {
     }
 
     impl ExpectedNode {
-        /// A 1 KB, 1 KB-aligned node.
+        /// A 1 KiB node aligned to a cache line.
         fn one_page(capacity: usize, keys_offset: usize, trailing_offset: usize) -> Self {
             Self {
                 size: 1024,
-                align: 1024,
+                align: 64,
                 capacity,
                 keys_offset,
                 trailing_offset,
@@ -512,7 +618,7 @@ mod tests {
             assert_eq!((keys.key_stride, trailing.1), strides);
             assert_eq!(keys.inline_keys_offset, inline_keys.then_some(8));
             assert!(page.size().is_multiple_of(1024));
-            assert!(page.align() >= 1024);
+            assert!(page.align() >= 64);
         }
 
         fn assert_leaf(&self, layout: LeafLayout, strides: (usize, usize), inline_keys: bool) {
@@ -571,7 +677,7 @@ mod tests {
                 NodeLayout::<K, V>::PLAIN_LEAF
             );
             assert_eq!(
-                NodeLayout::<K, V>::internal(None),
+                NodeLayout::<K, V>::internal_with_width(None),
                 NodeLayout::<K, V>::PLAIN_INTERNAL
             );
         }
@@ -584,8 +690,8 @@ mod tests {
                 true,
             );
             self.internal.assert_internal(
-                NodeLayout::<K, V>::internal(Some(width)),
-                strides::<K, Edge>(true),
+                NodeLayout::<K, V>::internal_with_width(Some(width)),
+                strides::<K, Edge>(false),
                 true,
             );
         }
@@ -622,20 +728,46 @@ mod tests {
     fn string_to_u64_with_inline_keys() {
         ExpectedLayout {
             // 8 + 8n + 32(n + 1) ≤ 1024: 40n ≤ 984, n = 24; entries at
-            // 8 + 24·8 = 200, the head 24 bytes into entry 0, key 0 at 232.
-            leaf: ExpectedNode::one_page(24, 232, 224),
-            // The same numbers, an edge in place of a value.
-            internal: ExpectedNode::one_page(24, 232, 224),
+            // 8 + 24·8 = 200, rounded to 224 for cache-line-contained
+            // pairs; the head is 24 bytes into entry 0, key 0 at 256.
+            leaf: ExpectedNode::one_page(24, 256, 248),
+            // 8 + 8n + 24n + 8(n + 1) ≤ 1024: n = 25. Keys start
+            // at 208, then edges at 208 + 25·24 = 808.
+            internal: ExpectedNode::one_page(25, 208, 808),
         }
         .assert_inline::<String, u64>(InlineWidth::Eight);
+    }
+
+    /// Auto heap-byte internals keep four bytes, independently of their
+    /// unchanged eight-byte leaf summaries and the value type.
+    #[test]
+    fn auto_heap_byte_internal_nodes_keep_four_bytes() {
+        ExpectedNode::one_page(28, 120, 792).assert_internal(
+            NodeLayout::<String, u64>::internal::<Auto>(),
+            (24, 8),
+            true,
+        );
+        assert_eq!(
+            NodeLayout::<String, u64>::internal::<Auto>(),
+            NodeLayout::<String, String>::internal::<Auto>(),
+        );
+        ExpectedNode::one_page(36, 152, 728).assert_internal(
+            NodeLayout::<&str, u64>::internal::<Auto>(),
+            (16, 8),
+            true,
+        );
+        assert_eq!(
+            NodeLayout::<String, u64>::internal::<WithInlineKey>(),
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_INTERNAL,
+        );
     }
 
     /// `Vec<u8>` is 24 bytes and 8-aligned, like `String`.
     #[test]
     fn byte_vec_to_u64_with_inline_keys() {
         ExpectedLayout {
-            leaf: ExpectedNode::one_page(24, 232, 224),
-            internal: ExpectedNode::one_page(24, 232, 224),
+            leaf: ExpectedNode::one_page(24, 256, 248),
+            internal: ExpectedNode::one_page(25, 208, 808),
         }
         .assert_inline::<Vec<u8>, u64>(InlineWidth::Eight);
     }
@@ -649,7 +781,7 @@ mod tests {
             // 192.
             leaf: ExpectedNode::one_page(17, 192, 168),
             // As for `String` → `u64`.
-            internal: ExpectedNode::one_page(24, 232, 224),
+            internal: ExpectedNode::one_page(25, 208, 808),
         }
         .assert_inline::<String, String>(InlineWidth::Eight);
     }
@@ -662,9 +794,68 @@ mod tests {
             // n = 20; entries at 8 + 20·8 = 168, the head at 200, key 0 at
             // 208.
             leaf: ExpectedNode::one_page(20, 208, 200),
-            internal: ExpectedNode::one_page(20, 208, 200),
+            // 8 + 8n + 32n + 8(n + 1) ≤ 1024: n = 21.
+            internal: ExpectedNode::one_page(21, 176, 848),
         }
         .assert_inline::<[u8; 32], u64>(InlineWidth::Eight);
+    }
+
+    #[test]
+    fn recognized_arrays_move_edges_without_changing_capacity() {
+        struct ArrayLayout;
+
+        impl ArrayLayout {
+            fn check<const N: usize>(capacity: usize, keys_offset: usize, edges_offset: usize) {
+                let original = NodeLayout::<[u8; N], u64>::TWO_BYTE_INLINE_INTERNAL;
+                let reordered = NodeLayout::<[u8; N], u64>::internal::<Auto>();
+                ExpectedNode::one_page(capacity, keys_offset, edges_offset).assert_internal(
+                    reordered,
+                    (N, 8),
+                    true,
+                );
+                assert_eq!(reordered.page, original.page);
+                assert_eq!(reordered.keys.capacity, original.keys.capacity);
+                assert_eq!(reordered.keys.key_stride, original.keys.key_stride);
+                assert!(8 + 2 * capacity <= edges_offset);
+                assert!(edges_offset + 8 * (capacity + 1) <= keys_offset);
+                assert!(keys_offset + N * capacity <= reordered.page.size());
+                if N.is_power_of_two() {
+                    for index in 0..capacity {
+                        assert!((keys_offset + index * N) % 64 + N <= 64);
+                    }
+                }
+                // The same Rust array under an explicit strategy keeps
+                // that strategy's original eight-byte-summary layout.
+                assert_eq!(
+                    NodeLayout::<[u8; N], u64>::internal::<WithInlineKey>(),
+                    NodeLayout::<[u8; N], u64>::EIGHT_BYTE_INLINE_INTERNAL
+                );
+            }
+        }
+
+        ArrayLayout::check::<16>(38, 400, 88);
+        ArrayLayout::check::<20>(33, 352, 80);
+        ArrayLayout::check::<32>(24, 256, 56);
+        assert_eq!(
+            NodeLayout::<String, u64>::internal::<Auto>(),
+            NodeLayout::<String, u64>::FOUR_BYTE_INLINE_INTERNAL
+        );
+        assert_eq!(
+            NodeLayout::<u64, u64>::internal::<WithInlineKey>(),
+            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_INTERNAL
+        );
+    }
+
+    #[test]
+    fn edge_first_layout_falls_back_when_alignment_would_lose_capacity() {
+        // Six-byte keys fit 63 entries exactly in the original order.
+        // Putting the aligned edges first would need 1026 bytes. This key
+        // type is not selected by Auto, but exercises the layout's fallback
+        // independently of today's recognized array sizes.
+        let original = NodeLayout::<[u8; 6], u64>::TWO_BYTE_INLINE_INTERNAL;
+        assert_eq!(original.keys.capacity, 63);
+        assert_eq!(original.edges_offset + 64 * 8, original.page.size());
+        assert_eq!(NodeLayout::<[u8; 6], u64>::FIXED_ARRAY_INTERNAL, original);
     }
 
     /// Over-aligned keys pad each entry to their alignment.
@@ -675,14 +866,16 @@ mod tests {
         // n = 14; entries at 128, the head at 192, key 0 at 256.
         let expected = || ExpectedNode {
             size: 2048,
-            align: 1024,
+            align: 64,
             capacity: 14,
             keys_offset: 256,
             trailing_offset: 192,
         };
         ExpectedLayout {
             leaf: expected(),
-            internal: expected(),
+            // Separate arrays avoid padding each edge to 64 bytes:
+            // (8 + 8·12 → 64) + 12·64 + 13·8 = 1000.
+            internal: ExpectedNode::one_page(12, 128, 896),
         }
         .assert_inline::<CacheLineAligned, u64>(InlineWidth::Eight);
     }
@@ -696,10 +889,9 @@ mod tests {
             // 1024: 9n ≤ 1015, n = 112; entries at 8 + 896 = 904, the head
             // and key 0 at 905.
             leaf: ExpectedNode::one_page(112, 905, 905),
-            // Entries of 1 → 8 + 8 = 16: 8 + 8n + 16(n + 1) ≤ 1024:
-            // 24n ≤ 1000, n = 41; entries at 8 + 328 = 336, edge 0 at 344,
-            // key 0 at 352.
-            internal: ExpectedNode::one_page(41, 352, 344),
+            // (8 + 8n + n → 8) + 8(n + 1) ≤ 1024: n = 59.
+            // Keys start at 480, edges at 539 rounded up to 544.
+            internal: ExpectedNode::one_page(59, 480, 544),
         }
         .assert_inline::<u8, ()>(InlineWidth::Eight);
     }
@@ -710,11 +902,31 @@ mod tests {
     fn u64_to_u64_with_two_byte_inline_keys() {
         ExpectedLayout {
             // (8 + 2n → 8) + 16(n + 1) ≤ 1024: 1016 at n = 55, 1032 at 56;
-            // entries at 120, the head at 128, key 0 at 136.
-            leaf: ExpectedNode::one_page(55, 136, 128),
-            internal: ExpectedNode::one_page(55, 136, 128),
+            // entries at 120 rounded to 128 so complete pairs stay within
+            // cache lines; the head is at 136, key 0 at 144.
+            leaf: ExpectedNode::one_page(55, 144, 136),
+            // (8 + 2n → 8) + 8n + 8(n + 1) ≤ 1024: n = 56.
+            internal: ExpectedNode::one_page(56, 120, 568),
         }
         .assert_inline::<u64, u64>(InlineWidth::Two);
+    }
+
+    #[test]
+    fn cache_line_sized_pairs_use_tail_slack_without_losing_capacity() {
+        // 8 + 2·14 → 8 = 40, followed by 15·64 = 960 bytes of entries.
+        // Moving entry 0 to byte 64 uses the 24-byte tail; key 0 is at 128.
+        ExpectedNode::one_page(14, 128, 72).assert_leaf(
+            NodeLayout::<u64, [u64; 7]>::TWO_BYTE_INLINE_LEAF,
+            (64, 64),
+            true,
+        );
+        // 8 + 8·13 = 112, followed by 14·64 = 896 bytes. Moving entry 0
+        // to byte 128 uses the 16-byte tail; the head is at 128 + 24.
+        ExpectedNode::one_page(13, 192, 152).assert_leaf(
+            NodeLayout::<String, [u64; 5]>::EIGHT_BYTE_INLINE_LEAF,
+            (64, 64),
+            true,
+        );
     }
 
     /// 16-aligned keys pad each entry to 32 bytes.
@@ -725,7 +937,8 @@ mod tests {
             // at n = 28, 1040 at 29; entries at 64, the head at 80, key 0 at
             // 96.
             leaf: ExpectedNode::one_page(28, 96, 80),
-            internal: ExpectedNode::one_page(28, 96, 80),
+            // (8 + 2n → 16) + 16n + 8(n + 1) ≤ 1024: n = 38.
+            internal: ExpectedNode::one_page(38, 96, 704),
         }
         .assert_inline::<u128, u64>(InlineWidth::Two);
     }
@@ -738,7 +951,7 @@ mod tests {
             // 1032 at 101; entries at 208, the head and key 0 at 216.
             leaf: ExpectedNode::one_page(100, 216, 216),
             // As for `u64` → `u64`.
-            internal: ExpectedNode::one_page(55, 136, 128),
+            internal: ExpectedNode::one_page(56, 120, 568),
         }
         .assert_inline::<i64, ()>(InlineWidth::Two);
     }
@@ -750,10 +963,8 @@ mod tests {
             // n = 84; entries at 8 + 336 = 344, the head at 348, key 0 at
             // 352.
             leaf: ExpectedNode::one_page(84, 352, 348),
-            // Entries of 4 → 8 + 8 = 16: (8 + 4n → 8) + 16(n + 1) ≤ 1024:
-            // 1024 at n = 50, 1048 at 51; entries at 208, edge 0 at 216,
-            // key 0 at 224.
-            internal: ExpectedNode::one_page(50, 224, 216),
+            // (8 + 4n + 4n → 8) + 8(n + 1) ≤ 1024: n = 63.
+            internal: ExpectedNode::one_page(63, 260, 512),
         }
         .assert_inline::<u32, u32>(InlineWidth::Four);
     }
@@ -777,14 +988,13 @@ mod tests {
                 keys_offset: 2048,
                 trailing_offset: 2048,
             },
-            // Entries of an edge each, padded to the key's 2 KB alignment:
-            // 12 keys need 2048 + 13·2048 bytes, so 28 KB; entries at 2048,
-            // edge 0 there, key 0 at 4096.
+            // Zero-sized keys start at 2048, edges at the same offset.
+            // The 4 KB node has room for 256 edges, so 255 keys.
             internal: ExpectedNode {
-                size: 28 * 1024,
+                size: 2 * 2048,
                 align: 2048,
-                capacity: 12,
-                keys_offset: 4096,
+                capacity: 255,
+                keys_offset: 2048,
                 trailing_offset: 2048,
             },
         }
@@ -826,7 +1036,7 @@ mod tests {
             // at 8 + 12·8 = 104.
             leaf: ExpectedNode {
                 size: 13 * 1024,
-                align: 1024,
+                align: 64,
                 capacity: 12,
                 keys_offset: 8,
                 trailing_offset: 104,
@@ -894,7 +1104,7 @@ mod tests {
             // ⌊(2048 − 64 − 64) / 128⌋ = 15; the head at 64 + 15·64 = 1024.
             leaf: ExpectedNode {
                 size: 2048,
-                align: 1024,
+                align: 64,
                 capacity: 15,
                 keys_offset: 64,
                 trailing_offset: 1024,
@@ -956,7 +1166,7 @@ mod tests {
             // 8 + 24·8 = 200.
             leaf: ExpectedNode {
                 size: 2048,
-                align: 1024,
+                align: 64,
                 capacity: 24,
                 keys_offset: 8,
                 trailing_offset: 200,
@@ -994,7 +1204,7 @@ mod tests {
             // 4 + 23·77 = 1775 → 1776.
             internal: ExpectedNode {
                 size: 2048,
-                align: 1024,
+                align: 64,
                 capacity: 23,
                 keys_offset: 4,
                 trailing_offset: 1776,

@@ -911,3 +911,47 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         "{panicked} panicked, {completed} completed"
     );
 }
+
+#[test]
+fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
+    use crate::node::handle::{EdgeRoom, ForceResult};
+    use crate::node::inline_keys::SearchKey;
+
+    let budget = Cell::new(usize::MAX);
+    let mut map = BBTreeMap::new();
+    let mut count = 0_u64;
+    loop {
+        map.insert(BudgetedKey::new(count, &budget), count);
+        count += 1;
+        let ForceResult::Leaf(leaf) = map.root.as_mut().unwrap().borrow_mut().force() else {
+            panic!("stop before the first split");
+        };
+        if matches!(leaf.last_edge().check_room(), EdgeRoom::Full(_)) {
+            break;
+        }
+    }
+    let query = BudgetedKey::new(count, &budget);
+    budget.set(usize::MAX);
+    assert!(
+        map.root
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .search_tree_for_insert(&SearchKey::new(&query))
+            .is_err()
+    );
+    let first_search_comparisons = usize::MAX - budget.get();
+    assert!(first_search_comparisons > 0);
+    budget.set(first_search_comparisons);
+    assert!(catch_unwind(AssertUnwindSafe(|| map.insert(query, count))).is_err());
+    assert_eq!(budget.get(), 0, "the second search must have started");
+    budget.set(usize::MAX);
+    map.check_invariants();
+    assert_eq!(map.len(), count as usize);
+    assert_eq!(map.height(), 0);
+    assert!(
+        map.iter()
+            .map(|(key, &value)| (key.number, value))
+            .eq((0..count).map(|number| (number, number)))
+    );
+}

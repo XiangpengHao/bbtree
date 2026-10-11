@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use super::handle::{
-    ForceResult, Head, Immut, Internal, Kv, Leaf, LeafOrInternal, NodeMut, NodeRef,
+    ForceResult, Head, Immut, Internal, Kv, KvByKind, Leaf, LeafOrInternal, Mut, NodeMut, NodeRef,
 };
 use crate::inline_key::InlineKeyStrategy;
 
@@ -36,7 +36,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Immut<'a>, K, V, S, LeafOrInt
     /// The key and its value: side by side in a leaf, or for a separator, the
     /// key here and the value in a head below.
     pub(crate) fn into_key_value(self) -> (&'a K, &'a V) {
-        match self.force() {
+        self.force().into_key_value()
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> KvByKind<Immut<'a>, K, V, S> {
+    /// The key and its leaf value, with the node's kind already known.
+    pub(crate) fn into_key_value(self) -> (&'a K, &'a V) {
+        match self {
             ForceResult::Leaf(kv) => kv.into_key_value(),
             ForceResult::Internal(kv) => (kv.into_key(), kv.into_value_head().into_value()),
         }
@@ -47,7 +54,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, LeafOrInternal>>
     /// The value: beside the key in a leaf, or for a separator, in a head
     /// below.
     pub(crate) fn into_value_mut(self) -> &'a mut V {
-        match self.force() {
+        self.force().into_value_mut()
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> KvByKind<Mut<'a, K, V>, K, V, S> {
+    /// The value with the exclusive access held by this position.
+    pub(crate) fn into_value_mut(self) -> &'a mut V {
+        match self {
             ForceResult::Leaf(kv) => kv.into_value_mut(),
             ForceResult::Internal(kv) => kv.into_value_head().into_value_mut(),
         }

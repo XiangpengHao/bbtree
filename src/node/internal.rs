@@ -278,7 +278,8 @@ mod tests {
         let mut halves_children = child_names(left.reborrow());
         halves_children.extend(child_names(right.borrow()));
         assert_eq!(halves_children, children);
-        assert!(left.len().abs_diff(right.borrow().len()) <= 2);
+        assert!(!left.is_underfull());
+        assert!(!right.borrow().is_underfull());
         assert_eq!((left.height(), right.height()), (1, 1));
         left.reborrow().assert_inline_keys_match();
         right.borrow().assert_inline_keys_match();

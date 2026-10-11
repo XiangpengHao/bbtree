@@ -12,7 +12,7 @@ use core::ops::RangeBounds;
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::handle::ValMut;
-use crate::node::walk::{FullWalk, RangeWalk};
+use crate::node::walk::{BorrowedWalk, RangeWalk};
 
 /// A mutable iterator over the entries of a `BBTreeMap`, in key order.
 ///
@@ -22,7 +22,7 @@ use crate::node::walk::{FullWalk, RangeWalk};
 /// [`iter_mut`]: BBTreeMap::iter_mut
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct IterMut<'a, K: 'a, V: 'a, S = Auto> {
-    walk: FullWalk<ValMut<'a, K, V>, K, V, S>,
+    walk: BorrowedWalk<ValMut<'a, K, V>, K, V, S>,
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for IterMut<'a, K, V, S> {
@@ -30,6 +30,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for IterMut<'a, K, V, S
 
     fn next(&mut self) -> Option<(&'a K, &'a mut V)> {
         self.walk.next()
+    }
+
+    fn fold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.fold(accumulator, fold)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -58,6 +65,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Iterator for IterMut<'a, K, V, S
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> DoubleEndedIterator for IterMut<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a mut V)> {
         self.walk.next_back()
+    }
+
+    fn rfold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.rfold(accumulator, fold)
     }
 }
 
@@ -89,7 +103,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for IterMut<'_, K, V, S> {
     /// ```
     fn default() -> Self {
         Self {
-            walk: FullWalk::EMPTY,
+            walk: BorrowedWalk::EMPTY,
         }
     }
 }
@@ -112,6 +126,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for ValuesMut<'a, K, V, S> {
         self.inner.next().map(|(_, value)| value)
     }
 
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner.fold(accumulator, |accumulator, (_, value)| {
+            fold(accumulator, value)
+        })
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
     }
@@ -124,6 +147,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for ValuesMut<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for ValuesMut<'a, K, V, S> {
     fn next_back(&mut self) -> Option<&'a mut V> {
         self.inner.next_back().map(|(_, value)| value)
+    }
+
+    fn rfold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.inner.rfold(accumulator, |accumulator, (_, value)| {
+            fold(accumulator, value)
+        })
     }
 }
 
@@ -178,6 +210,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for RangeMut<'a, K, V, S> {
         self.walk.next()
     }
 
+    fn fold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.fold(accumulator, fold)
+    }
+
     fn last(mut self) -> Option<(&'a K, &'a mut V)> {
         self.next_back()
     }
@@ -200,6 +239,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Iterator for RangeMut<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> DoubleEndedIterator for RangeMut<'a, K, V, S> {
     fn next_back(&mut self) -> Option<(&'a K, &'a mut V)> {
         self.walk.next_back()
+    }
+
+    fn rfold<A, F>(self, accumulator: A, fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.walk.rfold(accumulator, fold)
     }
 }
 
@@ -254,7 +300,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
         let root = self.root.as_mut().map(|root| root.borrow_valmut());
         IterMut {
-            walk: FullWalk::new(root, self.length),
+            walk: BorrowedWalk::new(root, self.length),
         }
     }
 

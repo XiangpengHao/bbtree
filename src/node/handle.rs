@@ -26,7 +26,11 @@
 //!    the slot updates the header with it (D17).
 //! 6. **Inline keys follow keys.** In a node with inline keys (D18), inline
 //!    key `i` is key `i`'s window at the node's prefix length for every
-//!    `i < len` (05-fence-key.md): every operation moves keys through
+//!    `i < len` (05-fence-key.md). An internal byte-string node may instead
+//!    keep windows at a local search prefix; queries validate the extra
+//!    bytes, and every key-changing primitive first restores fence windows
+//!    (`local_prefix.rs`). Exported key/bound windows always use the fences.
+//!    Every operation moves keys through
 //!    [`KeySlots`], which moves their inline keys with them; a key that
 //!    moves up into a node, or a node whose prefix length shrinks, gets its
 //!    window moved back with [`Window::moved_back_to`], and a node whose
@@ -36,6 +40,11 @@
 //!    `len..` hold the greatest inline key, all ones, so that a search may
 //!    count every slot without masking those out: a fresh page starts so,
 //!    and [`NodeMut::set_len`] refills the slots a shorter length leaves.
+//! 7. **Length tags follow keys.** Tagged byte-string leaves keep each
+//!    live key's byte length modulo 65536 in the corresponding tag slot.
+//!    `KeySlots` maintains these through every mutation. All capacity slots
+//!    start initialized; a search masks out slots outside its live primary
+//!    run and always confirms each selected candidate against the full key.
 //!
 //! Every fact is established once, by a check the B-tree makes anyway (the
 //! search, the insert-or-split decision, the merge decision) or by a checked
@@ -52,8 +61,10 @@ use core::hint;
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
+use core::ptr::NonNull;
 
 use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, KeyInliner, SearchKey, Window};
+use super::length_tags::{LengthMatch, LengthTags};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
 pub(crate) use super::slots::NodeKeys;
 use super::slots::{InlineKeySlots, KeySlots, Slots};
@@ -402,6 +413,10 @@ pub(crate) type NodeByKind<BorrowType, K, V, S> =
 pub(crate) type KvByKind<BorrowType, K, V, S> =
     ForceResult<Kv<NodeRef<BorrowType, K, V, S, Leaf>>, Kv<NodeRef<BorrowType, K, V, S, Internal>>>;
 
+/// An existing key, or the vacant leaf edge where an insertion belongs.
+pub(crate) type InsertSearchResult<BorrowType, K, V, S> =
+    Result<KvByKind<BorrowType, K, V, S>, Edge<NodeRef<BorrowType, K, V, S, Leaf>>>;
+
 impl<BorrowType, K, V, S, Kind: NodeKind> NodeRef<BorrowType, K, V, S, Kind> {
     /// # Safety
     ///
@@ -509,18 +524,33 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> NodeRef<BorrowTy
 }
 
 impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowType, K, V, S, Kind> {
+    /// Length metadata, when present, is initialized to capacity. Its live
+    /// prefix follows the keys through every `KeySlots` mutation.
+    pub(super) fn length_tags(&self) -> Option<&[u16]> {
+        // SAFETY: the live handle proves the node's kind and allocation;
+        // every tag was initialized when allocated and can be read under
+        // this shared reborrow (invariants 1 and 7).
+        unsafe {
+            let tags = self.node.length_tag_slots::<Kind>()?;
+            Some(tags.run(0, self.capacity()).as_ref())
+        }
+    }
+
     /// Binary search for `key` among the node's keys: `Found` at a key equal
     /// to it, otherwise `GoDown` at the edge where it belongs. With inline
     /// keys (D18), over those first.
     ///
     /// The position is in bounds for any `Ord` and `InlineKey`, consistent
     /// or not; see `search_index`.
+    // Keep this typed result adapter with its caller, which already owns
+    // the node and height. Outlining it returns both through a stack result
+    // at each visit; the actual search_index body remains free to outline.
+    #[inline(always)]
     pub(crate) fn search<Q>(self, key: &SearchKey<'_, K, S, Q>) -> SearchResult<Self>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.prefetch_search_area();
         match self.search_index(key) {
             // SAFETY: `search_index` returns `Ok(index)` with `index < len`.
             Ok(index) => SearchResult::Found(unsafe { Kv::new_unchecked(self, index) }),
@@ -529,59 +559,34 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         }
     }
 
+    /// An active search offset is separate from the conservative fence
+    /// prefix used by structural operations.
+    #[inline]
+    pub(super) fn local_prefix_len(&self) -> Option<usize> {
+        Self::local_prefix_inliner()?;
+        // SAFETY: this live node has inline keys, and its borrow prevents
+        // concurrent header mutation.
+        let prefix = unsafe { self.node.search_prefix_len() };
+        (prefix != 0).then_some(prefix)
+    }
+
     /// `key`'s inline key at this node's prefix length, if the node has
     /// inline keys and `key` one to compare with them (D18).
     ///
     /// Each search takes it where it uses it, rather than having it handed
     /// in: handed across a call, it went through the stack, written right
     /// before the search read it back, a store the CPU can't always
-    /// forward, which stalled every level. For a std byte string, it is one
-    /// load from the search key's padded copy, written once.
+    /// forward, which stalled every level. Std byte strings read the
+    /// window directly from the search key.
     #[inline]
     fn inline_target<Q: ?Sized>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<InlineTarget>
     where
         K: Borrow<Q>,
     {
         if NodePtr::<K, V, S>::has_inline_keys() {
-            key.inline_target(self.prefix_len())
+            key.inline_target(self.local_prefix_len().unwrap_or_else(|| self.prefix_len()))
         } else {
             None
-        }
-    }
-
-    /// Starts loading every cache line a search of the node may read, up to
-    /// the capacity: its keys (D20), and before them its inline keys if it
-    /// has them (D18). One software prefetch per 64-byte line. Every search
-    /// calls it before reading anything of the node.
-    ///
-    /// A search of a large node probes keys in an order that the data
-    /// decides, so without it each probe waits for the previous probe's cache
-    /// miss; with it, the misses overlap. With inline keys, the keys matter
-    /// too: every full-key comparison, on a tie or to confirm a hit, starts
-    /// by reading the key in the node. It covers the capacity, which the node
-    /// kind fixes, rather than `len`: reading `len` first would make the
-    /// prefetches wait for the header's miss.
-    ///
-    /// Does nothing without the `prefetch` feature (D27).
-    fn prefetch_search_area(&self) {
-        #[cfg(all(feature = "prefetch", target_arch = "x86_64"))]
-        {
-            use core::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
-
-            const CACHE_LINE_SIZE: usize = 64;
-            let area = NodePtr::<K, V, S>::key_area::<Kind>();
-            let start = area.inline_keys_offset.unwrap_or(area.keys_offset);
-            let end = area.keys_offset + area.capacity * area.key_stride;
-            let first_line = start - start % CACHE_LINE_SIZE;
-            let page = self.node.page_start();
-            for line in (first_line..end).step_by(CACHE_LINE_SIZE) {
-                // SAFETY: the intrinsic needs the `sse` target feature, which
-                // every x86_64 target has. A prefetch is only a hint: it never
-                // faults and, to the language, accesses no memory (Miri runs
-                // it as a no-op), so any address would do; this one is inside
-                // the node's page anyway.
-                unsafe { _mm_prefetch::<_MM_HINT_T0>(page.wrapping_add(line).cast()) };
-            }
         }
     }
 
@@ -603,6 +608,16 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        if let Some(prefix) = self.local_prefix_len()
+            && let Some(first) = self.reborrow().keys().first()
+            && let Some(order) = key.cmp_prefix(first, self.prefix_len(), prefix)
+        {
+            match order {
+                Ordering::Less => return Err(0),
+                Ordering::Greater => return Err(self.len()),
+                Ordering::Equal => {}
+            }
+        }
         if let Some(target) = self.inline_target(key)
             && let Some(run) = self.inline_equal_run(target)
         {
@@ -625,6 +640,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// that depends on the height, it compiled to a loop of several times the
     /// instructions, and over two capacities, a leaf's and an internal
     /// node's, to one that summed the compares' bits one at a time.
+    /// Keep this small typed view in its callers: outlining shared uses
+    /// also made LLVM expand 64-bit summary counts into scalar lane-bit sums.
+    #[inline(always)]
     fn inline_equal_run(&self, target: InlineTarget) -> Option<Range<usize>> {
         Some(
             self.reborrow()
@@ -663,7 +681,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
             (Some(KeyInliner::InlineKeyTrait { .. }), KeySearch::Branchless) => {
                 Self::branchless_search_index(candidates, key.key())
             }
-            _ => Self::binary_search_index(candidates, |stored| key.cmp_tied(target, stored)),
+            _ => {
+                Self::binary_search_index(candidates, |stored| key.cmp_tied::<Kind>(target, stored))
+            }
         };
         found
             .map(|index| run.start + index)
@@ -741,8 +761,8 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// eighth of its capacity, and at least 4 (D22), so that an internal node
     /// below the root has at least 5 children, which bounds the height
     /// (`path.rs`). A removal that leaves fewer makes the node underfull, for
-    /// its parent to fix. A split leaves about half the capacity, at least 6
-    /// of 12 (D13), in each half, so inserts never do.
+    /// its parent to fix. A split leaves at least this many entries on each
+    /// side after insertion, so inserts never do.
     pub(crate) fn min_len(&self) -> usize {
         (self.capacity() / 8).max(4)
     }
@@ -765,13 +785,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
 }
 
 /// A node's inline keys, read in place (D18): every slot up to the
-/// capacity, at the map's width, of which slots `0..len` hold the inline keys
+/// capacity, at this node kind's width, of which slots `0..len` hold the inline keys
 /// of keys `0..len`, and the rest stale ones, which a search reads and masks
 /// out. Its methods speak in windows: they narrow a window to the bytes the
 /// node keeps, and give an inline key back as those bytes, zeros after.
 ///
-/// Every node of a map has the same width, so after monomorphization each
-/// method is that of one width. They are not generic, so they need
+/// Each typed node kind of a map has one width, so after monomorphization
+/// each method is that of one width. They are not generic, so they need
 /// `#[inline]` to inline into the searches, which other crates instantiate,
 /// and `always`: before the width folds, each looks like a match of three
 /// arms with bounds checks, which the compiler kept out of line, a call and
@@ -850,6 +870,13 @@ impl<'a> NodeInlineKeys<'a> {
         with_live_slots!(self, |live| live.equal_run(InlineSlot::of_window(window)))
     }
 
+    /// An equality mask only for widths and targets that benefit from it.
+    /// Unsupported shapes keep the original ordered range and empty check.
+    #[inline(always)]
+    fn point_mask(self, window: InlineWord) -> Option<super::vector_count::U64EqualityMask> {
+        with_live_slots!(self, |live| live.point_mask(InlineSlot::of_window(window)))
+    }
+
     /// Whether every slot past `len` holds the greatest inline key
     /// (invariant 6).
     #[cfg(test)]
@@ -907,8 +934,20 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
     /// the count is an emulated sequence that costs more than the
     /// mispredicts it avoids. Measured on 1M-entry maps of 8-byte inline
     /// keys (04, Q6).
+    /// Wide four-byte arrays on baseline x86-64 also use binary search:
+    /// beyond the one-word packed reduction, full-capacity counts cost
+    /// more than dependent probes in warm routing nodes.
     #[inline(always)]
     fn equal_run(self, target: W) -> Range<usize> {
+        if cfg!(all(
+            target_arch = "x86_64",
+            not(target_feature = "avx512bw"),
+            not(target_feature = "popcnt")
+        )) && size_of::<W>() == 4
+            && self.slots.len() > 32
+        {
+            return self.equal_run_by_search(target);
+        }
         if let Some(run) = W::equal_run_in_vectors(self.slots, self.len, target) {
             return run;
         }
@@ -917,6 +956,13 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
         } else {
             self.equal_run_by_search(target)
         }
+    }
+
+    /// Equality-only masks are optional; ordered fallback is chosen by
+    /// the leaf without wrapping its existing range in another result.
+    #[inline(always)]
+    fn point_mask(self, target: W) -> Option<super::vector_count::U64EqualityMask> {
+        W::point_mask_in_vectors(self.slots, target)
     }
 
     /// One pass over every slot up to the capacity counts the inline keys
@@ -977,6 +1023,77 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
 }
 
 impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Leaf> {
+    /// A point lookup may reject unequal lengths inside a primary tied run.
+    /// Ordered searches still use `search`: a length tag gives no edge.
+    pub(super) fn search_point<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Kv<Self>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let found = if let Some(target) = self.inline_target(key)
+            && let Some(inline_keys) = self.reborrow().inline_keys()
+        {
+            // This typed view keeps leaf capacity constant, as for the
+            // ordered inline_equal_run. Empty masks need no bound extraction.
+            let run = if let Some(mask) = inline_keys.point_mask(target.inline_key()) {
+                mask.run(self.len())?
+            } else {
+                inline_keys.equal_run(target.inline_key())
+            };
+            if run.is_empty() {
+                return None;
+            } else if run.len() == 1 {
+                // Point lookup needs no insertion edge or ordering result.
+                // Arrays use full equality; strings retain the prefix skip.
+                let keys = self.reborrow().keys();
+                let stored = &keys[run.start];
+                let matches = if let Some(query) = key.fixed_array_query() {
+                    query.matches(stored)
+                } else {
+                    key.cmp_tied::<Leaf>(target, stored) == Ordering::Equal
+                };
+                matches.then_some(run.start)
+            } else if let Some(tag) = key.length_tag()
+                && let Some(tags) = self.length_tags()
+            {
+                match LengthTags::new(tags).matching(run.clone(), tag) {
+                    LengthMatch::None => return None,
+                    LengthMatch::One(index) => {
+                        // The mask only includes indexes in the live run;
+                        // indexing keeps this fact checked locally too.
+                        if key.cmp_tied::<Leaf>(target, &self.reborrow().keys()[index])
+                            != Ordering::Equal
+                        {
+                            return None;
+                        }
+                        Some(index)
+                    }
+                    LengthMatch::Two { lower, upper } => {
+                        // Binary search over the two filtered keys: the
+                        // upper key is the midpoint. This avoids reading
+                        // unrelated strings in the original primary run.
+                        let keys = self.reborrow().keys();
+                        match key.cmp_tied::<Leaf>(target, &keys[upper]) {
+                            Ordering::Equal => Some(upper),
+                            Ordering::Less => (key.cmp_tied::<Leaf>(target, &keys[lower])
+                                == Ordering::Equal)
+                                .then_some(lower),
+                            Ordering::Greater => None,
+                        }
+                    }
+                    LengthMatch::Many => self.search_run(run, key, target).ok(),
+                }
+            } else {
+                self.search_run(run, key, target).ok()
+            }
+        } else {
+            self.search_index(key).ok()
+        }?;
+        // SAFETY: both searches return only a live key index; a tag result
+        // was bounded to the live run and checked by indexing above.
+        Some(unsafe { Kv::new_unchecked(self, found) })
+    }
+
     /// The leaf's head, or `None` if it has none: in a tree built by the node
     /// operations, only the leftmost leaf has none (D17).
     pub(crate) fn head(self) -> Option<Head<Self>> {
@@ -1084,10 +1201,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V,
     ///
     /// If `index >= len`.
     fn key_window(self, index: usize) -> Window {
-        match self.inline_keys() {
-            Some(inline_keys) => Window::new(self.prefix_len(), inline_keys.inline_key(index)),
-            None => Window::NONE,
+        assert!(index < self.len(), "key index out of bounds");
+        if self.local_prefix_len().is_some() {
+            let inliner = Self::local_prefix_inliner().expect("local byte-string prefix");
+            return Window::new(
+                self.prefix_len(),
+                inliner.inline_key_at(&self.keys()[0], self.prefix_len()),
+            );
         }
+        // SAFETY: `index < len` and the node has no active local windows.
+        // The slots rehydrate narrow heap-byte windows before export.
+        unsafe { self.key_slots().window(index) }
     }
 }
 
@@ -1102,6 +1226,22 @@ impl<K, V, S, Kind: NodeKind> NodeMut<'_, K, V, S, Kind> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
+    /// Records a longer initialized prefix. Slots beyond the new length
+    /// already hold the greatest inline key, so none needs refilling.
+    ///
+    /// # Safety
+    ///
+    /// `self.len() <= len <= capacity`, and all keys, inline keys, values
+    /// or edges described by `len` are initialized, as for `set_len`.
+    unsafe fn grow_len(&mut self, len: usize) {
+        debug_assert!(self.len() <= len && len <= self.capacity());
+        // SAFETY: the node is allocated and this handle is exclusive
+        // (invariant 1); the length and initialization requirements are
+        // forwarded. Growing preserves the untouched inline-key padding.
+        unsafe { self.node.set_len(len) }
+        self.refresh_local_prefix();
+    }
+
     /// Sets the length; the inline-key slots a shorter length leaves get
     /// the greatest inline key, as all slots past the length hold
     /// (invariant 6). Called once the slots are where the length says.
@@ -1110,7 +1250,9 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
     ///
     /// `len` is at most the capacity, and keys `0..len` (with their inline
     /// keys, and in a leaf, values `0..len`; in an internal node, edges
-    /// `0..=len`) are initialized by the time the node is used again.
+    /// `0..=len`) are initialized and valid at this call: refreshing an
+    /// internal node's local prefix may immediately read its live keys.
+    /// Any active local windows have been normalized before key mutation.
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         let old_len = self.len();
@@ -1124,17 +1266,43 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
+        self.refresh_local_prefix();
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
+    /// Installs prepared local search windows, or conservative fence windows
+    /// when `prefix_len` is zero. No key or user callback is read here.
+    pub(super) fn set_local_windows(
+        &mut self,
+        prefix_len: usize,
+        windows: impl ExactSizeIterator<Item = InlineWord>,
+    ) {
+        assert_eq!(windows.len(), self.len());
+        let slots = self
+            .key_slots()
+            .inline_keys()
+            .expect("local byte-string prefix");
+        // SAFETY: one plain-data word per initialized key, within capacity;
+        // this handle owns exclusive access to slots and the inline header.
+        unsafe {
+            for (index, window) in (0..self.len()).zip(windows) {
+                slots.write(index, window);
+            }
+            self.node.set_search_prefix_len(prefix_len);
+        }
+    }
+
     /// Moves the node's prefix length back to `fill`'s, and every inline key
     /// with it ([`Window::moved_back_to`]), given `fill`, the window there of
     /// a key whose encoding shares the node's prefix: one of the node's
-    /// fences, or one of its keys. Reads no key. Does nothing if the node's
+    /// fences, or one of its keys. An active local search prefix first
+    /// reads one built-in byte string to restore fence windows; subsequent
+    /// shifts read no key and invoke no user code. Does nothing if the node's
     /// prefix is no longer than `fill`'s, which includes every node without
     /// inline keys.
     pub(super) fn move_prefix_back_to(&mut self, fill: Window) {
+        self.normalize_local_prefix();
         let prefix_len = self.prefix_len();
         if prefix_len <= fill.prefix_len() {
             return;
@@ -1183,6 +1351,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
             }
             self.node.set_prefix_len(prefix_len);
         }
+        self.refresh_local_prefix();
     }
 
     /// Gives a node with no keys `prefix_len`, which, with no inline keys to
@@ -1291,6 +1460,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Internal> {
         let len = self.len();
         assert!(index <= len, "cutting a node past its last edge");
         self.assert_child_level(&first_child);
+        self.normalize_local_prefix();
         let count = len - index;
         let right = NodePtr::from_fresh_page(page);
         // SAFETY: `index <= len`, so keys (with their inline keys)
@@ -1340,6 +1510,206 @@ pub(crate) struct Edge<Node> {
 pub(crate) struct Kv<Node> {
     node: Node,
     index: usize,
+}
+
+/// A validated interval in one leaf, whose borrow keeps its slot positions
+/// unchanged.
+/// Paired entries with a positive stride use key pointers as their cursor
+/// and end; advancing needs neither the leaf pointer nor an index multiply.
+/// Other layouts keep the key origin in `front` and use `start..end`.
+/// Which representation applies depends only on the map's layout.
+///
+/// The originating leaf stays allocated with borrow `B`. Its path retains
+/// the leaf handle while this run retains the same borrow proof through its
+/// marker. Pointers preserve the page's provenance, including its key end.
+pub(super) struct LeafRun<B, K, V, S> {
+    front: NonNull<K>,
+    back: NonNull<K>,
+    start: usize,
+    end: usize,
+    _borrow: PhantomData<NodeRef<B, K, V, S, Leaf>>,
+}
+
+// SAFETY: the cached pointers grant exactly the originating leaf handle's
+// access. Moving or sharing them requires the same key/value borrow bounds.
+unsafe impl<B, K, V, S> Send for LeafRun<B, K, V, S> where NodeRef<B, K, V, S, Leaf>: Send {}
+// SAFETY: as for Send, with the leaf handle's shared-access bounds.
+unsafe impl<B, K, V, S> Sync for LeafRun<B, K, V, S> where NodeRef<B, K, V, S, Leaf>: Sync {}
+
+impl<B: CopyableBorrow, K, V, S> Clone for LeafRun<B, K, V, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: CopyableBorrow, K, V, S> Copy for LeafRun<B, K, V, S> {}
+
+impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> LeafRun<B, K, V, S> {
+    fn uses_pointers() -> bool {
+        NodePtr::<K, V, S>::has_paired_entries::<Leaf>()
+            && NodePtr::<K, V, S>::leaf_layout().keys.key_stride != 0
+    }
+
+    pub(super) fn new(leaf: NodeRef<B, K, V, S, Leaf>, range: Range<usize>) -> Self {
+        assert!(range.start <= range.end && range.end <= leaf.len());
+        // SAFETY: every leaf has positive capacity, so slot 0 is allocated
+        // even when uninitialized. No reference to its contents is formed.
+        let origin = unsafe { leaf.key_slots().keys().slot(0) };
+        let (front, back) = if Self::uses_pointers() {
+            let stride = NodePtr::<K, V, S>::leaf_layout().keys.key_stride;
+            // SAFETY: the layout bounds even the key at index capacity by
+            // the page's end. A value end need not fit, so only key pointers
+            // serve as sentinels; values are derived from live keys below.
+            unsafe {
+                (
+                    origin.byte_add(range.start * stride),
+                    origin.byte_add(range.end * stride),
+                )
+            }
+        } else {
+            (origin, origin)
+        };
+        Self {
+            front,
+            back,
+            start: range.start,
+            end: range.end,
+            _borrow: PhantomData,
+        }
+    }
+
+    pub(super) fn next(&mut self) -> Option<LeafEntry<B, K, V, S>> {
+        if Self::uses_pointers() {
+            if self.front == self.back {
+                return None;
+            }
+            let key = self.front;
+            // SAFETY: the nonempty interval contains this key; its next
+            // key pointer is at most the validated end of the run.
+            unsafe {
+                self.front = key.byte_add(NodePtr::<K, V, S>::leaf_layout().keys.key_stride);
+                return Some(self.entry(key, 0));
+            }
+        }
+        if self.start == self.end {
+            return None;
+        }
+        let index = self.start;
+        self.start += 1;
+        // SAFETY: the nonempty, validated interval contains this index.
+        Some(unsafe { self.entry(self.front, index) })
+    }
+
+    pub(super) fn next_back(&mut self) -> Option<LeafEntry<B, K, V, S>> {
+        if Self::uses_pointers() {
+            if self.front == self.back {
+                return None;
+            }
+            // SAFETY: the nonempty interval contains the preceding key.
+            unsafe {
+                self.back = self
+                    .back
+                    .byte_sub(NodePtr::<K, V, S>::leaf_layout().keys.key_stride);
+                return Some(self.entry(self.back, 0));
+            }
+        }
+        if self.start == self.end {
+            return None;
+        }
+        self.end -= 1;
+        // SAFETY: the nonempty, validated interval contains this index.
+        Some(unsafe { self.entry(self.front, self.end) })
+    }
+
+    /// An initialized entry: `origin` is either this entry's key in paired
+    /// mode (with index 0), or the leaf's first key in indexed mode.
+    unsafe fn entry(&self, origin: NonNull<K>, index: usize) -> LeafEntry<B, K, V, S> {
+        let layout = NodePtr::<K, V, S>::leaf_layout();
+        let value_offset = layout.head_offset + layout.value_stride - layout.keys.keys_offset;
+        // SAFETY: the caller supplies a live slot. Keys and values follow
+        // these aligned strides and never overlap. In paired mode they use
+        // the same stride, so the value is at a fixed offset from this key.
+        unsafe {
+            LeafEntry {
+                key: origin.byte_add(index * layout.keys.key_stride),
+                value: origin
+                    .cast::<u8>()
+                    .byte_add(value_offset + index * layout.value_stride)
+                    .cast(),
+                _borrow: PhantomData,
+            }
+        }
+    }
+
+    /// # Safety
+    /// `leaf` is the same leaf this run was made from, kept allocated with
+    /// unchanged slot positions. Its cursor has stayed in that leaf while the run
+    /// advanced, so the pointer difference recovers the new logical edge.
+    pub(super) unsafe fn edge_index(
+        &self,
+        leaf: NodeRef<B, K, V, S, Leaf>,
+        reverse: bool,
+    ) -> usize {
+        if Self::uses_pointers() {
+            // SAFETY: slot 0 exists, and the caller gives the originating
+            // allocation. Both pointers lie within it or at its key end.
+            let offset = unsafe {
+                let origin = leaf.key_slots().keys().slot(0);
+                let edge = if reverse { self.back } else { self.front };
+                edge.cast::<u8>().offset_from_unsigned(origin.cast())
+            };
+            offset / NodePtr::<K, V, S>::leaf_layout().keys.key_stride
+        } else if reverse {
+            self.end
+        } else {
+            self.start
+        }
+    }
+
+    pub(super) fn reborrow(&self) -> LeafRun<Immut<'_>, K, V, S> {
+        LeafRun {
+            front: self.front,
+            back: self.back,
+            start: self.start,
+            end: self.end,
+            _borrow: PhantomData,
+        }
+    }
+}
+
+/// Initialized key/value slots from a validated leaf run, with that run's
+/// borrow. It caches only pointers, never references to previously yielded
+/// mutable values. The walk proves each logical entry is handed out once.
+pub(crate) struct LeafEntry<B, K, V, S> {
+    key: NonNull<K>,
+    value: NonNull<V>,
+    _borrow: PhantomData<NodeRef<B, K, V, S, Leaf>>,
+}
+
+impl<'a, K, V, S> LeafEntry<Immut<'a>, K, V, S> {
+    pub(super) fn into_key_value(self) -> (&'a K, &'a V) {
+        // SAFETY: the slots are initialized and shared for the run's borrow.
+        unsafe { (self.key.as_ref(), self.value.as_ref()) }
+    }
+}
+
+impl<'a, K, V, S> LeafEntry<ValMut<'a, K, V>, K, V, S> {
+    /// # Safety
+    /// This entry's value is handed out only once for the run's borrow.
+    pub(super) unsafe fn into_key_value_mut(mut self) -> (&'a K, &'a mut V) {
+        // SAFETY: the initialized slots are disjoint, the key stays shared,
+        // and the caller permits this value's unique reference.
+        unsafe { (self.key.as_ref(), self.value.as_mut()) }
+    }
+}
+
+impl<K, V, S> LeafEntry<Dying<K, V>, K, V, S> {
+    /// # Safety
+    /// This entry is moved out only once and its leaf has not been freed.
+    pub(super) unsafe fn take_key_value(self) -> (K, V) {
+        // SAFETY: the caller permits moving these initialized slots once.
+        unsafe { (self.key.read(), self.value.read()) }
+    }
 }
 
 /// A leaf's head: the value of the separator key just left of the leaf in
@@ -1574,10 +1944,13 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> Kv<NodeMut<'_, K, V, S, Kind
     /// of a separator: it moves back to this node's, filled from the old
     /// key's window.
     pub(crate) fn replace_key(&mut self, key: InlinedKey<K, S>) -> K {
+        self.node.normalize_local_prefix();
         let key = key.moved_back_to(self.window());
         // SAFETY: `index < len`, so key `index` is initialized, with its
         // inline key, and this handle is exclusive.
-        unsafe { self.node.key_slots().replace(self.index, key).into_key() }
+        let old = unsafe { self.node.key_slots().replace(self.index, key).into_key() };
+        self.node.refresh_local_prefix();
+        old
     }
 }
 
@@ -1660,6 +2033,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Internal>> {
             node: mut parent,
             index,
         } = self;
+        parent.normalize_local_prefix();
         let len = parent.len();
         // SAFETY: `index < len`, so key `index` (with its inline key) and edge
         // `index + 1` are initialized; afterwards keys `0..len - 1` and edges
@@ -1932,7 +2306,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Leaf>> 
                 leaf.key_slots().insert(index, len, key);
                 leaf.value_slots().insert(index, len, value);
             }
-            leaf.set_len(len + 1);
+            leaf.grow_len(len + 1);
             Kv::new_unchecked(leaf, index)
         }
     }
@@ -1970,6 +2344,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
             node: mut parent,
             index,
         } = self.0;
+        parent.normalize_local_prefix();
         let len = parent.len();
         let key = parent.reborrow().window_from_child(index, key);
         // SAFETY: `index <= len < capacity` (invariants 3 and 4), so
@@ -1990,7 +2365,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
                     .edge_slots()
                     .insert(index + 1, len + 1, right_child.node);
             }
-            parent.set_len(len + 1);
+            parent.grow_len(len + 1);
             Kv::new_unchecked(parent, index)
         }
     }
@@ -2048,7 +2423,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Leaf>> {
         key: InlinedKey<K, S>,
         value: V,
     ) -> Split<'a, K, V, S, Leaf> {
-        let mut split = self.split_in_middle(right_page);
+        let mut split = self.split_for_insert(right_page);
         // SAFETY: `split` was just made, and neither half changed since.
         unsafe { split.fitting_edge() }.insert_fit(key, value);
         split
@@ -2071,7 +2446,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>>
         right_child: Subtree<K, V, S>,
     ) -> Split<'a, K, V, S, Internal> {
         self.0.node.assert_child_level(&right_child);
-        let mut split = self.split_in_middle(right_page);
+        let mut split = self.split_for_insert(right_page);
         // SAFETY: `split` was just made, and neither half changed since; both
         // halves are at the original height, checked against `right_child`
         // above.
@@ -2083,12 +2458,24 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>>
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> FullEdge<NodeMut<'a, K, V, S, Kind>> {
-    /// The split policy: the separator is the middle entry of the full node.
-    /// Whichever side the new entry joins, the halves differ by at most two.
+    /// Leave room where entries are arriving. An insertion at either end
+    /// leaves that side about one quarter full and the other side denser;
+    /// an interior insertion divides the free space evenly. The active side
+    /// keeps another minimum's worth of entries above the removal threshold,
+    /// so deleting the new entry cannot immediately merge the halves again.
+    /// Small nodes fall back to an even split to keep headroom on both sides.
     ///
-    /// Must return an index below `capacity`.
-    fn separator_index(capacity: usize) -> usize {
-        capacity / 2
+    /// Both sides meet `minimum` after the new entry is inserted, and
+    /// the returned index is below `capacity`.
+    fn separator_index(capacity: usize, insertion_index: usize, minimum: usize) -> usize {
+        let arriving_len = (2 * minimum).min(capacity / 2);
+        if insertion_index == 0 {
+            arriving_len - 1
+        } else if insertion_index == capacity {
+            capacity - arriving_len
+        } else {
+            capacity / 2
+        }
     }
 
     /// Splits the full node around the key `separator_index` picks, and
@@ -2098,13 +2485,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> FullEdge<NodeMut<'a
     /// The separator key moves up, with its inline key. In a leaf, its value
     /// stays behind as the head of the right leaf (D17). The right half goes
     /// into `right_page`, a page for the same kind of node as this one.
-    fn split_in_middle(self, right_page: FreshPage<K, V, S, Kind>) -> Split<'a, K, V, S, Kind> {
+    fn split_for_insert(self, right_page: FreshPage<K, V, S, Kind>) -> Split<'a, K, V, S, Kind> {
         let Edge {
             node: mut left,
             index,
         } = self.0;
+        left.normalize_local_prefix();
         let len = left.len();
-        let separator_index = Self::separator_index(len);
+        let separator_index = Self::separator_index(len, index, left.min_len());
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
         let right = NodePtr::from_fresh_page(right_page);
@@ -2180,6 +2568,33 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> Split<'_, K, V, S, Kind> {
     }
 }
 
+/// A fitting edge at the physically last leaf, lent together with its
+/// owner's cleared insertion hint. Dropping this token changes no entries
+/// and leaves the hint empty; consuming it appends and restores the hint.
+pub(crate) struct RightmostAppend<'a, K, V, S> {
+    edge: FittingEdge<NodeMut<'a, K, V, S, Leaf>>,
+    hint: &'a mut Option<NodePtr<K, V, S>>,
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
+    /// Appends the same key that was validated by
+    /// [`Subtree::rightmost_append`], with its value. Key identity is a
+    /// logical ordering requirement, not a memory-safety premise: the edge
+    /// itself proves its position and available room.
+    #[inline]
+    pub(crate) fn insert(self, key: K, value: V) {
+        let Self { edge, hint } = self;
+        let node = edge.0.node.node_ptr();
+        let prefix_len = edge.0.node.prefix_len();
+        // Compute the summary before mutation. A panic or an unused token
+        // leaves the hint cleared, without changing the tree.
+        edge.insert_fit(InlinedKey::new(key, prefix_len), value);
+        // Fitting appends preserve this leaf and all ancestors. There are
+        // no callbacks after insertion; the caller counts the entry next.
+        *hint = Some(node);
+    }
+}
+
 /// An owned tree: a root node at `height` and everything below it, of a map
 /// with inline-key strategy `S`.
 ///
@@ -2190,9 +2605,14 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> Split<'_, K, V, S, Kind> {
 ///
 /// Invariant: `node` holds a well-formed node of kind `Kind` at `height` (see
 /// [`NodeRef`]), and nothing but this `Subtree` reaches any node of the tree.
+/// If present, `rightmost_leaf` points to the tree's physically last leaf.
+/// Every general exclusive borrow clears it before lending mutation access;
+/// only the owner's fitting append preserves it. It holds no key reference,
+/// cached length, or assertion about the behavior of `Ord`.
 pub(crate) struct Subtree<K, V, S, Kind = LeafOrInternal> {
     node: NodePtr<K, V, S>,
     height: usize,
+    rightmost_leaf: Option<NodePtr<K, V, S>>,
     _marker: PhantomData<(K, V, Kind)>,
 }
 
@@ -2216,6 +2636,7 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
         Self {
             node,
             height,
+            rightmost_leaf: None,
             _marker: PhantomData,
         }
     }
@@ -2236,6 +2657,7 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
     }
 
     pub(crate) fn borrow_mut(&mut self) -> NodeMut<'_, K, V, S, Kind> {
+        self.clear_insertion_hint();
         // SAFETY: the tree is well-formed (type invariant), and `&mut self`
         // gives the handle exclusive access.
         unsafe { NodeRef::from_raw_parts(self.node, self.height) }
@@ -2243,10 +2665,24 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
 
     /// A handle for a walk that hands out values mutably (see [`ValMut`]).
     pub(crate) fn borrow_valmut(&mut self) -> NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {
+        self.clear_insertion_hint();
         // SAFETY: the tree is well-formed (type invariant), and `&mut self`
         // gives exclusive access, which the handle and its copies only use
         // as `ValMut` allows.
         unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+    }
+
+    /// Ends the owner's permission to append directly before another
+    /// exclusive borrower can change or release the remembered leaf.
+    pub(super) fn clear_insertion_hint(&mut self) {
+        if self.rightmost_leaf.is_some() {
+            self.rightmost_leaf = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_insertion_hint(&self) -> bool {
+        self.rightmost_leaf.is_some()
     }
 
     /// The tree, for a walk to take apart (see [`Dying`]).
@@ -2267,12 +2703,54 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S, Leaf> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+    /// Publishes a path's proof after it relinquishes its mutation access.
+    ///
+    /// # Safety
+    ///
+    /// `leaf` is the physically last leaf owned by this tree. No outstanding
+    /// handle may change it after this call; every subsequent structural
+    /// mutation must first clear the hint.
+    pub(super) unsafe fn remember_rightmost_leaf(&mut self, leaf: NodePtr<K, V, S>) {
+        self.rightmost_leaf = Some(leaf);
+    }
+
+    /// Validates a fitting append to the remembered last leaf when `key`
+    /// is greater than its current last key. Clears an active hint before
+    /// comparison, and retains no borrow of `key`: the returned token can
+    /// consume it on insertion. Failure leaves ordinary search to the caller.
+    #[inline]
+    pub(crate) fn rightmost_append(&mut self, key: &K) -> Option<RightmostAppend<'_, K, V, S>>
+    where
+        K: Ord,
+    {
+        let node = self.rightmost_leaf?;
+        self.rightmost_leaf = None;
+        // SAFETY: the hint's invariant identifies a live leaf owned by
+        // `self`; the exclusive owner borrow is its only mutation access.
+        // No ordering result is used to justify the pointer or its bounds.
+        // The returned handle reaches only this heap page, disjoint from
+        // the owner's hint field lent alongside it for the same lifetime.
+        let leaf: NodeMut<'_, K, V, S, Leaf> = unsafe { NodeRef::from_raw_parts(node, 0) };
+        let EdgeRoom::Fits(edge) = leaf.last_edge().check_room() else {
+            return None;
+        };
+        let last = edge.0.reborrow().left_kv().ok()?;
+        if SearchKey::<K, S, K>::new(key).cmp_full(last.key()) != Ordering::Greater {
+            return None;
+        }
+        Some(RightmostAppend {
+            edge,
+            hint: &mut self.rightmost_leaf,
+        })
+    }
+
     /// Puts a new root with no keys above the current one, which becomes its
     /// only child, and returns the new root.
     pub(crate) fn push_internal_level(
         &mut self,
         page: FreshPage<K, V, S, Internal>,
     ) -> NodeMut<'_, K, V, S, Internal> {
+        self.clear_insertion_hint();
         let root = NodePtr::from_fresh_page(page);
         // SAFETY: the new root's page is allocated for an internal node. Its
         // edge 0 becomes the old root, a well-formed subtree one level down,
@@ -2295,6 +2773,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     ///
     /// If the root is a leaf; the tree is unchanged then.
     pub(crate) fn pop_internal_level(&mut self) -> FreshPage<K, V, S, Internal> {
+        self.clear_insertion_hint();
         assert!(self.height > 0, "popping a leaf root");
         debug_assert_eq!(Self::borrow(self).len(), 0, "popping a root with keys");
         let root = self.node;
@@ -2388,7 +2867,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
     /// child's last edge becomes the right child's first.
     ///
     /// The right child takes the parent's prefix length (05-fence-key.md),
-    /// at which the separator's inline key is, so that no key is read: its
+    /// at which the separator's inline key is. After local search windows
+    /// are normalized, shifting reads no further key: its
     /// inline keys, and the key going up, move back to it, filled from the
     /// separator's, a fence of both children. Fitting both children's
     /// prefixes to their new fences, which reads keys, is the caller's
@@ -2402,6 +2882,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
         if right_len == self.right_child.capacity() {
             return Err(StealError::ReceiverFull);
         }
+        self.parent.node.normalize_local_prefix();
+        self.left_child.normalize_local_prefix();
+        self.right_child.normalize_local_prefix();
         let fill = self.parent.window();
         self.right_child.move_prefix_back_to(fill);
         let parent = &mut self.parent;
@@ -2436,6 +2919,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
             self.left_child.set_len(left_len - 1);
             self.right_child.set_len(right_len + 1);
         }
+        self.parent.node.refresh_local_prefix();
         Ok(())
     }
 
@@ -2458,6 +2942,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
         if left_len == self.left_child.capacity() {
             return Err(StealError::ReceiverFull);
         }
+        self.parent.node.normalize_local_prefix();
+        self.left_child.normalize_local_prefix();
+        self.right_child.normalize_local_prefix();
         let fill = self.parent.window();
         self.left_child.move_prefix_back_to(fill);
         let parent = &mut self.parent;
@@ -2486,6 +2973,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
             self.left_child.set_len(left_len + 1);
             self.right_child.set_len(right_len - 1);
         }
+        self.parent.node.refresh_local_prefix();
         Ok(())
     }
 }
@@ -2510,7 +2998,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
     /// any (D17). Keys move with their inline keys.
     ///
     /// The merged child takes the parent's prefix length (05-fence-key.md),
-    /// at which the separator's inline key is, so that no key is read: both
+    /// at which the separator's inline key is. After local search windows
+    /// are normalized, shifting reads no further key: both
     /// children's inline keys move back to it, filled from the separator's,
     /// a fence of both. Fitting the merged child's prefix to its fences,
     /// which reads keys, is the caller's business, as for
@@ -2525,6 +3014,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
             mut left_child,
             mut right_child,
         } = self.0;
+        parent.normalize_local_prefix();
         left_child.move_prefix_back_to(fill);
         right_child.move_prefix_back_to(fill);
         let parent_len = parent.len();
@@ -2645,6 +3135,7 @@ mod tests {
             for target in (0..18).map(W::from).chain([greatest()]) {
                 let start = inline_keys.partition_point(|&probe| probe < target);
                 let end = inline_keys.partition_point(|&probe| probe <= target);
+                assert_eq!(node.equal_run(target), start..end);
                 assert_eq!(node.equal_run_by_count(target), start..end);
                 assert_eq!(node.equal_run_by_search(target), start..end);
                 for slots in [&slots, &unpadded] {
@@ -2673,6 +3164,7 @@ mod tests {
             let node = LiveSlots::new(&slots, len);
             for target in (0..5).map(W::from) {
                 let runs = [
+                    node.equal_run(target),
                     node.equal_run_by_count(target),
                     node.equal_run_by_search(target),
                 ];

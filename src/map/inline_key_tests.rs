@@ -29,6 +29,77 @@ fn ten_digits(number: usize) -> String {
     format!("{number:010}")
 }
 
+/// A built-in stored key can be borrowed through an unknown query type.
+/// Its full ordering must remain available even in locally prefixed nodes.
+#[test]
+fn auto_strings_accept_an_unrecognized_borrowed_query() {
+    trait TextQuery {
+        fn text(&self) -> &str;
+    }
+    impl TextQuery for String {
+        fn text(&self) -> &str {
+            self
+        }
+    }
+    impl PartialEq for dyn TextQuery {
+        fn eq(&self, other: &Self) -> bool {
+            self.text() == other.text()
+        }
+    }
+    impl Eq for dyn TextQuery {}
+    impl PartialOrd for dyn TextQuery {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for dyn TextQuery {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.text().cmp(other.text())
+        }
+    }
+    impl Borrow<dyn TextQuery> for String {
+        fn borrow(&self) -> &(dyn TextQuery + 'static) {
+            self
+        }
+    }
+
+    let prefix = "long\0shared/prefix/".repeat(4);
+    let entries = (0..1024).map(|index| (format!("{prefix}{:04}", 2 * index), index));
+    let mut ours: BBTreeMap<_, _> = entries.clone().collect();
+    let mut theirs: BTreeMap<_, _> = entries.collect();
+    for index in 0..2048 {
+        let query = format!("{prefix}{index:04}");
+        let borrowed: &dyn TextQuery = &query;
+        assert_eq!(ours.get(borrowed), theirs.get(borrowed));
+        assert_eq!(ours.get_mut(borrowed), theirs.get_mut(borrowed));
+    }
+    for query in [
+        String::new(),
+        String::from(&prefix[..31]),
+        format!("{prefix}0000\0"),
+    ] {
+        let borrowed: &dyn TextQuery = &query;
+        assert_eq!(ours.get(borrowed), theirs.get(borrowed));
+        let bounds = (Bound::Included(borrowed), Bound::Unbounded);
+        assert_eq!(
+            ours.range::<dyn TextQuery, _>(bounds)
+                .take(4)
+                .collect::<Vec<_>>(),
+            theirs
+                .range::<dyn TextQuery, _>(bounds)
+                .take(4)
+                .collect::<Vec<_>>(),
+        );
+    }
+    for index in (0..1024).step_by(3) {
+        let query = format!("{prefix}{:04}", 2 * index);
+        let borrowed: &dyn TextQuery = &query;
+        assert_eq!(ours.remove(borrowed), theirs.remove(borrowed));
+    }
+    ours.check_invariants();
+    assert!(ours.iter().eq(theirs.iter()));
+}
+
 /// Four bytes: inline keys hold every key whole, so leaf searches tell
 /// equal keys by their length.
 impl FromNumber for Vec<u8> {
@@ -309,6 +380,50 @@ fn integer_keys_match_std() {
     workload.run::<i128, (), WithInlineKey>(79);
 }
 
+/// Array point lookup may use equality after its summary finds one
+/// candidate. Borrowed slices still distinguish proper zero-padded
+/// prefixes, and differences anywhere in the full array must be checked.
+#[test]
+fn fixed_array_point_queries_match_std() {
+    struct ArrayQueries;
+
+    impl ArrayQueries {
+        fn check<const N: usize>() {
+            let mut ours = BBTreeMap::new();
+            let mut theirs = BTreeMap::new();
+            for number in 0..1024_u16 {
+                let mut key = [0; N];
+                key[..2].copy_from_slice(&number.to_be_bytes());
+                ours.insert(key, number);
+                theirs.insert(key, number);
+            }
+            ours.check_invariants();
+            for (&key, &value) in &theirs {
+                assert_eq!(ours.get(&key), Some(&value));
+                assert_eq!(
+                    ours.get_mut(key.as_slice()).map(|value| *value),
+                    Some(value)
+                );
+                let mut query = key.to_vec();
+                query.push(0);
+                for len in 0..=query.len() {
+                    let borrowed = &query[..len];
+                    assert_eq!(ours.get(borrowed), theirs.get(borrowed));
+                }
+                for byte in 0..N {
+                    let mut different = key;
+                    different[byte] ^= 0x80;
+                    assert_eq!(ours.get(&different), theirs.get(&different));
+                }
+            }
+        }
+    }
+
+    ArrayQueries::check::<16>();
+    ArrayQueries::check::<20>();
+    ArrayQueries::check::<32>();
+}
+
 /// Strings whose nodes keep 2 or 4 bytes of their inline keys: runs of
 /// tied inline keys are long, and the full keys decide within them.
 #[test]
@@ -429,6 +544,12 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
             }
         }
         assert!(ours.len() <= inserts);
+        // A split-armed append changed this reversed-encoding history and
+        // exposed a refit that shortened a leaf below its parent. Check
+        // every edge after every operation, without calling the lying
+        // encoding or assuming the keys are sorted. The ledger below also
+        // verifies that later promotions/removals keep ownership intact.
+        ours.check_prefix_order();
     }
     assert!(ours.len() <= inserts);
     drop(ours);
