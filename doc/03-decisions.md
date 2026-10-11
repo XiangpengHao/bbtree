@@ -928,6 +928,34 @@ Supersedes D20 and D27.
   116.9, JSON 305.2 → 285.0, paths 563.0 → 469.3). These are the
   prefetch-on numbers the default build no longer reaches.
 
+**D47. Node plans: every per-key-type choice in one place.** (2026-10-11)
+Design and measurements in 07-node-plan.md.
+
+- **What:** `NodePlan::of::<S, Kind>()` (`node/node_plan.rs`) decides, per
+  key type and node kind, everything the nodes specialize on: summary width,
+  length tags, local prefix, children first, rehydrated windows, full and
+  tied searches, whole-key equality. One constructor per row of the table,
+  each with its reason. Layouts, slots, searches and prefix upkeep read it;
+  none asks what the key type is. Per-key arrays (inline keys, length tags)
+  are `KeyColumns`, which every key move moves alike.
+- **Why:** each specialization was spelled where it was used, as a stand-in
+  for type identity (`ByteString && width() == Two` for fixed arrays), in 26
+  places, and lived in three files.
+- **Zero overhead, by rule:** code derives the plan from type parameters
+  where it uses it and never passes or stores it; dispatchers over
+  plan-derived values are `#[inline(always)]`; `KeyInliner` and
+  `NodePlan::of` stay small, as a third variant or one more arm changed
+  LLVM's inlining by 9–142 instructions per operation.
+- **Measured** against the tree before, instructions per operation, 33
+  cells: identical on 26; `hash32` lookups −88 (LLVM now inlines the
+  internal search); the rest within ±9, of which set lookups +2 (an LLVM
+  speculation drops `inbounds` and keeps one null test). Debug tests 86 → 75 s, from
+  narrowing type recognition before comparing type identities.
+- **Rejected:** a public `KeyBytes` trait and `WithKeyBytes` strategy for
+  byte-ordered newtypes: no measured gain over `WithInlineKey` (311 vs
+  315 ns per lookup on path newtypes), as the wins of std heap strings need
+  key reads while keys move, which user code can't do safely.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)

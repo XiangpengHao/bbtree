@@ -10,6 +10,7 @@ use std::vec::Vec;
 
 use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
 use super::inline_keys::KeyInliner;
+use super::node_plan::NodePlan;
 use super::page::{PageKind, TestPages};
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
 
@@ -317,22 +318,19 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
     /// windows at its prefix length, as many as this kind keeps, in order
     /// (D18, 05-fence-key.md); a node without has prefix 0.
     pub(crate) fn assert_inline_keys_match(self) {
+        let plan = Self::plan();
         if let Some(tags) = self.length_tags() {
-            assert!(Kind::IS_LEAF);
-            let Some(KeyInliner::ByteString(bytes)) = KeyInliner::<K>::resolve::<S>() else {
-                panic!("only built-in byte strings have length tags");
-            };
+            assert!(plan.has_length_tags());
             for (index, key) in self.keys().iter().enumerate() {
-                assert_eq!(tags[index], bytes.bytes(key).len() as u16);
+                assert_eq!(Some(tags[index]), plan.length_tag(key));
             }
         }
         if let Some(prefix) = self.local_prefix_len() {
-            assert!(!Kind::IS_LEAF);
             assert!(self.len() >= 2);
             assert!(prefix >= self.prefix_len() + 8);
-            let Some(KeyInliner::ByteString(bytes)) = KeyInliner::<K>::resolve::<S>() else {
-                panic!("only built-in byte strings have local prefixes");
-            };
+            let bytes = plan
+                .local_prefix_bytes()
+                .expect("only nodes whose plan says so have local prefixes");
             let keys = self.keys();
             let prefix_bytes = &bytes.bytes(&keys[0])[..prefix];
             for key in keys.iter() {
@@ -340,12 +338,13 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
             }
         }
         let prefix_len = self.local_prefix_len().unwrap_or_else(|| self.prefix_len());
-        if let Some(inliner @ KeyInliner::ByteString(_)) = KeyInliner::<K>::resolve::<S>()
-            && inliner.width() == InlineWidth::Eight
+        if let Some(inliner) = plan.inliner()
+            && NodePlan::<K>::of::<S, Internal>().rehydrates_windows()
         {
-            // A narrow internal window may next fill an eight-byte leaf
-            // prefix. Exported windows must preserve every byte, including
-            // for an inactive local prefix where stored slots are narrow.
+            // A narrow internal window may next fill a leaf's prefix, so
+            // every window a node of this map hands out keeps all the bytes
+            // a leaf does, also for an inactive local prefix, where the
+            // stored slots are narrow.
             for (index, key) in self.keys().iter().enumerate() {
                 let window = self.kv_at(index).window();
                 assert_eq!(window.prefix_len(), self.prefix_len());
@@ -355,13 +354,15 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
                 );
             }
         }
-        let expected: Option<Vec<InlineWord>> = KeyInliner::<K>::resolve::<S>().map(|inliner| {
-            let dropped_bits =
-                8 * (InlineWidth::Eight.bytes() - inliner.node_width::<Kind>().bytes()) as u32;
-            (self.keys().iter())
-                .map(|key| inliner.inline_key_at(key, prefix_len) >> dropped_bits << dropped_bits)
-                .collect()
-        });
+        let expected: Option<Vec<InlineWord>> = Option::zip(plan.inliner(), plan.inline_width())
+            .map(|(inliner, inline_width)| {
+                let dropped_bits = 8 * (InlineWidth::Eight.bytes() - inline_width.bytes()) as u32;
+                (self.keys().iter())
+                    .map(|key| {
+                        inliner.inline_key_at(key, prefix_len) >> dropped_bits << dropped_bits
+                    })
+                    .collect()
+            });
         let actual: Option<Vec<InlineWord>> = self.inline_keys().map(|inline_keys| {
             assert!(
                 inline_keys.pads_with_greatest(),

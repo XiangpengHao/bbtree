@@ -153,7 +153,8 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PrefixGrowth> NodeMut<'_, K, V, S, Kin
     /// `InlineKey` leaves the node as it was. Does nothing if the node has
     /// no inline keys.
     pub(super) fn refit_prefix(&mut self, prefix_len: usize) {
-        let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
+        let plan = Self::plan();
+        let (Some(inliner), Some(inline_width)) = (plan.inliner(), plan.inline_width()) else {
             return;
         };
         let node = self.reborrow();
@@ -163,7 +164,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PrefixGrowth> NodeMut<'_, K, V, S, Kin
             return;
         }
         let keys = node.keys();
-        let mut inline_keys = RefitBuffer::new(inliner.node_width::<Kind>());
+        let mut inline_keys = RefitBuffer::new(inline_width);
         for (index, key) in keys.iter().enumerate() {
             inline_keys.set(index, inliner.inline_key_at(key, prefix_len));
         }

@@ -7,10 +7,8 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
-use super::handle::Internal;
-use super::inline_keys::KeyInliner;
 use super::page::{InlineKeyNodeHeader, NodeHeader, NodePtr};
-use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
+use crate::inline_key::{Auto, InlineWidth, InlineWord};
 
 /// Byte layouts of the node pages for keys `K` and values `V`: for leaves
 /// and for internal nodes (D9, D12, D17, D21, D29), each without an array
@@ -24,7 +22,9 @@ use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
 /// leaf      | header | w0 … w_n | (_ head) (k0 v0) (k1 v1) … (k_n v_n)   |
 /// internal  | header | w0 … w_n | k0 k1 … k_n | e0 e1 … e_n+1          |
 ///           0        inline_keys_offset
-/// fixed-array internal | header | w0 … w_n | e0 … e_n+1 | k0 … k_n    |
+///
+/// with children first:
+/// internal  | header | w0 … w_n | e0 e1 … e_n+1 | k0 k1 … k_n          |
 /// ```
 ///
 /// - Every layout has a header at offset 0, keys, and one more trailing
@@ -46,11 +46,10 @@ use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
 ///   of their size, so each pair stays within one cache line.
 ///   Internal nodes keep keys and edges in separate arrays: most searches
 ///   read only an edge after the inline keys, so unrelated keys need not
-///   occupy the edge's cache line. Recognized fixed arrays put edges first
-///   when the same capacity fits: early edges share the summaries' last
-///   cache line, and 16- and 32-byte keys become cache-line-contained.
-///   Heap strings keep keys first because local-prefix validation reads
-///   their first key before searching the summaries.
+///   occupy the edge's cache line. A node whose plan puts its children
+///   first (D39) puts the edges before the keys when the same capacity
+///   fits: early edges share the summaries' last cache line, and 16- and
+///   32-byte keys become cache-line-contained.
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
 ///   own sizes, or the entries' with inline keys.
@@ -62,8 +61,8 @@ use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
 /// The layouts are constants. Every invariant the node code relies on
 /// for one is asserted at compile time when that constant is evaluated,
 /// which happens before any page of that layout exists. A map picks the
-/// constants of its key type (`NodePtr::inline_width`, in `page.rs`), by a
-/// choice that folds after monomorphization.
+/// constants its node plans call for (`node_plan.rs`, `NodePtr::plan` in
+/// `page.rs`), by a choice that folds after monomorphization.
 pub(super) struct NodeLayout<K, V>(PhantomData<fn() -> (K, V)>);
 
 /// Where the keys of one kind of node sit, and how many fit.
@@ -99,8 +98,9 @@ pub(super) struct LeafLayout {
     pub(super) head_offset: usize,
     /// Bytes from the head to value 0, and from one value to the next.
     pub(super) value_stride: usize,
-    /// A dense array of `u16` length tags, when the unused space before the
-    /// head holds one per key. Reserving it changes no offset or capacity.
+    /// Where a dense array of `u16` length tags fits, when the unused space
+    /// before the head holds one per key, for a leaf whose plan keeps them
+    /// (D36). Reserving it changes no offset or capacity.
     pub(super) length_tags_offset: Option<usize>,
 }
 
@@ -196,7 +196,17 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
         Self::internal_layout(Some(InlineWidth::Eight));
 
-    const FIXED_ARRAY_INTERNAL: InternalLayout = Self::fixed_array_internal_layout();
+    const PLAIN_CHILDREN_FIRST_INTERNAL: InternalLayout =
+        Self::children_first_internal_layout(None);
+
+    const TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
+        Self::children_first_internal_layout(Some(InlineWidth::Two));
+
+    const FOUR_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
+        Self::children_first_internal_layout(Some(InlineWidth::Four));
+
+    const EIGHT_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
+        Self::children_first_internal_layout(Some(InlineWidth::Eight));
 
     /// The leaf layout without inline keys, or with inline keys of
     /// `inline_width`: one of the four constants, which `inline_width` picks
@@ -210,28 +220,23 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
-    /// Resolves the strategy once for layout: only recognized fixed byte
-    /// arrays place their edges before their real keys. Custom encodings
-    /// retain their original shape, regardless of the width they request.
-    #[inline]
-    pub(super) fn internal<S: InlineKeyStrategy<K>>() -> InternalLayout {
-        let inliner = KeyInliner::<K>::resolve::<S>();
-        if let Some(KeyInliner::ByteString(bytes)) = inliner
-            && bytes.inline_width() == InlineWidth::Two
-        {
-            // Fixed arrays are the only recognized byte strings with
-            // two-byte summaries; no new type-identity check is needed.
-            return Self::FIXED_ARRAY_INTERNAL;
-        }
-        Self::internal_with_width(inliner.map(KeyInliner::node_width::<Internal>))
-    }
-
-    fn internal_with_width(inline_width: Option<InlineWidth>) -> InternalLayout {
-        match inline_width {
-            None => Self::PLAIN_INTERNAL,
-            Some(InlineWidth::Two) => Self::TWO_BYTE_INLINE_INTERNAL,
-            Some(InlineWidth::Four) => Self::FOUR_BYTE_INLINE_INTERNAL,
-            Some(InlineWidth::Eight) => Self::EIGHT_BYTE_INLINE_INTERNAL,
+    /// The internal layout without inline keys, or with inline keys of
+    /// `inline_width`, with its children before its keys if
+    /// `children_first`: one of the eight constants, which the node plan
+    /// picks after monomorphization.
+    pub(super) fn internal(
+        inline_width: Option<InlineWidth>,
+        children_first: bool,
+    ) -> InternalLayout {
+        match (inline_width, children_first) {
+            (None, false) => Self::PLAIN_INTERNAL,
+            (Some(InlineWidth::Two), false) => Self::TWO_BYTE_INLINE_INTERNAL,
+            (Some(InlineWidth::Four), false) => Self::FOUR_BYTE_INLINE_INTERNAL,
+            (Some(InlineWidth::Eight), false) => Self::EIGHT_BYTE_INLINE_INTERNAL,
+            (None, true) => Self::PLAIN_CHILDREN_FIRST_INTERNAL,
+            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
+            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
+            (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
         }
     }
 
@@ -274,14 +279,15 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
-    /// Reorders the arrays without changing allocation size or fanout.
-    /// Alignment can make this order larger for some key shapes, so retain
-    /// the original layout whenever its capacity would no longer fit.
-    const fn fixed_array_internal_layout() -> InternalLayout {
-        let layout = Self::TWO_BYTE_INLINE_INTERNAL;
+    /// The internal layout with inline keys of `inline_width`, or none, with
+    /// its edges right after the inline keys and its keys after them (D39):
+    /// the arrays reordered, with the same allocation size and capacity.
+    /// Alignment can make this order larger for some key shapes, so the
+    /// keys stay first whenever the capacity would no longer fit.
+    const fn children_first_internal_layout(inline_width: Option<InlineWidth>) -> InternalLayout {
+        let layout = Self::internal_layout(inline_width);
         let capacity = layout.keys.capacity;
-        let summaries_end =
-            Self::keys_start(Self::inline_key_size(Some(InlineWidth::Two)), capacity);
+        let summaries_end = Self::keys_start(Self::inline_key_size(inline_width), capacity);
         let edges_offset = summaries_end.next_multiple_of(Self::EDGE.align);
         let edges_end = edges_offset + (capacity + 1) * Self::EDGE.size;
         let keys_offset = edges_end.next_multiple_of(align_of::<K>());
@@ -574,6 +580,7 @@ mod tests {
 
     use super::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
     use crate::inline_key::{Auto, InlineWidth, WithInlineKey};
+    use crate::node::page::NodePtr;
     use crate::node::test_support::{CacheLineAligned, PageAligned};
 
     /// The expected page of one node kind.
@@ -678,7 +685,7 @@ mod tests {
                 NodeLayout::<K, V>::PLAIN_LEAF
             );
             assert_eq!(
-                NodeLayout::<K, V>::internal_with_width(None),
+                NodeLayout::<K, V>::internal(None, false),
                 NodeLayout::<K, V>::PLAIN_INTERNAL
             );
         }
@@ -691,7 +698,7 @@ mod tests {
                 true,
             );
             self.internal.assert_internal(
-                NodeLayout::<K, V>::internal_with_width(Some(width)),
+                NodeLayout::<K, V>::internal(Some(width), false),
                 strides::<K, Edge>(false),
                 true,
             );
@@ -744,21 +751,21 @@ mod tests {
     #[test]
     fn auto_heap_byte_internal_nodes_keep_four_bytes() {
         ExpectedNode::one_page(28, 120, 792).assert_internal(
-            NodeLayout::<String, u64>::internal::<Auto>(),
+            NodePtr::<String, u64, Auto>::internal_layout(),
             (24, 8),
             true,
         );
         assert_eq!(
-            NodeLayout::<String, u64>::internal::<Auto>(),
-            NodeLayout::<String, String>::internal::<Auto>(),
+            NodePtr::<String, u64, Auto>::internal_layout(),
+            NodePtr::<String, String, Auto>::internal_layout(),
         );
         ExpectedNode::one_page(36, 152, 728).assert_internal(
-            NodeLayout::<&str, u64>::internal::<Auto>(),
+            NodePtr::<&str, u64, Auto>::internal_layout(),
             (16, 8),
             true,
         );
         assert_eq!(
-            NodeLayout::<String, u64>::internal::<WithInlineKey>(),
+            NodePtr::<String, u64, WithInlineKey>::internal_layout(),
             NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_INTERNAL,
         );
     }
@@ -808,7 +815,7 @@ mod tests {
         impl ArrayLayout {
             fn check<const N: usize>(capacity: usize, keys_offset: usize, edges_offset: usize) {
                 let original = NodeLayout::<[u8; N], u64>::TWO_BYTE_INLINE_INTERNAL;
-                let reordered = NodeLayout::<[u8; N], u64>::internal::<Auto>();
+                let reordered = NodePtr::<[u8; N], u64, Auto>::internal_layout();
                 ExpectedNode::one_page(capacity, keys_offset, edges_offset).assert_internal(
                     reordered,
                     (N, 8),
@@ -828,7 +835,7 @@ mod tests {
                 // The same Rust array under an explicit strategy keeps
                 // that strategy's original eight-byte-summary layout.
                 assert_eq!(
-                    NodeLayout::<[u8; N], u64>::internal::<WithInlineKey>(),
+                    NodePtr::<[u8; N], u64, WithInlineKey>::internal_layout(),
                     NodeLayout::<[u8; N], u64>::EIGHT_BYTE_INLINE_INTERNAL
                 );
             }
@@ -838,11 +845,11 @@ mod tests {
         ArrayLayout::check::<20>(33, 352, 80);
         ArrayLayout::check::<32>(24, 256, 56);
         assert_eq!(
-            NodeLayout::<String, u64>::internal::<Auto>(),
+            NodePtr::<String, u64, Auto>::internal_layout(),
             NodeLayout::<String, u64>::FOUR_BYTE_INLINE_INTERNAL
         );
         assert_eq!(
-            NodeLayout::<u64, u64>::internal::<WithInlineKey>(),
+            NodePtr::<u64, u64, WithInlineKey>::internal_layout(),
             NodeLayout::<u64, u64>::TWO_BYTE_INLINE_INTERNAL
         );
     }
@@ -856,7 +863,44 @@ mod tests {
         let original = NodeLayout::<[u8; 6], u64>::TWO_BYTE_INLINE_INTERNAL;
         assert_eq!(original.keys.capacity, 63);
         assert_eq!(original.edges_offset + 64 * 8, original.page.size());
-        assert_eq!(NodeLayout::<[u8; 6], u64>::FIXED_ARRAY_INTERNAL, original);
+        assert_eq!(
+            NodeLayout::<[u8; 6], u64>::TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
+            original
+        );
+    }
+
+    /// Putting the children first only moves the arrays: at every width, and
+    /// without inline keys, the page, capacity and inline keys stay those of
+    /// the layout with the keys first.
+    #[test]
+    fn children_first_keeps_page_and_capacity_at_every_width() {
+        fn check<K>() {
+            let widths = [
+                None,
+                Some(InlineWidth::Two),
+                Some(InlineWidth::Four),
+                Some(InlineWidth::Eight),
+            ];
+            for width in widths {
+                let keys_first = NodeLayout::<K, u64>::internal(width, false);
+                let children_first = NodeLayout::<K, u64>::internal(width, true);
+                assert_eq!(children_first.page, keys_first.page);
+                assert_eq!(children_first.keys.capacity, keys_first.keys.capacity);
+                assert_eq!(children_first.keys.key_stride, keys_first.keys.key_stride);
+                assert_eq!(
+                    children_first.keys.inline_keys_offset,
+                    keys_first.keys.inline_keys_offset
+                );
+                if children_first != keys_first {
+                    assert!(children_first.edges_offset < children_first.keys.keys_offset);
+                }
+            }
+        }
+        check::<u64>();
+        check::<[u8; 6]>();
+        check::<[u8; 32]>();
+        check::<String>();
+        check::<()>();
     }
 
     /// Over-aligned keys pad each entry to their alignment.

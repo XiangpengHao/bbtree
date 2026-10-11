@@ -40,11 +40,12 @@
 //!    `len..` hold the greatest inline key, all ones, so that a search may
 //!    count every slot without masking those out: a fresh page starts so,
 //!    and [`NodeMut::set_len`] refills the slots a shorter length leaves.
-//! 7. **Length tags follow keys.** Tagged byte-string leaves keep each
-//!    live key's byte length modulo 65536 in the corresponding tag slot.
-//!    `KeySlots` maintains these through every mutation. All capacity slots
-//!    start initialized; a search masks out slots outside its live primary
-//!    run and always confirms each selected candidate against the full key.
+//! 7. **Length tags follow keys.** Leaves whose plan keeps length tags
+//!    (`node_plan.rs`) keep each live key's byte length modulo 65536 in the
+//!    corresponding tag slot. `KeySlots` maintains these through every
+//!    mutation. All capacity slots start initialized; a search masks out
+//!    slots outside its live primary run and always confirms each selected
+//!    candidate against the full key.
 //!
 //! Every fact is established once, by a check the B-tree makes anyway (the
 //! search, the insert-or-split decision, the merge decision) or by a checked
@@ -59,12 +60,12 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::hint;
 use core::marker::PhantomData;
-use core::mem;
 use core::ops::Range;
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, KeyInliner, SearchKey, Window};
+use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, SearchKey, Window};
 use super::length_tags::{LengthMatch, LengthTags};
+use super::node_plan::{KeySearch, NodePlan};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
 pub(crate) use super::slots::NodeKeys;
 use super::slots::{InlineKeySlots, KeySlots, Slots};
@@ -370,34 +371,6 @@ unsafe impl<K: Send, V: Send, S, Kind> Send for NodeRef<Dying<K, V>, K, V, S, Ki
 // and values not moved out, which `K: Sync` and `V: Sync` allow sharing.
 unsafe impl<K: Sync, V: Sync, S, Kind> Sync for NodeRef<Dying<K, V>, K, V, S, Kind> {}
 
-/// How a node searches its keys when inline keys don't decide (D18). Fixed
-/// per key type at compile time, so the choice costs nothing at run time.
-enum KeySearch {
-    /// For keys that compare in a register: branchless binary search.
-    Branchless,
-    /// For keys whose comparisons are expensive: plain binary search.
-    Binary,
-}
-
-impl KeySearch {
-    /// Branchless for keys with no drop glue and at most 16 bytes: integers,
-    /// `char`, small tuples of them. Their comparisons are a few instructions
-    /// on data already loaded, so a chain of conditional moves is cheapest.
-    ///
-    /// Everything else (`String`, `Vec`, `Box`, large arrays) uses plain
-    /// binary search. Without specialization this is a heuristic: `&str` and `&[u8]`
-    /// keys also have no drop glue and fit in 16 bytes, so they take the
-    /// branchless path although their comparisons follow a pointer, unless
-    /// inline keys decide (D18).
-    const fn for_key<K>() -> Self {
-        if !mem::needs_drop::<K>() && mem::size_of::<K>() <= 16 {
-            Self::Branchless
-        } else {
-            Self::Binary
-        }
-    }
-}
-
 /// A node, position or subtree sorted by kind; see [`NodeRef::force`].
 pub(crate) enum ForceResult<LeafThing, InternalThing> {
     Leaf(LeafThing),
@@ -527,13 +500,11 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// Length metadata, when present, is initialized to capacity. Its live
     /// prefix follows the keys through every `KeySlots` mutation.
     pub(super) fn length_tags(&self) -> Option<&[u16]> {
+        let tags = self.key_slots().columns().length_tags()?;
         // SAFETY: the live handle proves the node's kind and allocation;
         // every tag was initialized when allocated and can be read under
         // this shared reborrow (invariants 1 and 7).
-        unsafe {
-            let tags = self.node.length_tag_slots::<Kind>()?;
-            Some(tags.run(0, self.capacity()).as_ref())
-        }
+        unsafe { Some(tags.run(0, self.capacity()).as_ref()) }
     }
 
     /// Binary search for `key` among the node's keys: `Found` at a key equal
@@ -563,7 +534,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// prefix used by structural operations.
     #[inline]
     pub(super) fn local_prefix_len(&self) -> Option<usize> {
-        Self::local_prefix_inliner()?;
+        Self::plan().local_prefix_bytes()?;
         // SAFETY: this live node has inline keys, and its borrow prevents
         // concurrent header mutation.
         let prefix = unsafe { self.node.search_prefix_len() };
@@ -590,9 +561,11 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         }
     }
 
-    /// How this node's keys are searched when inline keys don't decide,
-    /// fixed per key type at compile time.
-    const KEY_SEARCH: KeySearch = KeySearch::for_key::<K>();
+    /// The plan of the map's nodes of this kind (`node_plan.rs`).
+    #[inline(always)]
+    pub(super) fn plan() -> NodePlan<K> {
+        NodePtr::<K, V, S>::plan::<Kind>()
+    }
 
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` the edge
     /// where `key` belongs. In bounds for any `Ord` and `InlineKey`,
@@ -600,7 +573,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     ///
     /// If the node has inline keys and `key` has one to compare (D18), taken
     /// at the node's prefix length, the search runs over them; otherwise over
-    /// the keys, as the key type picks (D19).
+    /// the keys, as the node's plan says (D19).
     /// After monomorphization, a map without inline keys has only the
     /// latter.
     fn search_index<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
@@ -624,7 +597,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
             return self.search_run(run, key, target);
         }
         let keys = self.reborrow().keys();
-        match Self::KEY_SEARCH {
+        match Self::plan().full_search() {
             KeySearch::Branchless => Self::branchless_search_index(keys, key.key()),
             KeySearch::Binary => {
                 Self::binary_search_index(keys, |probe| key.key().cmp(probe.borrow()))
@@ -656,12 +629,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// which order them (the `InlineKey` contract), so if `key` is in no
     /// run, its edge is where the run would start.
     ///
-    /// Keys with their own `InlineKey` impl compare by `Ord` within it, and
-    /// search as their type picks (D19): branchless for plain data such as
-    /// integers, whose run is the whole node where their kept bytes all tie,
-    /// as at a node of prefix 0, the root's. Std byte strings search it by
-    /// binary search, comparing as [`SearchKey::cmp_tied`] does, a word at a
-    /// time from past the bytes the run shares.
+    /// It runs as the node's plan says. Keys with their own `InlineKey` impl
+    /// compare by `Ord`, and search as their type picks (D19): branchless
+    /// for plain data such as integers, whose run is the whole node where
+    /// their kept bytes all tie, as at a node of prefix 0, the root's. Std
+    /// byte strings search it by binary search, comparing as
+    /// [`SearchKey::cmp_tied`] does, a word at a time from past the bytes
+    /// the run shares.
     ///
     /// In bounds for any `Ord` and `InlineKey`: the run lies within `0..len`
     /// whatever the inline keys hold ([`NodeInlineKeys::equal_run`]), taking
@@ -677,11 +651,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         Q: Ord + ?Sized,
     {
         let candidates = self.reborrow().keys().slice(run.clone());
-        let found = match (KeyInliner::<K>::resolve::<S>(), Self::KEY_SEARCH) {
-            (Some(KeyInliner::InlineKeyTrait { .. }), KeySearch::Branchless) => {
-                Self::branchless_search_index(candidates, key.key())
-            }
-            _ => {
+        let found = match Self::plan().tied_search() {
+            KeySearch::Branchless => Self::branchless_search_index(candidates, key.key()),
+            KeySearch::Binary => {
                 Self::binary_search_index(candidates, |stored| key.cmp_tied::<Kind>(target, stored))
             }
         };
@@ -778,7 +750,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         self.len() == self.capacity()
     }
 
-    fn key_slots(&self) -> KeySlots<K, S> {
+    fn key_slots(&self) -> KeySlots<K, S, Kind> {
         // SAFETY: the node is allocated, and of kind `Kind` (invariant 1).
         unsafe { self.node.key_slots::<Kind>() }
     }
@@ -1047,7 +1019,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Lea
                 // Arrays use full equality; strings retain the prefix skip.
                 let keys = self.reborrow().keys();
                 let stored = &keys[run.start];
-                let matches = if let Some(query) = key.fixed_array_query() {
+                let matches = if Self::plan().has_whole_key_equality()
+                    && let Some(query) = key.whole_bytes_query()
+                {
                     query.matches(stored)
                 } else {
                     key.cmp_tied::<Leaf>(target, stored) == Ordering::Equal
@@ -1203,7 +1177,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V,
     fn key_window(self, index: usize) -> Window {
         assert!(index < self.len(), "key index out of bounds");
         if self.local_prefix_len().is_some() {
-            let inliner = Self::local_prefix_inliner().expect("local byte-string prefix");
+            let inliner = Self::plan().inliner().expect("local byte-string prefix");
             return Window::new(
                 self.prefix_len(),
                 inliner.inline_key_at(&self.keys()[0], self.prefix_len()),
@@ -1256,13 +1230,8 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         let old_len = self.len();
-        if let Some(inline_keys) = self.key_slots().inline_keys() {
-            for index in len..old_len {
-                // SAFETY: `index < old_len <= capacity`; inline keys are
-                // plain data, and this handle is exclusive.
-                unsafe { inline_keys.write(index, InlineWord::MAX) };
-            }
-        }
+        // SAFETY: `old_len <= capacity`, and this handle is exclusive.
+        unsafe { self.key_slots().columns().mark_vacant(len..old_len) };
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
@@ -3065,36 +3034,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
 
 #[cfg(test)]
 mod tests {
-    use std::string::String;
     use std::vec::Vec;
 
     use core::cmp::Ordering;
     use core::ptr::NonNull;
     use std::vec;
 
-    use super::{InlineKeySlots, InlineSlot, KeySearch, LiveSlots, NodeInlineKeys};
+    use super::{InlineKeySlots, InlineSlot, LiveSlots, NodeInlineKeys};
     use crate::inline_key::{InlineWidth, InlineWord};
     use crate::node::test_support::TestRng;
-
-    #[test]
-    fn key_types_pick_their_search() {
-        assert!(matches!(KeySearch::for_key::<u64>(), KeySearch::Branchless));
-        assert!(matches!(KeySearch::for_key::<u32>(), KeySearch::Branchless));
-        assert!(matches!(
-            KeySearch::for_key::<(u64, u64)>(),
-            KeySearch::Branchless
-        ));
-        assert!(matches!(KeySearch::for_key::<String>(), KeySearch::Binary));
-        assert!(matches!(
-            KeySearch::for_key::<[u8; 32]>(),
-            KeySearch::Binary
-        ));
-        // The documented misfire: a borrowed string looks like plain data.
-        assert!(matches!(
-            KeySearch::for_key::<&str>(),
-            KeySearch::Branchless
-        ));
-    }
 
     /// `stale_count` random slots after `live`, as no node holds past its
     /// length: a search must stay in bounds whatever they hold.

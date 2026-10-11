@@ -46,6 +46,7 @@ mod layout;
 mod leaf;
 mod length_tags;
 mod local_prefix;
+mod node_plan;
 pub(crate) mod page;
 pub(crate) mod path;
 pub(crate) mod prefix;

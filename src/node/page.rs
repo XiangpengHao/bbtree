@@ -10,9 +10,9 @@ use core::marker::PhantomData;
 use core::ptr::NonNull;
 
 use super::handle::{ForceResult, Internal, Leaf, NodeKind};
-use super::inline_keys::KeyInliner;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
-use super::slots::{InlineKeySlots, KeySlots, Slots};
+use super::node_plan::NodePlan;
+use super::slots::{InlineKeySlots, KeyColumns, KeySlots, Slots};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 pub(super) use type_identity::{ByteString, SameType, StdInteger};
@@ -312,20 +312,28 @@ impl<K, V, S> NodePtr<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
-    /// The width of the inline keys nodes of `Kind` hold, or `None` if they
-    /// hold none (D18).
+    /// The plan of the map's nodes of kind `Kind` (`node_plan.rs`): what they
+    /// store beside their keys, which every layout decision below follows.
     ///
-    /// Every layout decision below asks this, and it is a pure function of
-    /// `K`, `S` and `Kind` that folds to a constant. Every page of a map and
-    /// kind gets the same answer, so accesses match its allocation layout.
-    #[inline]
-    pub(super) fn inline_width<Kind: PageKind>() -> Option<InlineWidth> {
-        KeyInliner::<K>::resolve::<S>().map(KeyInliner::node_width::<Kind>)
+    /// A pure function of `K`, `S` and `Kind` that folds to a constant: every
+    /// page of a map and kind gets the same answer, so accesses match its
+    /// allocation layout.
+    #[inline(always)]
+    pub(super) fn plan<Kind: PageKind>() -> NodePlan<K> {
+        NodePlan::of::<S, Kind>()
     }
 
-    /// Whether the map's nodes hold inline keys (D18).
+    /// The width of the inline keys nodes of `Kind` hold, or `None` if they
+    /// hold none (D18).
+    #[inline]
+    pub(super) fn inline_width<Kind: PageKind>() -> Option<InlineWidth> {
+        Self::plan::<Kind>().inline_width()
+    }
+
+    /// Whether the map's nodes hold inline keys (D18): those of both kinds
+    /// do, or neither does.
     pub(super) fn has_inline_keys() -> bool {
-        KeyInliner::<K>::resolve::<S>().is_some()
+        Self::plan::<Leaf>().inline_width().is_some()
     }
 
     pub(super) fn leaf_layout() -> LeafLayout {
@@ -333,7 +341,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 
     pub(super) fn internal_layout() -> InternalLayout {
-        NodeLayout::<K, V>::internal::<S>()
+        let plan = Self::plan::<Internal>();
+        NodeLayout::<K, V>::internal(plan.inline_width(), plan.has_children_first())
     }
 
     /// Where the keys and inline keys of a node of kind `Kind` sit.
@@ -350,30 +359,6 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         Self::key_area::<Kind>().capacity
     }
 
-    /// Optional length tags occupy only unused leaf padding. Explicit
-    /// `InlineKey` strategies and fixed arrays never use this filter.
-    fn length_tags_offset<Kind: PageKind>() -> Option<usize> {
-        if !Kind::IS_LEAF {
-            return None;
-        }
-        let KeyInliner::ByteString(bytes) = KeyInliner::<K>::resolve::<S>()? else {
-            return None;
-        };
-        if bytes.inline_width() != InlineWidth::Eight {
-            return None;
-        }
-        Self::leaf_layout().length_tags_offset
-    }
-
-    /// # Safety
-    /// The allocated node is of kind `Kind`.
-    pub(super) unsafe fn length_tag_slots<Kind: PageKind>(self) -> Option<Slots<u16>> {
-        let offset = Self::length_tags_offset::<Kind>()?;
-        // SAFETY: the layout places this aligned array after the summaries
-        // and before the head and real keys, within the allocation.
-        Some(unsafe { Slots::new(self.page.byte_add(offset).cast(), Self::capacity::<Kind>()) })
-    }
-
     /// Whether a node of kind `Kind` pairs its keys with its trailing slots
     /// in entries (D29, D32), which then move whole: in a leaf with inline
     /// keys, unless the values take no room, which leaves the keys side by
@@ -386,46 +371,40 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// and, for a leaf, no head. An internal node still needs its first edge
     /// written.
     ///
-    /// With inline keys, it also fills every inline-key slot up to the
-    /// capacity with the greatest inline key, all ones, so that searches may
-    /// count the slots past `len` (handle.rs, invariant 6).
+    /// It also initializes the columns beside the keys
+    /// ([`KeyColumns::initialize`]): every inline-key slot up to the capacity
+    /// gets the greatest inline key, so that searches may count the slots
+    /// past `len` (handle.rs, invariant 6).
     pub(super) fn from_fresh_page<Kind: PageKind>(page: FreshPage<K, V, S, Kind>) -> Self {
-        let page = page.into_raw();
+        let node = Self {
+            page: page.into_raw(),
+            _marker: PhantomData,
+            _strategy: PhantomData,
+        };
         let common = NodeHeader {
             len: 0,
             has_head: false,
         };
         // SAFETY: the page is aligned to its layout (checked in
         // `FreshPage::new`), whose alignment either header's divides, and the
-        // header of its layout fits before its keys and inline keys, whose
+        // header of its layout fits before its keys and columns, whose
         // `capacity` slots lie in the page, aligned (layout invariants); the
-        // page is exclusively ours.
+        // page is exclusively ours, for a node of kind `Kind`.
         unsafe {
-            if let Some(width) = Self::inline_width::<Kind>() {
-                page.cast::<InlineKeyNodeHeader>()
+            if Self::has_inline_keys() {
+                node.page
+                    .cast::<InlineKeyNodeHeader>()
                     .write(InlineKeyNodeHeader {
                         common,
                         prefix_len: 0,
                         search_prefix_len: 0,
                     });
-                let area = Self::key_area::<Kind>();
-                if let Some(offset) = area.inline_keys_offset {
-                    page.byte_add(offset)
-                        .write_bytes(u8::MAX, area.capacity * width.bytes());
-                }
             } else {
-                page.cast::<NodeHeader>().write(common);
+                node.page.cast::<NodeHeader>().write(common);
             }
-            if let Some(offset) = Self::length_tags_offset::<Kind>() {
-                page.byte_add(offset)
-                    .write_bytes(0, Self::capacity::<Kind>() * size_of::<u16>());
-            }
+            node.key_columns::<Kind>().initialize();
         }
-        Self {
-            page,
-            _marker: PhantomData,
-            _strategy: PhantomData,
-        }
+        node
     }
 
     /// The `prefix_len` of a node with inline keys (05-fence-key.md), or
@@ -507,32 +486,57 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     ///
     /// The node has not been released, and is of kind `Kind`; nothing writes
     /// its header concurrently.
-    pub(super) unsafe fn key_slots<Kind: PageKind>(self) -> KeySlots<K, S> {
+    pub(super) unsafe fn key_slots<Kind: PageKind>(self) -> KeySlots<K, S, Kind> {
         let area = Self::key_area::<Kind>();
         // SAFETY: forwarded.
         let prefix_len = unsafe { self.prefix_len() }.unwrap_or(0);
         // SAFETY: the keys' offset is aligned for `K`, and so is their
-        // stride, the inline keys' offset for inline keys of any width, and
-        // `capacity` of each from there stay within a page of the node's
-        // kind, `Kind`, and clear of each other (layout invariants); the
-        // inline keys are of the width the layout was made for; the page is
-        // allocated (caller).
+        // stride, and `capacity` keys from there stay within a page of the
+        // node's kind, `Kind`, clear of its other arrays (layout
+        // invariants); the columns are this kind's; the page is allocated
+        // (caller).
         unsafe {
             let keys = Slots::with_stride(
                 self.page.byte_add(area.keys_offset).cast(),
                 area.capacity,
                 area.key_stride,
             );
-            let inline_keys = Option::zip(Self::inline_width::<Kind>(), area.inline_keys_offset)
-                .map(|(width, offset)| {
+            KeySlots::new(keys, self.key_columns::<Kind>(), prefix_len)
+        }
+    }
+
+    /// The arrays a node of kind `Kind` keeps beside its keys
+    /// ([`KeyColumns`]): its inline keys, at its plan's width, and its
+    /// length tags (D36), if its plan keeps them and its layout has room for
+    /// them in the padding before its head and first key. Reads nothing
+    /// from the page.
+    ///
+    /// # Safety
+    ///
+    /// The page is allocated, for a node of kind `Kind`.
+    #[inline(always)]
+    pub(super) unsafe fn key_columns<Kind: PageKind>(self) -> KeyColumns {
+        let plan = Self::plan::<Kind>();
+        let area = Self::key_area::<Kind>();
+        let length_tags_offset = if plan.has_length_tags() {
+            Self::leaf_layout().length_tags_offset
+        } else {
+            None
+        };
+        // SAFETY: the inline keys' offset is aligned for inline keys of any
+        // width, and `capacity` of them from there stay within a page of the
+        // node's kind, `Kind`, clear of its other arrays, as do the length
+        // tags, which only a leaf's layout has room for (layout
+        // invariants); the inline keys are of the width the layout was made
+        // for; the page is allocated (caller).
+        unsafe {
+            let inline_keys =
+                Option::zip(plan.inline_width(), area.inline_keys_offset).map(|(width, offset)| {
                     InlineKeySlots::new(width, self.page.byte_add(offset), area.capacity)
                 });
-            KeySlots::new(
-                keys,
-                inline_keys,
-                self.length_tag_slots::<Kind>(),
-                prefix_len,
-            )
+            let length_tags = length_tags_offset
+                .map(|offset| Slots::new(self.page.byte_add(offset).cast(), area.capacity));
+            KeyColumns::new(inline_keys, length_tags, area.capacity)
         }
     }
 
@@ -715,23 +719,37 @@ mod type_identity {
         /// `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`, `[u8; 20]`
         /// or `[u8; 32]`, lifetimes aside. Folds to a constant after
         /// monomorphization.
+        ///
+        /// Unoptimized builds compare type identities at run time, on every
+        /// call, so the candidates are first narrowed by what is known
+        /// without comparing any: whether `T` is unsized, and whether it
+        /// owns memory to drop.
         #[inline(always)]
         pub(in crate::node) fn recognize() -> Option<Self> {
-            let representation = if ErasedTypeId::is::<T, str>() || ErasedTypeId::is::<T, [u8]>() {
-                ByteStringType::InPlace
+            let is_unsized = mem::size_of::<&T>() > mem::size_of::<&u8>();
+            let representation = if is_unsized {
+                if ErasedTypeId::is::<T, str>() || ErasedTypeId::is::<T, [u8]>() {
+                    ByteStringType::InPlace
+                } else {
+                    return None;
+                }
+            } else if mem::needs_drop::<T>() {
+                if ErasedTypeId::is::<T, String>() {
+                    ByteStringType::String
+                } else if ErasedTypeId::is::<T, Vec<u8>>() {
+                    ByteStringType::ByteVec
+                } else if ErasedTypeId::is::<T, Box<str>>() {
+                    ByteStringType::BoxedStr
+                } else if ErasedTypeId::is::<T, Box<[u8]>>() {
+                    ByteStringType::BoxedBytes
+                } else {
+                    return None;
+                }
             } else if ErasedTypeId::is::<T, [u8; 16]>()
                 || ErasedTypeId::is::<T, [u8; 20]>()
                 || ErasedTypeId::is::<T, [u8; 32]>()
             {
                 ByteStringType::Array
-            } else if ErasedTypeId::is::<T, String>() {
-                ByteStringType::String
-            } else if ErasedTypeId::is::<T, Vec<u8>>() {
-                ByteStringType::ByteVec
-            } else if ErasedTypeId::is::<T, Box<str>>() {
-                ByteStringType::BoxedStr
-            } else if ErasedTypeId::is::<T, Box<[u8]>>() {
-                ByteStringType::BoxedBytes
             } else if ErasedTypeId::is::<T, &str>() {
                 ByteStringType::StrRef
             } else if ErasedTypeId::is::<T, &[u8]>() {
@@ -745,14 +763,19 @@ mod type_identity {
             })
         }
 
-        /// Fixed arrays keep their bytes in the node, so a prefix tie
-        /// needs no heap read. Two bytes retain a dense search array while
-        /// leaving more room for entries. Heap-backed strings keep eight.
+        /// Whether a value is its bytes, as an array is, rather than a
+        /// handle to bytes elsewhere: two keys' bytes then compare without
+        /// reading past the node that holds them.
         #[inline(always)]
-        pub(in crate::node) fn inline_width(self) -> InlineWidth {
+        pub(in crate::node) fn holds_its_bytes(self) -> bool {
             match self.representation {
-                ByteStringType::Array => InlineWidth::Two,
-                _ => InlineWidth::Eight,
+                ByteStringType::InPlace | ByteStringType::Array => true,
+                ByteStringType::String
+                | ByteStringType::ByteVec
+                | ByteStringType::BoxedStr
+                | ByteStringType::BoxedBytes
+                | ByteStringType::StrRef
+                | ByteStringType::BytesRef => false,
             }
         }
 
@@ -807,21 +830,20 @@ mod type_identity {
     impl<T> StdInteger<T> {
         /// The proof, if `T` is `u64`, `i64`, `u128` or `i128`. Folds to a
         /// constant after monomorphization.
+        ///
+        /// Unoptimized builds compare type identities at run time, so the
+        /// candidates are first narrowed by `T`'s size.
         #[inline(always)]
         pub(in crate::node) fn recognize() -> Option<Self> {
             // SAFETY: each arm passes the type that `T` was just found to be;
             // integers have no lifetimes to erase.
             unsafe {
-                if ErasedTypeId::is::<T, u64>() {
-                    Some(Self::of::<u64>())
-                } else if ErasedTypeId::is::<T, i64>() {
-                    Some(Self::of::<i64>())
-                } else if ErasedTypeId::is::<T, u128>() {
-                    Some(Self::of::<u128>())
-                } else if ErasedTypeId::is::<T, i128>() {
-                    Some(Self::of::<i128>())
-                } else {
-                    None
+                match mem::size_of::<T>() {
+                    8 if ErasedTypeId::is::<T, u64>() => Some(Self::of::<u64>()),
+                    8 if ErasedTypeId::is::<T, i64>() => Some(Self::of::<i64>()),
+                    16 if ErasedTypeId::is::<T, u128>() => Some(Self::of::<u128>()),
+                    16 if ErasedTypeId::is::<T, i128>() => Some(Self::of::<i128>()),
+                    _ => None,
                 }
             }
         }
@@ -1128,8 +1150,8 @@ mod tests {
         // SAFETY: allocated nodes of the requested kind; only addresses
         // and the allocation-initialized tag slots are inspected.
         unsafe {
-            assert!(internal.length_tag_slots::<Internal>().is_none());
-            if let Some(tags) = leaf.length_tag_slots::<Leaf>() {
+            assert!(internal.key_columns::<Internal>().length_tags().is_none());
+            if let Some(tags) = leaf.key_columns::<Leaf>().length_tags() {
                 assert!(
                     tags.run(0, leaf_capacity)
                         .as_ref()

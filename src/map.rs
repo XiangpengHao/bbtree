@@ -77,9 +77,10 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 ///
 /// Its nodes store an inline key beside each key, a register-sized summary
 /// that searches compare first, when the strategy `S` gives the key type
-/// one: by default ([`Auto`]), std byte-string keys such as `String` have
-/// them, and other keys don't. [`WithInlineKey`] gives them to any key type
-/// that implements [`InlineKey`]. Either way, every method behaves as std's.
+/// one: by default ([`Auto`]), std byte-string and 64- and 128-bit integer
+/// keys have them, and other keys don't. [`WithInlineKey`] gives them to any
+/// key type that implements [`InlineKey`]. Either way, every method behaves
+/// as std's.
 ///
 /// [`std::collections::BTreeMap`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html
 /// [`WithInlineKey`]: crate::WithInlineKey

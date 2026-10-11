@@ -16,7 +16,8 @@ This way, each search pay one cache line miss and linear search the group head, 
   (31-slot leaves) is at 702 instructions per lookup against 534 for String→u64.
 
 
-- [ ] I think leaf node should not use inline key, because leaf node is to find that key, not to find the gap that contains the key. so we should do this: instead of storing the 8/4/2 bytes inline key which contains the raw values, we should store the hashed inline key, and only store 2 bytes (even 1 byte?). 
+- [-] I think leaf node should not use inline key, because leaf node is to find that key, not to find the gap that contains the key. so we should do this: instead of storing the 8/4/2 bytes inline key which contains the raw values, we should store the hashed inline key, and only store 2 bytes (even 1 byte?). 
 Since the hash is over the inline key, the K itself doesn't require Hash trait. If the K already implements Hash, we can hash the K itself this can gives us even better performance.  This might remove the length tag from the leaf node.
 
-- [ ] Now that we have a lot of specializations, each data type may have different layout, and different inline/search strategies. I wonder what we can do to design the zero-overhead abstractions to avoid us from accumulating a lot of adhoc specializations all over the places.
+- [-] When we insert to sorted array, we need to shift the keys, which is a memmov, is it? and I think it has to first copy the data to a temporary buffer, and then copy back, because the move is interleaving.
+BUT if we move data in the reverse order, we can avoid this buffer. 

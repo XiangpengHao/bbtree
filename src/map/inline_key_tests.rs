@@ -2,12 +2,14 @@
 //! default strategy, looked up by every borrowed form; keys whose inline
 //! keys tie, or hold the whole key; a newtype that opts in, looked up through
 //! another borrowed form too; integers, and strings, whose nodes keep 2 or 4
-//! bytes of their inline keys; and inline keys that break their contract,
-//! which may give wrong answers but never break memory safety.
+//! bytes of their inline keys; inline keys that break their contract, which
+//! may give wrong answers but never break memory safety; and an `InlineKey`
+//! that panics, which leaves the map valid.
 
 #![forbid(unsafe_code)]
 
 use core::borrow::Borrow;
+use core::cell::Cell;
 use core::cmp::Ordering;
 use core::ops::Bound;
 use core::panic::AssertUnwindSafe;
@@ -590,4 +592,101 @@ fn a_map_with_constant_inline_keys_keeps_its_invariants() {
     }
     map.check_invariants();
     assert!(map.height() >= 1);
+}
+
+/// A name whose `InlineKey` panics once its shared budget of calls is spent.
+struct PanickingName<'b> {
+    name: UserName,
+    budget: &'b Cell<usize>,
+}
+
+impl PartialEq for PanickingName<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for PanickingName<'_> {}
+
+impl PartialOrd for PanickingName<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PanickingName<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl InlineKey for PanickingName<'_> {
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        let left = self.budget.get();
+        assert!(left > 0, "inline key panic");
+        self.budget.set(left - 1);
+        self.name.inline_key_at(offset)
+    }
+}
+
+/// An `InlineKey` that panics in the middle of inserts and removals, which
+/// split, merge and refit nodes, leaves a valid map, which agrees with std's
+/// on every key it was not changing: the map calls it only before a change,
+/// or after the entry is in or out and counted, never while keys move. A
+/// refit it stops leaves a prefix shorter than its fences share, which
+/// searches as well, so prefixes are checked only against their parents'.
+#[test]
+fn a_panicking_inline_key_leaves_a_valid_map() {
+    let rng = TestRng::new(96);
+    let budget = Cell::new(usize::MAX);
+    let (steps, key_space) = if cfg!(miri) {
+        (300, 300)
+    } else {
+        (20_000, 6000)
+    };
+    let key = |number: usize| PanickingName {
+        name: UserName::from_number(number),
+        budget: &budget,
+    };
+    let mut ours: BBTreeMap<PanickingName<'_>, usize, WithInlineKey> =
+        BBTreeMap::with_strategy(WithInlineKey);
+    let mut theirs: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut panics = 0;
+    for step in 0..steps {
+        let number = rng.below(key_space);
+        let insert = rng.below(3) != 0;
+        budget.set(rng.below(40));
+        let changed = catch_unwind(AssertUnwindSafe(|| {
+            if insert {
+                ours.insert(key(number), step);
+            } else {
+                ours.remove(&key(number));
+            }
+        }));
+        budget.set(usize::MAX);
+        if changed.is_err() {
+            panics += 1;
+            // The entry may or may not have gone in or out: std's map
+            // follows ours, which must hold it or not.
+            match ours.get(&key(number)) {
+                Some(&value) => theirs.insert(number, value),
+                None => theirs.remove(&number),
+            };
+        } else if insert {
+            theirs.insert(number, step);
+        } else {
+            theirs.remove(&number);
+        }
+        ours.check_prefix_order();
+    }
+    assert!(panics > 0);
+    assert_eq!(ours.len(), theirs.len());
+    assert!(
+        ours.keys()
+            .zip(theirs.keys())
+            .all(|(ours, &number)| ours.name == UserName::from_number(number))
+    );
+    for (&number, value) in &theirs {
+        assert_eq!(ours.get(&key(number)), Some(value));
+    }
 }

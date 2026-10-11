@@ -8,9 +8,9 @@
 //! them, as it stores them, and as it compares a search's with them.
 //!
 //! - [`KeyInliner`] resolves a map's strategy for its key type, once and for
-//!   all at compile time: how its keys get inline keys, and how many bytes of
-//!   them the nodes keep, or that they have none. Page layouts follow from it
-//!   (`page.rs`).
+//!   all at compile time: how its keys get inline keys, or that they have
+//!   none. What each node kind does with them follows from it
+//!   (`node_plan.rs`).
 //! - [`InlineSlot`] is what a node stores an inline key as, at each width.
 //! - [`Window`] is an inline key with the prefix length it is taken at; it
 //!   moves back to a shorter prefix without reading the key.
@@ -26,6 +26,7 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
+use super::node_plan::NodePlan;
 use super::page::{ByteString, InlineKeyNodeHeader, PageKind, SameType, StdInteger};
 use super::vector_count::VectorCount;
 use crate::inline_key::sealed::InlineKeySource;
@@ -68,9 +69,9 @@ impl<K> KeyInliner<K> {
     ///
     /// A pure function of `K` and `S`, the strategy's constant source and
     /// `K`'s type identity, which folds to a constant after
-    /// monomorphization: every page of a map gets the same layout from it,
-    /// and must (`page.rs`).
-    #[inline]
+    /// monomorphization: every node plan of a map follows from it, and so
+    /// does every page's layout, which must (`node_plan.rs`).
+    #[inline(always)]
     pub(super) fn resolve<S: InlineKeyStrategy<K>>() -> Option<Self> {
         match S::SOURCE {
             InlineKeySource::RecognizedStdTypes => {
@@ -88,32 +89,6 @@ impl<K> KeyInliner<K> {
                 inline_key_at,
                 width,
             }),
-        }
-    }
-
-    /// The encoding's default width: eight for heap byte strings, two for
-    /// fixed arrays, or the explicit strategy's width. `node_width` selects
-    /// the narrower storage used by heap-byte internal nodes.
-    #[inline]
-    pub(super) fn width(self) -> InlineWidth {
-        match self {
-            Self::ByteString(byte_string) => byte_string.inline_width(),
-            Self::InlineKeyTrait { width, .. } => width,
-        }
-    }
-
-    /// The bytes this node kind stores. Heap-byte leaves retain full
-    /// windows for terminal confirmation; routing nodes keep four bytes.
-    /// Explicit encodings and fixed-size keys retain their chosen width.
-    #[inline]
-    pub(super) fn node_width<Kind: PageKind>(self) -> InlineWidth {
-        if !Kind::IS_LEAF
-            && matches!(self, Self::ByteString(_))
-            && self.width() == InlineWidth::Eight
-        {
-            InlineWidth::Four
-        } else {
-            self.width()
         }
     }
 
@@ -328,15 +303,16 @@ impl<'a> PrefixChunk<'a> {
     }
 }
 
-/// A recognized byte query for a stored fixed array. Point lookup can
-/// compare the whole array for equality once its ordered summary selects
-/// a single candidate; no lexicographic result is needed at a leaf.
-pub(super) struct FixedArrayQuery<'q, K> {
+/// A byte query that a point lookup compares with a std byte string key's
+/// bytes all at once, for equality alone: once the inline keys leave one
+/// candidate, a leaf needs no order. Where the plan says so (D38), a fixed
+/// byte array's, whose length the compiler knows.
+pub(super) struct WholeBytesQuery<'q, K> {
     query: &'q [u8],
     stored: ByteString<K>,
 }
 
-impl<K> FixedArrayQuery<'_, K> {
+impl<K> WholeBytesQuery<'_, K> {
     #[inline]
     pub(super) fn matches(&self, key: &K) -> bool {
         self.query == self.stored.bytes(key)
@@ -583,18 +559,15 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
         self.key.cmp(stored.borrow())
     }
 
-    /// Available only for built-in fixed byte arrays and recognized byte
-    /// queries. Custom ordering and heap strings retain ordered suffix
-    /// comparisons, including their known common-prefix skip.
+    /// The query, for comparing with a key's bytes all at once: for std byte
+    /// string keys and a recognized byte query only. Keys with their own
+    /// `InlineKey` impl keep their `Ord`.
     #[inline]
-    pub(super) fn fixed_array_query(&self) -> Option<FixedArrayQuery<'_, K>> {
+    pub(super) fn whole_bytes_query(&self) -> Option<WholeBytesQuery<'_, K>> {
         let KeyInliner::ByteString(stored) = KeyInliner::<K>::resolve::<S>()? else {
             return None;
         };
-        if stored.inline_width() != InlineWidth::Two {
-            return None;
-        }
-        Some(FixedArrayQuery {
+        Some(WholeBytesQuery {
             query: self.recognized_bytes()?.bytes,
             stored,
         })
@@ -623,11 +596,11 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
         Some(SearchBytes::new(query).cmp_guard(stored))
     }
 
-    /// How this key orders against `stored`, a key of the node `target` is
-    /// for whose inline key equals this key's in the bytes the node keeps.
-    /// For std byte strings, from past the bytes known equal, the node's
-    /// prefix and the actual stored width of its inline key
-    /// ([`SearchBytes::cmp_from`]): the search key shares the prefix,
+    /// How this key orders against `stored`, a key of a node of kind `Kind`
+    /// that `target` is for, whose inline key equals this key's in the bytes
+    /// the node keeps. For std byte strings, from past the bytes known
+    /// equal, the node's prefix and the bytes of each inline key its plan
+    /// stores ([`SearchBytes::cmp_from`]): the search key shares the prefix,
     /// lying between the node's fences, as every key in it does. Otherwise
     /// by `Q`'s `Ord`.
     #[inline]
@@ -636,10 +609,11 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
         K: Borrow<Q>,
         Q: Ord,
     {
-        if let Some(KeyInliner::ByteString(stored_bytes)) = KeyInliner::<K>::resolve::<S>()
+        let plan = NodePlan::<K>::of::<S, Kind>();
+        if let Some(KeyInliner::ByteString(stored_bytes)) = plan.inliner()
+            && let Some(width) = plan.inline_width()
             && let Some(search) = self.recognized_bytes()
         {
-            let width = KeyInliner::ByteString(stored_bytes).node_width::<Kind>();
             let equal_len = target.prefix_len + width.bytes();
             return search.cmp_from(stored_bytes.bytes(stored), equal_len);
         }
@@ -657,7 +631,7 @@ mod tests {
     use core::cmp::Ordering;
 
     use super::{
-        InlineKeyNodeHeader, InlineSlot, InlinedKey, KeyInliner, SearchBytes, SearchKey,
+        InlineKeyNodeHeader, InlineSlot, InlinedKey, KeyInliner, NodePlan, SearchBytes, SearchKey,
         WINDOW_LEN, Window,
     };
     use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
@@ -787,12 +761,12 @@ mod tests {
         assert!(has_inline_keys::<i128, WithInlineKey>());
     }
 
-    /// Heap-backed byte strings keep all 8 bytes, arrays keep 2; integers
-    /// and keys with their own impl keep what it says.
+    /// Heap-backed byte strings keep all 8 bytes in leaves, arrays keep 2;
+    /// integers and keys with their own impl keep what it says.
     #[test]
     fn strategies_keep_their_keys_widths() {
         fn width<K, S: crate::InlineKeyStrategy<K>>() -> Option<InlineWidth> {
-            KeyInliner::<K>::resolve::<S>().map(KeyInliner::width)
+            NodePlan::<K>::of::<S, Leaf>().inline_width()
         }
         assert_eq!(width::<String, Auto>(), Some(InlineWidth::Eight));
         assert_eq!(width::<[u8; 16], Auto>(), Some(InlineWidth::Two));

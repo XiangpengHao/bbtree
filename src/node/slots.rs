@@ -1,15 +1,17 @@
 //! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
 //! only code that moves keys, values and edges around (D9, D12, D14, D29).
 //! [`InlineKeySlots`] are a node's inline keys at its kind's width,
-//! [`KeySlots`] moves a node's keys together with them (D18), and
-//! [`NodeKeys`] lends a node's keys in place.
+//! [`KeyColumns`] every array a node keeps beside its keys, [`KeySlots`]
+//! moves a node's keys together with them (D18), and [`NodeKeys`] lends a
+//! node's keys in place.
 
 use core::marker::PhantomData;
 use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlineSlot, InlinedKey, KeyInliner, Window};
-use super::page::ByteString;
+use super::inline_keys::{InlineSlot, InlinedKey, Window};
+use super::node_plan::NodePlan;
+use super::page::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// Where `capacity` slots of `T` sit in memory: slot `i` at `stride * i`
@@ -263,6 +265,19 @@ impl<T> Slots<T> {
         }
     }
 
+    /// Sets every byte of slots side by side to `byte`.
+    ///
+    /// # Safety
+    ///
+    /// The slots are side by side, hold nothing that needs dropping, and a
+    /// `T` whose bytes are all `byte` is valid.
+    pub(super) unsafe fn fill_bytes(self, byte: u8) {
+        debug_assert!(self.is_contiguous());
+        // SAFETY: slots side by side lie within the allocation, end to end
+        // (type invariant); the caller vouches for what they hold after.
+        unsafe { self.anchor.write_bytes(byte, self.capacity) }
+    }
+
     /// Moves slot `from` into slot `to`, which holds nothing that needs
     /// dropping; `from` holds nothing afterwards.
     ///
@@ -439,6 +454,17 @@ impl InlineKeySlots {
         unsafe { with_slots_of_width!(self, |slots| slots.slot(index).read().window()) }
     }
 
+    /// Fills every slot with the greatest inline key, all ones.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::fill_bytes`]: inline keys are plain data, and any
+    /// bytes are a valid one.
+    pub(super) unsafe fn fill_with_greatest(self) {
+        // SAFETY: forwarded.
+        unsafe { with_slots_of_width!(self, |slots| slots.fill_bytes(u8::MAX)) }
+    }
+
     /// Writes the first bytes of `window` into slot `index`, which is
     /// initialized afterwards. Inline keys need no dropping.
     ///
@@ -513,59 +539,228 @@ impl InlineKeySlots {
     }
 }
 
-/// A node's key slots and, in a node with inline keys, its inline-key slots
-/// beside them (D18), for a map with strategy `S`. Every operation moves a
-/// key and its inline key together, so that inline key `i` is always key
-/// `i`'s; each mirrors the [`Slots`] operation of its name, with the same
-/// contract for both arrays.
+/// What a node keeps beside its keys, one slot per key, in arrays of their
+/// own that every move of the keys moves alike: its inline keys (D18) and,
+/// in a leaf whose plan keeps them, its keys' length tags (D36). Another
+/// such array is a field here and a cell of [`KeyCells`]; the code that
+/// moves keys ([`KeySlots`]) doesn't change.
+///
+/// Each operation mirrors the [`Slots`] operation of its name, with the same
+/// contract for every array.
+///
+/// Invariant: each array present has the keys' capacity.
+#[derive(Clone, Copy)]
+pub(super) struct KeyColumns {
+    inline_keys: Option<InlineKeySlots>,
+    length_tags: Option<Slots<u16>>,
+}
+
+/// What the [`KeyColumns`] of a node hold for one key.
+#[derive(Clone, Copy)]
+pub(super) struct KeyCells {
+    /// The first bytes of the key's window, which the inline keys keep.
+    inline_key: InlineWord,
+    /// The key's length tag, if the node keeps them.
+    length_tag: Option<u16>,
+}
+
+/// Every method is `#[inline(always)]`: which arrays a node keeps, and at
+/// what width, is a constant of its plan (`node_plan.rs`) only where the
+/// method is inlined into code that knows the node's kind and map; called,
+/// it would be a value tested at run time.
+impl KeyColumns {
+    /// # Safety
+    ///
+    /// Each array present has `capacity` slots, as [`Slots::new`] requires
+    /// of them.
+    #[inline(always)]
+    pub(super) unsafe fn new(
+        inline_keys: Option<InlineKeySlots>,
+        length_tags: Option<Slots<u16>>,
+        capacity: usize,
+    ) -> Self {
+        debug_assert!(inline_keys.is_none_or(|inline_keys| inline_keys.capacity() == capacity));
+        debug_assert!(length_tags.is_none_or(|tags| tags.capacity == capacity));
+        Self {
+            inline_keys,
+            length_tags,
+        }
+    }
+
+    /// The inline-key slots, if the node has them.
+    #[inline(always)]
+    pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
+        self.inline_keys
+    }
+
+    /// The length-tag slots, if the node has them.
+    #[inline(always)]
+    pub(super) fn length_tags(self) -> Option<Slots<u16>> {
+        self.length_tags
+    }
+
+    /// Fills every slot of a node that holds no keys yet: each inline key
+    /// with the greatest, all ones, as slots past the length hold (invariant
+    /// 6 in `handle.rs`), and each length tag with 0.
+    ///
+    /// # Safety
+    ///
+    /// The node holds no keys, and its handle has exclusive access.
+    #[inline(always)]
+    pub(super) unsafe fn initialize(self) {
+        // SAFETY: the slots are in the page (type invariant) and hold plain
+        // data; the caller has exclusive access.
+        unsafe {
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.fill_with_greatest();
+            }
+            if let Some(tags) = self.length_tags {
+                tags.fill_bytes(0);
+            }
+        }
+    }
+
+    /// Gives slots `vacated`, which a node no longer holds keys in, the
+    /// greatest inline key again (invariant 6). Their length tags stay
+    /// stale: nothing reads a tag past the length.
+    ///
+    /// # Safety
+    ///
+    /// `vacated` is within the capacity, and the node's handle has exclusive
+    /// access.
+    #[inline(always)]
+    pub(super) unsafe fn mark_vacant(self, vacated: Range<usize>) {
+        if let Some(inline_keys) = self.inline_keys {
+            for index in vacated {
+                // SAFETY: `index < capacity` (caller); inline keys are plain
+                // data.
+                unsafe { inline_keys.write(index, InlineWord::MAX) };
+            }
+        }
+    }
+
+    /// Writes `cells` into slot `index`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::slot`]: `index < capacity`.
+    #[inline(always)]
+    unsafe fn write(self, index: usize, cells: KeyCells) {
+        // SAFETY: forwarded; every array has the keys' capacity.
+        unsafe {
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.write(index, cells.inline_key);
+            }
+            if let (Some(tags), Some(tag)) = (self.length_tags, cells.length_tag) {
+                tags.slot(index).write(tag);
+            }
+        }
+    }
+
+    /// See [`Slots::insert`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::insert`].
+    #[inline(always)]
+    unsafe fn insert(self, index: usize, len: usize, cells: KeyCells) {
+        // SAFETY: forwarded; every array has the keys' capacity, and is
+        // initialized like them.
+        unsafe {
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.insert(index, len, cells.inline_key);
+            }
+            if let (Some(tags), Some(tag)) = (self.length_tags, cells.length_tag) {
+                tags.insert(index, len, tag);
+            }
+        }
+    }
+
+    /// See [`Slots::remove`]; what slot `index` held is dropped, being plain
+    /// data.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::remove`].
+    #[inline(always)]
+    unsafe fn remove(self, index: usize, len: usize) {
+        // SAFETY: forwarded; every array has the keys' capacity, and is
+        // initialized like them.
+        unsafe {
+            if let Some(inline_keys) = self.inline_keys {
+                inline_keys.remove(index, len);
+            }
+            if let Some(tags) = self.length_tags {
+                tags.remove(index, len);
+            }
+        }
+    }
+
+    /// See [`Slots::move_run_to`]. `dest` holds the same arrays: it is a
+    /// node of the same map and kind.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Slots::move_run_to`].
+    #[inline(always)]
+    unsafe fn move_run_to(self, start: usize, count: usize, dest: Self, dest_start: usize) {
+        // SAFETY: forwarded; every array of both has its keys' capacity, and
+        // is initialized like them.
+        unsafe {
+            if let (Some(source), Some(destination)) = (self.inline_keys, dest.inline_keys) {
+                source.move_run_to(start, count, destination, dest_start);
+            }
+            if let (Some(source), Some(destination)) = (self.length_tags, dest.length_tags) {
+                source.move_run_to(start, count, destination, dest_start);
+            }
+        }
+    }
+}
+
+/// A node's key slots and the columns beside them ([`KeyColumns`]), for a
+/// node of kind `Kind` of a map with strategy `S`. Every operation moves a
+/// key and its cells together, so that inline key `i` is always key `i`'s;
+/// each mirrors the [`Slots`] operation of its name, with the same contract
+/// for every array.
 ///
 /// The node stores its keys' windows at its prefix length (05-fence-key.md):
 /// a key read out comes with its window there, and a key written in must
-/// come with its window there, which debug builds check. Heap-byte exports
-/// recover all eight bytes from the key when storage is narrower. A key
-/// read out of a node without inline keys comes with [`Window::NONE`].
+/// come with its window there, which debug builds check. A node whose plan
+/// stores fewer bytes of each window than a leaf reads a window it hands out
+/// from its key again (D43). A key read out of a node without inline keys
+/// comes with [`Window::NONE`].
 ///
-/// Invariant: `inline_keys` and `length_tags`, if present, have the keys'
-/// capacity. A live length tag is its byte-string key's length, narrowed to
-/// `u16`; tags never determine ordering and need no prefix adjustment.
-pub(super) struct KeySlots<K, S> {
+/// Invariant: the columns have the keys' capacity, and are those of the
+/// plan of `Kind` (`node_plan.rs`). A live length tag is its key's length,
+/// truncated to 16 bits; tags never order keys and need no prefix
+/// adjustment.
+pub(super) struct KeySlots<K, S, Kind> {
     keys: Slots<K>,
-    inline_keys: Option<InlineKeySlots>,
-    length_tags: Option<Slots<u16>>,
+    columns: KeyColumns,
     /// The node's prefix length; 0 without inline keys.
     prefix_len: usize,
-    _strategy: PhantomData<fn() -> S>,
+    _plan: PhantomData<fn() -> (S, Kind)>,
 }
 
-impl<K, S> Clone for KeySlots<K, S> {
+impl<K, S, Kind> Clone for KeySlots<K, S, Kind> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K, S> Copy for KeySlots<K, S> {}
+impl<K, S, Kind> Copy for KeySlots<K, S, Kind> {}
 
-impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
+impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
-    /// The optional metadata arrays have the keys' capacity, and length
-    /// tags are present only for recognized built-in byte-string keys.
-    pub(super) unsafe fn new(
-        keys: Slots<K>,
-        inline_keys: Option<InlineKeySlots>,
-        length_tags: Option<Slots<u16>>,
-        prefix_len: usize,
-    ) -> Self {
-        debug_assert!(
-            inline_keys.is_none_or(|inline_keys| inline_keys.capacity() == keys.capacity)
-        );
-        debug_assert!(length_tags.is_none_or(|tags| tags.capacity == keys.capacity));
+    /// The columns have the keys' capacity, and are those of the plan of
+    /// `Kind`.
+    pub(super) unsafe fn new(keys: Slots<K>, columns: KeyColumns, prefix_len: usize) -> Self {
         Self {
             keys,
-            inline_keys,
-            length_tags,
+            columns,
             prefix_len,
-            _strategy: PhantomData,
+            _plan: PhantomData,
         }
     }
 
@@ -574,57 +769,63 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
         self.keys
     }
 
+    /// The columns beside the keys, to read or rewrite in place.
+    pub(super) fn columns(self) -> KeyColumns {
+        self.columns
+    }
+
     /// The inline-key slots alone, to read inline keys in place, if the node
     /// has them.
     pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
-        self.inline_keys
+        self.columns.inline_keys()
     }
 
-    /// Exports a fence window. Narrow heap-byte internals recover all eight
-    /// bytes before this window can fill a leaf's prefix or move into one.
-    /// Reading recognized bytes invokes no user code and cannot panic.
+    /// Key `index`'s window at the node's fence prefix, to hand out: as many
+    /// of its bytes as a leaf keeps, read from the key again where the plan
+    /// stores fewer (D43). Reading a std byte string calls no user code and
+    /// can't panic.
     ///
     /// # Safety
     ///
     /// Key `index` and its inline key are initialized, `index < capacity`,
     /// and any local search prefix has been normalized to the fences.
     pub(super) unsafe fn window(self, index: usize) -> Window {
-        let Some(slots) = self.inline_keys else {
+        let Some(slots) = self.columns.inline_keys() else {
             return Window::NONE;
         };
-        let word = if slots.width() == InlineWidth::Four
-            && let Some(inliner @ KeyInliner::ByteString(_)) = KeyInliner::<K>::resolve::<S>()
-            && inliner.width() == InlineWidth::Eight
-        {
-            // SAFETY: this key is initialized and unchanged during the read.
-            inliner.inline_key_at(unsafe { self.keys.slot(index).as_ref() }, self.prefix_len)
-        } else {
-            // SAFETY: forwarded; the inline-key slots have the keys' capacity.
-            unsafe { slots.read(index) }
+        let plan = NodePlan::<K>::of::<S, Kind>();
+        let word = match plan.inliner() {
+            Some(inliner) if plan.rehydrates_windows() => {
+                // SAFETY: this key is initialized and unchanged during the
+                // read.
+                inliner.inline_key_at(unsafe { self.keys.slot(index).as_ref() }, self.prefix_len)
+            }
+            // SAFETY: forwarded; the inline-key slots have the keys'
+            // capacity.
+            _ => unsafe { slots.read(index) },
         };
         Window::new(self.prefix_len, word)
     }
 
-    /// The inline key to store for `key`, whose window must be at this
+    /// `key`, and what the columns hold for it. Its window must be at this
     /// node's prefix length.
-    fn inline_key_of(self, key: &InlinedKey<K, S>) -> InlineWord {
-        let window = key.window();
+    fn cells_of(self, key: InlinedKey<K, S>) -> (K, KeyCells) {
+        let (key, window) = key.into_parts();
         debug_assert!(
-            self.inline_keys.is_none() || window.prefix_len() == self.prefix_len,
+            self.columns.inline_keys().is_none() || window.prefix_len() == self.prefix_len,
             "a key at prefix length {} goes into a node at {}",
             window.prefix_len(),
             self.prefix_len
         );
-        window.inline_key()
-    }
-
-    fn length_tag_of(self, key: &K) -> Option<u16> {
-        self.length_tags.map(|_| {
-            ByteString::<K>::recognize()
-                .expect("length tags require built-in byte strings")
-                .bytes(key)
-                .len() as u16
-        })
+        let length_tag = self
+            .columns
+            .length_tags()
+            .and_then(|_| NodePlan::<K>::of::<S, Kind>().length_tag(&key));
+        let cells = KeyCells {
+            inline_key: window.inline_key(),
+            length_tag,
+        };
+        (key, cells)
     }
 
     /// Reads key `index` and its inline key out; the slot holds nothing
@@ -635,8 +836,7 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
     /// `index < capacity`, and slot `index` is initialized.
     /// Any local search windows have been normalized to the fence prefix.
     pub(super) unsafe fn read(self, index: usize) -> InlinedKey<K, S> {
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity
-        // (type invariant).
+        // SAFETY: forwarded.
         unsafe {
             let window = self.window(index);
             let key = self.keys.slot(index).read();
@@ -644,30 +844,23 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
         }
     }
 
-    /// Writes `key` and its inline key into slot `index`.
+    /// Writes `key` and its cells into slot `index`.
     ///
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` holds nothing that needs
     /// dropping: it is overwritten, and is initialized afterwards.
     pub(super) unsafe fn write(self, index: usize, key: InlinedKey<K, S>) {
-        let inline_key = self.inline_key_of(&key);
-        let (key, _) = key.into_parts();
-        let length_tag = self.length_tag_of(&key);
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity
-        // (type invariant).
+        let (key, cells) = self.cells_of(key);
+        // SAFETY: forwarded; the columns have the keys' capacity (type
+        // invariant).
         unsafe {
             self.keys.slot(index).write(key);
-            if let Some(inline_keys) = self.inline_keys {
-                inline_keys.write(index, inline_key);
-            }
-            if let (Some(tags), Some(tag)) = (self.length_tags, length_tag) {
-                tags.slot(index).write(tag);
-            }
+            self.columns.write(index, cells);
         }
     }
 
-    /// Replaces key `index` and its inline key, and returns the old ones.
+    /// Replaces key `index` and its cells, and returns the old key.
     ///
     /// # Safety
     ///
@@ -688,19 +881,12 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
     ///
     /// As for [`Slots::insert`].
     pub(super) unsafe fn insert(self, index: usize, len: usize, key: InlinedKey<K, S>) {
-        let inline_key = self.inline_key_of(&key);
-        let (key, _) = key.into_parts();
-        let length_tag = self.length_tag_of(&key);
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
-        // are initialized like them (type invariant).
+        let (key, cells) = self.cells_of(key);
+        // SAFETY: forwarded; the columns have the keys' capacity and are
+        // initialized like them (type invariant).
         unsafe {
             self.keys.insert(index, len, key);
-            if let Some(inline_keys) = self.inline_keys {
-                inline_keys.insert(index, len, inline_key);
-            }
-            if let (Some(tags), Some(tag)) = (self.length_tags, length_tag) {
-                tags.insert(index, len, tag);
-            }
+            self.columns.insert(index, len, cells);
         }
     }
 
@@ -720,20 +906,13 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
         len: usize,
         key: InlinedKey<K, S>,
     ) {
-        let inline_key = self.inline_key_of(&key);
-        let (key, _) = key.into_parts();
-        let length_tag = self.length_tag_of(&key);
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
-        // are initialized like them (type invariant).
+        let (key, cells) = self.cells_of(key);
+        // SAFETY: forwarded; the columns have the keys' capacity and are
+        // initialized like them (type invariant).
         unsafe {
             self.keys.shift_strides_up(index, len);
             self.keys.slot(index).write(key);
-            if let Some(inline_keys) = self.inline_keys {
-                inline_keys.insert(index, len, inline_key);
-            }
-            if let (Some(tags), Some(tag)) = (self.length_tags, length_tag) {
-                tags.insert(index, len, tag);
-            }
+            self.columns.insert(index, len, cells);
         }
     }
 
@@ -744,17 +923,12 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
     /// As for [`Slots::remove`], with any local search windows normalized
     /// to the fence prefix.
     pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlinedKey<K, S> {
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
-        // are initialized like them (type invariant).
+        // SAFETY: forwarded; the columns have the keys' capacity and are
+        // initialized like them (type invariant).
         unsafe {
             let window = self.window(index);
             let key = self.keys.remove(index, len);
-            if let Some(inline_keys) = self.inline_keys {
-                inline_keys.remove(index, len);
-            }
-            if let Some(tags) = self.length_tags {
-                tags.remove(index, len);
-            }
+            self.columns.remove(index, len);
             InlinedKey::from_parts(key, window)
         }
     }
@@ -775,31 +949,25 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
         index: usize,
         len: usize,
     ) -> InlinedKey<K, S> {
-        // SAFETY: forwarded; the inline-key slots have the keys' capacity and
-        // are initialized like them (type invariant).
+        // SAFETY: forwarded; the columns have the keys' capacity and are
+        // initialized like them (type invariant).
         unsafe {
             let window = self.window(index);
             let key = self.keys.slot(index).read();
-            if let Some(inline_keys) = self.inline_keys {
-                inline_keys.remove(index, len);
-            }
+            self.columns.remove(index, len);
             self.keys.shift_strides_down(index, len);
-            if let Some(tags) = self.length_tags {
-                tags.remove(index, len);
-            }
             InlinedKey::from_parts(key, window)
         }
     }
 
-    /// See [`Slots::move_run_to`].
+    /// See [`Slots::move_run_to`]: the keys and their cells, into `dest`, a
+    /// node of the same map and kind.
     ///
     /// # Safety
     ///
-    /// As for [`Slots::move_run_to`], and `dest` is a node of the same map
-    /// and kind: both arrays have the same inline-key width and either
-    /// both have length tags or neither does. Local search windows have
-    /// been normalized, and `dest` has this node's fence prefix length,
-    /// since the inline keys move without changing their windows.
+    /// As for [`Slots::move_run_to`]. Local search windows have been
+    /// normalized, and `dest` has this node's fence prefix length, since the
+    /// inline keys move without changing their windows.
     pub(super) unsafe fn move_run_to(
         self,
         start: usize,
@@ -808,24 +976,15 @@ impl<K, S: InlineKeyStrategy<K>> KeySlots<K, S> {
         dest_start: usize,
     ) {
         debug_assert_eq!(
-            self.inline_keys.map(InlineKeySlots::width),
-            dest.inline_keys.map(InlineKeySlots::width)
-        );
-        debug_assert_eq!(self.length_tags.is_some(), dest.length_tags.is_some());
-        debug_assert_eq!(
             self.prefix_len, dest.prefix_len,
             "a run moves between nodes of different prefix lengths"
         );
-        // SAFETY: forwarded; the inline-key slots of both have their keys'
-        // capacity and are initialized like them (type invariant).
+        // SAFETY: forwarded; the columns of both have their keys' capacity
+        // and are initialized like them (type invariant).
         unsafe {
             self.keys.move_run_to(start, count, dest.keys, dest_start);
-            if let (Some(source), Some(destination)) = (self.inline_keys, dest.inline_keys) {
-                source.move_run_to(start, count, destination, dest_start);
-            }
-            if let (Some(source), Some(destination)) = (self.length_tags, dest.length_tags) {
-                source.move_run_to(start, count, destination, dest_start);
-            }
+            self.columns
+                .move_run_to(start, count, dest.columns, dest_start);
         }
     }
 }
