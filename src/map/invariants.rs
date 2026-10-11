@@ -32,7 +32,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     ///   keys' windows at its prefix length, in order (D18), which is what
     ///   its fences share, 0 along the tree's borders (05-fence-key.md);
     ///   otherwise none, and prefix 0.
-    pub(super) fn check_invariants(&self) {
+    pub(crate) fn check_invariants(&self) {
         let Some(root) = &self.root else {
             assert_eq!(self.length, 0, "a map without a root has entries");
             return;

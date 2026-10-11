@@ -64,6 +64,7 @@ use crate::node::path::Path;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use extract_if::ExtractIf;
+pub(crate) use extract_if::ExtractionWalk;
 pub use into_iter::{IntoIter, IntoKeys, IntoValues};
 pub use iter::{Iter, Keys, Range, Values};
 pub use iter_mut::{IterMut, RangeMut, ValuesMut};

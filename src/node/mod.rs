@@ -42,6 +42,7 @@ mod clone;
 pub(crate) mod handle;
 pub(crate) mod inline_keys;
 mod internal;
+mod join;
 mod layout;
 mod leaf;
 mod length_tags;

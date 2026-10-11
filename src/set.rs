@@ -1,14 +1,28 @@
 //! [`BBTreeSet`]: an ordered set with the API and behavior of std's
 //! `BTreeSet` (D1), as a [`BBTreeMap`] whose values are zero-sized, as std's
 //! set is a map of zero-sized values. Each method hands its work to the map's
-//! method of the same job; the iterators wrap the map's (`iter.rs`).
+//! method of the same job; the iterators wrap the map's (`iter.rs`,
+//! `extract_if.rs`).
+//!
+//! The operations on two sets are std's algorithms on the set's iterators
+//! and lookups: `difference.rs`, `intersection.rs`, `union.rs` and
+//! `symmetric_difference.rs`, the last two on one merge (`merge.rs`), and
+//! `subset.rs`. Their operators build the resulting set into full nodes
+//! from the ascending elements, as `collect` does once it has sorted them.
 //!
 //! The values are `SetValZST`, std's name for its own, so that iterators
 //! that print the map's entries print what std's print.
 
 #![forbid(unsafe_code)]
 
+mod difference;
+mod extract_if;
+mod intersection;
 mod iter;
+mod merge;
+mod subset;
+mod symmetric_difference;
+mod union;
 
 #[cfg(test)]
 mod differential_tests;
@@ -23,7 +37,12 @@ use core::hash::{Hash, Hasher};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::BBTreeMap;
 
+pub use difference::Difference;
+pub use extract_if::ExtractIf;
+pub use intersection::Intersection;
 pub use iter::{IntoIter, Iter, Range};
+pub use symmetric_difference::SymmetricDifference;
+pub use union::Union;
 
 /// The value of every element of a set's map: it takes no space, and
 /// compares, hashes and prints as std's does.
@@ -325,6 +344,34 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
         self.map.insert(value, SetValZST).is_none()
     }
 
+    /// Adds a value to the set, replacing the existing element, if any, that
+    /// is equal to the value. Returns the replaced element.
+    ///
+    /// It searches the set once. If `T`'s `Ord`, or its `InlineKey` with
+    /// [`WithInlineKey`], panics before an element is replaced, the set is
+    /// unchanged; an insert panics as [`BBTreeMap::insert`] does.
+    ///
+    /// [`WithInlineKey`]: crate::WithInlineKey
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeSet;
+    ///
+    /// let mut set = BBTreeSet::new();
+    /// set.insert(Vec::<i32>::new());
+    ///
+    /// assert_eq!(set.get(&[][..]).unwrap().capacity(), 0);
+    /// set.replace(Vec::with_capacity(10));
+    /// assert_eq!(set.get(&[][..]).unwrap().capacity(), 10);
+    /// ```
+    pub fn replace(&mut self, value: T) -> Option<T>
+    where
+        T: Ord,
+    {
+        self.map.replace_key(value, SetValZST)
+    }
+
     /// If the set contains an element equal to the value, removes it from
     /// the set and drops it. Returns whether such an element was present.
     ///
@@ -513,6 +560,27 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+    /// A set of `elements`, which ascend strictly, built into full nodes
+    /// without comparing them (`node/build.rs`). Elements out of order make
+    /// a set whose searches give wrong answers, but that is memory-safe.
+    fn from_ascending(elements: impl Iterator<Item = T>) -> Self {
+        Self {
+            map: BBTreeMap::from_ascending_entries(elements.map(|element| (element, SetValZST))),
+        }
+    }
+
+    /// Whether looking up `lookups` elements in this set one by one beats
+    /// walking the set alongside them: when the set has at least 16 times
+    /// as many elements, std's estimate for its sets. It must be std's: the
+    /// choice decides which of two equal elements an intersection hands out
+    /// (the smaller set's, when it looks them up), and what its iterator
+    /// prints and hints. Dividing rather than multiplying can't overflow.
+    fn prefers_lookups(&self, lookups: usize) -> bool {
+        lookups <= self.len() / 16
     }
 }
 

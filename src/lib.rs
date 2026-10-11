@@ -34,5 +34,8 @@ pub mod bbtree_map {
 /// An ordered set based on a B-tree, [`BBTreeSet`], and the types that go
 /// with it: the counterpart of `std::collections::btree_set`.
 pub mod bbtree_set {
-    pub use crate::set::{BBTreeSet, IntoIter, Iter, Range};
+    pub use crate::set::{
+        BBTreeSet, Difference, ExtractIf, Intersection, IntoIter, Iter, Range, SymmetricDifference,
+        Union,
+    };
 }

@@ -24,10 +24,19 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
     /// of equal keys is kept; the others are dropped in order.
     fn from_sorted_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        let mut builder = TreeBuilder::new();
-        builder.extend(LastOfEqualKeys {
+        Self::from_ascending_entries(LastOfEqualKeys {
             entries: entries.peekable(),
-        });
+        })
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+    /// A map of `entries`, whose keys ascend strictly, built into full nodes
+    /// comparing no keys (`node/build.rs`). Keys out of order make a map
+    /// whose searches give wrong answers, but that is memory-safe.
+    pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
+        let mut builder = TreeBuilder::new();
+        builder.extend(entries);
         Self::from_builder(builder)
     }
 }

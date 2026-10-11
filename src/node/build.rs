@@ -41,14 +41,24 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         }
     }
 
-    /// The entries pushed so far.
-    pub(crate) fn len(&self) -> usize {
-        self.length
+    /// A builder that appends to `tree`, a well-formed tree, as to one it
+    /// built: into its rightmost leaf while it has room, then into new nodes
+    /// along its right border, whose prefixes are 0 in any tree. It counts
+    /// only the entries it appends.
+    pub(crate) fn continuing(tree: Subtree<K, V, S>) -> Self {
+        Self {
+            tree: Some(tree),
+            length: 0,
+        }
     }
 
-    /// Appends `key`/`value`; see [`Self::extend`].
-    pub(crate) fn push(&mut self, key: K, value: V) {
-        self.extend(core::iter::once((key, value)));
+    /// Fits the prefixes of the nodes beside the tree's right border to
+    /// their fences, reading keys: for a tree [`Self::continuing`] took
+    /// from a cut, whose border took entries from them.
+    pub(crate) fn fit_border_siblings(&mut self) {
+        if let Some(tree) = &mut self.tree {
+            tree.fit_border_siblings::<LastEdge>();
+        }
     }
 
     /// Appends the entries, whose keys must be greater than every key so far
@@ -58,7 +68,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// closes with a prefix.
     ///
     /// The entries go into the rightmost leaf while it has room, found once
-    /// per leaf.
+    /// per leaf and once per call: callers append runs, not single entries.
     pub(crate) fn extend(&mut self, entries: impl IntoIterator<Item = (K, V)>) {
         let mut entries = entries.into_iter();
         let Some(mut next) = entries.next() else {

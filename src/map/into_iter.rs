@@ -30,8 +30,8 @@ pub struct IntoIter<K, V, S: InlineKeyStrategy<K> = Auto> {
     walk: DyingWalk<K, V, S, Deallocate<K, V, S>>,
 }
 
-/// Where the iterator's freed pages go: back to the global allocator.
-type Deallocate<K, V, S> = fn(PageByKind<K, V, S>);
+/// Where an owning walk's freed pages go: back to the global allocator.
+pub(super) type Deallocate<K, V, S> = fn(PageByKind<K, V, S>);
 
 impl<K, V, S: InlineKeyStrategy<K>> IntoIter<K, V, S> {
     /// The entries left, by reference, in ascending order.

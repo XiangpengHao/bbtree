@@ -3,7 +3,9 @@
 //! map's tests cover (`map/differential_tests.rs`); these check that each of
 //! the set's methods reaches the right one of the map's and gives std's
 //! answers, down to which of equal elements stays and what each iterator
-//! prints.
+//! prints. The operations on two sets run on pairs of every shape that
+//! decides their strategy: apart, touching at an end, one inside the other,
+//! and lengths on both sides of where looking up beats walking.
 
 #![forbid(unsafe_code)]
 
@@ -50,9 +52,11 @@ where
     /// clearing, and consuming what more point operations put in.
     fn run(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
         self.run_random_operations(rng, steps, key_space);
+        self.ours.map.check_invariants();
         self.assert_same_iteration(rng);
         self.assert_same_ranges(rng, 64, key_space);
         self.bulk_changes(rng, key_space);
+        self.ours.map.check_invariants();
         self.assert_same_iteration(rng);
         self.assert_clones_compare_alike(rng, key_space);
         self.ours.clear();
@@ -63,13 +67,15 @@ where
     }
 
     /// `steps` random point operations on elements made from
-    /// `0..key_space`. Inserts are as frequent as removals and pops
-    /// together, which keeps about a third of the key space in the sets.
+    /// `0..key_space`. Inserts and replacements are as frequent as removals
+    /// and pops together, which keeps about a third of the key space in the
+    /// sets.
     fn run_random_operations(&mut self, rng: &TestRng, steps: usize, key_space: usize) {
         for _ in 0..steps {
             let value = T::from_number(rng.below(key_space));
             match rng.below(10) {
-                0..4 => assert_eq!(self.ours.insert(value.clone()), self.theirs.insert(value)),
+                0..3 => assert_eq!(self.ours.insert(value.clone()), self.theirs.insert(value)),
+                3 => assert_eq!(self.ours.replace(value.clone()), self.theirs.replace(value)),
                 4 => assert_eq!(self.ours.remove(&value), self.theirs.remove(&value)),
                 5 => assert_eq!(self.ours.take(&value), self.theirs.take(&value)),
                 6 => assert_eq!(self.ours.pop_first(), self.theirs.pop_first()),
@@ -182,14 +188,36 @@ where
         (start, end)
     }
 
-    /// `retain` by the same random choices; a split at a random element and
-    /// an `append` that puts the halves back together; and an `append` of a
-    /// random set that overlaps, made by `extend`.
+    /// `retain`, and `extract_if` over a random range stopped partway, by
+    /// the same random choices; a split at a random element and an `append`
+    /// that puts the halves back together; and an `append` of a random set
+    /// that overlaps, made by `extend`.
     fn bulk_changes(&mut self, rng: &TestRng, key_space: usize) {
         let seed = rng.below(1 << 30) as u64;
         let (ours_choices, theirs_choices) = (TestRng::new(seed), TestRng::new(seed));
         self.ours.retain(|_| ours_choices.below(8) != 0);
         self.theirs.retain(|_| theirs_choices.below(8) != 0);
+        self.assert_same_contents();
+
+        let bounds = Self::random_range_bounds(rng, key_space);
+        let mut ours = self
+            .ours
+            .extract_if(bounds.clone(), |_| ours_choices.below(4) == 0);
+        let mut theirs = self
+            .theirs
+            .extract_if(bounds, |_| theirs_choices.below(4) == 0);
+        for _ in 0..rng.below(key_space / 8 + 2) {
+            assert_eq!(ours.size_hint(), theirs.size_hint());
+            if theirs.size_hint().1 <= Some(PRINTED_LEN) {
+                assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+            }
+            let extracted = theirs.next();
+            assert_eq!(ours.next(), extracted);
+            if extracted.is_none() {
+                break;
+            }
+        }
+        drop((ours, theirs));
         self.assert_same_contents();
 
         let at = T::from_number(rng.below(key_space));
@@ -245,6 +273,87 @@ where
         );
     }
 
+    /// Sets of the elements made from `numbers`.
+    fn from_numbers(numbers: impl Iterator<Item = usize> + Clone) -> Self {
+        let mut sets = Self::new();
+        sets.ours.extend(numbers.clone().map(T::from_number));
+        sets.theirs.extend(numbers.map(T::from_number));
+        sets
+    }
+
+    /// Combines these sets with `other`, both ways and each with itself, by
+    /// every operation on two sets, lazy and building a set, against std's.
+    fn assert_same_set_operations(&self, other: &Self, rng: &TestRng) {
+        let printed = self.theirs.len().max(other.theirs.len()) <= PRINTED_LEN;
+        for (a, b) in [(self, other), (other, self), (self, self)] {
+            let (ours, theirs) = ((&a.ours, &b.ours), (&a.theirs, &b.theirs));
+            let difference = (ours.0.difference(ours.1), theirs.0.difference(theirs.1));
+            Self::assert_same_combination(rng, difference.0, difference.1, printed);
+            let intersection = (ours.0.intersection(ours.1), theirs.0.intersection(theirs.1));
+            Self::assert_same_combination(rng, intersection.0, intersection.1, printed);
+            let union = (ours.0.union(ours.1), theirs.0.union(theirs.1));
+            Self::assert_same_combination(rng, union.0, union.1, printed);
+            let symmetric_difference = (
+                ours.0.symmetric_difference(ours.1),
+                theirs.0.symmetric_difference(theirs.1),
+            );
+            Self::assert_same_combination(
+                rng,
+                symmetric_difference.0,
+                symmetric_difference.1,
+                printed,
+            );
+            assert_eq!(ours.0.is_subset(ours.1), theirs.0.is_subset(theirs.1));
+            assert_eq!(ours.0.is_superset(ours.1), theirs.0.is_superset(theirs.1));
+            assert_eq!(ours.0.is_disjoint(ours.1), theirs.0.is_disjoint(theirs.1));
+            let built = [
+                (ours.0 - ours.1, theirs.0 - theirs.1),
+                (ours.0 & ours.1, theirs.0 & theirs.1),
+                (ours.0 | ours.1, theirs.0 | theirs.1),
+                (ours.0 ^ ours.1, theirs.0 ^ theirs.1),
+            ];
+            for (ours, theirs) in built {
+                ours.map.check_invariants();
+                assert_eq!(ours.len(), theirs.len());
+                assert!(ours.iter().eq(&theirs));
+            }
+        }
+    }
+
+    /// Steps `ours` and `theirs`, over the same combination of two sets,
+    /// alike to their ends: the same items and size hints, and the same
+    /// prints while `printed`. Their `min`, and clones taken at a random
+    /// step, go on alike too.
+    fn assert_same_combination<'a>(
+        rng: &TestRng,
+        mut ours: impl Iterator<Item = &'a T> + Clone + Debug,
+        mut theirs: impl Iterator<Item = &'a T> + Clone + Debug,
+        printed: bool,
+    ) where
+        T: 'a,
+    {
+        assert_eq!(ours.clone().min(), theirs.clone().min());
+        let mut clones = None;
+        loop {
+            assert_eq!(ours.size_hint(), theirs.size_hint());
+            if printed {
+                assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
+            }
+            if clones.is_none() && rng.below(8) == 0 {
+                clones = Some((ours.clone(), theirs.clone()));
+            }
+            let item = theirs.next();
+            assert_eq!(ours.next(), item);
+            if item.is_none() {
+                assert_eq!(ours.next(), None);
+                break;
+            }
+        }
+        if let Some((ours, theirs)) = clones {
+            assert!(ours.eq(theirs));
+        }
+    }
+
     /// Takes both sets by value and walks them from both ends at random,
     /// through about half of their elements, then drops what is left of
     /// both. A small set's iterators print the same first.
@@ -287,6 +396,81 @@ fn string_set_matches_std() {
 fn zero_sized_set_matches_std() {
     let rng = TestRng::new(23);
     MirroredSets::<()>::new().run(&rng, 100, 1);
+    let (empty, full) = (
+        MirroredSets::<()>::new(),
+        MirroredSets::<()>::from_numbers(0..1),
+    );
+    empty.assert_same_set_operations(&full, &rng);
+    full.assert_same_set_operations(&full, &rng);
+}
+
+/// Lengths of pairs of sets: about where looking up beats walking, 16
+/// times as many elements, on both sides of it, and far from it.
+const PAIR_LENS: [(usize, usize); 13] = [
+    (0, 0),
+    (0, 7),
+    (1, 1),
+    (2, 31),
+    (2, 32),
+    (10, 10),
+    (10, 159),
+    (10, 160),
+    (10, 161),
+    (100, 1599),
+    (100, 1600),
+    (500, 2000),
+    (20, 6000),
+];
+
+/// The numbers of `len` elements of `0..universe`, distinct, in random order.
+fn distinct_numbers(rng: &TestRng, len: usize, universe: usize) -> Vec<usize> {
+    let mut numbers: Vec<usize> = (0..universe).collect();
+    rng.shuffle(&mut numbers);
+    numbers.truncate(len);
+    numbers
+}
+
+/// Every operation on two sets, on pairs of each length in [`PAIR_LENS`],
+/// and of each shape: overlapping, apart, touching at one end, and one
+/// inside the other with or without its ends.
+#[test]
+fn set_operations_match_std() {
+    let rng = TestRng::new(25);
+    for (a_len, b_len) in PAIR_LENS {
+        let universe = 2 * (a_len + b_len) + 2;
+        let b_numbers = distinct_numbers(&rng, b_len, universe);
+        let b = MirroredSets::<u64>::from_numbers(b_numbers.iter().copied());
+        let overlapping = distinct_numbers(&rng, a_len, universe);
+        let apart = overlapping.iter().map(|number| number + universe);
+        // Below `b` but for its first element, which is the top of these.
+        let b_min = b_numbers.iter().copied().min().unwrap_or(0);
+        let touching = overlapping
+            .iter()
+            .map(|number| b_min - number % (b_min + 1));
+        let inside = b_numbers.iter().copied().take(a_len);
+        let mut inside_without_ends = b_numbers.clone();
+        inside_without_ends.sort_unstable();
+        let inner = inside_without_ends.len().saturating_sub(1).max(1);
+        let inside_without_ends = inside_without_ends
+            .into_iter()
+            .take(inner)
+            .skip(1)
+            .take(a_len);
+        let shapes = [
+            MirroredSets::from_numbers(overlapping.iter().copied()),
+            MirroredSets::from_numbers(apart),
+            MirroredSets::from_numbers(touching.chain(b_numbers.first().map(|_| b_min))),
+            MirroredSets::from_numbers(inside),
+            MirroredSets::from_numbers(inside_without_ends),
+        ];
+        for a in &shapes {
+            a.assert_same_set_operations(&b, &rng);
+        }
+    }
+    // Strings, with inline keys of another width.
+    let a = MirroredSets::<String>::from_numbers(distinct_numbers(&rng, 300, 1000).into_iter());
+    let b = MirroredSets::<String>::from_numbers(distinct_numbers(&rng, 600, 1000).into_iter());
+    a.assert_same_set_operations(&b, &rng);
 }
 
 /// An element ordered by its key alone, whose tag, which it prints, tells
@@ -294,7 +478,6 @@ fn zero_sized_set_matches_std() {
 #[derive(Clone, Debug)]
 struct Tagged {
     key: u64,
-    #[expect(dead_code, reason = "read by `Debug` alone, which the tests compare")]
     tag: usize,
 }
 
@@ -319,8 +502,9 @@ impl Ord for Tagged {
 }
 
 /// Of equal elements, `collect` and `from` keep the last; `insert`,
-/// `extend` and `append` keep the one already in; `get` and `take` hand
-/// back the one in: all as std's do.
+/// `extend` and `append` keep the one already in; `replace` swaps in the
+/// new one; `get` and `take` hand back the one in; the operations on two
+/// sets hand out one set's or the other's: all as std's do.
 #[test]
 fn which_of_equal_elements_stays_matches_std() {
     let rng = TestRng::new(24);
@@ -353,9 +537,61 @@ fn which_of_equal_elements_stays_matches_std() {
         same_print(&ours_appended, &theirs_appended);
 
         let (mut ours_taken, mut theirs_taken) = (ours.clone(), theirs.clone());
+        let (mut ours_replaced, mut theirs_replaced) = (ours.clone(), theirs.clone());
         for element in elements.iter().take(16) {
             same_print(&ours.get(element), &theirs.get(element));
             same_print(&ours_taken.take(element), &theirs_taken.take(element));
+            let replacement = Tagged {
+                key: element.key,
+                tag: len + element.tag,
+            };
+            same_print(
+                &ours_replaced.replace(replacement.clone()),
+                &theirs_replaced.replace(replacement),
+            );
+        }
+        same_print(&ours_replaced, &theirs_replaced);
+        ours_replaced.map.check_invariants();
+
+        // `ours` holds the last of equal elements and `ours_extended` the
+        // first, so the sets they make tell which side an operation hands
+        // out: with a part of about a 16th, on both sides of where looking
+        // up beats walking.
+        let part: Vec<bool> = (0..ours.len()).map(|_| rng.below(16) == 0).collect();
+        let ours_part: BBTreeSet<Tagged> = ours_extended
+            .iter()
+            .zip(&part)
+            .filter(|&(_, &taken)| taken)
+            .map(|(element, _)| element.clone())
+            .collect();
+        let theirs_part: BTreeSet<Tagged> = theirs_extended
+            .iter()
+            .zip(&part)
+            .filter(|&(_, &taken)| taken)
+            .map(|(element, _)| element.clone())
+            .collect();
+        for (ours, theirs) in [
+            ((&ours, &ours_part), (&theirs, &theirs_part)),
+            ((&ours_part, &ours), (&theirs_part, &theirs)),
+        ] {
+            for (ours, theirs) in [
+                (
+                    ours.0.intersection(ours.1).collect::<Vec<_>>(),
+                    theirs.0.intersection(theirs.1).collect::<Vec<_>>(),
+                ),
+                (
+                    ours.0.union(ours.1).collect(),
+                    theirs.0.union(theirs.1).collect(),
+                ),
+                (
+                    ours.0.difference(ours.1).collect(),
+                    theirs.0.difference(theirs.1).collect(),
+                ),
+            ] {
+                same_print(&ours, &theirs);
+            }
+            same_print(&(ours.0 & ours.1), &(theirs.0 & theirs.1));
+            same_print(&(ours.0 | ours.1), &(theirs.0 | theirs.1));
         }
     }
     let array = [(3, 0), (1, 1), (3, 2), (2, 3), (1, 4)].map(|(key, tag)| Tagged { key, tag });

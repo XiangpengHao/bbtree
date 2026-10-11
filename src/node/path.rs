@@ -45,7 +45,7 @@ use super::handle::{
     CopyableBorrow, Dying, Edge, ForceResult, Immut, Internal, Kv, Leaf, LeafOrInternal, Mut,
     NodeKind, NodeMut, NodeRef, SearchResult, Subtree, ValMut,
 };
-use super::inline_keys::SearchKey;
+use super::inline_keys::{InlinedKey, SearchKey};
 use super::page::{FreshPage, NodePtr, PageByKind};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -847,6 +847,23 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         match self.view().force() {
             ForceResult::Leaf(leaf) => leaf.kv_at(index).into_key(),
             ForceResult::Internal(internal) => internal.kv_at(index).into_key(),
+        }
+    }
+
+    /// Puts `key` in place of the key the path ends at, with its inline key
+    /// at the node's prefix length, and returns the old key: its value, and
+    /// the path, stay. Keeping the keys in order is the caller's business.
+    ///
+    /// # Panics
+    ///
+    /// If the path ends at no key.
+    pub(crate) fn replace_key(&mut self, key: K) -> K {
+        let index = self.index();
+        let node = self.node_mut();
+        let key = InlinedKey::new(key, node.prefix_len());
+        match node.force() {
+            ForceResult::Leaf(leaf) => leaf.kv_at(index).replace_key(key),
+            ForceResult::Internal(internal) => internal.kv_at(index).replace_key(key),
         }
     }
 

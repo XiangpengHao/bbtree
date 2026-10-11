@@ -561,6 +561,33 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         }
     }
 
+    /// Puts `key` in place of an equal key and returns that one, keeping its
+    /// value and dropping `value`; or, if there is none, inserts `key` with
+    /// `value` and returns `None`: std's set's `replace`, on one search.
+    ///
+    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics
+    /// before the key is replaced, the map is unchanged; an insert panics as
+    /// [`BBTreeMap::insert`] does.
+    ///
+    /// [`WithInlineKey`]: crate::WithInlineKey
+    pub(crate) fn replace_key(&mut self, key: K, value: V) -> Option<K>
+    where
+        K: Ord,
+    {
+        let Self { root, length } = self;
+        let place = if root.is_none() {
+            VacantPlace::NoTree(root)
+        } else {
+            let mut path = PathMut::new(root.as_mut().expect("checked just above"));
+            if path.search(&SearchKey::new(&key)) {
+                return Some(path.replace_key(key));
+            }
+            VacantPlace::InTree(path)
+        };
+        VacantEntry { key, length, place }.insert_and_count(value);
+        None
+    }
+
     /// Returns the first entry in the map for in-place manipulation. The key
     /// of this entry is the minimum key in the map.
     ///

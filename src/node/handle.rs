@@ -2981,54 +2981,164 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
                 index,
             },
             mut left_child,
-            mut right_child,
+            right_child,
         } = self.0;
         parent.normalize_local_prefix();
-        left_child.move_prefix_back_to(fill);
-        right_child.move_prefix_back_to(fill);
         let parent_len = parent.len();
-        let left_len = left_child.len();
-        let right_len = right_child.len();
-        let merged_len = left_len + 1 + right_len;
-        // SAFETY:
-        // - Parent: `index < parent_len` (invariant 3). Key `index`, with its
-        //   inline key, and edge `index + 1`, the right child, come out; the
-        //   parent keeps keys `0..parent_len - 1` and edges `0..parent_len`.
-        // - Left child: `merged_len <= capacity` (invariant 4). The separator
-        //   goes into key slot `left_len`, and the right child's keys
-        //   `0..right_len` into `left_len + 1..merged_len`, all with their
-        //   inline keys, the three nodes being of the same map (invariant 6).
-        //   The right child's trailing slots `0..=right_len`, all initialized
-        //   (the context's invariant), go into the left child's
-        //   `left_len + 1..=merged_len`: between leaves, its head beside the
-        //   separator as its value, and its values; between internal
-        //   children, its edges, from a distinct page and one level below,
-        //   like the left child's own. The left child's slot 0 is untouched.
-        // - Right child: of kind `ChildKind`, as its page is released;
-        //   everything moved out, and its edge is gone from the parent, so
-        //   nothing reaches its page anymore (invariant 2).
-        let freed_page = unsafe {
+        // SAFETY: `index < parent_len` (invariant 3). Key `index`, with its
+        // inline key, at the parent's prefix length, `fill`'s, and edge
+        // `index + 1`, the right child, come out; the parent keeps keys
+        // `0..parent_len - 1` and edges `0..parent_len`.
+        let separator = unsafe {
             let separator = parent.key_slots().remove(index, parent_len);
             parent.edge_slots().remove(index + 1, parent_len + 1);
             parent.set_len(parent_len - 1);
-
-            left_child.key_slots().write(left_len, separator);
-            right_child
-                .key_slots()
-                .move_run_to(0, right_len, left_child.key_slots(), left_len + 1);
-            ChildKind::move_run(
-                right_child.node,
-                0,
-                right_len + 1,
-                left_child.node,
-                left_len + 1,
-            );
-            left_child.set_len(merged_len);
-            ChildKind::page_by_kind(right_child.node.into_fresh_page())
+            separator
         };
+        // SAFETY: both children and the separator fit in one node (invariant
+        // 4). The right child is another node of kind `ChildKind`, at the
+        // left one's height, in the same map, with its trailing slot 0
+        // initialized (the context's invariant); its edge is gone from the
+        // parent, so nothing reaches its page but the one returned. The
+        // parent's prefix length, `fill`'s, is at most either child's.
+        let freed_page = unsafe { left_child.absorb_unchecked(fill, separator, right_child) };
         // SAFETY: `index <= parent_len - 1`, the parent's new length.
         let merged_edge = unsafe { Edge::new_unchecked(parent, index) };
         (merged_edge, freed_page)
+    }
+}
+
+/// What [`NodeMut::absorb`] gives back when the node, the separator and the
+/// tree's root don't fit in one node: the separator and the tree.
+pub(crate) type Unabsorbed<K, V, S> = (InlinedKey<K, S>, Subtree<K, V, S>);
+
+impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> NodeMut<'a, K, V, S, Kind> {
+    /// Moves `separator`, and every key and trailing slot of `right` after
+    /// it, to the end of this node, as a merge moves its parent's separator
+    /// and right child into the left one, and returns `right`'s emptied
+    /// page: for a node and the root of another tree, which share no
+    /// parent, as when two trees join (`join.rs`). For leaves, `right`'s
+    /// head is the separator's value, which rejoins it as an entry (D17).
+    ///
+    /// Both nodes take the separator's prefix length, as merged children
+    /// take their parent's. If they don't fit in one node with the
+    /// separator, nothing changes, and both come back.
+    ///
+    /// # Panics
+    ///
+    /// If `right` is not at this node's height, if it is a leaf without a
+    /// head, or if the separator's prefix length is longer than either
+    /// node's; nothing changes then.
+    pub(crate) fn absorb(
+        &mut self,
+        separator: InlinedKey<K, S>,
+        right: Subtree<K, V, S>,
+    ) -> Result<PageByKind<K, V, S>, Unabsorbed<K, V, S>> {
+        assert_eq!(
+            right.height, self.height,
+            "a node absorbs a node of its own height"
+        );
+        if self.len() + 1 + Subtree::borrow(&right).len() > self.capacity() {
+            return Err((separator, right));
+        }
+        // SAFETY: `right` is the root of a well-formed tree (its type
+        // invariant) at this node's height, so of this kind, and the
+        // `Subtree` given up below was its only owner: no other handle to it
+        // lives.
+        let right_node: NodeMut<'_, K, V, S, Kind> =
+            unsafe { NodeRef::from_raw_parts(right.node, right.height) };
+        // SAFETY: an allocated node of kind `Kind`.
+        let right_has_first_slot = unsafe { Kind::has_first_slot(right_node.node) };
+        assert!(
+            right_has_first_slot,
+            "the leaf right of a separator has no head"
+        );
+        let fill = separator.window();
+        assert!(
+            fill.prefix_len() <= self.prefix_len().min(right_node.prefix_len()),
+            "a separator past the prefix of a node it joins"
+        );
+        // SAFETY: checked just above: the fit, `right`'s kind, height and
+        // initialized trailing slot 0, and the prefix lengths. `right` is
+        // another tree's root, so another node, of the same map type, and
+        // its owner is given up: nothing reaches its page but the one
+        // returned.
+        Ok(unsafe { self.absorb_unchecked(fill, separator, right_node) })
+    }
+
+    /// Moves `separator` to key slot `len`, and every key and trailing slot
+    /// of `right` after it, both nodes first taking `fill`'s prefix length,
+    /// and returns `right`'s emptied page: the core of [`Mergeable::merge`]
+    /// and [`Self::absorb`]. After local search windows are normalized,
+    /// shifting reads no further key: both nodes' inline keys move back,
+    /// filled from the separator's, a fence of both. Fitting the node's
+    /// prefix to its fences, which reads keys, is the caller's business.
+    ///
+    /// # Safety
+    ///
+    /// The node, `separator` and `right` fit in one node: `len + 1 +
+    /// right.len() <= capacity`. `right` is another node of this kind and
+    /// height, in a tree of the same map type, whose trailing slot 0 is
+    /// initialized (a leaf's head), and nothing reaches its page afterwards
+    /// but through the one returned. `separator`'s window is at `fill`'s
+    /// prefix length, at most either node's.
+    unsafe fn absorb_unchecked(
+        &mut self,
+        fill: Window,
+        separator: InlinedKey<K, S>,
+        mut right: NodeMut<'_, K, V, S, Kind>,
+    ) -> PageByKind<K, V, S> {
+        self.move_prefix_back_to(fill);
+        right.move_prefix_back_to(fill);
+        let left_len = self.len();
+        let right_len = right.len();
+        let merged_len = left_len + 1 + right_len;
+        // SAFETY:
+        // - This node: `merged_len <= capacity` (the caller). The separator
+        //   goes into key slot `left_len`, and `right`'s keys `0..right_len`
+        //   into `left_len + 1..merged_len`, all with their inline keys at
+        //   this node's prefix length now (invariant 6). `right`'s trailing
+        //   slots `0..=right_len`, all initialized (the caller), go into this
+        //   node's `left_len + 1..=merged_len`: between leaves, its head
+        //   beside the separator as its value, and its values; between
+        //   internal nodes, its edges, from a distinct page and one level
+        //   below, like this node's own. This node's slot 0 is untouched.
+        // - `right`: of kind `Kind`, as its page is released; everything
+        //   moved out, and nothing reaches its page anymore (the caller).
+        unsafe {
+            self.key_slots().write(left_len, separator);
+            right
+                .key_slots()
+                .move_run_to(0, right_len, self.key_slots(), left_len + 1);
+            Kind::move_run(right.node, 0, right_len + 1, self.node, left_len + 1);
+            self.set_len(merged_len);
+            Kind::page_by_kind(right.node.into_fresh_page())
+        }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'_, K, V, S, Internal>> {
+    /// Puts `child`, the root of a tree one level below this node, at this
+    /// edge in place of the subtree there, and returns that one, as two
+    /// trees join (`join.rs`). Keeping keys in order, heads where separators
+    /// expect them (D17), and the new child's prefix at least this node's,
+    /// is the caller's business.
+    ///
+    /// # Panics
+    ///
+    /// If `child` is not exactly one level below this node; the node is
+    /// unchanged then.
+    pub(crate) fn replace_child(&mut self, child: Subtree<K, V, S>) -> Subtree<K, V, S> {
+        self.node.assert_child_level(&child);
+        // SAFETY: `index <= len` (invariant 3), so edge `index` is
+        // initialized: the only pointer to a well-formed subtree one level
+        // down (invariant 2), whose ownership goes to the `Subtree`
+        // returned. `child`, checked to be one level down, takes its place,
+        // owned by the node from now on, its `Subtree` given up.
+        unsafe {
+            let old = self.node.edge_slots().slot(self.index).replace(child.node);
+            Subtree::from_raw_parts(old, self.node.height - 1)
+        }
     }
 }
 

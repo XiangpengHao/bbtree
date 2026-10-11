@@ -79,13 +79,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         }
         let length = self.length;
         let lower = self.root.as_mut().expect("a map with entries has a tree");
-        let mut path = PathMut::new(&mut *lower);
-        path.search_to_edge(&SearchKey::new(key), KeySide::Before);
-        path.clear_prefixes();
-        let mut upper = path.cut();
-        let release = &mut PageByKind::deallocate;
-        lower.fix_border::<LastEdge>(release);
-        upper.fix_border::<FirstEdge>(release);
+        let upper = lower.split_off_at(key, KeySide::Before);
         let (lower_length, upper_length) = if lower.height() < upper.height() {
             let lower_length = Subtree::borrow(lower).count_entries();
             (lower_length, length - lower_length)
@@ -104,6 +98,33 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         if let Some(root) = &mut upper.root {
             root.fit_border_siblings::<FirstEdge>();
         }
+        upper
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+    /// Cuts the tree at the leaf edge on `side` of `key`: keeps what lies
+    /// before it, and returns what lies after, both with their borders along
+    /// the cut brought up to their minimum (`node/border.rs`). The nodes
+    /// beside those borders, which gave them entries, keep prefixes that
+    /// still fit their narrower fences: fitting them with
+    /// `fit_border_siblings`, which reads keys, is the caller's business,
+    /// once both trees are where a panic can't lose them.
+    ///
+    /// Every `Ord` call happens first, in the search, before anything
+    /// changes.
+    pub(crate) fn split_off_at<Q>(&mut self, key: &Q, side: KeySide) -> Self
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let mut path = PathMut::new(self);
+        path.search_to_edge(&SearchKey::new(key), side);
+        path.clear_prefixes();
+        let mut upper = path.cut();
+        let release = &mut PageByKind::deallocate;
+        self.fix_border::<LastEdge>(release);
+        upper.fix_border::<FirstEdge>(release);
         upper
     }
 }
