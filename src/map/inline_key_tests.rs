@@ -21,9 +21,9 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::BBTreeMap;
-use super::differential_tests::{FromNumber, MirroredMaps, Workload};
+use super::differential_tests::{MirroredMaps, Workload};
 use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
-use crate::node::test_support::{DropLedger, TestRng, Tracked};
+use crate::node::test_support::{DropLedger, FromNumber, TestRng, Tracked};
 
 /// Ten digits: keys of up to 100 consecutive numbers tie on their first 8
 /// bytes, so searches go through runs of equal inline keys.

@@ -16,9 +16,11 @@ mod map;
     expect(dead_code, reason = "the node tests use the rest of the node API")
 )]
 mod node;
+mod set;
 
 pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
 pub use map::BBTreeMap;
+pub use set::BBTreeSet;
 
 /// An ordered map based on a B-tree, [`BBTreeMap`], and the types that go
 /// with it: the counterpart of `std::collections::btree_map`.
@@ -27,4 +29,10 @@ pub mod bbtree_map {
         BBTreeMap, Entry, ExtractIf, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys,
         OccupiedEntry, Range, RangeMut, VacantEntry, Values, ValuesMut,
     };
+}
+
+/// An ordered set based on a B-tree, [`BBTreeSet`], and the types that go
+/// with it: the counterpart of `std::collections::btree_set`.
+pub mod bbtree_set {
+    pub use crate::set::{BBTreeSet, IntoIter, Iter, Range};
 }

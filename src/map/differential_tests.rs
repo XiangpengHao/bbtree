@@ -27,35 +27,7 @@ use std::vec::Vec;
 
 use super::{BBTreeMap, Entry, OccupiedEntry};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::test_support::{CacheLineAligned, PageAligned, TestRng};
-
-/// A key or value made from a number. Different numbers make different
-/// values as far as the type allows, and keys from ascending numbers ascend.
-pub(super) trait FromNumber {
-    fn from_number(number: usize) -> Self;
-}
-
-impl FromNumber for u64 {
-    fn from_number(number: usize) -> Self {
-        number as u64
-    }
-}
-
-impl FromNumber for u8 {
-    fn from_number(number: usize) -> Self {
-        number as u8
-    }
-}
-
-impl FromNumber for () {
-    fn from_number(_: usize) -> Self {}
-}
-
-impl FromNumber for String {
-    fn from_number(number: usize) -> Self {
-        format!("{number:010}")
-    }
-}
+use crate::node::test_support::{CacheLineAligned, FromNumber, PageAligned, TestRng};
 
 /// With `u64` values, 64-byte keys fill a 1 KB node with 14 entries in both
 /// kinds (D13, D15, D17): tall trees from a few hundred entries, with little
@@ -133,7 +105,7 @@ where
         let theirs = catch_unwind(AssertUnwindSafe(|| self.theirs.range::<Q, _>(bounds)));
         match (ours, theirs) {
             (Ok(ours), Ok(theirs)) => {
-                Self::assert_same_items(rng, ours.clone(), theirs.clone(), 64);
+                rng.assert_same_items(ours.clone(), theirs.clone(), 64);
                 if rng.below(32) == 0 {
                     assert!(ours.eq(theirs), "the whole ranges differ");
                 }
@@ -163,32 +135,6 @@ where
             .expect("a panic with a message")
     }
 
-    /// Takes up to `steps` items from `ours` and `theirs` alike, each from
-    /// the front or the back at random, checking that they match, and so do
-    /// the size hints before each; once both are done, that they stay done.
-    fn assert_same_items<T: PartialEq + Debug>(
-        rng: &TestRng,
-        mut ours: impl DoubleEndedIterator<Item = T>,
-        mut theirs: impl DoubleEndedIterator<Item = T>,
-        steps: usize,
-    ) {
-        for _ in 0..steps {
-            assert_eq!(ours.size_hint(), theirs.size_hint());
-            let (ours_item, theirs_item) = if rng.below(2) == 0 {
-                (ours.next(), theirs.next())
-            } else {
-                (ours.next_back(), theirs.next_back())
-            };
-            let done = theirs_item.is_none();
-            assert_eq!(ours_item, theirs_item);
-            if done {
-                assert_eq!(ours.next(), None);
-                assert_eq!(ours.next_back(), None);
-                return;
-            }
-        }
-    }
-
     /// A bound at `key` of a random kind, or none.
     fn random_bound<T>(rng: &TestRng, key: T) -> Bound<T> {
         match rng.below(5) {
@@ -203,12 +149,12 @@ where
     /// while.
     fn assert_same_iteration(&self, rng: &TestRng) {
         let steps = self.theirs.len() + 1;
-        Self::assert_same_items(rng, self.ours.iter(), self.theirs.iter(), steps);
+        rng.assert_same_items(self.ours.iter(), self.theirs.iter(), steps);
         let steps = steps.min(1024);
-        Self::assert_same_items(rng, self.ours.keys(), self.theirs.keys(), steps);
-        Self::assert_same_items(rng, self.ours.values(), self.theirs.values(), steps);
+        rng.assert_same_items(self.ours.keys(), self.theirs.keys(), steps);
+        rng.assert_same_items(self.ours.values(), self.theirs.values(), steps);
         let (ours, theirs) = (IntoIterator::into_iter(&self.ours), self.theirs.iter());
-        Self::assert_same_items(rng, ours, theirs, steps);
+        rng.assert_same_items(ours, theirs, steps);
     }
 
     /// Checks `count` ranges against std's, between random bounds in order
@@ -268,10 +214,10 @@ where
                 if theirs.len() <= 64 {
                     assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
                 }
-                Self::assert_same_items(rng, ours, theirs, steps);
+                rng.assert_same_items(ours, theirs, steps);
             }
-            1 => Self::assert_same_items(rng, ours.into_keys(), theirs.into_keys(), steps),
-            _ => Self::assert_same_items(rng, ours.into_values(), theirs.into_values(), steps),
+            1 => rng.assert_same_items(ours.into_keys(), theirs.into_keys(), steps),
+            _ => rng.assert_same_items(ours.into_values(), theirs.into_values(), steps),
         }
     }
 

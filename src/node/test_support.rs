@@ -1,11 +1,16 @@
-//! Test-only helpers: a deterministic PRNG, drop tracking, padded and
-//! over-aligned test types, trees built through the node API, and a check of
-//! inline keys. The map's tests use the first three and the last too.
+//! Test-only helpers: a deterministic PRNG, which also walks two iterators
+//! alike from random ends, keys and values made from numbers, drop tracking,
+//! padded and over-aligned test types, trees built through the node API, and
+//! a check of inline keys. The map's and the set's tests use the first four
+//! and the last too.
 
 #![forbid(unsafe_code)]
 
 use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
+use core::fmt::Debug;
+use std::format;
+use std::string::String;
 use std::vec::Vec;
 
 use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
@@ -38,6 +43,60 @@ impl TestRng {
         for index in (1..items.len()).rev() {
             items.swap(index, self.below(index + 1));
         }
+    }
+
+    /// Takes up to `steps` items from `ours` and `theirs` alike, each from
+    /// the front or the back at random, checking that they match, and so do
+    /// the size hints before each; once both are done, that they stay done.
+    pub(crate) fn assert_same_items<T: PartialEq + Debug>(
+        &self,
+        mut ours: impl DoubleEndedIterator<Item = T>,
+        mut theirs: impl DoubleEndedIterator<Item = T>,
+        steps: usize,
+    ) {
+        for _ in 0..steps {
+            assert_eq!(ours.size_hint(), theirs.size_hint());
+            let (ours_item, theirs_item) = if self.below(2) == 0 {
+                (ours.next(), theirs.next())
+            } else {
+                (ours.next_back(), theirs.next_back())
+            };
+            let done = theirs_item.is_none();
+            assert_eq!(ours_item, theirs_item);
+            if done {
+                assert_eq!(ours.next(), None);
+                assert_eq!(ours.next_back(), None);
+                return;
+            }
+        }
+    }
+}
+
+/// A key or value made from a number. Different numbers make different
+/// values as far as the type allows, and keys from ascending numbers ascend.
+pub(crate) trait FromNumber {
+    fn from_number(number: usize) -> Self;
+}
+
+impl FromNumber for u64 {
+    fn from_number(number: usize) -> Self {
+        number as u64
+    }
+}
+
+impl FromNumber for u8 {
+    fn from_number(number: usize) -> Self {
+        number as u8
+    }
+}
+
+impl FromNumber for () {
+    fn from_number(_: usize) -> Self {}
+}
+
+impl FromNumber for String {
+    fn from_number(number: usize) -> Self {
+        format!("{number:010}")
     }
 }
 
