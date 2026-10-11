@@ -47,8 +47,8 @@ for u64 internal nodes and 38 for u128. The model reads actual capacities and of
 geometry, and requires original keys before child pointers.
 It also checks every inline summary against its key. Source/API drift should be
 reviewed rather than silencing assertions. The original copied-source manifest
-is `/tmp/bbtree-integer-edge-model-src.sha256`; raw results and analysis belong
-with the dated performance evidence in `doc/performance` and the cost model.
+is `/tmp/bbtree-integer-edge-model-src.sha256`; the analysis is in
+`doc/06-cost-model.md`.
 
 `rejected-layout.patch` records the tested production proposal and its geometry
 and differential coverage; it is retained as research, not applied by this

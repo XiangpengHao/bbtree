@@ -629,11 +629,10 @@ Supersedes D18's integers opting in.
   `u64` → `u64`, 26% for a `u64` set. A node holds 55 `u64` keys
   instead of 63.
 
-**D32. Internal nodes split keys from children; nodes align to 64 bytes.** (2026-10-10)
-Updates D29's internal layout, D15's alignment, D22's split point, D23's
-folds and D24's point lookups. The experiments behind D32–D45 are in
-[06-cost-model.md](06-cost-model.md), the combined results in
-[07-large-map-optimization.md](07-large-map-optimization.md).
+**D32. Internal nodes split keys from children.** (2026-10-10)
+Updates D29's internal layout, D22's split point, D23's folds and D24's
+point lookups. The experiments behind D32–D45 are in
+[06-cost-model.md](06-cost-model.md).
 
 - **Internal nodes keep keys and child pointers in separate arrays.**
   Leaves with inline keys still pair each key with its value (D29). An
@@ -641,14 +640,10 @@ folds and D24's point lookups. The experiments behind D32–D45 are in
   child pointers should share cache lines with each other, not with keys.
   A leaf search reads the key it ends at and then its value, so pairing
   still pays there. Settles D29's open question.
-- **Nodes align to 64 bytes, not 1 KiB:** `max(64, align_of K, align_of
-  trailing slot)`. Paths keep indexes in their own array, so nothing uses
-  a node pointer's low bits and 1 KiB alignment bought nothing.
-  - **Gain:** with the System allocator, 100,000 touched 1 KiB blocks take
-    110 MB of RSS instead of 206 MB (−47%).
-  - **Cost:** a node can now straddle a 4 KiB page (15 of 64 offsets).
-    Timings moved about 1%, except 1M JSON `get_miss`: +7.6%, same
-    instructions, more DRAM fills.
+- **Nodes stay aligned to 1 KiB (D15).** Tried 64 bytes: it only saves
+  memory under glibc's malloc. mimalloc puts 1 KiB blocks on 1 KiB
+  boundaries either way, and an A/B showed the same instructions and RSS,
+  with timing differences within run-to-run noise.
 - **Point lookups keep no path.** `get` and `get_mut` hold only the
   current node. Inserts, entries, removals and range bounds keep paths.
 - **Consuming `fold`/`rfold` run one counted loop per leaf** and update

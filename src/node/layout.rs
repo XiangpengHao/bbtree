@@ -54,8 +54,8 @@ use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord};
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
 ///   own sizes, or the entries' with inline keys.
-/// - Each kind is the smallest multiple of 1 KiB and its alignment that
-///   holds `MIN_CAPACITY` keys, aligned to a cache line or more (D13, D15). A
+/// - Each kind is the smallest multiple of its alignment, 1 KiB or more,
+///   that holds `MIN_CAPACITY` keys, and is aligned to it (D13, D15). A
 ///   leaf's size depends on `K` and `V`; an internal node's on `K` alone, as
 ///   it holds no values (D17, D21).
 ///
@@ -141,12 +141,13 @@ struct KindLayout {
 }
 
 impl<K, V> NodeLayout<K, V> {
-    /// Every node allocation is a multiple of this size (D15).
+    /// Every node allocation is a multiple of this size, and aligned to it
+    /// or more (D15).
     const BASE_NODE_SIZE: usize = 1024;
 
-    /// Keep headers and search arrays on cache-line boundaries without
-    /// forcing each allocation to a node-size boundary.
-    const MIN_NODE_ALIGN: usize = 64;
+    /// Entries up to this size start at a multiple of it, so that none
+    /// crosses a cache line (D34).
+    const CACHE_LINE_SIZE: usize = 64;
 
     /// Every node kind holds at least this many keys (D13); nodes grow by
     /// whole allocation-size steps until it fits.
@@ -310,7 +311,7 @@ impl<K, V> NodeLayout<K, V> {
     const fn kind_layout(inline_key_size: usize, trailing: TrailingSlot) -> KindLayout {
         let align = Self::node_align(trailing.align);
         let size = Self::bytes_needed(inline_key_size, trailing, Self::MIN_CAPACITY)
-            .next_multiple_of(Self::max(Self::BASE_NODE_SIZE, align));
+            .next_multiple_of(align);
         let capacity = Self::capacity_in(size, inline_key_size, trailing);
         let keys_start = Self::keys_start(inline_key_size, capacity);
         let (keys_offset, key_stride, trailing_offset, trailing_stride) =
@@ -320,7 +321,7 @@ impl<K, V> NodeLayout<K, V> {
                 // of this alignment, so rounding their start up still fits
                 // the same capacity. It only uses the unused page tail.
                 let entries_align =
-                    if entry_size.is_power_of_two() && entry_size <= Self::MIN_NODE_ALIGN {
+                    if entry_size.is_power_of_two() && entry_size <= Self::CACHE_LINE_SIZE {
                         entry_size
                     } else {
                         Self::entry_align(trailing)
@@ -413,7 +414,7 @@ impl<K, V> NodeLayout<K, V> {
             assert!(keys.keys_offset == entries_offset + key_stride);
             assert!(slot_offset >= size_of::<K>());
             assert!(slot_offset + trailing.size <= key_stride);
-            if key_stride.is_power_of_two() && key_stride <= Self::MIN_NODE_ALIGN {
+            if key_stride.is_power_of_two() && key_stride <= Self::CACHE_LINE_SIZE {
                 assert!(keys.keys_offset.is_multiple_of(key_stride));
             }
         } else {
@@ -439,10 +440,10 @@ impl<K, V> NodeLayout<K, V> {
         if a < b { a } else { b }
     }
 
-    /// A node is aligned to a cache line and to its keys and trailing slots.
+    /// A node is aligned to 1 KiB (D15), and to its keys and trailing slots.
     const fn node_align(trailing_slot_align: usize) -> usize {
         Self::max(
-            Self::MIN_NODE_ALIGN,
+            Self::BASE_NODE_SIZE,
             Self::max(align_of::<K>(), trailing_slot_align),
         )
     }
@@ -586,11 +587,11 @@ mod tests {
     }
 
     impl ExpectedNode {
-        /// A 1 KiB node aligned to a cache line.
+        /// A 1 KiB, 1 KiB-aligned node.
         fn one_page(capacity: usize, keys_offset: usize, trailing_offset: usize) -> Self {
             Self {
                 size: 1024,
-                align: 64,
+                align: 1024,
                 capacity,
                 keys_offset,
                 trailing_offset,
@@ -618,7 +619,7 @@ mod tests {
             assert_eq!((keys.key_stride, trailing.1), strides);
             assert_eq!(keys.inline_keys_offset, inline_keys.then_some(8));
             assert!(page.size().is_multiple_of(1024));
-            assert!(page.align() >= 64);
+            assert!(page.align() >= 1024);
         }
 
         fn assert_leaf(&self, layout: LeafLayout, strides: (usize, usize), inline_keys: bool) {
@@ -866,7 +867,7 @@ mod tests {
         // n = 14; entries at 128, the head at 192, key 0 at 256.
         let expected = || ExpectedNode {
             size: 2048,
-            align: 64,
+            align: 1024,
             capacity: 14,
             keys_offset: 256,
             trailing_offset: 192,
@@ -1036,7 +1037,7 @@ mod tests {
             // at 8 + 12·8 = 104.
             leaf: ExpectedNode {
                 size: 13 * 1024,
-                align: 64,
+                align: 1024,
                 capacity: 12,
                 keys_offset: 8,
                 trailing_offset: 104,
@@ -1104,7 +1105,7 @@ mod tests {
             // ⌊(2048 − 64 − 64) / 128⌋ = 15; the head at 64 + 15·64 = 1024.
             leaf: ExpectedNode {
                 size: 2048,
-                align: 64,
+                align: 1024,
                 capacity: 15,
                 keys_offset: 64,
                 trailing_offset: 1024,
@@ -1166,7 +1167,7 @@ mod tests {
             // 8 + 24·8 = 200.
             leaf: ExpectedNode {
                 size: 2048,
-                align: 64,
+                align: 1024,
                 capacity: 24,
                 keys_offset: 8,
                 trailing_offset: 200,
@@ -1204,7 +1205,7 @@ mod tests {
             // 4 + 23·77 = 1775 → 1776.
             internal: ExpectedNode {
                 size: 2048,
-                align: 64,
+                align: 1024,
                 capacity: 23,
                 keys_offset: 4,
                 trailing_offset: 1776,

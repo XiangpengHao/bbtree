@@ -521,7 +521,7 @@ mod tests {
         );
         assert_eq!(
             NodeLayout::<u64, PageAligned>::PLAIN_INTERNAL.page.align(),
-            64
+            1024
         );
     }
 }

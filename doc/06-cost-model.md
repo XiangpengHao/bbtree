@@ -166,7 +166,7 @@ main suite.
 | Separate internal keys and children | accepted | D32 |
 | 2 KiB internal nodes | rejected | |
 | 512-byte leaves | rejected | |
-| 64-byte node alignment | accepted | D32 |
+| 64-byte node alignment | rejected | |
 | 2-byte inline keys for fixed arrays | accepted | D32 |
 | End-biased splits | accepted | D32 |
 | Short fitting-insert path | accepted | D33 |
@@ -250,11 +250,12 @@ same instructions, fewer L1 and DRAM misses. Accepted.
 lose 28% (23.3 → 29.8, cause unknown). Deferred. Diagnostic in
 `bench/diagnostics/integer-edge`.
 
-**64-byte node alignment (D32).** Paths no longer pack bits into node
-pointers, so 1 KiB alignment is not needed. Timings move about 1% except
-1M JSON misses, +7.6% (same instructions, more DRAM fills). With the
-System allocator, 100,000 touched 1 KiB blocks take 110 MB of RSS instead
-of 206 MB. Accepted for the memory.
+**64-byte node alignment.** With glibc's malloc, a 1 KiB-aligned 1 KiB
+block can't sit next to another, so every other slot is skipped:
+100,000 blocks span 204.8 MB at 1 KiB alignment and 108.8 MB at 64.
+mimalloc puts 1 KiB blocks on 1 KiB boundaries at either alignment, and
+an A/B showed the same instructions and RSS, with timings within
+run-to-run noise. Rejected: nodes stay 1 KiB-aligned (D15).
 
 **Map-owned page arena** (model only). mimalloc already packs 1 KiB
 blocks. Pages allocated in time order aren't neighbors in key order after
@@ -436,13 +437,3 @@ to 15 instructions. `u64` `range64` 688.2 → 664.5; portable `next()`
 already 15 instructions; a direct sibling step at leaf crossings might
 save 60–80 of about 1,590 instructions per scan (4–5%) and no memory
 fetch. Deferred.
-
-## Raw records
-
-Every measured candidate, including failures, is in
-[ablation.csv](performance/2026-10-10-ablation.csv) (main suite) and
-[portable.csv](performance/2026-10-10-portable.csv) (diagnostics). The
-other files in [performance/](performance/) hold the structural counts,
-codegen reviews and rejected patches cited above. Binaries and reports
-from the original runs were in `/tmp` and are gone; the CSVs are what's
-left.

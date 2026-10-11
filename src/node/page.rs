@@ -1230,8 +1230,8 @@ mod tests {
         // the edges, right after them, at 8 + 63·8 = 512.
         let leaf = NodePtr::<[u64; 1], u64, Auto>::leaf_layout();
         let internal = NodePtr::<[u64; 1], u64, Auto>::internal_layout();
-        assert_eq!((leaf.page.size(), leaf.page.align()), (1024, 64));
-        assert_eq!((internal.page.size(), internal.page.align()), (1024, 64));
+        assert_eq!((leaf.page.size(), leaf.page.align()), (1024, 1024));
+        assert_eq!((internal.page.size(), internal.page.align()), (1024, 1024));
         assert_eq!(leaf.keys, internal.keys);
         assert_eq!(
             (
