@@ -105,6 +105,16 @@ pub struct BBTreeSet<T, S: InlineKeyStrategy<T> = Auto> {
     map: BBTreeMap<T, SetValZST, S>,
 }
 
+#[cfg(fuzzing)]
+impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+    /// Panics unless the set's tree is well formed, by the map's check
+    /// ([`BBTreeMap::check_invariants`]). Only in fuzzing builds
+    /// (`--cfg fuzzing`, which `cargo fuzz` sets), for the fuzz targets.
+    pub fn check_invariants(&self) {
+        self.map.check_invariants();
+    }
+}
+
 impl<T> BBTreeSet<T> {
     /// Makes a new, empty `BBTreeSet`, with the default strategy, [`Auto`].
     /// For another, see [`BBTreeSet::with_strategy`].

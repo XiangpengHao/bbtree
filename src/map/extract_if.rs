@@ -66,7 +66,9 @@ pub(crate) struct ExtractionWalk<'a, K, V, R, S: InlineKeyStrategy<K>> {
     /// Whether the map had a tree, which it keeps even if no entry stays.
     had_tree: bool,
     /// The map's entries not handed out: its length less those the walk has
-    /// handed out, which std's walk counts down in the map as it goes.
+    /// handed out, which std's walk counts down in the map as it goes. The
+    /// kept tree's builder counts those it dropped, which a panicking
+    /// `InlineKey` stopped it from placing (`node/build.rs`).
     length: usize,
     /// The entries before the range, where they were, and then those in it
     /// visited and kept, in order.
@@ -284,9 +286,11 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
                 .into_iter()
                 .chain(iter::from_fn(|| rest.next())),
         );
-        let (kept, _) = mem::replace(&mut self.kept, TreeBuilder::new()).finish();
+        let kept = mem::replace(&mut self.kept, TreeBuilder::new());
+        let dropped = kept.dropped();
+        let (kept, _) = kept.finish();
         self.map.root = Subtree::concat(kept, self.after.0.take());
-        self.map.length = self.length;
+        self.map.length = self.length - dropped;
         if self.had_tree {
             self.map.keep_a_tree();
         }

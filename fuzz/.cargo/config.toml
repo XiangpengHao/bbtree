@@ -1,0 +1,4 @@
+# Compile the library's structural checks (`check_invariants`), as `cargo fuzz`
+# does, for every build here: clippy and the harnesses' own tests.
+[build]
+rustflags = ["--cfg", "fuzzing"]

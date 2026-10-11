@@ -13,4 +13,9 @@ This means that:
 1. Each node will has a lock (spin lock with proper backoff, scheudler hint etc.).
 2. Each KV will have a lock.
 3. Each X access to a KV will hold the X lock of the KV, and S lock of the leaf node.
+4. We will do hand over hand locking.
 
+
+Things I liked:
+1. optimistic inner node locking, pessimistic leaf node locking.
+2. use shuttle for concurrency testing.

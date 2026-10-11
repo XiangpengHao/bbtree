@@ -42,6 +42,8 @@ mod clone;
 pub(crate) mod handle;
 pub(crate) mod inline_keys;
 mod internal;
+#[cfg(any(test, fuzzing))]
+mod invariants;
 mod join;
 mod layout;
 mod leaf;

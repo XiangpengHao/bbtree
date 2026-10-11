@@ -594,7 +594,9 @@ fn a_map_with_constant_inline_keys_keeps_its_invariants() {
     assert!(map.height() >= 1);
 }
 
-/// A name whose `InlineKey` panics once its shared budget of calls is spent.
+/// A name whose `InlineKey` panics once its shared budget of calls is spent,
+/// and then not again until given a new budget: a second panic while the
+/// first unwinds would abort.
 struct PanickingName<'b> {
     name: UserName,
     budget: &'b Cell<usize>,
@@ -622,9 +624,13 @@ impl Ord for PanickingName<'_> {
 
 impl InlineKey for PanickingName<'_> {
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let left = self.budget.get();
-        assert!(left > 0, "inline key panic");
-        self.budget.set(left - 1);
+        match self.budget.get().checked_sub(1) {
+            Some(left) => self.budget.set(left),
+            None => {
+                self.budget.set(usize::MAX);
+                panic!("inline key panic");
+            }
+        }
         self.name.inline_key_at(offset)
     }
 }
@@ -689,4 +695,53 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
     for (&number, value) in &theirs {
         assert_eq!(ours.get(&key(number)), Some(value));
     }
+}
+
+/// An `InlineKey` that panics while `retain` or `extract_if` puts the kept
+/// entries back into a tree drops the entry it was placing, and the map
+/// counts only the entries it holds: its length is what a walk finds, and
+/// every value is dropped once. The panic lands at every point of the
+/// rebuild in turn: computing a kept key's inline key, fitting the prefix of
+/// a node it closes, fitting the border when the walk finishes, and putting
+/// back what a dropped `extract_if` did not visit.
+#[test]
+fn a_panicking_inline_key_in_retain_or_extract_if_keeps_the_count() {
+    let budget = Cell::new(usize::MAX);
+    let ledger = DropLedger::new();
+    let (count, budgets) = if cfg!(miri) {
+        (40, (0..60).step_by(7))
+    } else {
+        (300, (0..450).step_by(3))
+    };
+    for (trial, left) in budgets.enumerate() {
+        let mut map: BBTreeMap<PanickingName<'_>, Tracked<'_>, WithInlineKey> =
+            BBTreeMap::with_strategy(WithInlineKey);
+        for number in 0..count {
+            let key = PanickingName {
+                name: UserName::from_number(number),
+                budget: &budget,
+            };
+            map.insert(key, ledger.track());
+        }
+        let mut position = 0;
+        let mut every_third = |_: &PanickingName<'_>, _: &mut Tracked<'_>| {
+            position += 1;
+            position % 3 == 0
+        };
+        budget.set(left);
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if trial % 2 == 0 {
+                map.retain(|key, value| !every_third(key, value));
+            } else {
+                map.extract_if(.., &mut every_third)
+                    .take(count / 10)
+                    .for_each(drop);
+            }
+        }));
+        budget.set(usize::MAX);
+        assert_eq!(map.len(), map.iter().count(), "budget {left}");
+        assert_eq!(map.len(), map.iter().rev().count(), "budget {left}");
+        map.check_prefix_order();
+    }
+    ledger.assert_all_dropped_once();
 }

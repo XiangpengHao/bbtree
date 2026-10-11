@@ -851,7 +851,7 @@ impl<'a> NodeInlineKeys<'a> {
 
     /// Whether every slot past `len` holds the greatest inline key
     /// (invariant 6).
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(super) fn pads_with_greatest(self) -> bool {
         with_live_slots!(self, |live| live.pads_with_greatest())
     }
@@ -876,7 +876,7 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
         &self.slots[..self.len]
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     fn pads_with_greatest(self) -> bool {
         let greatest = W::of_window(InlineWord::MAX);
         self.slots[self.len..].iter().all(|&slot| slot == greatest)

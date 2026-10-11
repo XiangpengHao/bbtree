@@ -6,3 +6,7 @@ description = "Blessed B-tree."
 repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

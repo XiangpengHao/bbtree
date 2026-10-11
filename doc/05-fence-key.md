@@ -533,10 +533,9 @@ Every set ties 0% at 4 bytes.
 - **The window's load per level** (`hash32`, 8–9%): a target that doesn't
   wait on the node's `prefix_len`, such as the windows at a few prefix
   lengths kept in registers and picked by a shift, might hide it.
-- **The fuzzer fuzzes `u64` keys only,** which have 2-byte inline keys
-  since D31: nothing fuzzes 8-byte windows or the path without inline keys.
-  A target with string keys sharing prefixes would fuzz the first, one with
-  a key `Auto` doesn't recognize the second.
+- ~~**The fuzzer fuzzes `u64` keys only.**~~ Resolved 2026-10-11: one
+  fuzz target per row of the node plan, string keys sharing prefixes
+  included (`08-fuzzing-verification.md`).
 - **1k string lookups** (see "Width"): about 20% slower than before the
   per-type widths, with fewer instructions.
 - **The padding past `len`** (invariant 6) is now needed only by LLVM's

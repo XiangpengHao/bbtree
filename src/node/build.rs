@@ -31,6 +31,9 @@ pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
     tree: Option<Subtree<K, V, S>>,
     /// The entries pushed so far.
     length: usize,
+    /// The entries `extend` has taken from its iterators: those pushed, and
+    /// each one a panicking `InlineKey` dropped while it was being placed.
+    taken: usize,
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
@@ -38,6 +41,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         Self {
             tree: None,
             length: 0,
+            taken: 0,
         }
     }
 
@@ -49,6 +53,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         Self {
             tree: Some(tree),
             length: 0,
+            taken: 0,
         }
     }
 
@@ -69,8 +74,12 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     ///
     /// The entries go into the rightmost leaf while it has room, found once
     /// per leaf and once per call: callers append runs, not single entries.
+    ///
+    /// An `InlineKey` that panics, computing an entry's inline key or the
+    /// prefix of a node the entry closes, drops the entry, which
+    /// [`Self::dropped`] counts, and leaves the tree well formed.
     pub(crate) fn extend(&mut self, entries: impl IntoIterator<Item = (K, V)>) {
-        let mut entries = entries.into_iter();
+        let mut entries = entries.into_iter().inspect(|_| self.taken += 1);
         let Some(mut next) = entries.next() else {
             return;
         };
@@ -101,16 +110,26 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         }
     }
 
+    /// How many entries `extend` took and dropped, each one a panicking
+    /// `InlineKey` stopped it from placing: a caller that counts the entries
+    /// it hands over, rather than those pushed, subtracts these.
+    pub(crate) fn dropped(&self) -> usize {
+        self.taken - self.length
+    }
+
     /// The tree, with its right border topped up past the minimum from the
     /// full left siblings (`border.rs`), whose prefixes then fit their new
     /// fences, and its number of entries; `None` if nothing was pushed.
+    ///
+    /// Fitting reads keys while the builder still holds the tree: a
+    /// panicking `InlineKey` takes it apart, as it does any tree not
+    /// finished, where a tree held anywhere else would leak.
     pub(crate) fn finish(mut self) -> (Option<Subtree<K, V, S>>, usize) {
-        let mut tree = self.tree.take();
-        if let Some(tree) = &mut tree {
+        if let Some(tree) = &mut self.tree {
             tree.fix_border::<LastEdge>(&mut PageByKind::deallocate);
             tree.fit_border_siblings::<LastEdge>();
         }
-        (tree, self.length)
+        (self.tree.take(), self.length)
     }
 
     /// The rightmost leaf of the tree under `node`.

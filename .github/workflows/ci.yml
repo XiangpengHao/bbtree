@@ -82,6 +82,47 @@ jobs:
           BBTREE_BENCH_DATA: ${{ runner.temp }}/no-bench-data
         run: cargo run --release --bin bbtree-bench -- realkeys tiny --quick --map bbtree
 
+  fuzz:
+    name: fuzz harness (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      # The structural checks that the fuzz targets call, which only fuzzing
+      # builds (`--cfg fuzzing`) compile.
+      - name: Clippy (library, fuzzing build)
+        working-directory: .
+        run: cargo clippy --all-features -- -D warnings
+        env:
+          RUSTFLAGS: --cfg fuzzing
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # `fuzz/.cargo/config.toml` builds with `--cfg fuzzing`, as cargo-fuzz
+      # does.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The harnesses on pseudo-random inputs, and every crash kept in
+      # `regressions/`. The fuzzing itself runs weekly (fuzz.yml).
+      - name: Test
+        run: cargo test
+
   miri:
     name: miri
     runs-on: ubuntu-latest

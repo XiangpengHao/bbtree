@@ -34,7 +34,7 @@ mod insert;
 #[cfg(test)]
 mod insert_tests;
 mod into_iter;
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 mod invariants;
 mod iter;
 mod iter_mut;

@@ -1,8 +1,10 @@
-//! Test-only check of the structural invariants of a [`BBTreeMap`], through
-//! the node API.
+//! Check of the structural invariants of a [`BBTreeMap`], through the node
+//! API: compiled for tests and for fuzzing builds (`--cfg fuzzing`, which
+//! `cargo fuzz` sets), where the fuzz targets (`fuzz/`) call it.
 
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
 use std::vec::Vec;
 
 use crate::inline_key::InlineKeyStrategy;
@@ -32,7 +34,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     ///   keys' windows at its prefix length, in order (D18), which is what
     ///   its fences share, 0 along the tree's borders (05-fence-key.md);
     ///   otherwise none, and prefix 0.
-    pub(crate) fn check_invariants(&self) {
+    ///
+    /// Calls `Ord` and the strategy's inline-key encoding: a map whose keys
+    /// break their contracts fails it.
+    pub fn check_invariants(&self) {
         let Some(root) = &self.root else {
             assert_eq!(self.length, 0, "a map without a root has entries");
             return;
@@ -57,26 +62,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         assert_eq!(walk.entries, self.length, "len() is not the entry count");
     }
 
-    /// The height of the root above the leaves: 0 for a map that is one leaf
-    /// or nothing.
-    pub(super) fn height(&self) -> usize {
-        self.root.as_ref().map_or(0, |root| root.height())
-    }
-
-    /// Every node's prefix length (05-fence-key.md), from the root down, each
-    /// node before its children.
-    pub(super) fn node_prefix_lens(&self) -> Vec<usize> {
-        let mut prefix_lens = Vec::new();
-        if let Some(root) = &self.root {
-            Self::collect_prefix_lens(root.borrow(), &mut prefix_lens);
-        }
-        prefix_lens
-    }
-
-    /// Structural prefix monotonicity is independent of key ordering or
-    /// user encodings. Moving a key to its parent only shortens its window,
-    /// even in a tree whose logical answers are wrong.
-    pub(super) fn check_prefix_order(&self) {
+    /// Panics unless no node's prefix length is shorter than its parent's
+    /// (D44). Calls neither `Ord` nor any encoding: it holds even for keys
+    /// that break their contracts, whose maps give wrong answers.
+    pub fn check_prefix_order(&self) {
         if let Some(root) = &self.root {
             Self::check_prefix_order_in(root.borrow(), 0);
         }
@@ -96,6 +85,25 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
                 Self::check_prefix_order_in(internal.edge_at(index).descend(), prefix);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+    /// The height of the root above the leaves: 0 for a map that is one leaf
+    /// or nothing.
+    pub(super) fn height(&self) -> usize {
+        self.root.as_ref().map_or(0, |root| root.height())
+    }
+
+    /// Every node's prefix length (05-fence-key.md), from the root down, each
+    /// node before its children.
+    pub(super) fn node_prefix_lens(&self) -> Vec<usize> {
+        let mut prefix_lens = Vec::new();
+        if let Some(root) = &self.root {
+            Self::collect_prefix_lens(root.borrow(), &mut prefix_lens);
+        }
+        prefix_lens
     }
 
     fn collect_prefix_lens(

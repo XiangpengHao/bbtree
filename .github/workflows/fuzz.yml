@@ -1,0 +1,139 @@
+name: Fuzz
+
+# Weekly fuzzing (doc/08-fuzzing-verification.md): every target in turn, each
+# for its share of the budget, continuing from the corpora the last run saved,
+# so that the weeks add up. A crash fails the run and is saved as an artifact.
+on:
+  schedule:
+    # Wednesdays at 10:17 UTC: 5:17 in the morning in Madison under daylight
+    # time, 4:17 otherwise. Off the hour, when GitHub delays scheduled runs
+    # the most.
+    - cron: "17 10 * * 3"
+  workflow_dispatch:
+    inputs:
+      percent:
+        description: Fuzzing time, as a percentage of each target's weekly budget
+        default: "100"
+
+permissions:
+  contents: read
+  # To fetch the corpora that the last run saved.
+  actions: read
+
+# Runs that overlap would both start from the same corpora.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    # The budget below is 90 minutes; the rest is building and saving.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fetch the corpora of the last run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p fuzz/corpus
+          # The newest earlier run that saved its corpora; the first run
+          # starts from nothing.
+          for run_id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow fuzz.yml \
+              --limit 10 --json databaseId --jq '.[].databaseId'); do
+            [ "$run_id" = "$GITHUB_RUN_ID" ] && continue
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+                --name fuzz-corpora --dir fuzz/corpus; then
+              echo "Continuing from the corpora of run $run_id"
+              break
+            fi
+          done
+
+      # With AddressSanitizer, cargo-fuzz's default, and the library's debug
+      # assertions, its own cross-checks.
+      - name: Build the targets
+        run: cargo fuzz build --debug-assertions
+
+      - name: Fuzz
+        env:
+          PERCENT: ${{ inputs.percent || '100' }}
+        run: |
+          # Minutes a week per target, by how much code a bug there would
+          # reach and how much harm it would do (doc/08-fuzzing-verification.md).
+          budget=(
+            "map_heap_byte_strings 20"
+            "user_code_panics 20"
+            "map_integers 12"
+            "map_user_inline_keys 12"
+            "map_plain_keys 10"
+            "set_algebra 10"
+            "map_byte_arrays 6"
+          )
+          failed=()
+          echo "| target | seconds | result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for entry in "${budget[@]}"; do
+            read -r target minutes <<< "$entry"
+            seconds=$(( minutes * 60 * PERCENT / 100 ))
+            echo "::group::$target, $seconds s"
+            # A crash ends the target's run, not the others'. An input that
+            # runs over a minute is reported as a hang.
+            if cargo fuzz run --debug-assertions "$target" -- \
+                -max_total_time="$seconds" -fork="$(nproc)" -timeout=60; then
+              result=clean
+            else
+              result="**crashed**"
+              failed+=("$target")
+            fi
+            echo "::endgroup::"
+            echo "| $target | $seconds | $result |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            {
+              echo
+              echo "The crashing inputs are in the \`fuzz-crashes\` artifact. To replay"
+              echo "one, minimize it, and keep it once fixed:"
+              echo
+              echo '```'
+              echo "cargo fuzz run --debug-assertions <target> <input>"
+              echo "cargo fuzz tmin --debug-assertions <target> <input>"
+              echo "cp <minimized input> fuzz/regressions/<target>/<what it found>"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::crashed: ${failed[*]}"
+            exit 1
+          fi
+
+      - name: Save the corpora
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpora
+          path: fuzz/corpus
+          # Three weeks: the next run, or the one after a skipped week,
+          # continues from them.
+          retention-days: 21
+
+      - name: Save the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts
+          retention-days: 90
