@@ -12,6 +12,7 @@ use core::ops::RangeBounds;
 use super::{BBTreeSet, SetValZST};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::{self, Keys};
+use crate::node::handle::KeyRun;
 
 /// An iterator over the items of a `BBTreeSet`.
 ///
@@ -94,6 +95,15 @@ impl<T, S> Clone for Iter<'_, T, S> {
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Iter<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Iter").field(&self.iter).finish()
+    }
+}
+
+impl<'a, T, S: InlineKeyStrategy<T>> Iter<'a, T, S> {
+    /// The elements after the walk's front, a leaf's run at a time, which
+    /// the walk moves past at once (`node/walk.rs`): what the operations on
+    /// two sets visit.
+    pub(super) fn next_key_run(&mut self) -> Option<KeyRun<'a, T>> {
+        self.iter.next_key_run()
     }
 }
 

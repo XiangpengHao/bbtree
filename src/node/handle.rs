@@ -1646,6 +1646,124 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> LeafRun<B, K, V, S> {
     }
 }
 
+impl<'a, K, V, S: InlineKeyStrategy<K>> LeafRun<Immut<'a>, K, V, S> {
+    /// The keys left in the run, which it moves past, staying in its leaf
+    /// with none left: for a loop to visit them without the walk.
+    pub(super) fn take_keys(&mut self) -> KeyRun<'a, K> {
+        let stride = NodePtr::<K, V, S>::leaf_layout().keys.key_stride;
+        let (next, len) = if Self::uses_pointers() {
+            // SAFETY: both pointers lie in the same leaf's key slots, or at
+            // their end, `front` not past `back`, a whole number of strides
+            // apart.
+            let bytes = unsafe {
+                self.back
+                    .cast::<u8>()
+                    .offset_from_unsigned(self.front.cast())
+            };
+            let next = self.front;
+            self.front = self.back;
+            (next, bytes / stride)
+        } else {
+            // SAFETY: `start <= end <= len` (validated when made), so key
+            // `start` is a slot of the leaf, or its end.
+            let next = unsafe { self.front.byte_add(self.start * stride) };
+            let len = self.end - self.start;
+            self.start = self.end;
+            (next, len)
+        };
+        // SAFETY: the run's keys are initialized and shared for `'a`, `len`
+        // of them from `next`, `stride` bytes apart (the leaf's layout).
+        unsafe { KeyRun::new(next, stride, len) }
+    }
+}
+
+/// Keys of one node, in order, which a walk has moved past: for a loop to
+/// visit them without the walk, which it touches once per run rather than
+/// once per key (a merge of two sets). Copied into a local, the run lives
+/// in registers.
+///
+/// Invariant: `left` keys from `next`, `stride` bytes apart, are
+/// initialized and shared for `'a`.
+pub(crate) struct KeyRun<'a, K> {
+    next: *const K,
+    stride: usize,
+    left: usize,
+    _borrow: PhantomData<&'a K>,
+}
+
+impl<K> Clone for KeyRun<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K> Copy for KeyRun<'_, K> {}
+
+impl<'a, K> KeyRun<'a, K> {
+    /// No keys.
+    pub(crate) const EMPTY: Self = Self {
+        next: core::ptr::null(),
+        stride: 0,
+        left: 0,
+        _borrow: PhantomData,
+    };
+
+    /// # Safety
+    ///
+    /// The type invariant holds for `next`, `stride` and `len`.
+    unsafe fn new(next: NonNull<K>, stride: usize, len: usize) -> Self {
+        Self {
+            next: next.as_ptr(),
+            stride,
+            left: len,
+            _borrow: PhantomData,
+        }
+    }
+
+    /// `key` alone.
+    pub(crate) fn one(key: &'a K) -> Self {
+        // SAFETY: one key, which `key` keeps shared for `'a`.
+        unsafe { Self::new(NonNull::from(key), 0, 1) }
+    }
+
+    /// How many keys are left.
+    pub(crate) fn len(&self) -> usize {
+        self.left
+    }
+
+    /// The next key, staying before it.
+    #[inline]
+    pub(crate) fn peek(&self) -> Option<&'a K> {
+        // SAFETY: with a key left, `next` is that key (type invariant).
+        (self.left > 0).then(|| unsafe { &*self.next })
+    }
+
+    /// Moves past the next key, if any.
+    #[inline]
+    pub(crate) fn advance(&mut self) {
+        if self.left > 0 {
+            self.left -= 1;
+            // Past the last key, the pointer is never read.
+            self.next = self.next.wrapping_byte_add(self.stride);
+        }
+    }
+}
+
+impl<'a, K> Iterator for KeyRun<'a, K> {
+    type Item = &'a K;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a K> {
+        let key = self.peek()?;
+        self.advance();
+        Some(key)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left, Some(self.left))
+    }
+}
+
 /// Initialized key/value slots from a validated leaf run, with that run's
 /// borrow. It caches only pointers, never references to previously yielded
 /// mutable values. The walk proves each logical entry is handed out once.

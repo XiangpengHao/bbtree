@@ -7,8 +7,10 @@
 #![forbid(unsafe_code)]
 
 use core::cmp::Ordering;
+use core::ops::ControlFlow;
 
 use super::BBTreeSet;
+use super::merge::{MergeSides, MergeStep};
 use crate::inline_key::InlineKeyStrategy;
 
 impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
@@ -64,16 +66,15 @@ impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
         let mut other_iter = other.iter();
         other_iter.next();
         other_iter.next_back();
-        self_iter.all(|self_next| {
-            for other_next in other_iter.by_ref() {
-                match other_next.cmp(self_next) {
-                    Ordering::Less => {}
-                    Ordering::Equal => return true,
-                    Ordering::Greater => return false,
-                }
-            }
-            false
-        })
+        // An element of `self` alone, or left once `other` ends, is missing.
+        let all_found = MergeSides::new(self_iter, other_iter).try_fold_steps::<_, _, true, false>(
+            (),
+            |(), step| match step {
+                MergeStep::Left(_) => ControlFlow::Break(()),
+                MergeStep::Right(_) | MergeStep::Both(_) => ControlFlow::Continue(()),
+            },
+        );
+        all_found.is_continue()
     }
 
     /// Returns `true` if the set is a superset of another, i.e., `self`

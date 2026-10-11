@@ -322,8 +322,8 @@ where
 
     /// Steps `ours` and `theirs`, over the same combination of two sets,
     /// alike to their ends: the same items and size hints, and the same
-    /// prints while `printed`. Their `min`, and clones taken at a random
-    /// step, go on alike too.
+    /// prints while `printed`. Their `min` and `fold` from the start, and
+    /// clones taken at a random step, folded and stepped, go on alike too.
     fn assert_same_combination<'a>(
         rng: &TestRng,
         mut ours: impl Iterator<Item = &'a T> + Clone + Debug,
@@ -333,6 +333,7 @@ where
         T: 'a,
     {
         assert_eq!(ours.clone().min(), theirs.clone().min());
+        assert_eq!(Self::folded(ours.clone()), Self::folded(theirs.clone()));
         let mut clones = None;
         loop {
             assert_eq!(ours.size_hint(), theirs.size_hint());
@@ -350,7 +351,9 @@ where
             }
         }
         if let Some((ours, theirs)) = clones {
-            assert!(ours.eq(theirs));
+            let (ours_rest, theirs_rest) = (ours.clone(), theirs.clone());
+            assert_eq!(Self::folded(ours), Self::folded(theirs));
+            assert!(ours_rest.eq(theirs_rest));
         }
     }
 

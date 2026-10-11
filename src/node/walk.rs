@@ -75,7 +75,7 @@ use core::ops::Bound;
 use core::mem::needs_drop;
 
 use super::handle::{
-    CopyableBorrow, Dying, Edge, ForceResult, Head, Immut, Internal, Kv, Leaf, LeafEntry,
+    CopyableBorrow, Dying, Edge, ForceResult, Head, Immut, Internal, KeyRun, Kv, Leaf, LeafEntry,
     LeafOrInternal, LeafRun, NodeByKind, NodeRef, Subtree, ValMut,
 };
 use super::inline_keys::SearchKey;
@@ -553,6 +553,19 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V
     }
 }
 
+impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> BorrowedWalk<Immut<'a>, K, V, S> {
+    /// The keys after the front end, up to its leaf's end or the back end,
+    /// whichever comes first; or, where the front end crosses into another
+    /// leaf, the next key alone, a separator or the new leaf's first. The
+    /// walk moves past all of them at once, for a loop to visit them without
+    /// it. `None` once the ends meet.
+    pub(crate) fn next_key_run(&mut self) -> Option<KeyRun<'a, K>> {
+        let run = self.range.next_key_run()?;
+        self.length -= run.len();
+        Some(run)
+    }
+}
+
 /// A walk over every entry of a tree, which counts the entries left between
 /// its ends. An end that has not started starts at the first or last entry
 /// the first time it moves, so the walk costs nothing until then, and one end
@@ -764,6 +777,22 @@ impl<K, V, S> Clone for RangeWalk<Immut<'_>, K, V, S> {
             ends: self.ends,
             run: self.run,
         }
+    }
+}
+
+impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> RangeWalk<Immut<'a>, K, V, S> {
+    /// See [`BorrowedWalk::next_key_run`].
+    fn next_key_run(&mut self) -> Option<KeyRun<'a, K>> {
+        if let Some(run) = &mut self.run
+            && !run.reverse
+        {
+            let keys = run.entries.take_keys();
+            if keys.len() > 0 {
+                return Some(keys);
+            }
+        }
+        let (key, _) = self.step_outside_run::<FirstEdge>()?;
+        Some(KeyRun::one(key))
     }
 }
 

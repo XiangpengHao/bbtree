@@ -1,5 +1,5 @@
 //! The symmetric difference of two sets: [`SymmetricDifference`], which
-//! merges their iterators (`merge.rs`) and skips the elements of both, and
+//! merges their elements (`merge.rs`) and skips those of both, and
 //! `^`, which builds a set of it, as std's.
 
 #![forbid(unsafe_code)]
@@ -9,7 +9,7 @@ use core::iter::FusedIterator;
 use core::ops::BitXor;
 
 use super::BBTreeSet;
-use super::merge::AscendingPairs;
+use super::merge::{HeldSide, MergeSides, MergeStep};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the symmetric difference of
@@ -21,24 +21,43 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 /// [`symmetric_difference`]: BBTreeSet::symmetric_difference
 #[must_use = "this returns the difference as an iterator, \
               without modifying either input set"]
-pub struct SymmetricDifference<'a, T: 'a, S = Auto>(AscendingPairs<'a, T, S>);
+pub struct SymmetricDifference<'a, T: 'a, S = Auto> {
+    sides: MergeSides<'a, T, S>,
+    /// The side std's would hold an element of, taken out of its iterator.
+    held: HeldSide,
+}
 
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for SymmetricDifference<'a, T, S> {
     type Item = &'a T;
 
+    // Inlined into the caller's loop, see `merge.rs`.
+    #[inline(always)]
     fn next(&mut self) -> Option<&'a T> {
         loop {
-            let (a_next, b_next) = self.0.next_pair();
-            if a_next.and(b_next).is_none() {
-                return a_next.or(b_next);
+            let (step, held) = self.sides.next_step()?;
+            self.held = held;
+            match step {
+                MergeStep::Left(element) | MergeStep::Right(element) => return Some(element),
+                MergeStep::Both(_) => {}
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (a_len, b_len) = self.0.lens();
+        let (a_len, b_len) = self.sides.lens();
         // No overflow, as for `Union`.
         (0, Some(a_len + b_len))
+    }
+
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.sides
+            .fold_steps::<A, true, true>(accumulator, |accumulator, step| match step {
+                MergeStep::Left(element) | MergeStep::Right(element) => fold(accumulator, element),
+                MergeStep::Both(_) => accumulator,
+            })
     }
 
     fn min(mut self) -> Option<&'a T> {
@@ -50,13 +69,28 @@ impl<T: Ord, S: InlineKeyStrategy<T>> FusedIterator for SymmetricDifference<'_, 
 
 impl<T, S> Clone for SymmetricDifference<'_, T, S> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            sides: self.sides.clone(),
+            held: self.held,
+        }
     }
 }
 
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
+/// Prints as std's does: `SymmetricDifference(MergeIterInner(..))`.
+impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SymmetricDifference").field(&self.0).finish()
+        f.debug_tuple("SymmetricDifference")
+            .field(&PrintedMerge(self))
+            .finish()
+    }
+}
+
+/// A symmetric difference's merge, printed as std's `MergeIterInner`.
+struct PrintedMerge<'d, 'a, T, S>(&'d SymmetricDifference<'a, T, S>);
+
+impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.sides.print_as_std(f, self.0.held)
     }
 }
 
@@ -85,7 +119,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     where
         T: Ord,
     {
-        SymmetricDifference(AscendingPairs::new(self.iter(), other.iter()))
+        SymmetricDifference {
+            sides: MergeSides::new(self.iter(), other.iter()),
+            held: HeldSide::Neither,
+        }
     }
 }
 

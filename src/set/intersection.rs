@@ -13,6 +13,7 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::BitAnd;
 
+use super::merge::{MergeSides, MergeStep};
 use super::{BBTreeSet, Iter};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
@@ -34,11 +35,9 @@ pub struct Intersection<'a, T: 'a, S: InlineKeyStrategy<T> = Auto> {
     reason = "the iterator lives by value, as std's; boxing the walks would allocate for every set operation"
 )]
 enum IntersectionStrategy<'a, T, S: InlineKeyStrategy<T>> {
-    /// Walks both sets, of similar sizes, side by side.
-    Stitch {
-        a: Iter<'a, T, S>,
-        b: Iter<'a, T, S>,
-    },
+    /// Walks both sets, of similar sizes, side by side, a leaf's run of
+    /// each at a time (`merge.rs`).
+    Stitch(MergeSides<'a, T, S>),
     /// Walks the small set and looks each element up in the large one.
     Search {
         small_iter: Iter<'a, T, S>,
@@ -51,15 +50,19 @@ enum IntersectionStrategy<'a, T, S: InlineKeyStrategy<T>> {
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Intersection<'a, T, S> {
     type Item = &'a T;
 
+    // Inlined into the caller's loop, see `merge.rs`.
+    #[inline(always)]
     fn next(&mut self) -> Option<&'a T> {
         match &mut self.strategy {
-            IntersectionStrategy::Stitch { a, b } => {
-                let mut a_next = a.next()?;
-                let mut b_next = b.next()?;
+            // Each side's next element is taken out before comparing, as in
+            // std's: the one left over when the other side ends is gone.
+            IntersectionStrategy::Stitch(MergeSides { left, right }) => {
+                let mut a_next = left.next()?;
+                let mut b_next = right.next()?;
                 loop {
                     match a_next.cmp(b_next) {
-                        Ordering::Less => a_next = a.next()?,
-                        Ordering::Greater => b_next = b.next()?,
+                        Ordering::Less => a_next = left.next()?,
+                        Ordering::Greater => b_next = right.next()?,
                         Ordering::Equal => return Some(a_next),
                     }
                 }
@@ -74,10 +77,38 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Intersection<'a, T, S> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         match &self.strategy {
-            IntersectionStrategy::Stitch { a, b } => (0, Some(a.len().min(b.len()))),
+            IntersectionStrategy::Stitch(sides) => {
+                let (a_len, b_len) = sides.lens();
+                (0, Some(a_len.min(b_len)))
+            }
             IntersectionStrategy::Search { small_iter, .. } => (0, Some(small_iter.len())),
             IntersectionStrategy::Answer(None) => (0, Some(0)),
             IntersectionStrategy::Answer(Some(_)) => (1, Some(1)),
+        }
+    }
+
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        match self.strategy {
+            IntersectionStrategy::Stitch(sides) => {
+                sides.fold_steps::<A, false, false>(accumulator, |accumulator, step| match step {
+                    MergeStep::Both(element) => fold(accumulator, element),
+                    MergeStep::Left(_) | MergeStep::Right(_) => accumulator,
+                })
+            }
+            IntersectionStrategy::Search {
+                small_iter,
+                large_set,
+            } => small_iter.fold(accumulator, |accumulator, element| {
+                if large_set.contains(element) {
+                    fold(accumulator, element)
+                } else {
+                    accumulator
+                }
+            }),
+            IntersectionStrategy::Answer(answer) => answer.into_iter().fold(accumulator, fold),
         }
     }
 
@@ -91,10 +122,7 @@ impl<T: Ord, S: InlineKeyStrategy<T>> FusedIterator for Intersection<'_, T, S> {
 impl<T, S: InlineKeyStrategy<T>> Clone for Intersection<'_, T, S> {
     fn clone(&self) -> Self {
         let strategy = match &self.strategy {
-            IntersectionStrategy::Stitch { a, b } => IntersectionStrategy::Stitch {
-                a: a.clone(),
-                b: b.clone(),
-            },
+            IntersectionStrategy::Stitch(sides) => IntersectionStrategy::Stitch(sides.clone()),
             IntersectionStrategy::Search {
                 small_iter,
                 large_set,
@@ -118,10 +146,10 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Intersection<'_, T, 
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for IntersectionStrategy<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stitch { a, b } => f
+            Self::Stitch(sides) => f
                 .debug_struct("Stitch")
-                .field("a", a)
-                .field("b", b)
+                .field("a", &sides.left.printed_as_iter(false))
+                .field("b", &sides.right.printed_as_iter(false))
                 .finish(),
             Self::Search {
                 small_iter,
@@ -180,10 +208,7 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
                     small_iter: other.iter(),
                     large_set: self,
                 },
-                _ => IntersectionStrategy::Stitch {
-                    a: self.iter(),
-                    b: other.iter(),
-                },
+                _ => IntersectionStrategy::Stitch(MergeSides::new(self.iter(), other.iter())),
             }
         } else {
             IntersectionStrategy::Answer(None)

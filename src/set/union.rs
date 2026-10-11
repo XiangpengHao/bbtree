@@ -1,4 +1,4 @@
-//! The union of two sets: [`Union`], which merges their iterators
+//! The union of two sets: [`Union`], which merges their elements
 //! (`merge.rs`), and `|`, which builds a set of it, as std's.
 
 #![forbid(unsafe_code)]
@@ -8,7 +8,7 @@ use core::iter::FusedIterator;
 use core::ops::BitOr;
 
 use super::BBTreeSet;
-use super::merge::AscendingPairs;
+use super::merge::{HeldSide, MergeSides};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the union of `BBTreeSet`s.
@@ -19,21 +19,38 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 /// [`union`]: BBTreeSet::union
 #[must_use = "this returns the union as an iterator, \
               without modifying either input set"]
-pub struct Union<'a, T: 'a, S = Auto>(AscendingPairs<'a, T, S>);
+pub struct Union<'a, T: 'a, S = Auto> {
+    sides: MergeSides<'a, T, S>,
+    /// The side std's would hold an element of, taken out of its iterator.
+    held: HeldSide,
+}
 
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Union<'a, T, S> {
     type Item = &'a T;
 
+    // Inlined into the caller's loop, see `merge.rs`.
+    #[inline(always)]
     fn next(&mut self) -> Option<&'a T> {
-        let (a_next, b_next) = self.0.next_pair();
-        a_next.or(b_next)
+        let (step, held) = self.sides.next_step()?;
+        self.held = held;
+        Some(step.element())
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (a_len, b_len) = self.0.lens();
+        let (a_len, b_len) = self.sides.lens();
         // No overflow: every element takes room in a node, even a zero-sized
         // one, so two sets can't hold `usize::MAX` elements between them.
         (a_len.max(b_len), Some(a_len + b_len))
+    }
+
+    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    where
+        F: FnMut(A, Self::Item) -> A,
+    {
+        self.sides
+            .fold_steps::<A, true, true>(accumulator, |accumulator, step| {
+                fold(accumulator, step.element())
+            })
     }
 
     fn min(mut self) -> Option<&'a T> {
@@ -45,13 +62,26 @@ impl<T: Ord, S: InlineKeyStrategy<T>> FusedIterator for Union<'_, T, S> {}
 
 impl<T, S> Clone for Union<'_, T, S> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            sides: self.sides.clone(),
+            held: self.held,
+        }
     }
 }
 
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
+/// Prints as std's does: `Union(MergeIterInner(..))`.
+impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Union").field(&self.0).finish()
+        f.debug_tuple("Union").field(&PrintedMerge(self)).finish()
+    }
+}
+
+/// A union's merge, printed as std's `MergeIterInner`.
+struct PrintedMerge<'u, 'a, T, S>(&'u Union<'a, T, S>);
+
+impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.sides.print_as_std(f, self.0.held)
     }
 }
 
@@ -79,7 +109,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     where
         T: Ord,
     {
-        Union(AscendingPairs::new(self.iter(), other.iter()))
+        Union {
+            sides: MergeSides::new(self.iter(), other.iter()),
+            held: HeldSide::Neither,
+        }
     }
 }
 

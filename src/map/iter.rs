@@ -12,7 +12,7 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::Immut;
+use crate::node::handle::{Immut, KeyRun};
 use crate::node::walk::{BorrowedWalk, RangeWalk};
 
 #[cfg(test)]
@@ -199,6 +199,14 @@ impl<K, V, S> Clone for Keys<'_, K, V, S> {
 impl<K: fmt::Debug, V, S: InlineKeyStrategy<K>> fmt::Debug for Keys<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.clone()).finish()
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> Keys<'a, K, V, S> {
+    /// See [`BorrowedWalk::next_key_run`]: the keys a merge of two sets
+    /// visits a leaf at a time.
+    pub(crate) fn next_key_run(&mut self) -> Option<KeyRun<'a, K>> {
+        self.inner.walk.next_key_run()
     }
 }
 
