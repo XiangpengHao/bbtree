@@ -837,6 +837,7 @@ impl Workload {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn u64_to_u64_matches_std() {
     let workload = if cfg!(miri) {
         Workload {
@@ -857,6 +858,7 @@ fn u64_to_u64_matches_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn string_to_string_matches_std() {
     let workload = if cfg!(miri) {
         Workload {
@@ -877,6 +879,7 @@ fn string_to_string_matches_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn wide_keys_match_std() {
     let workload = if cfg!(miri) {
         // Height 2 already has an internal node split into a parent with
@@ -1014,6 +1017,7 @@ fn comparisons_and_hashes_match_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn zero_sized_keys_and_values_match_std() {
     let mut map = BBTreeMap::new();
     assert_eq!(map.insert((), ()), None);
@@ -1056,6 +1060,7 @@ fn byte_keys_with_zero_sized_values_match_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn over_aligned_values_match_std() {
     Workload {
         random_steps: if cfg!(miri) { 150 } else { 20_000 },
@@ -1090,6 +1095,7 @@ fn over_aligned_values_match_std() {
 /// tree of half-full small nodes, from ascending inserts, and in one thinned by
 /// removals toward the minimum fill, whose borders have little to spare.
 #[test]
+#[cfg_attr(miri, ignore = "its Miri size misses the height it asserts")]
 fn split_off_at_every_position_matches_std() {
     // These small nodes split evenly: 1500 ascending entries make a tree
     // 3 levels tall, and the smaller CI-only Miri case reaches 2.

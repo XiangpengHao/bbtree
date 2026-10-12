@@ -34,6 +34,7 @@ fn ten_digits(number: usize) -> String {
 /// A built-in stored key can be borrowed through an unknown query type.
 /// Its full ordering must remain available even in locally prefixed nodes.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn auto_strings_accept_an_unrecognized_borrowed_query() {
     trait TextQuery {
         fn text(&self) -> &str;
@@ -213,6 +214,7 @@ fn workload(native_random_steps: usize, native_key_space: usize) -> Workload {
 /// `String` keys have inline keys by default, and every lookup uses them:
 /// by `String` and by `str`.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn string_keys_match_std_by_string_and_by_str() {
     let workload = workload(100_000, 1 << 16);
     workload.run::<String, u64, Auto>(61);
@@ -252,6 +254,7 @@ fn string_keys_match_std_by_string_and_by_str() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_vec_keys_match_std_by_vec_and_by_slice() {
     let workload = workload(100_000, 1 << 16);
     workload.run::<Vec<u8>, u64, Auto>(63);
@@ -289,6 +292,7 @@ fn byte_vec_keys_match_std_by_vec_and_by_slice() {
 /// Every key ties on its inline key with every other: the search over inline
 /// keys finds one run, the whole node, and the full keys decide.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn keys_sharing_long_prefixes_match_std() {
     let workload = workload(40_000, 1 << 14);
     workload.run::<Box<str>, u64, Auto>(65);
@@ -356,6 +360,7 @@ fn short_keys_match_std() {
 /// A newtype that opts in has inline keys; a lookup by `str`, another
 /// borrowed form, compares full keys instead, with the same answers.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
     let workload = workload(100_000, 1 << 16);
     workload.run::<UserName, u64, WithInlineKey>(69);
@@ -374,6 +379,7 @@ fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
 /// Integers opt in, and their nodes keep 2 bytes of their inline keys:
 /// unsigned and signed, 8 and 16 bytes, maps and sets.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn integer_keys_match_std() {
     let workload = workload(100_000, 1 << 16);
     workload.run::<u64, u64, WithInlineKey>(76);
@@ -386,6 +392,7 @@ fn integer_keys_match_std() {
 /// candidate. Borrowed slices still distinguish proper zero-padded
 /// prefixes, and differences anywhere in the full array must be checked.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn fixed_array_point_queries_match_std() {
     struct ArrayQueries;
 
@@ -429,6 +436,7 @@ fn fixed_array_point_queries_match_std() {
 /// Strings whose nodes keep 2 or 4 bytes of their inline keys: runs of
 /// tied inline keys are long, and the full keys decide within them.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn narrow_inline_keys_match_std() {
     let workload = workload(100_000, 1 << 16);
     workload.run::<NarrowName<2>, u64, WithInlineKey>(80);

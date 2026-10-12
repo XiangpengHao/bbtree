@@ -1,6 +1,9 @@
 # bbtree
 
-[![CI](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml/badge.svg)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml)
+[![test](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
+[![miri](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
+[![sanitizer](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
+[![fuzzing](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
 
 Blessed B-tree:
 1. Drop-in replacement for std's `BTreeMap`/`BTreeSet`.

@@ -1,4 +1,5 @@
-name: Fuzz
+# Named for its README badge.
+name: fuzzing
 
 # Fuzzing (doc/08-fuzzing-verification.md), weekly and for every release
 # (ci.yml): every target in turn, each for its share of the run, continuing

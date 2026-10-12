@@ -1,14 +1,16 @@
-name: CI
+# Named for its README badge, as are miri.yml, sanitizer.yml and fuzz.yml.
+name: test
 
 on:
   push:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel a pull request's superseded runs. Every commit on main finishes its
+# run, so the README badge reports it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -146,15 +148,8 @@ jobs:
       - name: Test
         run: cargo test
 
-  # The release checks take hours each, so they run for releases, and weekly
-  # in their own workflows, rather than for every change. A new one (Verus,
-  # later) is a `release-` job here, added to the merge gate's `needs`.
-  release-miri:
-    name: release miri
-    needs: plan
-    if: needs.plan.outputs.release == 'true'
-    uses: ./.github/workflows/miri.yml
-
+  # The release checks: the fuzzing takes hours, so it runs for releases (and
+  # weekly, in fuzz.yml) rather than for every change.
   release-fuzz:
     name: release fuzz
     needs: plan
@@ -182,13 +177,15 @@ jobs:
       - name: Package
         run: cargo publish --dry-run --locked
 
-  # The one check that main's ruleset requires (.github/rulesets/main.json),
-  # so the jobs above can change without touching the ruleset. It always
-  # runs: a required check that is skipped counts as passed.
+  # This workflow's one required check (.github/rulesets/main.json), so the
+  # jobs above can change without touching the ruleset. It always runs: a
+  # required check that is skipped counts as passed. Miri and the sanitizer
+  # are required checks of their own (miri.yml, sanitizer.yml), as Verus will
+  # be.
   merge-gate:
     name: merge gate
     if: always()
-    needs: [plan, check, bench, fuzz, release-miri, release-fuzz, release-package]
+    needs: [plan, check, bench, fuzz, release-fuzz, release-package]
     runs-on: ubuntu-latest
     steps:
       - name: Check that every job passed

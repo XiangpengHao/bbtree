@@ -26,6 +26,7 @@ fn full_iteration_does_not_require_ordering() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn borrowed_walk_counts_steps_from_both_ends() {
     for length in [0, 1, 27, 128, 8192] {
         let mut maps = FoldMaps::new(length);
@@ -172,6 +173,7 @@ impl FoldMaps {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn folds_cover_different_leaf_strides() {
     #[derive(Clone, Debug, Eq, PartialEq)]
     #[repr(align(64))]
@@ -194,6 +196,7 @@ fn folds_cover_different_leaf_strides() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn cached_runs_resume_after_try_fold_breaks() {
     use core::ops::ControlFlow;
 
@@ -282,6 +285,7 @@ fn zero_stride_runs_count_logical_entries() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn folds_match_std_after_both_ends_move() {
     for length in [0, 1, 16, 256, 8192] {
         let maps = FoldMaps::new(length);
@@ -330,6 +334,7 @@ fn folds_match_std_after_both_ends_move() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn unbounded_ranges_can_switch_direction_at_exhaustion() {
     for length in [0, 1, 16, 8192] {
         for bounds in [
@@ -375,6 +380,7 @@ fn unbounded_ranges_can_switch_direction_at_exhaustion() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn range_runs_preserve_mixed_ends_clones_and_mutable_reborrows() {
     for length in [1, 27, 128, 8192] {
         for bounds in [
@@ -454,6 +460,7 @@ fn range_runs_preserve_mixed_ends_clones_and_mutable_reborrows() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn mutable_folds_keep_all_handed_out_references_disjoint() {
     for reverse in [false, true] {
         let mut maps = FoldMaps::new(8192);
@@ -508,6 +515,7 @@ fn mutable_folds_keep_all_handed_out_references_disjoint() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn a_panicking_fold_leaves_the_same_mutations_as_std() {
     for reverse in [false, true] {
         let mut maps = FoldMaps::new(8192);
