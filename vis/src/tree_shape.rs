@@ -1,12 +1,15 @@
-//! The shape of a built tree, level by level in key order: what the canvas
-//! draws from at every zoom without reading every page on every frame. It
-//! caches what bbtree's node views say about each node
+//! The shape of a built tree, level by level in key order: where each node
+//! is, its parent and children, and its key count and prefix, so the panels
+//! can name nodes, walk to neighbors and draw gauges without a page read.
+//! It caches what bbtree's node views say about each node
 //! (`BBTreeMap::inspect`), and computes nothing that bbtree computes.
 
 use std::ops::Range;
 
 use bbtree::InlineKeyStrategy;
 use bbtree::inspect::{NodeView, TreeView};
+
+use crate::count_text::Group;
 
 /// A node's place in the tree: its level, 0 for the leaves, and its index
 /// among that level's nodes, in key order.
@@ -34,19 +37,13 @@ impl NodeAt {
 pub(crate) struct TreeShape {
     levels: Vec<Level>,
     entries: usize,
-    /// The longest prefix any node skips, which colors by prefix scale to.
-    longest_prefix: usize,
     leaf_page_size: usize,
-    internal_page_size: Option<usize>,
+    internal_page_size: usize,
 }
 
-/// One level's nodes, in key order. The x axis counts leaves: leaf `i`
-/// spans `i..i + 1`, and an internal node the leaves below it.
+/// One level's nodes, in key order.
 pub(crate) struct Level {
     capacity: usize,
-    min_len: usize,
-    /// Node `i` covers leaves `first_leaf[i]..first_leaf[i + 1]`.
-    first_leaf: Vec<u32>,
     /// Node `i`'s children are nodes `first_child[i]..first_child[i + 1]`
     /// of the level below; empty at the leaves.
     first_child: Vec<u32>,
@@ -54,22 +51,6 @@ pub(crate) struct Level {
     parent: Vec<u32>,
     len: Vec<u16>,
     prefix_len: Vec<u16>,
-    /// Running sums: entry `i` sums nodes `0..i`, so that a run of nodes
-    /// has its mean in constant time, however many it holds.
-    len_sum: Vec<u64>,
-    prefix_sum: Vec<u64>,
-}
-
-/// One level's numbers, for the tree's summary.
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct LevelStats {
-    pub(crate) level: usize,
-    pub(crate) nodes: usize,
-    pub(crate) keys: u64,
-    pub(crate) capacity: usize,
-    pub(crate) mean_fill: f64,
-    pub(crate) min_len: usize,
-    pub(crate) fewest_keys: usize,
 }
 
 impl TreeShape {
@@ -80,14 +61,14 @@ impl TreeShape {
         tree: &TreeView<'_, K, V, S>,
         entries: usize,
     ) -> Self {
+        let mut shape = Self {
+            levels: Vec::new(),
+            entries,
+            leaf_page_size: 0,
+            internal_page_size: 0,
+        };
         let Some(root) = tree.root() else {
-            return Self {
-                levels: Vec::new(),
-                entries,
-                longest_prefix: 0,
-                leaf_page_size: 0,
-                internal_page_size: None,
-            };
+            return shape;
         };
         let mut top_down: Vec<Vec<NodeView<'_, K, V, S>>> = vec![vec![root]];
         let mut first_children: Vec<Vec<u32>> = Vec::new();
@@ -102,39 +83,23 @@ impl TreeShape {
             first_children.push(first_child);
             top_down.push(below);
         }
-        let leaf_page_size = top_down
+        shape.leaf_page_size = top_down
             .last()
             .map_or(0, |leaves| leaves[0].page_map().size());
-        let internal_page_size = (top_down.len() > 1).then(|| root.page_map().size());
-
-        let mut levels: Vec<Level> = Vec::with_capacity(top_down.len());
+        if top_down.len() > 1 {
+            shape.internal_page_size = root.page_map().size();
+        }
         for (depth, nodes) in top_down.iter().enumerate().rev() {
-            let first_child = first_children.get(depth).cloned().unwrap_or_default();
-            let first_leaf = match levels.last() {
-                None => (0..=nodes.len() as u32).collect(),
-                Some(below) => first_child
-                    .iter()
-                    .map(|&child| below.first_leaf[child as usize])
-                    .collect(),
-            };
-            let level = Level::new(nodes, first_leaf, first_child);
-            if let Some(below) = levels.last_mut() {
+            let level = Level::new(
+                nodes,
+                first_children.get(depth).cloned().unwrap_or_default(),
+            );
+            if let Some(below) = shape.levels.last_mut() {
                 below.parent = level.parents_of_children(below.node_count());
             }
-            levels.push(level);
+            shape.levels.push(level);
         }
-        let longest_prefix = levels.iter().map(Level::longest_prefix).max().unwrap_or(0);
-        Self {
-            levels,
-            entries,
-            longest_prefix,
-            leaf_page_size,
-            internal_page_size,
-        }
-    }
-
-    pub(crate) fn longest_prefix(&self) -> usize {
-        self.longest_prefix
+        shape
     }
 
     /// Levels above the leaves; `None` for a tree without nodes.
@@ -161,22 +126,48 @@ impl TreeShape {
     /// The bytes all the tree's pages take.
     pub(crate) fn page_bytes(&self) -> usize {
         let internal_nodes = self.node_count() - self.leaf_count();
-        self.leaf_count() * self.leaf_page_size
-            + internal_nodes * self.internal_page_size.unwrap_or(0)
+        self.leaf_count() * self.leaf_page_size + internal_nodes * self.internal_page_size
     }
 
-    pub(crate) fn leaf_page_size(&self) -> usize {
-        self.leaf_page_size
+    /// The root, if the tree has nodes.
+    pub(crate) fn root(&self) -> Option<NodeAt> {
+        self.height().map(|height| NodeAt::new(height, 0))
     }
 
-    pub(crate) fn internal_page_size(&self) -> Option<usize> {
-        self.internal_page_size
+    /// The child at edge `edge` of the internal node at `at`.
+    pub(crate) fn child(&self, at: NodeAt, edge: usize) -> NodeAt {
+        let children = self.levels[at.level].children(at.index);
+        assert!(edge < children.len(), "edge out of bounds");
+        NodeAt::new(at.level - 1, children.start + edge)
     }
 
-    /// The node of `level` over leaf position `x`, if there is one.
-    pub(crate) fn node_over(&self, level: usize, x: f64) -> Option<NodeAt> {
-        let nodes = self.levels.get(level)?.nodes_across(x..x);
-        (!nodes.is_empty()).then(|| NodeAt::new(level, nodes.start))
+    /// The node `delta` places right of `at` on its level, if there is one.
+    pub(crate) fn neighbor(&self, at: NodeAt, delta: isize) -> Option<NodeAt> {
+        let index = at.index.checked_add_signed(delta)?;
+        (index < self.levels[at.level].node_count()).then(|| NodeAt::new(at.level, index))
+    }
+
+    /// The node's name in a sentence: "the root", "leaf 1,204", "level 2
+    /// node 7".
+    pub(crate) fn node_name(&self, at: NodeAt) -> String {
+        if Some(at.level) == self.height() {
+            "the root".to_string()
+        } else if at.level == 0 {
+            format!("leaf {}", Group(at.index + 1))
+        } else {
+            format!("level {} node {}", at.level, Group(at.index + 1))
+        }
+    }
+
+    /// The level's name on its own: "root", "leaf", "level 2".
+    pub(crate) fn level_name(&self, level: usize) -> String {
+        if Some(level) == self.height() {
+            "root".to_string()
+        } else if level == 0 {
+            "leaf".to_string()
+        } else {
+            format!("level {level}")
+        }
     }
 
     /// The child indices that lead from the root down to `at`.
@@ -191,48 +182,23 @@ impl TreeShape {
         path.reverse();
         path
     }
-
-    /// Each level's numbers, the root's first.
-    pub(crate) fn level_stats(&self) -> Vec<LevelStats> {
-        (0..self.levels.len())
-            .rev()
-            .map(|level| self.levels[level].stats(level))
-            .collect()
-    }
 }
 
 impl Level {
     fn new<K, V, S: InlineKeyStrategy<K>>(
         nodes: &[NodeView<'_, K, V, S>],
-        first_leaf: Vec<u32>,
         first_child: Vec<u32>,
     ) -> Self {
-        let len: Vec<u16> = nodes.iter().map(|node| node.len() as u16).collect();
-        let prefix_len: Vec<u16> = nodes
-            .iter()
-            .map(|node| node.local_prefix_len().unwrap_or(node.prefix_len()) as u16)
-            .collect();
         Self {
             capacity: nodes[0].capacity(),
-            min_len: nodes[0].min_len(),
-            first_leaf,
             first_child,
             parent: vec![0; nodes.len()],
-            len_sum: Self::running_sum(&len),
-            prefix_sum: Self::running_sum(&prefix_len),
-            len,
-            prefix_len,
+            len: nodes.iter().map(|node| node.len() as u16).collect(),
+            prefix_len: nodes
+                .iter()
+                .map(|node| node.local_prefix_len().unwrap_or(node.prefix_len()) as u16)
+                .collect(),
         }
-    }
-
-    fn running_sum(values: &[u16]) -> Vec<u64> {
-        let mut sum = 0;
-        std::iter::once(0)
-            .chain(values.iter().map(|&value| {
-                sum += u64::from(value);
-                sum
-            }))
-            .collect()
     }
 
     /// The parent of each of the `children` nodes of the level below.
@@ -258,15 +224,10 @@ impl Level {
         usize::from(self.len[node])
     }
 
-    /// The prefix the node's searches skip: its local prefix if it keeps
+    /// The prefix the node's search skips: its local prefix if it keeps
     /// one, else the one its fences share.
     pub(crate) fn prefix_len(&self, node: usize) -> usize {
         usize::from(self.prefix_len[node])
-    }
-
-    /// The leaf positions node `node` covers.
-    pub(crate) fn span(&self, node: usize) -> Range<f64> {
-        f64::from(self.first_leaf[node])..f64::from(self.first_leaf[node + 1])
     }
 
     /// The nodes of the level below that are node `node`'s children.
@@ -274,55 +235,6 @@ impl Level {
         match self.first_child.get(node + 1) {
             Some(&end) => self.first_child[node] as usize..end as usize,
             None => 0..0,
-        }
-    }
-
-    pub(crate) fn parent(&self, node: usize) -> usize {
-        self.parent[node] as usize
-    }
-
-    /// The nodes whose spans overlap `x`, or for an empty `x`, the one
-    /// whose span holds it.
-    pub(crate) fn nodes_across(&self, x: Range<f64>) -> Range<usize> {
-        let count = self.node_count();
-        // The first node that ends past where `x` starts.
-        let first = self.first_leaf[1..].partition_point(|&end| f64::from(end) <= x.start);
-        let end = if x.is_empty() {
-            let holds = first < count && f64::from(self.first_leaf[first]) <= x.start;
-            first + usize::from(holds)
-        } else {
-            self.first_leaf[..count].partition_point(|&start| f64::from(start) < x.end)
-        };
-        first..end.max(first)
-    }
-
-    /// How full the nodes `nodes` are, together: their keys over their
-    /// room.
-    pub(crate) fn mean_fill(&self, nodes: Range<usize>) -> f64 {
-        let keys = self.len_sum[nodes.end] - self.len_sum[nodes.start];
-        keys as f64 / (nodes.len() * self.capacity).max(1) as f64
-    }
-
-    /// The mean prefix length of the nodes `nodes`.
-    pub(crate) fn mean_prefix(&self, nodes: Range<usize>) -> f64 {
-        let bytes = self.prefix_sum[nodes.end] - self.prefix_sum[nodes.start];
-        bytes as f64 / nodes.len().max(1) as f64
-    }
-
-    /// The longest prefix any node of the level skips.
-    fn longest_prefix(&self) -> usize {
-        self.prefix_len.iter().copied().max().map_or(0, usize::from)
-    }
-
-    fn stats(&self, level: usize) -> LevelStats {
-        LevelStats {
-            level,
-            nodes: self.node_count(),
-            keys: self.len_sum[self.node_count()],
-            capacity: self.capacity,
-            mean_fill: self.mean_fill(0..self.node_count()),
-            min_len: self.min_len,
-            fewest_keys: self.len.iter().copied().min().map_or(0, usize::from),
         }
     }
 }
@@ -338,14 +250,21 @@ mod tests {
     }
 
     #[test]
-    fn levels_cover_every_node_in_key_order() {
+    fn levels_hold_every_node_once_under_its_parent() {
         let map = map_of(100_000);
         let shape = TreeShape::of(&map.inspect(), map.len());
         let height = shape.height().unwrap();
         assert!(height >= 2);
         assert_eq!(shape.level(height).node_count(), 1);
-        let keys: u64 = shape.level_stats().iter().map(|stats| stats.keys).sum();
-        assert_eq!(keys as usize, map.len());
+        let keys: usize = (0..=height)
+            .map(|level| {
+                let nodes = shape.level(level);
+                (0..nodes.node_count())
+                    .map(|node| nodes.len(node))
+                    .sum::<usize>()
+            })
+            .sum();
+        assert_eq!(keys, map.len());
         for level in 1..=height {
             let nodes = shape.level(level);
             let below = shape.level(level - 1);
@@ -354,11 +273,14 @@ mod tests {
                 below.node_count()
             );
             for node in 0..nodes.node_count() {
-                let children = nodes.children(node);
-                assert_eq!(children.len(), nodes.len(node) + 1);
-                assert_eq!(nodes.span(node).start, below.span(children.start).start);
-                assert_eq!(nodes.span(node).end, below.span(children.end - 1).end);
-                assert!(children.clone().all(|child| below.parent(child) == node));
+                assert_eq!(nodes.children(node).len(), nodes.len(node) + 1);
+                for (edge, child) in nodes.children(node).enumerate() {
+                    assert_eq!(
+                        shape.child(NodeAt::new(level, node), edge),
+                        NodeAt::new(level - 1, child)
+                    );
+                    assert_eq!(below.parent[child] as usize, node);
+                }
             }
         }
     }
@@ -370,9 +292,8 @@ mod tests {
         let shape = TreeShape::of(&tree, map.len());
         let leaves = shape.level(0);
         for index in [0, leaves.node_count() / 3, leaves.node_count() - 1] {
-            let at = NodeAt::new(0, index);
             let mut node = tree.root().unwrap();
-            for edge in shape.path_to(at) {
+            for edge in shape.path_to(NodeAt::new(0, index)) {
                 node = node.child(edge).unwrap();
             }
             assert!(node.is_leaf());
@@ -381,32 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn nodes_across_a_span_are_those_overlapping_it() {
-        let map = map_of(50_000);
-        let shape = TreeShape::of(&map.inspect(), map.len());
-        let leaves = shape.level(0);
-        let count = leaves.node_count();
-        assert_eq!(leaves.nodes_across(0.0..1.0), 0..1);
-        assert_eq!(leaves.nodes_across(-5.0..1e9), 0..count);
-        assert_eq!(leaves.nodes_across(2.5..2.5), 2..3);
-        assert_eq!(leaves.nodes_across(1e9..2e9), count..count);
-        assert_eq!(shape.node_over(0, 3.2), Some(NodeAt::new(0, 3)));
-        assert_eq!(shape.node_over(0, -1.0), None);
-        let root = shape.height().unwrap();
-        assert_eq!(
-            shape.node_over(root, count as f64 / 2.0),
-            Some(NodeAt::new(root, 0))
-        );
-    }
-
-    #[test]
-    fn fill_is_keys_over_room() {
+    fn neighbors_stay_on_their_level() {
         let map = map_of(20_000);
         let shape = TreeShape::of(&map.inspect(), map.len());
-        let leaves = shape.level(0);
-        let all = 0..leaves.node_count();
-        let keys: usize = all.clone().map(|node| leaves.len(node)).sum();
-        let expected = keys as f64 / (leaves.node_count() * leaves.capacity()) as f64;
-        assert!((leaves.mean_fill(all) - expected).abs() < 1e-12);
+        let last = shape.leaf_count() - 1;
+        assert_eq!(shape.neighbor(NodeAt::new(0, 0), -1), None);
+        assert_eq!(
+            shape.neighbor(NodeAt::new(0, 0), 1),
+            Some(NodeAt::new(0, 1))
+        );
+        assert_eq!(shape.neighbor(NodeAt::new(0, last), 1), None);
+        assert_eq!(shape.node_name(shape.root().unwrap()), "the root");
+        assert_eq!(shape.node_name(NodeAt::new(0, 203)), "leaf 204");
     }
 }

@@ -27,7 +27,9 @@ pub use set::BBTreeSet;
 /// which promises no stability.
 #[cfg(feature = "inspect")]
 pub mod inspect {
-    pub use crate::node::inspect::{NodeId, NodeView, PageMap, SlotArray, SlotContents, TreeView};
+    pub use crate::node::inspect::{
+        NodeId, NodeView, PageMap, SlotArray, SlotContents, TraceOutcome, TraceStep, TreeView,
+    };
 }
 
 /// An ordered map based on a B-tree, [`BBTreeMap`], and the types that go

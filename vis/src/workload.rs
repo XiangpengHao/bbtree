@@ -5,7 +5,9 @@ use bbtree::BBTreeMap;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
+use crate::count_text::Group;
 use crate::inspected_tree::{InspectedMap, LoadedTree, VisKey};
+use crate::trace::Tracer;
 
 /// The kinds of key on offer, each picked for what bbtree does with it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -27,6 +29,24 @@ impl KeyKind {
             KeyKind::Integers => "u64",
             KeyKind::Urls => "String URLs",
             KeyKind::Ids => "[u8; 16] ids",
+        }
+    }
+
+    /// A key of this kind, as the lookup bar takes it.
+    pub(crate) fn example(self) -> &'static str {
+        match self {
+            KeyKind::Integers => "a u64, such as 396070",
+            KeyKind::Urls => "a URL, such as https://shop.example.com/orders/000291177",
+            KeyKind::Ids => "32 hex digits, such as 62627472656500000000000000003039",
+        }
+    }
+
+    /// Why `query` names no key of this kind.
+    pub(crate) fn parse_error(self, query: &str) -> String {
+        match self {
+            KeyKind::Integers => format!("\"{query}\" isn't a u64"),
+            KeyKind::Urls => format!("\"{query}\" isn't a key"),
+            KeyKind::Ids => format!("\"{query}\" isn't 32 hex digits"),
         }
     }
 
@@ -266,26 +286,25 @@ mod tests {
 }
 
 /// The build controls: key kind, size and order, and the build in flight.
+/// A finished build looks up a key at random, so there is a path to see.
 #[component]
-pub(crate) fn WorkloadPicker(
-    tree: Signal<Option<LoadedTree>>,
-    selected: Signal<Option<crate::tree_shape::NodeAt>>,
-) -> Element {
+pub(crate) fn WorkloadPicker(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> Element {
     let mut workload =
         use_signal(|| Workload::new(KeyKind::Integers, 1_000_000, InsertOrder::Random));
     let progress = use_signal(|| None::<f64>);
     let took = use_signal(|| None::<f64>);
     let build = use_callback(move |workload: Workload| {
-        let (mut tree, mut selected, mut progress, mut took) = (tree, selected, progress, took);
+        let (mut tree, mut tracer, mut progress, mut took) = (tree, tracer, progress, took);
         spawn(async move {
             // Drop the old tree first: at ten million entries, two don't fit.
-            selected.set(None);
+            tracer.clear();
             tree.set(None);
             took.set(None);
             progress.set(Some(0.0));
             let start = web_time::Instant::now();
             let built = workload.build(move |done| progress.set(Some(done))).await;
             took.set(Some(start.elapsed().as_secs_f64()));
+            tracer.run_random(&built);
             tree.set(Some(built));
             progress.set(None);
         });
@@ -294,11 +313,10 @@ pub(crate) fn WorkloadPicker(
 
     let current = workload();
     let building = progress();
-    let select = "rounded-md border border-[var(--grid)] bg-[var(--surface)] px-2 py-1 text-[12px]";
     rsx! {
         div { class: "flex flex-wrap items-center gap-2",
             select {
-                class: select,
+                class: "select",
                 "aria-label": "Key type",
                 onchange: move |evt| {
                     let kind = KeyKind::ALL
@@ -308,26 +326,22 @@ pub(crate) fn WorkloadPicker(
                     workload.set(Workload::new(kind, current.count(), current.order()));
                 },
                 for kind in KeyKind::ALL {
-                    option { value: kind.label(), selected: kind == current.kind(), "{kind.label()}" }
+                    option { value: kind.label(), selected: kind == current.kind(), {kind.label()} }
                 }
             }
             select {
-                class: select,
+                class: "select",
                 "aria-label": "Entries",
                 onchange: move |evt| {
                     let count = evt.value().parse().unwrap_or(current.count());
                     workload.set(Workload::new(current.kind(), count, current.order()));
                 },
                 for count in Workload::COUNTS.into_iter().filter(|&count| count <= current.kind().max_count()) {
-                    option {
-                        value: "{count}",
-                        selected: count == current.count(),
-                        "{crate::tree_canvas::Group(count)}"
-                    }
+                    option { value: "{count}", selected: count == current.count(), "{Group(count)} entries" }
                 }
             }
             select {
-                class: select,
+                class: "select",
                 "aria-label": "Insert order",
                 onchange: move |evt| {
                     let order = InsertOrder::ALL
@@ -337,28 +351,27 @@ pub(crate) fn WorkloadPicker(
                     workload.set(Workload::new(current.kind(), current.count(), order));
                 },
                 for order in InsertOrder::ALL {
-                    option { value: order.label(), selected: order == current.order(), "{order.label()}" }
+                    option { value: order.label(), selected: order == current.order(), {order.label()} }
                 }
             }
             button {
-                class: "rounded-md bg-[var(--accent)] px-3 py-1 text-[12px] font-medium text-white disabled:opacity-50",
+                class: "button-primary",
                 disabled: building.is_some(),
                 onclick: move |_| build.call(current),
                 "Build"
             }
-            if let (None, Some(seconds)) = (building, took()) {
-                span {
-                    class: "tabular text-[12px] text-[var(--muted)]",
-                    title: "Inserts, then one read of every node for the canvas",
-                    "built in {seconds:.1} s"
-                }
-            }
             if let Some(done) = building {
-                div { class: "flex items-center gap-2 text-[12px] text-[var(--ink-2)]",
-                    div { class: "h-1.5 w-28 overflow-hidden rounded-full bg-[var(--grid)]",
-                        div { class: "h-full bg-[var(--accent)]", style: "width:{done * 100.0}%;" }
+                span { class: "data flex items-center gap-2 text-[12px] text-[var(--graphite)]",
+                    span { class: "fill-track w-24",
+                        span { class: "fill-bar", style: "width:{done * 100.0}%;" }
                     }
-                    "building…"
+                    "building"
+                }
+            } else if let Some(seconds) = took() {
+                span {
+                    class: "data text-[12px] text-[var(--muted)]",
+                    title: "The inserts, then one read of every node",
+                    "built in {seconds:.1} s"
                 }
             }
         }

@@ -2,13 +2,12 @@
 
 use dioxus::prelude::*;
 
+use crate::count_text::Group;
 use crate::inspected_tree::LoadedTree;
-use crate::tree_canvas::Group;
 
 /// Pointers take 4 bytes in the wasm32 build this page runs, 8 on 64-bit
-/// targets: internal nodes here hold more keys, and heap-string leaves
-/// differ, than in a native build (`doc/10-visualization.md`).
-const LAYOUT_NOTE: &str = "Layouts as compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit target, and String leaves differ. Fixed-size leaves match.";
+/// targets (`doc/10-visualization.md`).
+const LAYOUT_NOTE: &str = "Layouts as compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit target, and String leaves differ (no length tags fit). Leaves of fixed-size keys and values match.";
 
 #[component]
 pub(crate) fn TreeSummary(tree: LoadedTree) -> Element {
@@ -17,22 +16,13 @@ pub(crate) fn TreeSummary(tree: LoadedTree) -> Element {
     let leaves = shape.leaf_count();
     let internal = shape.node_count() - leaves;
     let megabytes = shape.page_bytes() as f64 / (1024.0 * 1024.0);
-    let pages = match shape.internal_page_size() {
-        Some(internal) => format!("{} B leaves, {internal} B internal", shape.leaf_page_size()),
-        None => format!("{} B leaf", shape.leaf_page_size()),
-    };
     rsx! {
-        p { class: "tabular ml-auto flex flex-wrap items-center gap-x-3 text-[12px] text-[var(--ink-2)]",
-            span { class: "font-medium text-[var(--ink)]", "{Group(shape.entries())} entries" }
-            span { "{tree.key_kind().label()}" }
-            span { "height {height}" }
-            span { "{Group(leaves)} leaves · {Group(internal)} internal" }
-            span { "{megabytes:.1} MiB of pages ({pages})" }
-            span {
-                class: "cursor-help rounded border border-[var(--grid)] px-1.5 text-[11px] text-[var(--muted)]",
-                title: LAYOUT_NOTE,
-                "wasm32 layouts"
-            }
+        p { class: "data ml-auto flex flex-wrap items-center gap-x-4 text-[12px] text-[var(--graphite)]",
+            span { class: "text-[var(--ink)]", "{Group(shape.entries())} {tree.key_kind().label()} keys" }
+            span { "{height + 1} levels" }
+            span { "{Group(leaves)} leaves, {Group(internal)} internal" }
+            span { "{megabytes:.1} MiB of pages" }
+            span { class: "chip cursor-help", title: LAYOUT_NOTE, "wasm32 layouts" }
         }
     }
 }

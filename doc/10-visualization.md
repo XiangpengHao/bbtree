@@ -1,8 +1,8 @@
 # 10 — Visualization: browsing the real tree in a browser
 
-Status: implemented (2026-10-11), uncommitted: the `inspect` feature
-(`node/inspect.rs`, `map/inspect.rs`), and the visualizer in `vis/`, whose
-tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell. Operation traces are still to come.
+Status (2026-10-11): the `inspect` feature with lookup traces
+(`node/inspect.rs`, `map/inspect.rs`), and the visualizer in `vis/`.
+Inserts and removals are still to come.
 
 ## Goals
 
@@ -26,8 +26,8 @@ From the original note:
   fixed-size keys and values match x86-64. The in-node count takes the
   portable path instead of AVX-512, with the same result. The page says
   which target's layouts it shows.
-- **First milestone: faithful layout and browsing.** Operation traces come
-  later.
+- **First milestone: faithful layout and lookups.** Inserts and removals
+  come later.
 - **No dioxus-flow.** It was the first idea, to drive that library's
   performance work. It is a node-graph editor: `Flow` mounts every node and
   zooms both axes alike, and none of its editing applies to a read-only tree
@@ -37,13 +37,12 @@ From the original note:
   those changes is stashed in dioxus-flow's repository. `Flow` could still
   serve a later detail view of a few hundred nodes, such as animated
   operations.
-- **The canvas zooms only horizontally.** A tree of 250k leaves is about
-  350,000 times wider than tall, so under a uniform zoom its overview is a
-  line under a pixel tall, and levels only come apart in windows of about
-  1,000 leaves. With only x zoomed, every level keeps a row of fixed height
-  at every zoom: the overview shows all levels at once, and zoomed into one
-  leaf, the leaf is a wide strip, the shape of its page's byte map. The
-  model is a trace viewer's, such as Perfetto's.
+- **One lookup at a time, not every node at once (2026-10-11, second
+  design).** The first design drew all of a 10M tree, level by level, with
+  aggregates and one-axis zoom. It scaled, but it read as strips rather than
+  a tree, and it didn't say what was going on. The visualizer now follows one
+  key: its path from the root as linked node cards, each node's page as
+  cache lines, and the search's own steps.
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -87,82 +86,105 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **Code:** `node/inspect.rs` holds the views; it is safe code. The one
   addition elsewhere is `NodePtr::addr` in `page.rs`, for node ids.
 
+## Lookup traces: `TreeView::trace`
+
+`trace(&key)` runs the searches `get` runs, node by node: `search` in each
+internal node and `search_point` in the leaf, on the same `SearchKey`. Each
+`TraceStep` carries:
+
+- the node;
+- the outcome: down edge `e`, found at slot `i`, or absent (would go in at
+  slot `i`);
+- the key's inline key at the node's prefix, from the node's own
+  `inline_target`;
+- the slots whose inline keys tie with it, from the node's own `equal_run`:
+  the only keys compared in full.
+
+A key found in an internal node is a separator (D17). The trace then follows
+`into_value_head` down to the leaf whose head holds the value, and in debug
+builds asserts that it reaches the very value `into_value_head` returns.
+
+The only change to the node code is visibility: `inline_target` and
+`NodeInlineKeys::equal_run` become `pub(super)`. A test traces every key of
+two maps, `u64` and `String`, and some absent keys, against `get`.
+
 ## The visualizer (`vis/`)
 
 A workspace of its own, like `fuzz/`, so Dioxus stays out of bbtree's
 dependency graph and lockfile; nested packages are left out of bbtree's
-published package. It depends on bbtree with `features = ["inspect"]`. See
-`vis/README.md` for running it.
+published package. It depends on bbtree with `features = ["inspect"]`. Its
+tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
+`vis/README.md`.
 
-- **Builds** `u64`, `String` URL or `[u8; 16]` maps of up to 10M entries (1M
-  strings), by random inserts, ascending inserts or `collect`. Inserts go in
-  chunks of 50k, with a yield to the browser between them. Random order is a
-  full-period LCG walk through a bijective mix, so no index array is held.
+- **Build** `u64`, `String` URL or `[u8; 16]` maps of up to 10M entries (1M
+  strings), by random inserts, ascending inserts or `collect`. Each build
+  looks up a random key, so there is always a path to see.
+- **Look up** any key, or a random one, or step to the first key of the
+  previous or next leaf.
+- **The path** (`path_tree.rs`): one card per node from the root down, each
+  hanging under the edge its parent took, with a bold ink connector. A card
+  shows:
+  - the node's keys over its capacity, and the prefix its search skips (its
+    shared bytes in a tooltip);
+  - its slots as a ruler: tied slots outlined in highlighter yellow, the
+    found slot filled, and a notch at the edge taken;
+  - what the lookup did there, in a few words.
+
+  The parent's other children sit beside the card as gauges of how full
+  they are, fanned from their own edge slots. Clicking a gauge looks up that
+  node's first key. A separator's way to its value is dashed.
+- **The inspector** (`node_inspector.rs`), for the card you pick, the leaf
+  by default:
+  - What the search did, in sentences drawn from the trace: the bytes
+    skipped and why (fence prefix, D26; search prefix, D33), the inline key
+    compared and how many slots tied (D18), and the edge taken with the keys
+    either side, or the slot found, or the slot an insert would take.
+  - The page as 16 rows of 64-byte cache lines (`memory_map.rs`). Every
+    slot sits where the layout puts it, room is faint, and the slots the
+    lookup read are highlighted: candidates outlined, the result filled.
+    Each cache line the lookup touches gets a dot: the header's, all the
+    inline keys' (the count reads them all), the candidates' and the
+    result's.
+  - The slots in a table, scrolled to the lookup's row. Keys show only the
+    bytes past the shared prefix. Inline keys are hex bytes, and child links
+    look up their child's first key.
 - **The tree's shape** (`tree_shape.rs`): one top-down read of every node
-  per build, which records each level's nodes in key order: leaf range,
-  `len`, prefix, parent and children, plus running sums of `len` and prefix.
-  The mean of any run of nodes then takes constant time, so a strip bin costs
-  two binary searches however many leaves it covers. Everything drawn up
-  close is read live from a `NodeView`, reached from the root along the
-  shape's path.
-- **The canvas** (`tree_canvas.rs`): the x axis counts leaves, and only the
-  span around the view is in the document, at the current zoom, in its own
-  pixels. Every number that reaches the DOM stays screen-sized: in a 10M
-  tree, zoomed onto one leaf, the view sits billions of pixels into the
-  tree. A pan inside the span moves one transform; leaving it, or zooming,
-  redraws it.
-- **Detail by on-screen width, row by row:**
-  - a row whose nodes average under 4 px is a strip, binned per 2 px and
-    colored by mean fill or prefix, with one SVG path per ramp step;
-  - then one colored box per node;
-  - from 92 px, a box with its key count and a fill bar;
-  - from 300 px, its page drawn from its `PageMap`, with its first and last
-    keys;
-  - a node wider than the screen gets a caption that follows the view.
-- **The detail panel** (`node_detail.rs`): header numbers, the page bar with
-  its legend, and every key with its shared prefix grayed, its inline key in
-  hex, its length tag, and its value or child. Links lead to the children,
-  the parent and the neighbors.
-- **Colors** follow the dataviz method:
-  - fill and prefix use one sequential blue ramp;
-  - page slots use the only three categorical hues that validate in every
-    pairing (keys blue, inline keys orange, values, heads and children aqua);
-  - the header and length tags are two neutral grays;
-  - every color has a legend entry and a tooltip.
+  per build gives each level's nodes in key order, with parents, children,
+  key counts and prefixes. That is enough to name nodes, find neighbors and
+  draw gauges without a page read. Everything else is read live from a
+  `NodeView`, reached from the root along the shape's path.
+- **Look:** an annotated memory map.
+  - Cool paper, ink and graphite for structure.
+  - The three slot hues that validate in every pairing: keys blue, inline
+    keys orange, values, heads and children aqua.
+  - Two neutral grays for the header and length tags.
+  - Highlighter yellow for whatever the lookup read.
+  - Type: Martian Mono for titles, IBM Plex Sans for prose, IBM Plex Mono
+    for data.
 
-### Measured
+### What it shows
 
-Headless Chrome over the DevTools protocol, 1600×900, release build, real
-input events:
-
-| Build | Time | Leaves | Internal | Height | Pages |
-|---|---|---|---|---|---|
-| 10M `u64`, random inserts | 4.2 s | 258,282 | 4,950 | 4 | 257 MiB |
-| 10M `u64`, ascending inserts | 1.1 s | 227,273 | 4,210 | 4 | 226 MiB |
-| 10M `u64`, `collect` | 0.1 s | 178,572 | 2,482 | 3 | 177 MiB |
-| 1M `String` URLs, random | 0.4 s | 45,143 | 1,306 | 3 | 45 MiB |
-| 1M `[u8; 16]` ids, random | 0.4 s | 37,245 | 1,148 | 3 | 38 MiB |
-
-The times are the page's own: inserts, then the read of every node.
-
-- **Frame times:** 3 s zoom gestures and 3 s pans over the 1M and 10M
-  trees: every frame within p50 16.7 ms, max 16.8 ms, none over 20 ms.
-- **Elements:** the document holds at most about 1,800 elements at any zoom.
-- **What it shows:**
-  - u64 leaves: capacity 55, 2-byte inline keys under a 7-byte fence prefix;
-  - URL leaves: a 39-byte fence prefix and 8-byte inline keys;
-  - `[u8; 16]` internal nodes: children before keys (D39);
-  - the fill each insert order leaves.
+- **u64, 1M random inserts:** the fence prefix grows 0, 5, 6, 7 bytes from
+  the root down. At the root every 2-byte inline key is `00 00`, so all of
+  them tie and each is compared in full. In a leaf, one inline key matches,
+  and the lookup touches 3 of 16 cache lines.
+- **A key past the end of the tree** follows the right border, where every
+  fence prefix is 0. All 30 keys in the leaf tie on `00 00`, and the lookup
+  touches 10 of 16 lines. Ascending inserts land there.
+- **String URLs:** the root keeps a 25-byte search prefix
+  (`https://shop.example.com/`); the levels below skip 35, 36 and 38 bytes,
+  with 8-byte inline keys.
+- **`[u8; 16]` internal nodes** put children before keys (D39).
 
 ## Not done
 
-- Operation traces (get, insert, remove, range).
-  - The effects come from comparing the touched nodes before and after,
-    keyed by page address, together with the real `Path` (D24).
-  - The process is not one path: D37 records a path only when the leaf is
-    full, and D45 appends with no descent. An exact trace needs an observer
-    in the real code, whose default does nothing, kept only if it shows
-    instruction parity.
+- Inserts and removals. The effects come from comparing the touched nodes
+  before and after, keyed by page address. Their way down is not one path:
+  D37 records a path only when the leaf is full, and D45 appends with no
+  descent. An exact trace needs an observer in the real code, whose default
+  does nothing, kept only if it shows instruction parity.
+- A view of the whole tree's health (fill and prefix per level), which the
+  first design had and this one leaves out.
 - CI for `vis/`: it is a workspace of its own, which bbtree's CI doesn't
   build.
 - `cargo clippy --target wasm32-unknown-unknown` on bbtree fails one lint

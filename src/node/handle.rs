@@ -550,7 +550,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// forward, which stalled every level. Std byte strings read the
     /// window directly from the search key.
     #[inline]
-    fn inline_target<Q: ?Sized>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<InlineTarget>
+    pub(super) fn inline_target<Q: ?Sized>(
+        &self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> Option<InlineTarget>
     where
         K: Borrow<Q>,
     {
@@ -832,7 +835,7 @@ impl<'a> NodeInlineKeys<'a> {
     /// The positions of the inline keys equal to the bytes the node keeps
     /// of `window`; see [`LiveSlots::equal_run`].
     #[inline(always)]
-    fn equal_run(self, window: InlineWord) -> Range<usize> {
+    pub(super) fn equal_run(self, window: InlineWord) -> Range<usize> {
         with_live_slots!(self, |live| live.equal_run(InlineSlot::of_window(window)))
     }
 

@@ -11,11 +11,14 @@
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
+use core::ptr;
 
-use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef};
+use super::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, SearchResult};
+use super::inline_keys::SearchKey;
 use super::page::{InlineKeyNodeHeader, NodeHeader, NodePtr, PageKind};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
@@ -34,6 +37,167 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     pub fn root(&self) -> Option<NodeView<'a, K, V, S>> {
         self.root.map(|node| NodeView { node })
     }
+}
+
+impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
+    /// The steps the map's point lookup takes for `key`
+    /// ([`crate::BBTreeMap::get`]), node by node, through the same
+    /// searches: `search` in each internal node, `search_point` in the
+    /// leaf. A key found in an internal node is a separator, whose value is
+    /// a head below (D17): the trace then goes on the way the value is read
+    /// (`into_value_head`), down the separator's right edge and first edges,
+    /// to the leaf that holds it.
+    pub fn trace<Q>(&self, key: &Q) -> Vec<TraceStep<'a, K, V, S>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let search = SearchKey::<K, S, Q>::new(key);
+        let mut steps = Vec::new();
+        let Some(mut node) = self.root else {
+            return steps;
+        };
+        loop {
+            match node.force() {
+                ForceResult::Leaf(leaf) => {
+                    let outcome = match leaf.search_point(&search) {
+                        Some(kv) => TraceOutcome::Found { index: kv.index() },
+                        None => TraceOutcome::Absent {
+                            insert_at: match leaf.search(&search) {
+                                SearchResult::Found(kv) => kv.index(),
+                                SearchResult::GoDown(edge) => edge.index(),
+                            },
+                        },
+                    };
+                    steps.push(TraceStep::searched(&leaf, node, &search, outcome));
+                    return steps;
+                }
+                ForceResult::Internal(internal) => match internal.search(&search) {
+                    SearchResult::GoDown(edge) => {
+                        let outcome = TraceOutcome::Descend { edge: edge.index() };
+                        steps.push(TraceStep::searched(&internal, node, &search, outcome));
+                        node = edge.descend();
+                    }
+                    SearchResult::Found(kv) => {
+                        let outcome = TraceOutcome::Found { index: kv.index() };
+                        steps.push(TraceStep::searched(&internal, node, &search, outcome));
+                        let value: *const V = kv.into_value_head().into_value();
+                        let mut edge = kv.right_edge();
+                        loop {
+                            let below = edge.descend();
+                            match below.force() {
+                                ForceResult::Leaf(leaf) => {
+                                    debug_assert!(
+                                        leaf.head()
+                                            .is_some_and(|head| ptr::eq(head.into_value(), value))
+                                    );
+                                    steps.push(TraceStep::passed(below, TraceOutcome::Head));
+                                    return steps;
+                                }
+                                ForceResult::Internal(internal) => {
+                                    let outcome = TraceOutcome::ToHead { edge: 0 };
+                                    steps.push(TraceStep::passed(below, outcome));
+                                    edge = internal.first_edge();
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// One node of a lookup's way down ([`TreeView::trace`]): the node, what
+/// the lookup did there, and what its search compared.
+pub struct TraceStep<'a, K, V, S> {
+    node: NodeView<'a, K, V, S>,
+    outcome: TraceOutcome,
+    inline_key: Option<InlineWord>,
+    tied: Option<Range<usize>>,
+}
+
+impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
+    /// A node the lookup searched: with what its search compared the key's
+    /// inline key against, the node's own (D18).
+    fn searched<Kind: PageKind, Q: ?Sized>(
+        handle: &NodeRef<Immut<'a>, K, V, S, Kind>,
+        node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
+        search: &SearchKey<'_, K, S, Q>,
+        outcome: TraceOutcome,
+    ) -> Self
+    where
+        K: Borrow<Q>,
+    {
+        let target = handle.inline_target(search);
+        let tied = Option::zip(target, handle.inline_keys())
+            .map(|(target, inline_keys)| inline_keys.equal_run(target.inline_key()));
+        Self {
+            node: NodeView { node },
+            outcome,
+            inline_key: target.map(|target| target.inline_key()),
+            tied,
+        }
+    }
+
+    /// A node the lookup went through without searching it.
+    fn passed(node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>, outcome: TraceOutcome) -> Self {
+        Self {
+            node: NodeView { node },
+            outcome,
+            inline_key: None,
+            tied: None,
+        }
+    }
+
+    pub fn node(&self) -> NodeView<'a, K, V, S> {
+        self.node
+    }
+
+    pub fn outcome(&self) -> TraceOutcome {
+        self.outcome
+    }
+
+    /// The searched key's inline key at the node's prefix, as the node
+    /// compared it with its own; `None` if the node has no inline keys or
+    /// was not searched.
+    pub fn inline_key(&self) -> Option<InlineWord> {
+        self.inline_key
+    }
+
+    /// The keys whose inline keys equal the searched key's: the only ones
+    /// that can equal it, which the search goes on to compare in full.
+    pub fn tied(&self) -> Option<Range<usize>> {
+        self.tied.clone()
+    }
+
+    /// The edge the lookup left the node by, if it went further down.
+    pub fn edge_taken(&self) -> Option<usize> {
+        match self.outcome {
+            TraceOutcome::Descend { edge } | TraceOutcome::ToHead { edge } => Some(edge),
+            TraceOutcome::Found { index } if !self.node.is_leaf() => Some(index + 1),
+            _ => None,
+        }
+    }
+}
+
+/// What a lookup did at one node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceOutcome {
+    /// No key of the node equals the searched key, which lies between keys
+    /// `edge - 1` and `edge`: the lookup goes down edge `edge`.
+    Descend { edge: usize },
+    /// Key `index` equals the searched key. In a leaf its value is beside
+    /// it; in an internal node it is a separator, whose value is the head of
+    /// the leftmost leaf right of it, which the next steps reach.
+    Found { index: usize },
+    /// In a leaf, no key equals the searched key; it would go in at slot
+    /// `insert_at`.
+    Absent { insert_at: usize },
+    /// On the way to a separator's value: down edge `edge`.
+    ToHead { edge: usize },
+    /// The leaf whose head is a separator's value.
+    Head,
 }
 
 /// One node of a map's tree, read in place.
@@ -619,6 +783,74 @@ mod tests {
         assert_eq!(root.inline_key_width(), None);
         assert_eq!(root.inline_key(0), None);
         assert_eq!(root.prefix_len(), 0);
+    }
+
+    /// Traces every key of `map` and some absent ones, checking each trace
+    /// against `get`.
+    fn check_traces<K: Ord + Debug, V, S: InlineKeyStrategy<K>>(
+        map: &BBTreeMap<K, V, S>,
+        absent: &[K],
+    ) {
+        let tree = map.inspect();
+        let height = tree.root().unwrap().height();
+        for (key, value) in map.iter() {
+            let steps = tree.trace(key);
+            for (depth, step) in steps.iter().enumerate() {
+                assert_eq!(step.node().height(), height - depth);
+            }
+            let last = steps.last().unwrap();
+            let found = match last.outcome() {
+                TraceOutcome::Found { index } => {
+                    assert!(last.node().is_leaf());
+                    assert!(last.tied().is_none_or(|tied| tied.contains(&index)));
+                    last.node().value(index).unwrap()
+                }
+                TraceOutcome::Head => {
+                    let separator = &steps[steps
+                        .iter()
+                        .position(|step| matches!(step.outcome(), TraceOutcome::Found { .. }))
+                        .unwrap()];
+                    let TraceOutcome::Found { index } = separator.outcome() else {
+                        unreachable!()
+                    };
+                    assert_eq!(separator.node().key(index), key);
+                    last.node().head().unwrap()
+                }
+                outcome => panic!("{key:?} ended at {outcome:?}"),
+            };
+            assert!(ptr::eq(found, value), "{key:?} traced to another value");
+        }
+        for key in absent {
+            assert!(map.get(key).is_none());
+            let steps = tree.trace(key);
+            let last = steps.last().unwrap();
+            let TraceOutcome::Absent { insert_at } = last.outcome() else {
+                panic!("{key:?} ended at {:?}", last.outcome());
+            };
+            let leaf = last.node();
+            assert!(insert_at == 0 || leaf.key(insert_at - 1) < key);
+            assert!(insert_at == leaf.len() || key < leaf.key(insert_at));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
+    fn traces_follow_lookups() {
+        let mut integers = BBTreeMap::new();
+        for number in shuffled(20_000, 4) {
+            integers.insert(number as u64 * 2, number);
+        }
+        let absent: Vec<u64> = (0..200).map(|number| number * 2 + 1).collect();
+        check_traces(&integers, &absent);
+
+        let mut strings = BBTreeMap::new();
+        for number in shuffled(5_000, 5) {
+            strings.insert(format!("https://example.com/{:06}", number * 2), number);
+        }
+        let absent: Vec<String> = (0..50)
+            .map(|number| format!("https://example.com/{:06}", number * 2 + 1))
+            .collect();
+        check_traces(&strings, &absent);
     }
 
     #[test]

@@ -1,9 +1,10 @@
 # bbtree-vis
 
-Browse a bbtree in the browser, as bbtree stores it: a map is built in the
-page, and every node is drawn from bbtree's own read-only views
-(`BBTreeMap::inspect`, the `inspect` feature). Design and decisions are in
-`doc/10-visualization.md`.
+Look keys up in a bbtree and see how it finds them: the path from the root,
+each node's page cache line by cache line, and what the search compared at
+every node. Everything is read from bbtree's own read-only views
+(`BBTreeMap::inspect`, `TreeView::trace`, the `inspect` feature), never
+recomputed. Design and decisions are in `doc/10-visualization.md`.
 
 ```bash
 nix develop            # the repository's dev shell, or direnv
@@ -13,26 +14,24 @@ dx build --release --debug-symbols false   # into target/dx/bbtree-vis/release/w
 ```
 
 The release build needs `--debug-symbols false`: the nixpkgs `wasm-opt` crashes
-on the debug info `dx` keeps by default.
+on the debug info `dx` keeps by default. Fonts come from Google Fonts; offline,
+the page falls back to system fonts.
 
-## What it shows
+## Using it
 
-- **The whole tree, one row per level**, the root on top. The x axis counts
-  leaves; scrolling zooms along it, and rows keep their height, so every level
-  stays in view from all ten million entries down to one leaf across the
-  screen. Drag or shift-scroll to pan, double-click a node to frame it, `0`
-  to see everything, `Esc` to deselect.
-- **Detail by width.** Nodes too narrow for a box of their own make a strip,
-  binned per two pixels; then a colored box each, then a box with its key
-  count, then its page laid out byte by byte. Color by **fill** (keys over
-  capacity) or **prefix** (the bytes the node's searches skip).
-- **A node in full.** Click one: its header, its page (header, inline keys,
-  length tags, keys, values or children, empty slots, padding, where the
-  layout puts them), and every key with its inline key, length tag and value
-  or child. String and byte-array keys gray out the bytes the node shares.
-- **Builds** of `u64`, `String` URLs or `[u8; 16]` ids, up to ten million
-  entries (one million strings), by random inserts, ascending inserts or
-  `collect`.
+- **Build** a map of `u64`, `String` URLs or `[u8; 16]` ids, up to ten
+  million entries (one million strings), by random inserts, ascending inserts
+  or `collect`. A finished build looks up a random key.
+- **Look up** a key by typing it (a number, a URL, or 32 hex digits), or press
+  *Random key*, or step to the previous or next leaf.
+- **Read the path**: one card per node, root first, under the edge its parent
+  took. Highlighter yellow marks what the search compared: slots whose inline
+  keys tied are outlined, the slot found is filled, and the notch is the edge
+  taken. Gauges beside a card are its siblings, filled as full as they are;
+  click one to look up its first key.
+- **Inspect a node** by clicking its card: what the search did there in
+  words, its page as 64-byte cache lines with the slots and lines the lookup
+  read, and its slots in a table.
 
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
@@ -44,8 +43,9 @@ By feature, in `src/`:
 
 - `workload.rs`: what to build, and building it in chunks;
 - `inspected_tree.rs`: a built map behind one face for every key type;
+- `trace.rs`: a lookup as plain data, and the bar that starts one;
+- `path_tree.rs`: the path, its cards and the siblings' gauges;
+- `node_inspector.rs`: the picked node, in words, page and slots;
+- `memory_map.rs`: a page drawn as cache lines;
 - `tree_shape.rs`: each level's nodes in key order, read once per build;
-- `tree_canvas.rs`: the rows, the zoom, the strips and boxes;
-- `page_bar.rs`: a page drawn byte by byte;
-- `node_detail.rs`: the selected node's panel;
-- `tree_summary.rs`: the built tree in one line.
+- `tree_summary.rs`, `count_text.rs`: the header line, and counts as text.
