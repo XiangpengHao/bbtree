@@ -23,15 +23,17 @@
         };
         llvmPackages = pkgs.llvmPackages_latest;
         # Keep this exact nightly aligned with the Rust install step in CI.
-        rustNightly = pkgs.rust-bin.nightly."2026-10-07".default;
-        rustExtensions = [
-          "rust-src"
-          "rust-analyzer"
-          "clippy"
-          "llvm-tools-preview"
-          "miri"
-        ];
-        rustToolchain = rustNightly.override { extensions = rustExtensions; };
+        rustToolchain = pkgs.rust-bin.nightly."2026-10-07".default.override {
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+            "clippy"
+            "llvm-tools-preview"
+            "miri"
+          ];
+          # The visualizer (`vis/`) builds bbtree for the browser.
+          targets = [ "wasm32-unknown-unknown" ];
+        };
       in
       {
         devShells.default = pkgs.mkShell {
@@ -47,25 +49,16 @@
             pkgs.gh
             pkgs.zstd
             pkgs.python3
-          ];
-          ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
-        };
-
-        # The visualizer (`vis/`, `nix develop .#vis`): bbtree built for
-        # wasm32, and the Dioxus web toolchain. The nixpkgs `dx` is built
-        # without downloads: it takes wasm-bindgen, wasm-opt and tailwindcss
-        # from PATH, and needs the `wasm-bindgen` crate in vis/Cargo.toml
-        # pinned to the wasm-bindgen-cli it wraps.
-        devShells.vis = pkgs.mkShell {
-          packages = [
-            (rustNightly.override {
-              extensions = rustExtensions;
-              targets = [ "wasm32-unknown-unknown" ];
-            })
+            # The visualizer (`vis/`): the Dioxus web toolchain. The nixpkgs
+            # `dx` is built without downloads: it takes wasm-bindgen,
+            # wasm-opt and tailwindcss from PATH, and needs the
+            # `wasm-bindgen` crate in vis/Cargo.toml pinned to the
+            # wasm-bindgen-cli it wraps.
             pkgs.dioxus-cli
             pkgs.tailwindcss_4
             pkgs.binaryen
           ];
+          ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
         };
       }
     );

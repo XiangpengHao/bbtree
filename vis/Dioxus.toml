@@ -1,0 +1,12 @@
+[application]
+name = "bbtree-vis"
+
+[web.app]
+title = "bbtree"
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+script = []

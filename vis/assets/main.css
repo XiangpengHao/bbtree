@@ -1,0 +1,74 @@
+/* Color roles, by the job each does (doc/10-visualization.md):
+ * - fill / prefix: one sequential blue ramp, light to dark for more;
+ * - page slots: the three categorical hues that stay apart for every reader
+ *   in every pairing (keys, inline keys, what follows a key), and two neutral
+ *   steps for the header and length tags, always with a label beside them.
+ * Light only. */
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb;
+  --plane: #f4f4f1;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.1);
+  --accent: #2a78d6;
+
+  --ramp-1: #cde2fb;
+  --ramp-2: #9ec5f4;
+  --ramp-3: #6da7ec;
+  --ramp-4: #3987e5;
+  --ramp-5: #256abf;
+  --ramp-6: #184f95;
+  --ramp-7: #0d366b;
+
+  --slot-keys: #2a78d6;
+  --slot-inline: #eb6834;
+  --slot-trailing: #1baf7a;
+  --slot-header: #898781;
+  --slot-tags: #52514e;
+}
+
+html,
+body,
+#main {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--plane);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The ramp, by step: fill or prefix length, quantized. */
+.ramp-0 { fill: var(--grid); background: var(--grid); }
+.ramp-1 { fill: var(--ramp-1); background: var(--ramp-1); }
+.ramp-2 { fill: var(--ramp-2); background: var(--ramp-2); }
+.ramp-3 { fill: var(--ramp-3); background: var(--ramp-3); }
+.ramp-4 { fill: var(--ramp-4); background: var(--ramp-4); }
+.ramp-5 { fill: var(--ramp-5); background: var(--ramp-5); }
+.ramp-6 { fill: var(--ramp-6); background: var(--ramp-6); }
+.ramp-7 { fill: var(--ramp-7); background: var(--ramp-7); }
+
+/* A page's slots; a slot the node leaves empty is the same hue, faint. */
+.slot-header { fill: var(--slot-header); background: var(--slot-header); }
+.slot-inline { fill: var(--slot-inline); background: var(--slot-inline); }
+.slot-tags { fill: var(--slot-tags); background: var(--slot-tags); }
+.slot-keys { fill: var(--slot-keys); background: var(--slot-keys); }
+.slot-trailing { fill: var(--slot-trailing); background: var(--slot-trailing); }
+.slot-empty { opacity: 0.22; }
+
+.page-track { fill: var(--grid); }
+.tree-link { stroke: var(--axis); stroke-width: 1; fill: none; }
+.node-box {
+  box-shadow: 0 0 0 1px var(--ring);
+}
+.node-box.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
