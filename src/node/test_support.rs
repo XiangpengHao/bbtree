@@ -478,6 +478,7 @@ mod tests {
     use crate::node::layout::NodeLayout;
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn bulky_key_nodes_hold_twelve_entries() {
         assert_eq!(size_of::<Tracked<'_>>(), 16);
         assert_eq!(size_of::<Bulky<'_>>(), 152);

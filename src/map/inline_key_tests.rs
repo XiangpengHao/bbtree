@@ -575,6 +575,7 @@ fn inline_keys_that_tie_everywhere_give_right_answers() {
 /// Wrong answers, as the contract allows, but never out of bounds: Miri
 /// checks every access in CI.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn wrong_inline_keys_stay_memory_safe() {
     let _ = run_with_lying_keys(Lie::Reversed, 73);
     let _ = run_with_lying_keys(Lie::Random, 74);
@@ -650,6 +651,7 @@ impl InlineKey for PanickingName<'_> {
 /// refit it stops leaves a prefix shorter than its fences share, which
 /// searches as well, so prefixes are checked only against their parents'.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_inline_key_leaves_a_valid_map() {
     let rng = TestRng::new(96);
     let budget = Cell::new(usize::MAX);
@@ -715,6 +717,7 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
 /// entries past a bounded range, and putting back what a dropped
 /// `extract_if` did not visit.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_inline_key_in_a_bulk_change_leaves_a_valid_map() {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum BulkChange {

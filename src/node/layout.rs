@@ -707,6 +707,7 @@ mod tests {
 
     /// Values and edges are both 8 bytes, so both kinds are alike.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn u64_to_u64_fills_one_page() {
         ExpectedLayout {
             // Needs 8 + 12·8 + 13·8 = 208; ⌊(1024 − 8 − 8) / 16⌋ = 63; the
@@ -719,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn string_to_u64_fills_one_page() {
         ExpectedLayout {
             // Needs 8 + 12·24 + 13·8 = 400; ⌊(1024 − 8 − 8) / 32⌋ = 31; the
@@ -733,6 +735,7 @@ mod tests {
     /// The layout `String` keys get by default (D18, D29): entries of
     /// 24 + 8 = 32 bytes, so 24 keys instead of 31.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn string_to_u64_with_inline_keys() {
         ExpectedLayout {
             // 8 + 8n + 32(n + 1) ≤ 1024: 40n ≤ 984, n = 24; entries at
@@ -749,6 +752,7 @@ mod tests {
     /// Auto heap-byte internals keep four bytes, independently of their
     /// unchanged eight-byte leaf summaries and the value type.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn auto_heap_byte_internal_nodes_keep_four_bytes() {
         ExpectedNode::one_page(28, 120, 792).assert_internal(
             NodePtr::<String, u64, Auto>::internal_layout(),
@@ -772,6 +776,7 @@ mod tests {
 
     /// `Vec<u8>` is 24 bytes and 8-aligned, like `String`.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn byte_vec_to_u64_with_inline_keys() {
         ExpectedLayout {
             leaf: ExpectedNode::one_page(24, 256, 248),
@@ -782,6 +787,7 @@ mod tests {
 
     /// Large values cut the leaf's capacity, not the internal node's.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn string_to_string_with_inline_keys() {
         ExpectedLayout {
             // Entries of 24 + 24 = 48: 8 + 8n + 48(n + 1) ≤ 1024: 56n ≤ 968,
@@ -796,6 +802,7 @@ mod tests {
 
     /// Unaligned keys: the slot after each pads to its own alignment.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn byte_array_keys_with_inline_keys() {
         ExpectedLayout {
             // Entries of 32 + 8 = 40: 8 + 8n + 40(n + 1) ≤ 1024: 48n ≤ 976,
@@ -809,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn recognized_arrays_move_edges_without_changing_capacity() {
         struct ArrayLayout;
 
@@ -855,6 +863,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn edge_first_layout_falls_back_when_alignment_would_lose_capacity() {
         // Six-byte keys fit 63 entries exactly in the original order.
         // Putting the aligned edges first would need 1026 bytes. This key
@@ -905,6 +914,7 @@ mod tests {
 
     /// Over-aligned keys pad each entry to their alignment.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn over_aligned_keys_with_inline_keys() {
         // Entries of 64 + 8 → 128 bytes: 12 keys need (8 + 96 → 128) +
         // 13·128 = 1792, so 2 KB. (8 + 8n → 128) + 128(n + 1) ≤ 2048 at
@@ -928,6 +938,7 @@ mod tests {
     /// Small keys: the inline keys outweigh them, and in an internal node
     /// each entry pads its key to the edge's alignment.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn set_of_bytes_with_inline_keys() {
         ExpectedLayout {
             // Entries of 1 byte, the slot taking none: 8 + 8n + (n + 1) ≤
@@ -944,6 +955,7 @@ mod tests {
     /// The layout `u64` keys get with their inline keys: entries of 16
     /// bytes after 2 bytes each of inline keys, so 55 keys instead of 63.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn u64_to_u64_with_two_byte_inline_keys() {
         ExpectedLayout {
             // (8 + 2n → 8) + 16(n + 1) ≤ 1024: 1016 at n = 55, 1032 at 56;
@@ -957,6 +969,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn cache_line_sized_pairs_use_tail_slack_without_losing_capacity() {
         // 8 + 2·14 → 8 = 40, followed by 15·64 = 960 bytes of entries.
         // Moving entry 0 to byte 64 uses the 24-byte tail; key 0 is at 128.
@@ -976,6 +989,7 @@ mod tests {
 
     /// 16-aligned keys pad each entry to 32 bytes.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn u128_to_u64_with_two_byte_inline_keys() {
         ExpectedLayout {
             // Entries of 16 + 8 → 32: (8 + 2n → 16) + 32(n + 1) ≤ 1024: 992
@@ -990,6 +1004,7 @@ mod tests {
 
     /// A set: the leaf has no values, and its entries are its keys.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn set_of_i64_with_two_byte_inline_keys() {
         ExpectedLayout {
             // Entries of 8: (8 + 2n → 8) + 8(n + 1) ≤ 1024: 1016 at n = 100,
@@ -1002,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn u32_to_u32_with_four_byte_inline_keys() {
         ExpectedLayout {
             // Entries of 4 + 4 = 8: 8 + 4n + 8(n + 1) ≤ 1024: 12n ≤ 1008,
@@ -1021,6 +1037,7 @@ mod tests {
     /// Inline keys take at most 1 KB, which only binds for keys that take
     /// no room and are aligned past 1 KB, whose nodes are larger than 1 KB.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn inline_keys_take_at_most_one_kb() {
         ExpectedLayout {
             // A 2 KB leaf of entries of no size: 1020 keys' inline keys fit,
@@ -1074,6 +1091,7 @@ mod tests {
     /// The case D21 is about: the leaf grows to fit 12 values, and the
     /// internal node stays the one of any other `u64`-keyed map.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn large_values_grow_leaves_only() {
         ExpectedLayout {
             // Needs 8 + 12·8 + 13·1000 = 13 104, over 12 KB: 13 KB.
@@ -1093,6 +1111,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn small_values_pack_more_leaf_entries() {
         ExpectedLayout {
             // Needs 8 + 12·8 + 13·1 = 117; ⌊(1024 − 8 − 1) / 9⌋ = 112; the
@@ -1105,6 +1124,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn set_of_bytes_packs_tightly() {
         ExpectedLayout {
             // Needs 4 + 12·1 = 16; ⌊(1024 − 4 − 0) / 1⌋ = 1020; the head, of
@@ -1118,6 +1138,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn zero_sized_keys_and_values_hit_the_capacity_cap() {
         ExpectedLayout {
             // Needs 4; entries take no room, so the cap of 1023 binds.
@@ -1129,6 +1150,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn over_aligned_keys_shift_the_key_array() {
         ExpectedLayout {
             // Needs 64 + 12·64 + 13·8 = 936; ⌊(1024 − 64 − 8) / 72⌋ = 13;
@@ -1143,6 +1165,7 @@ mod tests {
     /// Over-aligned keys and values: the leaf grows for the values, and the
     /// internal node is that of `CacheLineAligned → u64`.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn over_aligned_values_grow_leaves_only() {
         ExpectedLayout {
             // Needs 64 + 12·64 + 13·64 = 1664: 2 KB.
@@ -1161,6 +1184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn page_aligned_values_raise_leaf_alignment_only() {
         ExpectedLayout {
             // Aligned to 8 KB. Needs (8 + 12·8 → 8192) + 13·8192 = 114 688:
@@ -1179,6 +1203,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn heap_owning_keys_and_values() {
         ExpectedLayout {
             // Needs 8 + 12·24 + 13·24 = 608; ⌊(1024 − 8 − 24) / 48⌋ = 20;
@@ -1193,6 +1218,7 @@ mod tests {
     /// With `K = u64`, 12 entries and a head fit in a 1 KB leaf up to
     /// `size_of V = 70`.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn largest_value_that_fits_one_page() {
         ExpectedLayout {
             // Needs 8 + 12·8 + 13·70 = 1014; ⌊(1024 − 8 − 70) / 78⌋ = 12;
@@ -1204,6 +1230,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn one_value_byte_more_needs_a_two_page_leaf() {
         ExpectedLayout {
             // Needs 8 + 12·8 + 13·71 = 1027: 2 KB.
@@ -1224,6 +1251,7 @@ mod tests {
     /// 12 keys and 13 edges fit in a 1 KB internal node up to
     /// `size_of K = 76` (with `align_of K = 1`).
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn largest_key_that_fits_a_one_page_internal_node() {
         ExpectedLayout {
             // Needs 4 + 12·76 = 916; ⌊(1024 − 4 − 0) / 76⌋ = 13; the head,
@@ -1239,6 +1267,7 @@ mod tests {
     /// An internal node can be the larger kind: one key byte more and it
     /// needs 2 KB, while the leaf of a set still fits in 1 KB.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn one_key_byte_more_needs_a_two_page_internal_node() {
         ExpectedLayout {
             // Needs 4 + 12·77 = 928; ⌊(1024 − 4 − 0) / 77⌋ = 13; the head at

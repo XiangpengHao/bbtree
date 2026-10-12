@@ -495,6 +495,7 @@ impl Ord for CloningKey<'_> {
 /// A `clone` that panics part of the way through a tall tree drops what it
 /// copied so far, every key once, and leaves the source unchanged.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_clone_drops_the_partial_copy() {
     let ledger = DropLedger::new();
     let budget = Cell::new(usize::MAX);
@@ -559,6 +560,7 @@ fn entries_drop_like_std() {
 /// entry not removed yet in the map, the one it was testing included; all
 /// as std's do.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn retain_and_extract_if_drop_like_std() {
     let ledgers = LockstepLedgers::new();
     let rng = TestRng::new(28);
@@ -725,6 +727,7 @@ fn replacing_separators_matches_std() {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_new_key_leaves_both_maps_unchanged() {
     let ledgers = LockstepLedgers::new();
     let mut maps = TrackedMaps::new(&ledgers);
@@ -744,6 +747,7 @@ fn a_panicking_new_key_leaves_both_maps_unchanged() {
 /// `clear` drops the entries as dropping the map does, and leaves the map
 /// empty and usable even if one of their `Drop`s panics, as std's does.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_drop_while_clearing_matches_std() {
     let ledgers = LockstepLedgers::new();
     let mut maps = TrackedMaps::new(&ledgers);
@@ -773,6 +777,7 @@ fn a_panicking_drop_while_clearing_matches_std() {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_drop_while_dropping_the_map_matches_std() {
     // Above 194 entries (15 leaves of 12, plus 14 separators), the tree
     // needs a height of at least 2.
@@ -854,6 +859,7 @@ impl Borrow<u64> for BudgetedKey<'_> {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_ord_leaves_the_map_unchanged() {
     let budget = Cell::new(usize::MAX);
     let rng = TestRng::new(22);
@@ -913,6 +919,7 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     use crate::node::handle::{EdgeRoom, ForceResult};
     use crate::node::inline_keys::SearchKey;

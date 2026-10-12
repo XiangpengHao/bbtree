@@ -380,6 +380,7 @@ impl Drop for AppendPanicKey<'_> {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn cached_append_clears_before_callbacks_and_preserves_drop_order() {
     use core::panic::AssertUnwindSafe;
     use std::panic::catch_unwind;

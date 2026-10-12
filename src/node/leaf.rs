@@ -639,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn checked_positions_reject_out_of_bounds_indices() {
         let pages = TestPages::<u32, u64>::new();
         let mut leaf = Subtree::new_leaf(pages.fresh());

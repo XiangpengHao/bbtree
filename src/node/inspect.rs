@@ -576,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn string_keys_keep_prefixes_and_length_tags() {
         let mut map = BBTreeMap::new();

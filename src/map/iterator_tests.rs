@@ -515,6 +515,7 @@ fn mutable_folds_keep_all_handed_out_references_disjoint() {
 }
 
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn a_panicking_fold_leaves_the_same_mutations_as_std() {
     for reverse in [false, true] {

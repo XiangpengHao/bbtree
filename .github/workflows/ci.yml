@@ -79,9 +79,17 @@ jobs:
           toolchain: nightly-2026-10-07
           components: rustfmt, clippy
 
+      # The bench builds for the runner's CPU (bench/.cargo/config.toml), and
+      # runners differ: a build cached on one with AVX-512 dies of SIGILL on
+      # one without. So each instruction set gets its own cache.
+      - name: Identify the CPU's instruction set
+        id: cpu
+        run: echo "flags=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bench
+          key: cpu-${{ steps.cpu.outputs.flags }}
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -148,6 +156,51 @@ jobs:
       - name: Test
         run: cargo test
 
+  # The library's tests on other platforms. On ARM, the portable code runs
+  # where x86 has SIMD. On wasm, pointers are 32 bits and a panic aborts,
+  # so tests that assume 64-bit pointers or need unwinding are ignored there.
+  test-aarch64:
+    name: test (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --lib --all-features
+
+  test-wasm:
+    name: test (wasm32-wasip1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          targets: wasm32-wasip1
+
+      - name: Install wasmtime
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+        run: cargo test --target wasm32-wasip1 --lib --all-features
+
   # The release checks: the fuzzing takes hours, so it runs for releases (and
   # weekly, in fuzz.yml) rather than for every change.
   release-fuzz:
@@ -185,7 +238,7 @@ jobs:
   merge-gate:
     name: merge gate
     if: always()
-    needs: [plan, check, bench, fuzz, release-fuzz, release-package]
+    needs: [plan, check, bench, fuzz, test-aarch64, test-wasm, release-fuzz, release-package]
     runs-on: ubuntu-latest
     steps:
       - name: Check that every job passed

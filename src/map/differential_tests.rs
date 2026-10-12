@@ -905,6 +905,7 @@ fn wide_keys_match_std() {
 /// Bounds out of order panic with std's messages, unless the map has never
 /// had a tree; an emptied map still has one, as std's does.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn ranges_out_of_order_panic_like_std() {
     let rng = TestRng::new(10);
     let mut maps = MirroredMaps::<u64, u64>::new();
@@ -936,6 +937,7 @@ fn ranges_out_of_order_panic_like_std() {
 /// `collect` and `from` sort the entries, and keep the last of equal keys,
 /// as std's do; a missing key in `Index` panics with std's message.
 #[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn collecting_and_indexing_match_std() {
     let rng = TestRng::new(12);
     let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };

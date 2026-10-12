@@ -293,6 +293,7 @@ fn iterators_are_covariant_in_keys_and_values() {
 /// handle with its height, and a count. std's, whose nodes point to their
 /// parents, need 72 bytes.
 #[test]
+#[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
 fn iterator_sizes() {
     assert_eq!(size_of::<Iter<'_, u64, u64>>(), 560);
     assert_eq!(size_of::<Keys<'_, u64, u64>>(), 560);
@@ -303,6 +304,7 @@ fn iterator_sizes() {
 }
 
 #[test]
+#[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
 fn four_words_with_an_insertion_hint() {
     assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 32);
     assert_eq!(
