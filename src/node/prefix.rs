@@ -152,7 +152,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PrefixGrowth> NodeMut<'_, K, V, S, Kin
     /// Computes them all first, then writes them, so that a panicking
     /// `InlineKey` leaves the node as it was. Does nothing if the node has
     /// no inline keys.
-    pub(super) fn refit_prefix(&mut self, prefix_len: usize) {
+    fn refit_prefix(&mut self, prefix_len: usize) {
         let plan = Self::plan();
         let (Some(inliner), Some(inline_width)) = (plan.inliner(), plan.inline_width()) else {
             return;

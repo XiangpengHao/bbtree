@@ -30,7 +30,7 @@ a leaf), chosen by the input.
 - **Oracles.** Std's answers (map and set targets) or a model (panics);
   `check_invariants` after every operation, so a corrupt node is caught when
   it is made, not when a lookup later crosses it; AddressSanitizer and the
-  library's debug assertions. `check_invariants` and `check_prefix_order`
+  library's debug assertions. `check_invariants` and `check_prefix_lens`
   are public only in builds with `--cfg fuzzing`, which `cargo fuzz` sets.
 - **Inputs.** Structured: a list of operations, decoded until the input's
   bytes run out. Keys are a stem from a few the input gives, and a number from
@@ -57,7 +57,7 @@ A crash the weekly run finds is minimized (`cargo fuzz tmin`), then kept as
 
 - **`retain` and `extract_if` miscounted after a panicking `InlineKey`**
   (fixed 2026-10-11; `fuzz/regressions/user_code_panics/`, and
-  `a_panicking_inline_key_in_retain_or_extract_if_keeps_the_count`). The
+  `a_panicking_inline_key_in_a_bulk_change_leaves_a_valid_map`). The
   kept entries go into a `TreeBuilder`, which calls `InlineKey` as it places
   each one and as nodes close. When that panicked, the entry being placed
   was dropped, but the walk, which counts the entries it hands over rather

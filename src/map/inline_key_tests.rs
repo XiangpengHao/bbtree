@@ -551,7 +551,7 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
         // every edge after every operation, without calling the lying
         // encoding or assuming the keys are sorted. The ledger below also
         // verifies that later promotions/removals keep ownership intact.
-        ours.check_prefix_order();
+        ours.check_prefix_lens();
     }
     assert!(ours.len() <= inserts);
     drop(ours);
@@ -683,7 +683,7 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
         } else {
             theirs.remove(&number);
         }
-        ours.check_prefix_order();
+        ours.check_prefix_lens();
     }
     assert!(panics > 0);
     assert_eq!(ours.len(), theirs.len());
@@ -697,31 +697,46 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
     }
 }
 
-/// An `InlineKey` that panics while `retain` or `extract_if` puts the kept
-/// entries back into a tree drops the entry it was placing, and the map
-/// counts only the entries it holds: its length is what a walk finds, and
-/// every value is dropped once. The panic lands at every point of the
-/// rebuild in turn: computing a kept key's inline key, fitting the prefix of
-/// a node it closes, fitting the border when the walk finishes, and putting
-/// back what a dropped `extract_if` did not visit.
+/// An `InlineKey` that panics while `retain`, `extract_if` or `append`
+/// builds a tree of the entries it keeps loses at most the entries it was
+/// placing: the map counts only those it holds, every value is dropped once,
+/// none leaked, and the tree's borders keep prefix 0, so that a key past the
+/// last goes in last. The panic lands on every call in turn: computing an
+/// entry's inline key, fitting the prefix of a node a new leaf closes,
+/// fitting the border when the walk or the merge finishes, joining back the
+/// entries past a bounded range, and putting back what a dropped
+/// `extract_if` did not visit.
 #[test]
-fn a_panicking_inline_key_in_retain_or_extract_if_keeps_the_count() {
+fn a_panicking_inline_key_in_a_bulk_change_leaves_a_valid_map() {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum BulkChange {
+        Retain,
+        ExtractIfAll,
+        ExtractIfRange,
+        /// Appends the upper half to the lower: the merge takes all of the
+        /// lower half first, and a panic leaves nothing of it to take after.
+        Append,
+    }
     let budget = Cell::new(usize::MAX);
     let ledger = DropLedger::new();
-    let (count, budgets) = if cfg!(miri) {
-        (40, (0..60).step_by(7))
-    } else {
-        (300, (0..450).step_by(3))
+    let count = if cfg!(miri) { 30 } else { 120 };
+    let key = |number: usize| PanickingName {
+        name: UserName::from_number(number),
+        budget: &budget,
     };
-    for (trial, left) in budgets.enumerate() {
+    // Runs `change` on fresh maps, the `left`-th call of `InlineKey`
+    // panicking; returns the calls left.
+    let run = |change: BulkChange, left: usize| {
         let mut map: BBTreeMap<PanickingName<'_>, Tracked<'_>, WithInlineKey> =
             BBTreeMap::with_strategy(WithInlineKey);
+        let mut other = BBTreeMap::with_strategy(WithInlineKey);
         for number in 0..count {
-            let key = PanickingName {
-                name: UserName::from_number(number),
-                budget: &budget,
+            let target = if change == BulkChange::Append && number >= count / 2 {
+                &mut other
+            } else {
+                &mut map
             };
-            map.insert(key, ledger.track());
+            target.insert(key(number), ledger.track());
         }
         let mut position = 0;
         let mut every_third = |_: &PanickingName<'_>, _: &mut Tracked<'_>| {
@@ -729,19 +744,46 @@ fn a_panicking_inline_key_in_retain_or_extract_if_keeps_the_count() {
             position % 3 == 0
         };
         budget.set(left);
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            if trial % 2 == 0 {
-                map.retain(|key, value| !every_third(key, value));
-            } else {
+        let _ = catch_unwind(AssertUnwindSafe(|| match change {
+            BulkChange::Retain => map.retain(|key, value| !every_third(key, value)),
+            BulkChange::ExtractIfAll => {
                 map.extract_if(.., &mut every_third)
                     .take(count / 10)
                     .for_each(drop);
             }
+            BulkChange::ExtractIfRange => {
+                map.extract_if(key(count / 4)..key(3 * count / 4), &mut every_third)
+                    .take(count / 10)
+                    .for_each(drop);
+            }
+            BulkChange::Append => map.append(&mut other),
         }));
-        budget.set(usize::MAX);
-        assert_eq!(map.len(), map.iter().count(), "budget {left}");
-        assert_eq!(map.len(), map.iter().rev().count(), "budget {left}");
-        map.check_prefix_order();
+        let calls_left = budget.replace(usize::MAX);
+        assert_eq!(map.len(), map.iter().count(), "{change:?}, budget {left}");
+        assert_eq!(
+            map.len(),
+            map.iter().rev().count(),
+            "{change:?}, budget {left}"
+        );
+        map.check_prefix_lens();
+        map.insert(key(count), ledger.track());
+        assert!(
+            map.keys().is_sorted(),
+            "{change:?}, budget {left}: a key past the last went in elsewhere"
+        );
+        calls_left
+    };
+    for change in [
+        BulkChange::Retain,
+        BulkChange::ExtractIfAll,
+        BulkChange::ExtractIfRange,
+        BulkChange::Append,
+    ] {
+        let calls = usize::MAX - run(change, usize::MAX);
+        let step = if cfg!(miri) { calls / 8 + 1 } else { 1 };
+        for left in (0..calls).step_by(step) {
+            run(change, left);
+            ledger.assert_all_dropped_once();
+        }
     }
-    ledger.assert_all_dropped_once();
 }

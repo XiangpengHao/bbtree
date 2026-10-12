@@ -16,17 +16,20 @@
 //!   to their fences (`node/prefix.rs`): the entry is then in or out, and
 //!   those nodes keep prefixes shorter than their fences share, which
 //!   searches allow but `check_invariants` doesn't, so from then on the run
-//!   checks prefix order and answers only;
-//! - with lying keys, no node's prefix is shorter than its parent's (D44),
-//!   and the map's length is the number of entries it walks; and no panic
-//!   but the hostile ones: std's map panics on an inconsistent `Ord` only in
-//!   `range`, which this target doesn't call.
+//!   checks prefix lengths (`check_prefix_lens`) and answers only;
+//! - with any keys, no node's prefix is shorter than its parent's (D44),
+//!   the nodes along the tree's borders keep prefix 0, which searches past
+//!   the first or last key read, and the map's length is the number of
+//!   entries it walks; and, with lying keys, no panic but the hostile ones:
+//!   std's map panics on an inconsistent `Ord` only in `range`, which this
+//!   target doesn't call.
 //!
 //! At the end, dropping the map drops every key and value left, once.
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::panic::{self, AssertUnwindSafe};
 
 use bbtree::bbtree_map::Entry;
@@ -171,9 +174,10 @@ enum HostileOperation {
         keep: PositionMask,
         panics_at: Option<u8>,
     },
-    /// Extracts the entries that `extract` picks, at most `take` of them;
-    /// the predicate panics on call `panics_at`, if any.
+    /// Extracts the entries in `range` that `extract` picks, at most `take`
+    /// of them; the predicate panics on call `panics_at`, if any.
     ExtractIf {
+        range: OrderRange,
         extract: PositionMask,
         take: u8,
         panics_at: Option<u8>,
@@ -201,6 +205,36 @@ impl HostileOperation {
             (_, Self::Append { .. } | Self::Retain { .. } | Self::ExtractIf { .. }) => false,
             _ => true,
         }
+    }
+}
+
+/// A range of key orders from the input: from `start`, included, up to
+/// `end`, excluded, each end unbounded if absent. A range out of order is
+/// taken the other way round, as both maps panic for one.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct OrderRange {
+    start: Option<u16>,
+    end: Option<u16>,
+}
+
+impl OrderRange {
+    /// The ends in order: unbounded when `Ord` lies, which may find the
+    /// start after the end, for which the map panics, as std's does.
+    fn ends(self, conduct: Conduct) -> (Option<u16>, Option<u16>) {
+        match (self.start, self.end) {
+            _ if conduct == Conduct::LyingOrder => (None, None),
+            (Some(start), Some(end)) if end < start => (Some(end), Some(start)),
+            ends => ends,
+        }
+    }
+
+    /// The range as bounds on the model's keys.
+    fn order_bounds(self, conduct: Conduct) -> (Bound<u16>, Bound<u16>) {
+        let (start, end) = self.ends(conduct);
+        (
+            start.map_or(Bound::Unbounded, Bound::Included),
+            end.map_or(Bound::Unbounded, Bound::Excluded),
+        )
     }
 }
 
@@ -487,7 +521,7 @@ impl<'h, S: InlineKeyStrategy<HostileKey<'h>> + Default> HostileMap<'h, S> {
             len,
             "values lost or kept alive"
         );
-        self.map.check_prefix_order();
+        self.map.check_prefix_lens();
         if !self.host.is_honest() {
             return;
         }
@@ -624,16 +658,22 @@ impl<'h, S: InlineKeyStrategy<HostileKey<'h>> + Default> HostileMap<'h, S> {
                 self.model.retain(|_, _| model_keep());
             }
             HostileOperation::ExtractIf {
+                range,
                 extract,
                 take,
                 panics_at,
             } => {
+                let key_bound = |bound: Bound<u16>| bound.map(|order| host.key(order, false));
+                let (start, end) = range.order_bounds(host.conduct);
                 let mut predicate = host.predicate(extract, panics_at);
-                let extracted: Vec<_> = (self.map.extract_if(.., |_, _| predicate()))
+                let key_range = (key_bound(start), key_bound(end));
+                let extracted: Vec<_> = (self.map.extract_if(key_range, |_, _| predicate()))
                     .take(usize::from(take))
                     .collect();
                 let mut model_extract = extract.picker();
-                let expected: Vec<_> = (self.model.extract_if(.., |_, _| model_extract()))
+                let model_range = (start, end);
+                let expected: Vec<_> = (self.model)
+                    .extract_if(model_range, |_, _| model_extract())
                     .take(usize::from(take))
                     .collect();
                 let extracted_ids = extracted.iter().map(|(key, value)| (key.order, value.id));

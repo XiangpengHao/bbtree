@@ -744,12 +744,6 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         self.len() < self.min_len()
     }
 
-    /// Whether the node holds as many keys as it can: an insert into it
-    /// splits it.
-    pub(super) fn is_full(&self) -> bool {
-        self.len() == self.capacity()
-    }
-
     fn key_slots(&self) -> KeySlots<K, S, Kind> {
         // SAFETY: the node is allocated, and of kind `Kind` (invariant 1).
         unsafe { self.node.key_slots::<Kind>() }

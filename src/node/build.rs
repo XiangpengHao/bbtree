@@ -11,18 +11,15 @@
 //!
 //! Nodes on the right border have prefix 0, having no fence on the right.
 //! A node that closes, full, gets what its fences share, and its keys'
-//! windows past it (`prefix.rs`); so do the left siblings that `finish`
-//! takes entries from.
+//! windows past it (`prefix.rs`), once the next leaf hangs after it, off
+//! the border; so do the left siblings that `finish` takes entries from.
 
 #![forbid(unsafe_code)]
 
-use super::handle::{
-    EdgeRoom, ForceResult, Immut, Leaf, LeafOrInternal, NodeMut, NodeRef, Subtree,
-};
+use super::handle::{EdgeRoom, ForceResult, Leaf, LeafOrInternal, NodeMut, Subtree};
 use super::inline_keys::{InlinedKey, KeyInliner};
-use super::page::{FreshPage, PageByKind, PageKind};
-use super::path::{LastEdge, MAX_HEIGHT, PathMut};
-use super::prefix::PrefixGrowth;
+use super::page::{FreshPage, PageByKind};
+use super::path::{LastEdge, PathMut};
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order.
@@ -99,10 +96,10 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
                 };
             }
             let (key, value) = next;
-            Self::fit_closing_nodes(tree, &key);
             // It goes up into the right border, where prefixes are 0.
-            Self::start_leaf(tree, InlinedKey::new(key, 0), value);
+            let top = Self::start_leaf(tree, InlinedKey::new(key, 0), value);
             self.length += 1;
+            Self::fit_closed_nodes(tree, top);
             next = match entries.next() {
                 Some(entry) => entry,
                 None => return,
@@ -144,84 +141,43 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         }
     }
 
-    /// Fits the prefixes of the nodes that a new leaf starting at
-    /// `first_key` closes, from the leaf up: the full rightmost leaf, and
-    /// each full rightmost node above it, which no key joins again, whose
-    /// upper fence `first_key` is from now on.
-    fn fit_closing_nodes(tree: &mut Subtree<K, V, S>, first_key: &K) {
-        let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
+    /// Fits the prefixes of the nodes that a new leaf closed, which
+    /// [`Self::start_leaf`] hung after a separator in the node at height
+    /// `top`: the right border of the subtree left of that separator, full,
+    /// which no key joins again, whose upper fence the separator is from now
+    /// on. From the leaf up, so that each node's prefix sees its children's.
+    ///
+    /// Reads keys only once the new leaf hangs beside them: until then they
+    /// are on the tree's right border, where a prefix must be 0, and a
+    /// panicking `InlineKey` would leave one there that searches past the
+    /// last key misread. Off the border, a prefix it leaves short of the
+    /// fences is one searches allow (`prefix.rs`).
+    fn fit_closed_nodes(tree: &mut Subtree<K, V, S>, top: usize) {
+        if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
-        };
-        // What each full node's fences share, from the root down: its lower
-        // fence is the last key of the nearest node above it that has one.
-        let mut prefix_lens = [None; MAX_HEIGHT + 1];
-        let mut low = None;
-        let mut node = tree.borrow();
-        loop {
-            let height = node.height();
-            let ((is_full, last_key), child) = match node.force() {
-                ForceResult::Leaf(leaf) => (Self::closing_state(leaf), None),
-                ForceResult::Internal(internal) => (
-                    Self::closing_state(internal),
-                    Some(internal.last_edge().descend()),
-                ),
-            };
-            if is_full {
-                prefix_lens[height] = Some(inliner.fence_prefix_len(low, Some(first_key)));
-            }
-            if last_key.is_some() {
-                low = last_key;
-            }
-            match child {
-                Some(child) => node = child,
-                None => break,
-            }
         }
-        // From the leaf up, while full, so that each node's prefix sees its
-        // children's.
         let mut path = PathMut::new(tree);
-        path.descend_to_last_key();
-        if !Self::refit_if_full(path.leaf_mut(), prefix_lens[0]) {
-            return;
+        path.start_at_root();
+        while path.height() > top {
+            path.set_index(path.view().len());
+            path.descend();
         }
-        while path.height() < path.root_height() {
+        // The edge left of the separator, the node's last key.
+        path.set_index(path.view().len() - 1);
+        path.descend_to_leaf::<LastEdge>();
+        while path.height() < top {
             path.ascend();
-            let height = path.height();
-            if !Self::refit_if_full(path.internal_mut(), prefix_lens[height]) {
-                return;
-            }
+            let edge = path.index();
+            path.fit_children_to_fences([edge]);
         }
-    }
-
-    /// Whether `node`, a rightmost node, is full, and its last key.
-    fn closing_state<'t, Kind: PageKind>(
-        node: NodeRef<Immut<'t>, K, V, S, Kind>,
-    ) -> (bool, Option<&'t K>) {
-        (node.is_full(), node.last_kv().map(|last| last.into_key()))
-    }
-
-    /// Fits the prefix of `node`, a rightmost node a new leaf closes, to
-    /// `prefix_len`, what its fences share, if it is full; returns whether
-    /// it was.
-    fn refit_if_full<Kind: PrefixGrowth>(
-        mut node: NodeMut<'_, K, V, S, Kind>,
-        prefix_len: Option<usize>,
-    ) -> bool {
-        if !node.is_full() {
-            return false;
-        }
-        if let Some(prefix_len) = prefix_len {
-            node.refit_prefix(prefix_len);
-        }
-        true
     }
 
     /// Starts a new rightmost leaf after a full one, with `value` as its
     /// head, and hangs it in `tree` after `separator`: in the rightmost
     /// internal node one level up if it has room; or else in a new node
     /// there, which hangs one level further up the same way; or under a new
-    /// root.
-    fn start_leaf(tree: &mut Subtree<K, V, S>, separator: InlinedKey<K, S>, value: V) {
+    /// root. Returns the height of the node that took the separator.
+    fn start_leaf(tree: &mut Subtree<K, V, S>, separator: InlinedKey<K, S>, value: V) -> usize {
         let mut leaf = Subtree::new_leaf(FreshPage::allocate());
         leaf.borrow_mut().replace_head(value);
         let mut child = leaf.forget_type();
@@ -231,7 +187,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             path.ascend();
             if let EdgeRoom::Fits(edge) = path.internal_mut().last_edge().check_room() {
                 edge.insert_fit(separator, child);
-                return;
+                return path.height();
             }
             child.push_internal_level(FreshPage::allocate());
         }
@@ -240,6 +196,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             unreachable!("a new root has room");
         };
         edge.insert_fit(separator, child);
+        path.height()
     }
 }
 

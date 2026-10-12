@@ -47,18 +47,18 @@ struct SeparatorPlace {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
-    /// Joins this tree, `separator` and `right`, whose keys ascend in that
+    /// Joins this tree, the separator, its key `separator` with its window
+    /// at prefix 0 and its `value`, and `right`, whose keys ascend in that
     /// order and which both have entries, into this tree. Compares no keys;
     /// keys out of order make a tree whose searches give wrong answers, but
     /// that is memory-safe. Pages come from and go to the global allocator.
     ///
-    /// `InlineKey` is called first, for the separator, before anything
-    /// changes: a panic then drops the separator and leaves both trees as
-    /// they were. It is called last again, to fit the prefixes, once the
-    /// tree is whole: a panic then leaves it valid.
-    pub(crate) fn join(&mut self, separator: (K, V), mut right: Self) {
-        let (key, value) = separator;
-        let separator = InlinedKey::new(key, 0);
+    /// The caller computes the separator's window, which calls `InlineKey`,
+    /// while it still holds `right`: a panic then leaves both trees with
+    /// their owners. `InlineKey` is called again, last, to fit the
+    /// prefixes, once the tree is whole: a panic then leaves it valid, with
+    /// this tree's owner.
+    pub(crate) fn join(&mut self, separator: InlinedKey<K, S>, value: V, mut right: Self) {
         let mut node = right.borrow_mut();
         loop {
             node = match node.force() {

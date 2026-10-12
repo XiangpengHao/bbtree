@@ -63,26 +63,41 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     }
 
     /// Panics unless no node's prefix length is shorter than its parent's
-    /// (D44). Calls neither `Ord` nor any encoding: it holds even for keys
-    /// that break their contracts, whose maps give wrong answers.
-    pub fn check_prefix_order(&self) {
+    /// (D44), and every node along the tree's left and right borders, which
+    /// lacks a fence, has prefix 0 (05-fence-key.md): a search for a key
+    /// past the first or last goes down a border, and reads its windows
+    /// there. Calls neither `Ord` nor any encoding: it holds even for keys
+    /// that panic or break their contracts, whose maps give wrong answers.
+    pub fn check_prefix_lens(&self) {
         if let Some(root) = &self.root {
-            Self::check_prefix_order_in(root.borrow(), 0);
+            Self::check_prefix_lens_in(root.borrow(), 0, true, true);
         }
     }
 
-    fn check_prefix_order_in(
+    fn check_prefix_lens_in(
         node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
         parent_prefix: usize,
+        on_left_border: bool,
+        on_right_border: bool,
     ) {
         let prefix = node.prefix_len();
         assert!(
             prefix >= parent_prefix,
             "child prefix {prefix} < parent {parent_prefix}"
         );
+        assert!(
+            prefix == 0 || !(on_left_border || on_right_border),
+            "prefix {prefix} on the tree's border"
+        );
         if let ForceResult::Internal(internal) = node.force() {
-            for index in 0..=internal.len() {
-                Self::check_prefix_order_in(internal.edge_at(index).descend(), prefix);
+            let len = internal.len();
+            for index in 0..=len {
+                Self::check_prefix_lens_in(
+                    internal.edge_at(index).descend(),
+                    prefix,
+                    on_left_border && index == 0,
+                    on_right_border && index == len,
+                );
             }
         }
     }

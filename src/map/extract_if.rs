@@ -41,6 +41,7 @@ use super::into_iter::Deallocate;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::node::build::TreeBuilder;
 use crate::node::handle::Subtree;
+use crate::node::inline_keys::InlinedKey;
 use crate::node::page::{FreshPage, PageByKind};
 use crate::node::path::{FirstEdge, KeySide, Path, PathMut};
 use crate::node::walk::DyingWalk;
@@ -205,16 +206,20 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
             Bound::Excluded(end) => Some((end, KeySide::Before)),
             Bound::Unbounded => None,
         };
+        let cut_past_end = end.is_some();
         let range = match end {
             Some((end, side)) => {
                 let past_end = tree.split_off_at(end, side);
-                let range = mem::replace(tree, past_end);
-                tree.fit_border_siblings::<FirstEdge>();
-                range
+                mem::replace(tree, past_end)
             }
             None => self.after.0.take().expect("the tree, cut or not"),
         };
         self.source.rest = DyingWalk::new(Some(range), usize::MAX, PageByKind::deallocate);
+        if let Some(past_end) = &mut self.after.0
+            && cut_past_end
+        {
+            past_end.fit_border_siblings::<FirstEdge>();
+        }
     }
 }
 
@@ -303,20 +308,25 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// (`node/join.rs`); or the one with entries; or `None` if neither has
     /// any. Keys out of order make a tree whose searches give wrong answers,
     /// but that is memory-safe.
+    ///
+    /// Both trees stay with owners that take them apart while `InlineKey`
+    /// runs, as the last entry's removal, its window and the join call it:
+    /// a panic then drops their entries rather than leaking them.
     fn concat(left: Option<Self>, right: Option<Self>) -> Option<Self> {
-        let (mut left, mut right) = match (Self::with_entries(left), Self::with_entries(right)) {
+        let (left, right) = match (Self::with_entries(left), Self::with_entries(right)) {
             (Some(left), Some(right)) => (left, right),
             (left, right) => return left.or(right),
         };
+        let (mut left, mut right) = (DetachedTree(Some(left)), DetachedTree(Some(right)));
         let mut left_length = 1;
-        let separator = left
-            .pop_last(PageByKind::deallocate, &mut left_length)
+        let (key, value) = (left.0.as_mut())
+            .and_then(|left| left.pop_last(PageByKind::deallocate, &mut left_length))
             .expect("a tree with entries has a last one");
-        let Some(mut left) = Self::with_entries(Some(left)) else {
-            let (key, value) = separator;
-            let mut right_length = 0;
-            {
-                let mut path = PathMut::new(&mut right);
+        match Self::with_entries(left.0.take()) {
+            Some(rest) => left.0 = Some(rest),
+            None => {
+                let mut right_length = 0;
+                let mut path = PathMut::new(right.0.as_mut().expect("the right tree"));
                 path.start_at_root();
                 path.descend_to_leaf::<FirstEdge>();
                 path.insert(
@@ -326,11 +336,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                     FreshPage::allocate,
                     &mut right_length,
                 );
+                return right.0.take();
             }
-            return Some(right);
-        };
-        left.join(separator, right);
-        Some(left)
+        }
+        let separator = InlinedKey::new(key, 0);
+        let right = right.0.take().expect("the right tree");
+        left.0
+            .as_mut()
+            .expect("the left tree")
+            .join(separator, value, right);
+        left.0.take()
     }
 
     /// `tree`, if it has entries; otherwise it is taken apart, and `None`.

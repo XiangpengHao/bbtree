@@ -174,7 +174,7 @@ An operation does its upkeep in two steps:
 | steal | the receiver's widen, the giver's narrow; their children's don't | the receiver takes the parent's prefix, filled from the separator, which comes down at its window; the key going up moves back the same way | both |
 | removal of separator `s`, replaced by its successor `s'` (D17) | the right border of the subtree left of `s` (upper fence `s` → `s'`) and the left border of the subtree right of it (lower fence `s` → `s'`) | before any change, the first border's nodes shrink to `min(own, LCP(s, s'))`, reading keys; then `s'` moves back to `s`'s node's prefix, filled from `s` | the second border's nodes |
 | `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes prefix 0, from the root down, each filled from its parent's key beside the path | once both maps are counted, the nodes beside each border |
-| builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the closing nodes, from the leaf up; after `finish`, the nodes beside the right border |
+| builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the nodes a new leaf closes, from the leaf up, once it hangs after them; after `finish`, the nodes beside the right border |
 | root push / pop, clone | none | a new root has prefix 0; a copy copies prefixes | — |
 
 - **Why the first border of a removed separator shrinks first.** Its
@@ -193,6 +193,11 @@ An operation does its upkeep in two steps:
   `high` the key right of it at the nearest where it isn't the last
   (`PathMut::bounds`). Only fitting reads them. A plain search reads no
   fence.
+- **A node on a border keeps prefix 0 through a panic.** A search for a key
+  past the first or last goes down a border and reads windows there, so no
+  fit may give a border node a prefix, even for a moment that a panicking
+  `InlineKey` could make last: the builder fits a full rightmost node only
+  once the next leaf hangs after it, off the border.
 - **An internal node grows at most to its children's prefixes,** which reads
   their headers: a prefix that fits its fences never passes them, but a panic
   during an earlier fit may have left one of theirs short.
