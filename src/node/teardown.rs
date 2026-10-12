@@ -144,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn destroy_drops_entries_in_ascending_order() {
         destroy_in_order::<Bulky<'_>, Auto>(&DropLedger::new(), 300);
         // 25 entries in a leaf with inline keys: height 2 takes more. The
@@ -152,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn destroy_keeps_ascending_order_after_a_panicking_drop() {
         let rng = TestRng::new(13);
         for position in [0, 123, 299] {
@@ -190,6 +192,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn destroy_finishes_after_a_panicking_drop() {
         let rng = TestRng::new(11);
         let count = if cfg!(miri) { 60 } else { 300 };

@@ -306,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     #[cfg_attr(
         miri,
         ignore = "the rejected child is leaked on purpose, which Miri reports"
@@ -336,6 +337,7 @@ mod tests {
     /// A separator over a leaf without a head is a broken tree: balancing it
     /// panics instead of moving an empty head slot.
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn balancing_refuses_a_headless_right_leaf() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
@@ -362,6 +364,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn push_and_pop_levels() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
@@ -560,6 +563,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn steals_and_merges_of_internal_nodes() {
         let ledger = DropLedger::new();
         let pages = TestPages::new();

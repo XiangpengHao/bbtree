@@ -242,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "its Miri size misses the height it asserts")]
     fn a_tree_stays_memory_safe_under_any_ord() {
         tree_stays_memory_safe::<0, Auto>();
         tree_stays_memory_safe::<32, Auto>();
@@ -638,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn checked_positions_reject_out_of_bounds_indices() {
         let pages = TestPages::<u32, u64>::new();
         let mut leaf = Subtree::new_leaf(pages.fresh());

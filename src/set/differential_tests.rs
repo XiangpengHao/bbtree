@@ -372,6 +372,7 @@ where
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn u64_set_matches_std() {
     let rng = TestRng::new(21);
     let (steps, key_space) = if cfg!(miri) {
@@ -437,6 +438,7 @@ fn distinct_numbers(rng: &TestRng, len: usize, universe: usize) -> Vec<usize> {
 /// and of each shape: overlapping, apart, touching at one end, and one
 /// inside the other with or without its ends.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn set_operations_match_std() {
     let rng = TestRng::new(25);
     for (a_len, b_len) in PAIR_LENS {

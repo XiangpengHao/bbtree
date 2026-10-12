@@ -45,6 +45,7 @@ fn iterators_are_covariant_in_elements() {
 
 /// The map's four words, its values taking no space.
 #[test]
+#[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
 fn four_words_like_the_map() {
     assert_eq!(size_of::<BBTreeSet<u64>>(), 32);
     assert_eq!(size_of::<BBTreeSet<u64>>(), size_of::<BBTreeMap<u64, ()>>());

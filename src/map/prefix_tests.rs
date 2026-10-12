@@ -191,6 +191,7 @@ fn cuts_refit_the_nodes_beside_their_borders() {
 /// must still choose the correct edge. Separator replacement, cuts and
 /// rebuilding must preserve this distinction, including embedded zeros.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn local_prefix_queries_and_mutations_match_std() {
     use std::collections::BTreeMap;
     use std::ops::Bound::{Included, Unbounded};
@@ -278,6 +279,7 @@ fn local_prefix_queries_and_mutations_match_std() {
 /// Its narrow parent must still export bytes four through seven when a
 /// separator moves down or fills the window of a leaf whose fence shrinks.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn narrow_parent_windows_survive_demotion_and_fence_changes() {
     use std::collections::BTreeMap;
 

@@ -1244,6 +1244,7 @@ mod tests {
     /// before inline keys; std byte strings and integers get the layout
     /// with them.
     #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn only_inline_keys_change_the_layout() {
         assert!(!NodePtr::<[u64; 1], u64, Auto>::has_inline_keys());
         assert_eq!(

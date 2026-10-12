@@ -197,6 +197,7 @@ mod tests {
     /// A separator above a leaf without a head is a broken tree: looking up
     /// its value panics instead of reading an empty slot.
     #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn a_separator_over_a_headless_leaf_panics() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();

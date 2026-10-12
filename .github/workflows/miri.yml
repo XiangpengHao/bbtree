@@ -1,14 +1,21 @@
-name: Miri
+# Named for its README badge.
+name: miri
 
-# Every test under Miri, which reports undefined behavior in the unsafe code.
-# A run takes hours, so Miri runs weekly and for every release (ci.yml), not
-# for every change.
+# The tests under Miri, which reports undefined behavior in the unsafe code.
+# Tests that take over about 3 minutes under Miri are ignored under it
+# (`#[cfg_attr(miri, ignore = ...)]`), so that this runs on every change;
+# normal test runs keep them.
 on:
-  schedule:
-    # Wednesdays at 10:17 UTC, with the weekly fuzzing (fuzz.yml).
-    - cron: "17 10 * * 3"
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
-  workflow_call:
+
+# Cancel a pull request's superseded runs. Every commit on main finishes its
+# run, so the README badge reports it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

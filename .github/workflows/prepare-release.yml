@@ -94,7 +94,7 @@ jobs:
           body: |
             ## Release v${{ steps.bump.outputs.version }}
 
-            This PR bumps the version to `${{ steps.bump.outputs.version }}`. A change of version is a release, so CI runs every release check on it: Miri, two hours of fuzzing, and the package.
+            This PR bumps the version to `${{ steps.bump.outputs.version }}`. A change of version is a release, so CI runs the release checks on it besides the usual ones: two hours of fuzzing, and the package.
 
             ---
 
