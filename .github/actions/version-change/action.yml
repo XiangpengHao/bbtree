@@ -1,0 +1,43 @@
+name: Version change
+description: >
+  The package version at the checked-out commit, and whether it differs from
+  the version at another commit. A change of version is a release: ci.yml
+  runs the release checks on a pull request that
+  makes one, and publish.yml publishes the push to main that merges it. Both
+  ask this action, so that they agree on what a release is.
+
+inputs:
+  base:
+    description: The commit to compare the checked-out one against.
+    required: true
+
+outputs:
+  version:
+    description: The package version at the checked-out commit.
+    value: ${{ steps.compare.outputs.version }}
+  changed:
+    description: "`true` if the version differs from the one at `base`, else `false`."
+    value: ${{ steps.compare.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - id: compare
+      shell: bash
+      env:
+        BASE: ${{ inputs.base }}
+      run: |
+        git fetch --quiet --depth=1 origin "$BASE"
+        version_at() {
+          git show "$1:Cargo.toml" | python3 -c \
+            'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'
+        }
+        version=$(version_at HEAD)
+        base_version=$(version_at "$BASE")
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        if [ "$version" = "$base_version" ]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::A release: version $base_version becomes $version"
+        fi

@@ -14,7 +14,29 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+  # For the release fuzzing to fetch the corpora that earlier runs saved.
+  actions: read
+
 jobs:
+  # Whether this pull request is a release: one that changes the package
+  # version (.github/actions/version-change). A release must also pass the
+  # `release-` jobs.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.changed || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        if: github.event_name == 'pull_request'
+        uses: ./.github/actions/version-change
+        with:
+          base: ${{ github.event.pull_request.base.sha }}
+
   check:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
@@ -119,12 +141,32 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # The harnesses on pseudo-random inputs, and every crash kept in
-      # `regressions/`. The fuzzing itself runs weekly (fuzz.yml).
+      # `regressions/`. The fuzzing itself runs weekly and for every release
+      # (fuzz.yml).
       - name: Test
         run: cargo test
 
-  miri:
-    name: miri
+  # The release checks take hours each, so they run for releases, and weekly
+  # in their own workflows, rather than for every change. A new one (Verus,
+  # later) is a `release-` job here, added to the merge gate's `needs`.
+  release-miri:
+    name: release miri
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    uses: ./.github/workflows/miri.yml
+
+  release-fuzz:
+    name: release fuzz
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      minutes: 120
+
+  release-package:
+    name: release package
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,14 +176,37 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-07
-          components: miri, rust-src
 
-      - uses: Swatinem/rust-cache@v2
+      # What `cargo publish` will upload, built from those files alone, so
+      # that publishing after the merge doesn't fail on the package.
+      - name: Package
+        run: cargo publish --dry-run --locked
 
-      - name: Miri
-        run: cargo miri test
-
-      - name: Miri (tree borrows, strict provenance)
-        run: cargo miri test
+  # The one check that main's ruleset requires (.github/rulesets/main.json),
+  # so the jobs above can change without touching the ruleset. It always
+  # runs: a required check that is skipped counts as passed.
+  merge-gate:
+    name: merge gate
+    if: always()
+    needs: [plan, check, bench, fuzz, release-miri, release-fuzz, release-package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that every job passed
         env:
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
+          RELEASE: ${{ needs.plan.outputs.release }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          # A change that isn't a release skips the `release-` jobs; every
+          # other result must be a pass.
+          not_passed=$(jq -r --arg release "$RELEASE" '
+            [ to_entries[]
+              | select(.value.result != "success")
+              | select(($release == "false"
+                  and (.key | startswith("release-"))
+                  and .value.result == "skipped") | not)
+              | "\(.key): \(.value.result)" ]
+            | join(", ")' <<< "$RESULTS")
+          if [ -n "$not_passed" ]; then
+            echo "::error::Not passed: $not_passed"
+            exit 1
+          fi

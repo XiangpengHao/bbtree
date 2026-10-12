@@ -33,6 +33,8 @@ mod inline_key_tests;
 mod insert;
 #[cfg(test)]
 mod insert_tests;
+#[cfg(any(test, feature = "inspect"))]
+mod inspect;
 mod into_iter;
 #[cfg(any(test, fuzzing))]
 mod invariants;

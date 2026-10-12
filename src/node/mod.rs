@@ -41,6 +41,8 @@ pub(crate) mod build;
 mod clone;
 pub(crate) mod handle;
 pub(crate) mod inline_keys;
+#[cfg(any(test, feature = "inspect"))]
+pub(crate) mod inspect;
 mod internal;
 #[cfg(any(test, fuzzing))]
 mod invariants;

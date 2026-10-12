@@ -1,0 +1,81 @@
+name: Publish Release
+
+# Publishes a merged release: a push to main that changes
+# the version, by the same test as ci.yml's merge gate. Only that commit is
+# published, never a later one that skipped the release checks, so to retry a
+# failed publish, re-run its run.
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  detect:
+    name: Detect a release
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        uses: ./.github/actions/version-change
+        with:
+          base: ${{ github.event.before }}
+
+  # Each step skips what an earlier attempt finished, so that a failed run can
+  # be re-run.
+  publish:
+    name: Publish Crate and Release
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    # Holds the crates.io token, and only main may deploy to it.
+    environment: crates-io
+    permissions:
+      # The tag and the GitHub release.
+      contents: write
+    concurrency:
+      group: publish
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+
+      - name: Publish crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # crates.io asks API clients to name themselves.
+          if curl --silent --fail --output /dev/null \
+              --user-agent "bbtree publish workflow (github.com/$GITHUB_REPOSITORY)" \
+              "https://crates.io/api/v1/crates/bbtree/$VERSION"; then
+            echo "crates.io already has bbtree $VERSION"
+          else
+            cargo publish --locked
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "v$VERSION is already released on GitHub"
+          else
+            gh release create "v$VERSION" --target "$GITHUB_SHA" \
+              --title "Release v$VERSION" --generate-notes
+          fi

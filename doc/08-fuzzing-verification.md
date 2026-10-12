@@ -2,6 +2,10 @@
 
 - Fuzzing is high level behavior testing, we should match bbtree with std btree. including the map and the set.
 
+- Verification basically means verus (https://github.com/verus-lang/verus) here. I'm not sure if it's is genuinely helpful, but think it's cool to add a verification to the title. Check t4 (https://github.com/XiangpengHao/t4) for how it uses and setup verus.
+Verification is unbounded, there're infinite things we can verify, so we want to invest our time on the most important ones: memory issues, complex logic issues, etc. 
+Verification can be very long and expensive, so try to write minimal verification code to verify the properties.
+
 - ## Where the fuzzing time goes (2026-10-11)
 
 Fuzzing time is spent where a bug would reach the most users and do the most
@@ -40,8 +44,10 @@ a leaf), chosen by the input.
   covers them exactly), and `range` with lying keys, which may panic as std's
   does.
 - **Schedule.** `.github/workflows/fuzz.yml`, Wednesdays at 10:17 UTC, one job
-  of about 100 runner minutes, continuing from the last run's corpora. Push
-  CI builds the harnesses, runs them on pseudo-random inputs and replays
+  of about 100 runner minutes, continuing from the last run's corpora. Every
+  release also fuzzes, for 120 minutes in the same shares (`ci.yml`), and
+  saves its corpora for the next run. Push CI builds
+  the harnesses, runs them on pseudo-random inputs and replays
   `fuzz/regressions/`.
 
 Locally, from the repository root:

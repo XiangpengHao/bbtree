@@ -1,6 +1,7 @@
 # 10 — Visualization: browsing the real tree in a browser
 
-Status: planned (2026-10-11), nothing implemented.
+Status (2026-10-11): the dioxus-flow part is implemented in dioxus-flow's
+working tree, uncommitted, on top of v0.1.3; the bbtree parts are planned.
 
 ## Goals
 
@@ -32,6 +33,13 @@ From the original note:
   viewer's convenience alone justifies no change.
 - **Scale target: browsing a tree of 10M entries.** Operations are animated
   one at a time, on trees of any size.
+- **The canvas zooms only horizontally.** A tree of 250k leaves is about
+  350,000 times wider than tall, so under a uniform zoom its overview is a
+  line under a pixel tall, and levels only come apart in windows of about
+  1,000 leaves. With only x zoomed, every level keeps a row of fixed height
+  at every zoom: the overview shows all levels at once, and zoomed into one
+  leaf, the leaf is a wide strip, which is the shape of its page's byte map.
+  The model is a trace viewer's, such as Perfetto's.
 
 ## The rule: bbtree describes itself, the viewer reads and draws
 
@@ -107,8 +115,8 @@ mounts only what is around the viewport (`RegionLayer`, below), with a budget
 of about 2k elements.
 
 **The layout is implicit.** A B-tree needs no graph layout: leaf `i` sits at
-`x = i × pitch`, and each internal node is centered over its children's
-leaves. The viewer keeps a *tree index* that it rebuilds after every change:
+`x = i × pitch`, each internal node spans its children's leaves, and each
+level is a row of fixed height in pixels. The viewer keeps a *tree index* that it rebuilds after every change:
 
 - the leaf range of every internal node, per level, in key order: one pass
   over the ~10k internal nodes;
@@ -120,18 +128,20 @@ at index `i` is found through its parent in the index, then read through its
 `NodeView`. The index caches shape only; every number drawn up close comes
 from a live view.
 
-**Detail follows zoom:**
+**Detail follows the horizontal zoom, level by level.** Every level always
+has its row; what the row shows depends on how wide its nodes are on screen:
 
-- **Far:** one strip per level. Nodes narrower than about 2 px are binned
-  per pixel column and colored by an aggregate (fill, prefix length). Whether
-  to draw the strips as DOM rects or as one image per strip generated in Rust
-  is decided by measurement.
-- **Middle:** one box per node with a fill bar and `len`/capacity. An edge is
-  drawn only when both of its nodes are on screen.
-- **Near:** the page itself, drawn from its `PageMap` at byte scale: header,
-  inline-key slots, key and value slots (used and free), head, edges. Keys and
-  values are printed, string keys gray out their first `prefix_len` bytes,
-  and inline keys show in hex.
+- **Narrow (under about 6 px):** the row is a strip. Its nodes are binned per
+  pixel column and colored by an aggregate (fill, prefix length). Whether to
+  draw it as DOM rects or as one image generated in Rust is decided by
+  measurement.
+- **Wide enough to tell apart:** one box per node with a fill bar and
+  `len`/capacity, and links to its children where they are drawn too.
+- **Wider than most of the screen:** the page itself, drawn along the row
+  from its `PageMap` at byte scale: header, inline-key slots, key and value
+  slots (used and free), head, edges. Keys and values are printed where they
+  fit, string keys gray out their first `prefix_len` bytes, and inline keys
+  show in hex.
 
 ## dioxus-flow changes
 
@@ -139,36 +149,61 @@ The viewer draws on dioxus-flow's `Canvas`, not through `Flow`. `Canvas` is
 the lower layer that dioxus-flow already offers for applications that render
 their own content: pan, zoom, gestures, overlays. `Flow`'s editable node list,
 measurement and auto layout don't apply to a read-only tree whose layout is
-implicit, so `Flow` stays as it is. A huge world on `Canvas` is missing three
-things, each general to any application with a large world (maps, timelines,
-big trees):
+implicit, so `Flow` stays as it is. Everything added is general to any
+application with a large world (maps, timelines, traces, big trees):
 
-1. **`RegionLayer`: drawing only around the viewport.** The layer hands the
-   application a `Region`: the viewport padded by an overscan margin, at a
-   scale of `2^level`, where `level = floor(log2(zoom))`.
-   - The application draws the region in *local* coordinates: pixels at that
-     scale, relative to the region's origin.
-   - The region changes only when the view leaves it, or when the zoom
-     crosses a power of two. In between, a pan or zoom moves one CSS
-     transform: `translate` to the region's screen origin, then `scale` by
-     `zoom / 2^level`, which stays in `[1, 2)`.
-   - The level doubles as the level of detail: what to draw at a scale is the
-     application's call.
+1. **`RegionLayer`: drawing only around the viewport** (`src/region.rs`).
+   The layer hands the application a `Region`: the viewport padded by an
+   overscan margin, with a scale in local pixels per flow unit on each axis.
+   The application draws the region in those local pixels, relative to the
+   region's origin.
+   - The region holds still while the view stays inside it, so a pan moves
+     one CSS transform and draws nothing.
+   - Zooming both axes: the scale is the power of two at or below the zoom,
+     and the transform scales by the rest, under 2x. The region is drawn
+     again only when the zoom crosses a power of two.
+   - Zooming one axis: stretching would distort text, so the region is drawn
+     at the zoom itself, again on every zoom change.
    - Every number in the DOM stays about screen-sized, at any world size. A
      30M-unit-wide tree drawn in world coordinates would pass Chromium's
      layout limit of about 33.5M px (`LayoutUnit`) and lose precision in the
      compositor's f32.
-2. **Content bounds for `Canvas`.** Fit view and the minimap take the bounds
-   of what the application draws, which `Flow` derives from its nodes as
-   before. The minimap also draws application content, in flow coordinates.
-3. **Background spacing stops shrinking at very low zoom.** The dot spacing
-   doubles when it would fall below the closest spacing any default zoom
-   reaches. Without this, at zoom 10⁻⁴ the dots merge into a solid fill.
+   - The layer has no `will-change`: with it, Chromium stretches one raster
+     by the up to 2x left within a level, and text blurs.
+2. **`ZoomAxes::Horizontal`** (`Canvas { zoom_axes }`): only x zooms, and one
+   flow unit stays one pixel vertically. `Viewport` gains axis-aware
+   conversions (`scale`, `screen_to_flow_with`, `flow_to_screen_with`,
+   `visible_with`, `zoom_about_with`); zoom, fit view, centering, the
+   background, the minimap and the region layer use them. `Flow` keeps
+   `ZoomAxes::Both`.
+3. **Content bounds for `Canvas`** (`bounds`, `fit_view`): fit view and the
+   minimap take the extent of what the application draws, which `Flow`
+   derives from its nodes as before.
+4. **`MiniMap { stretch }` and minimap children:** a world far wider than
+   tall fills the panel instead of mapping to a line, the viewport indicator
+   stays at least 4 px across, and the application draws its own overview.
+5. **Background spacing stays within 4x of `gap` either way:** it doubles
+   below zoom 0.25 and halves above 4, so the default zoom range draws as
+   before, a far zoom doesn't fill with dots, and a deep one-axis zoom doesn't
+   thin them to one column.
 
-The demo gets a `?world=N` mode: a synthetic tree of N leaves with fanout 40,
-never materialized, drawn through `RegionLayer` with a level of detail. It
-measures the layer on its own, in both engines, as `?stress=N` does for
-`Flow`.
+The demo's `?world=N` mode draws a synthetic tree of N leaves with fanout 40,
+never materialized, through `RegionLayer` on a horizontally zooming canvas,
+with a level of detail per row and double-click to fit a node's subtree.
+
+**Measured** (headless Chrome over the DevTools protocol, 1600×900, release
+build, real input events, `?world=10000000`; WebKit not yet measured):
+
+- The fit view shows all six levels of the tree; double-clicks fit each
+  level's node in turn, down to one leaf across the screen at zoom 58.7. The
+  viewport translation is then -6.4e9 px, while the layer's stays at
+  `translate(-1600px, -900px)`.
+- A 3 s zoom gesture from one leaf out to 0.13, through the zoom where leaves
+  start being drawn one by one, redraws the region on each of its 61 zoom
+  changes: 180 frames, p50 16.7 ms, max 16.8 ms, none over 20 ms.
+- A 3 s pan, 200 px per event, across region switches: the same.
+- Under a uniform zoom, about 713 elements at zoom 0.5 pan 16,000 px in 4 s
+  with no frame over 16.8 ms.
 
 Not in this change: `Flow`'s own culling. Its nodes are tiled with
 `content-visibility` today, and replacing that is a separate decision with its
@@ -201,9 +236,9 @@ flake.
 
 ## Plan
 
-1. **dioxus-flow:** `RegionLayer`, content bounds, background spacing, and
-   the `?world=N` demo, measured in both engines. It needs nothing from
-   bbtree, so it goes first.
+1. **dioxus-flow:** `RegionLayer`, `ZoomAxes::Horizontal`, content bounds,
+   minimap stretch, background spacing, and the `?world=N` demo. Done in
+   Chrome; WebKit is still to measure, then commit.
 2. **bbtree:** the `inspect` feature and its tests. Add the wasm32 target to
    the flake, and run `cargo check` and `cargo clippy` for
    `--target wasm32-unknown-unknown --features inspect`. (The flake has no

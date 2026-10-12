@@ -22,6 +22,14 @@ pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord
 pub use map::BBTreeMap;
 pub use set::BBTreeSet;
 
+/// Read-only views of a map's nodes, from [`BBTreeMap::inspect`], as the map
+/// stores them: for the visualizer (`vis/`), behind the `inspect` feature,
+/// which promises no stability.
+#[cfg(feature = "inspect")]
+pub mod inspect {
+    pub use crate::node::inspect::{NodeId, NodeView, PageMap, SlotArray, SlotContents, TreeView};
+}
+
 /// An ordered map based on a B-tree, [`BBTreeMap`], and the types that go
 /// with it: the counterpart of `std::collections::btree_map`.
 pub mod bbtree_map {

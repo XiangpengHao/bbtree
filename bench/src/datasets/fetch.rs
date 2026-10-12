@@ -17,8 +17,7 @@ use super::{DataDirectory, DataFile, DataOrigin};
 pub(crate) struct DatasetFetch;
 
 impl DatasetFetch {
-    /// A private repository: `gh` downloads with the user's login, or with
-    /// `GH_TOKEN` in CI.
+    /// `gh` downloads with the user's login, or with `GH_TOKEN` in CI.
     const REPOSITORY: &str = "XiangpengHao/bbtree";
 
     /// TODO(phase 2): the tag of the new release, which holds the assets of

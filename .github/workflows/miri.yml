@@ -1,0 +1,63 @@
+name: Miri
+
+# Every test under Miri, which reports undefined behavior in the unsafe code.
+# A run takes hours, so Miri runs weekly and for every release (ci.yml), not
+# for every change.
+on:
+  schedule:
+    # Wednesdays at 10:17 UTC, with the weekly fuzzing (fuzz.yml).
+    - cron: "17 10 * * 3"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  miri:
+    name: miri (${{ matrix.model.name }})
+    runs-on: ubuntu-latest
+    # The most a job may run on GitHub's runners.
+    timeout-minutes: 360
+    strategy:
+      # Each aliasing model reports its own failures.
+      fail-fast: false
+      matrix:
+        model:
+          - name: stacked borrows
+            flags: ""
+          - name: tree borrows, strict provenance
+            flags: -Zmiri-tree-borrows -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: miri, rust-src
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Miri interprets on one core. Nextest runs each test in a process of
+      # its own, so as many tests run at once as the runner has cores.
+      - name: Miri
+        env:
+          MIRIFLAGS: ${{ matrix.model.flags }}
+        run: cargo miri nextest run --test-threads "$(nproc)"
+
+      # Nextest doesn't run doc tests.
+      - name: Miri (doc tests)
+        env:
+          MIRIFLAGS: ${{ matrix.model.flags }}
+        run: cargo miri test --doc

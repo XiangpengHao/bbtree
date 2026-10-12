@@ -242,6 +242,12 @@ impl<K, V, S> Clone for NodePtr<K, V, S> {
 impl<K, V, S> Copy for NodePtr<K, V, S> {}
 
 impl<K, V, S> NodePtr<K, V, S> {
+    /// The page's address, which tells nodes apart (`inspect.rs`).
+    #[cfg(any(test, feature = "inspect"))]
+    pub(super) fn addr(self) -> usize {
+        self.page.addr().get()
+    }
+
     /// Whether `self` and `other` point to the same node.
     pub(super) fn is(self, other: Self) -> bool {
         self.page == other.page

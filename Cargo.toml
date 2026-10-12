@@ -3,9 +3,15 @@ name = "bbtree"
 version = "0.1.0"
 edition = "2024"
 description = "Blessed B-tree."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
+
+[features]
+# Read-only views of a map's nodes (`BBTreeMap::inspect`), for the visualizer
+# in `vis/`. No stability promise.
+inspect = []
 
 
 [lints.rust]
