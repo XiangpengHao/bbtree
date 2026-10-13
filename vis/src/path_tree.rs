@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 use crate::count_text::Group;
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::PageMarks;
+use crate::path_summary::PathLegend;
 use crate::spotlight::{Hint, NodePart, Spotlight};
 use crate::trace::{Trace, TraceStep, Tracer};
 use crate::tree_shape::NodeAt;
@@ -72,7 +73,7 @@ struct GaugeSpot {
 }
 
 impl PathLayout {
-    const GUTTER: f64 = 150.0;
+    const GUTTER: f64 = 128.0;
     const RIGHT: f64 = 28.0;
     /// Below this width, cards span the panel.
     const NARROW: f64 = 720.0;
@@ -132,7 +133,7 @@ impl PathLayout {
         let card_width = if narrow {
             right - left
         } else {
-            ((right - left) * 0.58).clamp(320.0, 680.0)
+            ((right - left) * 0.66).clamp(320.0, 680.0)
         };
         let mut layout = Self {
             cards: Vec::new(),
@@ -345,6 +346,7 @@ pub(crate) fn PathTree(
                 measure.call(());
             },
             onresize: move |_| measure.call(()),
+            PathLegend { spotlight }
             if let Some(layout) = layout {
                 svg {
                     class: "path-edges",
@@ -378,7 +380,7 @@ pub(crate) fn PathTree(
                     div {
                         key: "label-{card.row}",
                         class: "level-label",
-                        style: if narrow { format!("transform:translate({}px,{}px);", card.x, card.y - PathLayout::LABEL_HEIGHT) } else { format!("transform:translate(20px,{}px);", card.y + 12.0) },
+                        style: if narrow { format!("transform:translate({}px,{}px);", card.x, card.y - PathLayout::LABEL_HEIGHT) } else { format!("transform:translate(16px,{}px);", card.y + 12.0) },
                         span { class: "display", {shape.level_name(card.step.at().level())} }
                         span { class: "data level-place",
                             "{Group(card.step.at().index() + 1)} of {Group(shape.level(card.step.at().level()).node_count())}"
@@ -503,6 +505,7 @@ fn PathCard(
             style: "transform:translate({card.x}px,{card.y}px);width:{card.width}px;height:{PathLayout::CARD_HEIGHT}px;--row:{card.row};",
             role: "button",
             tabindex: "0",
+            "data-row": "{card.row}",
             "aria-pressed": if selected { "true" } else { "false" },
             "aria-label": label,
             onclick: move |_| tracer.inspect(at),
@@ -513,23 +516,44 @@ fn PathCard(
                 }
             },
             div { class: "card-top data",
-                span { class: "card-count", "{len}/{capacity}" }
+                span {
+                    class: "card-count",
+                    onmouseenter: move |evt| {
+                        let point = evt.client_coordinates();
+                        spotlight.show_hint(Hint::new((point.x, point.y), "Keys", format!("The node holds {len} keys and has room for {capacity}; the bar shows how full it is.")));
+                    },
+                    onmouseleave: move |_| spotlight.clear(),
+                    "{len}/{capacity} keys"
+                }
                 span { class: "fill-track", "aria-hidden": "true",
                     span { class: "fill-bar", style: "transform:scaleX({len as f64 / capacity.max(1) as f64});" }
                 }
                 if prefix > 0 {
-                    span { class: "card-chip", "prefix {prefix} B" }
+                    span {
+                        class: "card-chip card-prefix",
+                        onmouseenter: move |evt| {
+                            let point = evt.client_coordinates();
+                            spotlight.show_hint(Hint::new((point.x, point.y), "Skipped prefix", format!("Every key in this node starts with the same {prefix} bytes, so its search starts after them.")));
+                        },
+                        onmouseleave: move |_| spotlight.clear(),
+                        "skips {prefix} B"
+                    }
                 }
                 if lines > 0 {
-                    span { class: "card-chip card-lines",
+                    span {
+                        class: "card-chip card-lines",
+                        onmouseenter: move |evt| {
+                            let point = evt.client_coordinates();
+                            spotlight.show_hint(Hint::new((point.x, point.y), "Cache lines read", "How many of the node's 64-byte cache lines the lookup read; a range when a search among tied keys may have read more."));
+                        },
+                        onmouseleave: move |_| spotlight.clear(),
                         match (lines, maybe) {
-                            (1, 0) => "1 line".to_string(),
-                            (lines, 0) => format!("{lines} lines"),
-                            (lines, maybe) => format!("{lines}–{} lines", lines + maybe),
+                            (1, 0) => "reads 1 line".to_string(),
+                            (lines, 0) => format!("reads {lines} lines"),
+                            (lines, maybe) => format!("reads {lines}–{} lines", lines + maybe),
                         }
                     }
                 }
-                span { class: "card-note", {note} }
             }
             div {
                 class: "ruler",
@@ -586,8 +610,9 @@ fn PathCard(
                 }
             }
             div { class: "card-bounds data",
-                span { class: "truncate", {first.unwrap_or_default()} }
-                span { class: "truncate text-right", {last.unwrap_or_default()} }
+                span { class: "card-first", {first.unwrap_or_default()} }
+                span { class: "card-note", {note} }
+                span { class: "card-last", {last.unwrap_or_default()} }
             }
         }
     }

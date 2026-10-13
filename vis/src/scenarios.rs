@@ -30,16 +30,17 @@ impl Scenario {
         }
     }
 
-    pub(crate) fn label(self) -> &'static str {
+    /// The scenario's name, standing alone.
+    pub(crate) fn title(self) -> &'static str {
         match self {
-            Scenario::Random => "Random key",
-            Scenario::Separator => "a separator",
-            Scenario::PastTheEnd => "past the last key",
-            Scenario::Missing => "a missing key",
+            Scenario::Random => "A random key",
+            Scenario::Separator => "A separator",
+            Scenario::PastTheEnd => "Past the last key",
+            Scenario::Missing => "A missing key",
         }
     }
 
-    /// What the lookup shows, for the hint.
+    /// What the lookup shows.
     pub(crate) fn shows(self) -> &'static str {
         match self {
             Scenario::Random => "Looks up a key of the map at random.",

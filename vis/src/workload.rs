@@ -6,7 +6,9 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
 use crate::count_text::Group;
+use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::{InspectedMap, LoadedTree, VisKey};
+use crate::popover::Popover;
 use crate::scenarios::Scenario;
 use crate::trace::Tracer;
 
@@ -137,6 +139,21 @@ impl InsertOrder {
             InsertOrder::Random => "random inserts",
             InsertOrder::Ascending => "ascending inserts",
             InsertOrder::Collected => "collect (bulk)",
+        }
+    }
+
+    /// What the order does to the tree.
+    pub(crate) fn shows(self) -> &'static str {
+        match self {
+            InsertOrder::Random => {
+                "One insert at a time, in a scrambled order: nodes fill up and split wherever keys land."
+            }
+            InsertOrder::Ascending => {
+                "One insert at a time, in key order: every insert lands at the tree's right edge, and splits there leave full nodes behind."
+            }
+            InsertOrder::Collected => {
+                "All at once from sorted keys, by bbtree's bulk builder: every node as full as it can be."
+            }
         }
     }
 }
@@ -319,17 +336,18 @@ mod tests {
     }
 }
 
-/// The build controls: key kind, size and order, and the build in flight.
-/// Any change builds the tree anew, so the controls always say what is
-/// shown, and they wait while a build runs: at ten million entries, two
-/// trees don't fit. A finished build looks up a key at random, so there is
-/// a path to see.
+/// The tree being shown, as a toolbar button that opens its build
+/// controls: key kind, size and order. Any change builds the tree anew, so
+/// the controls always say what is shown, and they wait while a build
+/// runs: at ten million entries, two trees don't fit. A finished build
+/// looks up a key at random, so there is a path to see.
 #[component]
-pub(crate) fn WorkloadPicker(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> Element {
+pub(crate) fn WorkloadMenu(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> Element {
     let mut workload =
         use_signal(|| Workload::new(KeyKind::Integers, 1_000_000, InsertOrder::Random));
     let progress = use_signal(|| None::<f64>);
     let took = use_signal(|| None::<f64>);
+    let mut open = use_signal(|| false);
     let build = use_callback(move |workload: Workload| {
         let (mut tree, mut tracer, mut progress, mut took) = (tree, tracer, progress, took);
         spawn(async move {
@@ -357,60 +375,88 @@ pub(crate) fn WorkloadPicker(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -
     let current = workload();
     let building = progress();
     rsx! {
-        div { class: "workload",
-            fieldset { class: "segmented",
-                legend { class: "sr-only", "Key type" }
-                for kind in KeyKind::ALL {
-                    label {
-                        class: "segment",
-                        title: kind.shows(),
-                        input {
-                            class: "sr-only",
-                            r#type: "radio",
-                            name: "key-kind",
-                            checked: kind == current.kind(),
-                            disabled: building.is_some(),
-                            onchange: move |_| choose(Workload::new(kind, current.count(), current.order())),
-                        }
-                        span { {kind.label()} }
-                    }
-                }
-            }
-            select {
-                class: "select",
-                "aria-label": "Entries",
-                disabled: building.is_some(),
-                onchange: move |evt| {
-                    let count = evt.value().parse().unwrap_or(current.count());
-                    choose(Workload::new(current.kind(), count, current.order()));
-                },
-                for count in Workload::COUNTS.into_iter().filter(|&count| count <= current.kind().max_count()) {
-                    option { value: "{count}", selected: count == current.count(), "{Group(count)} keys" }
-                }
-            }
-            select {
-                class: "select",
-                "aria-label": "Insert order",
-                disabled: building.is_some(),
-                onchange: move |evt| {
-                    let order = InsertOrder::ALL
-                        .into_iter()
-                        .find(|order| order.label() == evt.value())
-                        .unwrap_or(InsertOrder::Random);
-                    choose(Workload::new(current.kind(), current.count(), order));
-                },
-                for order in InsertOrder::ALL {
-                    option { value: order.label(), selected: order == current.order(), {order.label()} }
-                }
-            }
-            span { class: "build-status data", role: "status",
+        div { class: "menu workload-menu",
+            button {
+                id: "workload-trigger",
+                class: "toolbar-pill",
+                "aria-haspopup": "dialog",
+                "aria-expanded": if open() { "true" } else { "false" },
+                title: "Change the tree",
+                onclick: move |_| open.set(!open()),
+                span { class: "pill-strong", {current.kind().label()} }
+                span { class: "data", "{Group(current.count())}" }
+                span { class: "pill-quiet", {current.order().label()} }
                 if let Some(done) = building {
-                    span { class: "fill-track wide", "aria-hidden": "true",
+                    span { class: "fill-track", "aria-hidden": "true",
                         span { class: "fill-bar", style: "transform:scaleX({done});" }
                     }
-                    "building {done * 100.0:.0}%"
-                } else if let Some(seconds) = took() {
-                    span { title: "The inserts, then one read of every node", "built in {seconds:.1} s" }
+                }
+                IconGlyph { icon: Icon::Disclose }
+            }
+            Popover {
+                open,
+                label: "The tree to build",
+                trigger: "workload-trigger",
+                align_end: false,
+                fieldset { class: "popover-field",
+                    legend { class: "popover-heading", "Keys" }
+                    div { class: "segmented",
+                        for kind in KeyKind::ALL {
+                            label { class: "segment",
+                                input {
+                                    class: "sr-only",
+                                    r#type: "radio",
+                                    name: "key-kind",
+                                    checked: kind == current.kind(),
+                                    disabled: building.is_some(),
+                                    onchange: move |_| choose(Workload::new(kind, current.count(), current.order())),
+                                }
+                                span { {kind.label()} }
+                            }
+                        }
+                    }
+                    p { class: "popover-note", {current.kind().shows()} }
+                }
+                div { class: "popover-row",
+                    label { class: "popover-field",
+                        span { class: "popover-heading", "How many" }
+                        select {
+                            class: "select",
+                            disabled: building.is_some(),
+                            onchange: move |evt| {
+                                let count = evt.value().parse().unwrap_or(current.count());
+                                choose(Workload::new(current.kind(), count, current.order()));
+                            },
+                            for count in Workload::COUNTS.into_iter().filter(|&count| count <= current.kind().max_count()) {
+                                option { value: "{count}", selected: count == current.count(), "{Group(count)}" }
+                            }
+                        }
+                    }
+                    label { class: "popover-field",
+                        span { class: "popover-heading", "Built by" }
+                        select {
+                            class: "select",
+                            disabled: building.is_some(),
+                            onchange: move |evt| {
+                                let order = InsertOrder::ALL
+                                    .into_iter()
+                                    .find(|order| order.label() == evt.value())
+                                    .unwrap_or(InsertOrder::Random);
+                                choose(Workload::new(current.kind(), current.count(), order));
+                            },
+                            for order in InsertOrder::ALL {
+                                option { value: order.label(), selected: order == current.order(), {order.label()} }
+                            }
+                        }
+                    }
+                }
+                p { class: "popover-note", {current.order().shows()} }
+                p { class: "popover-footnote data", role: "status",
+                    if let Some(done) = building {
+                        "building… {done * 100.0:.0}%"
+                    } else if let Some(seconds) = took() {
+                        "built in {seconds:.1} s, then read once, node by node"
+                    }
                 }
             }
         }

@@ -260,13 +260,24 @@ impl SearchStep {
     }
 }
 
-/// The inspected node, under the path.
+/// Which view of the inspected node's slots is shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InspectorTab {
+    /// The page, cache line by cache line.
+    Page,
+    /// The slots, one row each.
+    Slots,
+}
+
+/// The inspected node, beside the path: its search as steps, then its page
+/// or its slots.
 #[component]
 pub(crate) fn NodeInspector(
     tree: LoadedTree,
     at: NodeAt,
     trace: Trace,
     replay: u64,
+    tab: Signal<InspectorTab>,
     tracer: Tracer,
     spotlight: Spotlight,
 ) -> Element {
@@ -289,9 +300,10 @@ pub(crate) fn NodeInspector(
     let below = place
         .and_then(|place| trace.steps().get(place + 1))
         .map(TraceStep::at);
-    let fill = detail.len as f64 / detail.capacity.max(1) as f64;
     let lines = detail.page.size().div_ceil(64);
     let kind = tree.key_kind();
+    let shown = tab();
+    let mut tab = tab;
     let mut tracer = tracer;
     let tree_for_pick = tree.clone();
     let detail_for_pick = detail.clone();
@@ -304,69 +316,88 @@ pub(crate) fn NodeInspector(
     };
     rsx! {
         section { class: "inspector", "aria-label": "The inspected node",
-            div { class: "inspector-main",
-                div { class: "inspector-story",
-                    header { class: "inspector-head",
-                        div { class: "inspector-title",
-                            h2 { class: "display", {shape.level_name(at.level())} }
-                            span { class: "data text-small text-graphite",
-                                "{Group(at.index() + 1)} of {Group(level.node_count())}"
+            header { class: "inspector-head",
+                div { class: "inspector-title",
+                    h2 { class: "display", {shape.level_name(at.level())} }
+                    span { class: "data text-small text-graphite",
+                        "{Group(at.index() + 1)} of {Group(level.node_count())}"
+                    }
+                    span { class: "data text-small text-graphite",
+                        " · {detail.len} of {detail.capacity} keys"
+                    }
+                }
+                nav { class: "path-steps", "aria-label": "Along the path",
+                    button {
+                        class: "icon-button",
+                        disabled: above.is_none(),
+                        title: "The node above on the path (↑)",
+                        "aria-label": "Inspect the node above on the path",
+                        onclick: move |_| {
+                            if let Some(above) = above {
+                                tracer.inspect(above);
                             }
-                        }
-                        nav { class: "path-steps", "aria-label": "Along the path",
-                            button {
-                                class: "icon-button",
-                                disabled: above.is_none(),
-                                title: "The node above on the path (↑)",
-                                "aria-label": "Inspect the node above on the path",
-                                onclick: move |_| {
-                                    if let Some(above) = above {
-                                        tracer.inspect(above);
-                                    }
-                                },
-                                IconGlyph { icon: Icon::Up }
+                        },
+                        IconGlyph { icon: Icon::Up }
+                    }
+                    button {
+                        class: "icon-button",
+                        disabled: below.is_none(),
+                        title: "The node below on the path (↓)",
+                        "aria-label": "Inspect the node below on the path",
+                        onclick: move |_| {
+                            if let Some(below) = below {
+                                tracer.inspect(below);
                             }
-                            button {
-                                class: "icon-button",
-                                disabled: below.is_none(),
-                                title: "The node below on the path (↓)",
-                                "aria-label": "Inspect the node below on the path",
-                                onclick: move |_| {
-                                    if let Some(below) = below {
-                                        tracer.inspect(below);
-                                    }
-                                },
-                                IconGlyph { icon: Icon::Down }
-                            }
+                        },
+                        IconGlyph { icon: Icon::Down }
+                    }
+                }
+            }
+            if steps.is_empty() {
+                p { class: "inspector-note text-ui text-graphite",
+                    "The lookup didn't pass through this node. Click one of its keys or children to look up a key that does."
+                }
+            } else {
+                ol { class: "search-steps", key: "{replay}-{at.level()}-{at.index()}",
+                    for (number, search_step) in steps.into_iter().enumerate() {
+                        SearchStepItem {
+                            number: number + 1,
+                            search_step,
+                            detail: detail.clone(),
+                            kind,
+                            spotlight,
                         }
                     }
-                    if steps.is_empty() {
-                        p { class: "text-ui text-graphite",
-                            "The lookup didn't pass through this node. Click one of its keys or children to look up a key that does."
-                        }
-                    } else {
-                        ol { class: "search-steps", key: "{replay}-{at.level()}-{at.index()}",
-                            for (number, search_step) in steps.into_iter().enumerate() {
-                                SearchStepItem {
-                                    number: number + 1,
-                                    search_step,
-                                    detail: detail.clone(),
-                                    kind,
-                                    spotlight,
-                                }
-                            }
-                        }
+                }
+            }
+            div { class: "tabs", role: "tablist", "aria-label": "Views of the node",
+                button {
+                    class: "tab",
+                    role: "tab",
+                    "aria-selected": if shown == InspectorTab::Page { "true" } else { "false" },
+                    onclick: move |_| tab.set(InspectorTab::Page),
+                    "Page"
+                    span { class: "tab-note", "its memory, line by line" }
+                }
+                button {
+                    class: "tab",
+                    role: "tab",
+                    "aria-selected": if shown == InspectorTab::Slots { "true" } else { "false" },
+                    onclick: move |_| tab.set(InspectorTab::Slots),
+                    "Slots"
+                    span { class: "tab-note", "every key, one row each" }
+                }
+            }
+            if shown == InspectorTab::Page {
+                div { class: "tab-panel inspector-page", role: "tabpanel",
+                    MemoryMap {
+                        detail: detail.clone(),
+                        marks,
+                        replay,
+                        spotlight,
+                        on_pick,
                     }
                     dl { class: "facts",
-                        div {
-                            dt { "keys" }
-                            dd {
-                                "{detail.len} of {detail.capacity}"
-                                span { class: "fill-track", "aria-hidden": "true",
-                                    span { class: "fill-bar", style: "transform:scaleX({fill});" }
-                                }
-                            }
-                        }
                         div {
                             dt {
                                 Term { concept: Concept::FencePrefix, spotlight, "fence prefix" }
@@ -401,23 +432,15 @@ pub(crate) fn NodeInspector(
                         }
                     }
                 }
-                div { class: "inspector-page",
-                    MemoryMap {
-                        detail: detail.clone(),
-                        marks,
-                        replay,
-                        spotlight,
-                        on_pick,
-                    }
+            } else {
+                SlotTable {
+                    tree: tree.clone(),
+                    detail,
+                    step,
+                    replay,
+                    tracer,
+                    spotlight,
                 }
-            }
-            SlotTable {
-                tree: tree.clone(),
-                detail,
-                step,
-                replay,
-                tracer,
-                spotlight,
             }
         }
     }

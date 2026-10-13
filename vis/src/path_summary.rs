@@ -40,34 +40,41 @@ pub(crate) fn PathSummary(
                     " read"
                 }
             }
-            div { class: "path-legend", "aria-label": "What the path's marks mean",
-                span { class: "legend-item",
-                    span { class: "ruler-swatch slot-key" }
-                    "key"
-                }
-                span { class: "legend-item",
-                    span { class: "ruler-swatch slot-room" }
-                    "empty"
-                }
-                span { class: "legend-item",
-                    span { class: "ruler-swatch slot-tied" }
-                    Term { concept: Concept::Tie, spotlight, "tied" }
-                }
-                span { class: "legend-item",
-                    span { class: "ruler-swatch slot-found" }
-                    "found"
-                }
-                span { class: "legend-item",
-                    span { class: "notch-swatch" }
-                    Term { concept: Concept::Child, spotlight, "child taken" }
-                }
-            }
             button {
-                class: "button button-quiet",
+                class: "icon-button quiet",
                 title: "Watch the lookup go down again",
+                "aria-label": "Replay the lookup",
                 onclick: move |_| tracer.replay(),
                 IconGlyph { icon: Icon::Replay }
-                "Replay"
+            }
+        }
+    }
+}
+
+/// What the path's marks mean, in its top corner.
+#[component]
+pub(crate) fn PathLegend(spotlight: Spotlight) -> Element {
+    rsx! {
+        div { class: "path-legend", "aria-label": "What the path's marks mean",
+            span { class: "legend-item",
+                span { class: "ruler-swatch slot-key" }
+                "key"
+            }
+            span { class: "legend-item",
+                span { class: "ruler-swatch slot-room" }
+                "empty slot"
+            }
+            span { class: "legend-item",
+                span { class: "ruler-swatch slot-tied" }
+                Term { concept: Concept::Tie, spotlight, "tied" }
+            }
+            span { class: "legend-item",
+                span { class: "ruler-swatch slot-found" }
+                "found"
+            }
+            span { class: "legend-item",
+                span { class: "notch-swatch" }
+                Term { concept: Concept::Child, spotlight, "child taken" }
             }
         }
     }

@@ -10,8 +10,8 @@ use dioxus::prelude::*;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::PageMarks;
+use crate::popover::Popover;
 use crate::scenarios::Scenario;
-use crate::spotlight::{Hint, Spotlight};
 use crate::tree_shape::{NodeAt, TreeShape};
 
 /// One lookup, from the root down.
@@ -106,6 +106,22 @@ impl Trace {
             let (node_certain, node_possible) = marks.lines_read(&tree.page_map(step.at));
             (certain + node_certain, possible + node_possible)
         })
+    }
+
+    /// Where the lookup ended, in a few words.
+    pub(crate) fn outcome_brief(&self, shape: &TreeShape) -> String {
+        let Some(last) = self.steps.last() else {
+            return "the map is empty".to_string();
+        };
+        let place = shape.node_name(last.at);
+        match last.outcome {
+            TraceOutcome::Found { .. } => format!("found in {place}"),
+            TraceOutcome::Absent { .. } => "not in the map".to_string(),
+            TraceOutcome::Head => "found as a separator".to_string(),
+            TraceOutcome::Descend { .. } | TraceOutcome::ToHead { .. } => {
+                format!("stopped at {place}")
+            }
+        }
     }
 
     /// Where the lookup ended, in a sentence.
@@ -271,10 +287,11 @@ impl Tracer {
     }
 }
 
-/// The bar to look a key up from: by typing it, at random, beside the last
-/// one, or as one of the scenarios worth seeing.
+/// The toolbar's search: the key looked up and where it ended, as a
+/// button that opens the panel to look up another, by typing it, at
+/// random, beside the last one, or as one of the lookups worth seeing.
 #[component]
-pub(crate) fn LookupBar(tree: LoadedTree, tracer: Tracer, spotlight: Spotlight) -> Element {
+pub(crate) fn LookupMenu(tree: LoadedTree, tracer: Tracer, open: Signal<bool>) -> Element {
     let mut text = use_signal(String::new);
     let trace = tracer.trace();
     // A lookup started elsewhere shows its key here.
@@ -289,8 +306,16 @@ pub(crate) fn LookupBar(tree: LoadedTree, tracer: Tracer, spotlight: Spotlight) 
     let kind = tree.key_kind();
     let error = tracer.error();
     let invalid = error.is_some();
+    let shown_key = trace
+        .as_ref()
+        .map(|trace| trace.query().to_string())
+        .unwrap_or_default();
+    let outcome = trace
+        .as_ref()
+        .map(|trace| trace.outcome_brief(tree.shape()))
+        .unwrap_or_default();
     let mut tracer = tracer;
-    let mut spotlight = spotlight;
+    let mut open = open;
     let (submit_tree, random_tree, left_tree, right_tree, scenario_tree) = (
         tree.clone(),
         tree.clone(),
@@ -299,16 +324,35 @@ pub(crate) fn LookupBar(tree: LoadedTree, tracer: Tracer, spotlight: Spotlight) 
         tree.clone(),
     );
     rsx! {
-        div { class: "lookup-bar",
-            form {
-                class: "lookup-form",
-                role: "search",
-                onsubmit: move |evt| {
-                    evt.prevent_default();
-                    tracer.run(&submit_tree, &text.peek());
-                },
-                label { class: "lookup-label", r#for: "lookup", "Look up" }
-                div { class: "lookup-field",
+        div { class: "menu lookup-menu",
+            button {
+                id: "lookup-trigger",
+                class: "toolbar-pill lookup-pill",
+                "aria-haspopup": "dialog",
+                "aria-expanded": if open() { "true" } else { "false" },
+                title: "Look up another key (/)",
+                onclick: move |_| open.set(!open()),
+                IconGlyph { icon: Icon::Search }
+                span { class: "pill-key data", {shown_key} }
+                span { class: "pill-outcome", {outcome} }
+                kbd { class: "key-hint", "/" }
+            }
+            Popover {
+                open,
+                label: "Look up a key",
+                trigger: "lookup-trigger",
+                align_end: false,
+                form {
+                    class: "lookup-form",
+                    role: "search",
+                    onsubmit: move |evt| {
+                        evt.prevent_default();
+                        tracer.run(&submit_tree, &text.peek());
+                        if tracer.error().is_none() {
+                            open.set(false);
+                        }
+                    },
+                    label { class: "sr-only", r#for: "lookup", "Key" }
                     input {
                         id: "lookup",
                         class: if invalid { "lookup-input data invalid" } else { "lookup-input data" },
@@ -318,64 +362,89 @@ pub(crate) fn LookupBar(tree: LoadedTree, tracer: Tracer, spotlight: Spotlight) 
                         "aria-invalid": if invalid { "true" } else { "false" },
                         "aria-describedby": "lookup-error",
                         value: "{text}",
+                        onmounted: move |evt| async move {
+                            let _ = evt.data().set_focus(true).await;
+                        },
                         oninput: move |evt| text.set(evt.value()),
                     }
-                    kbd { class: "key-hint", "aria-hidden": "true", "/" }
+                    button { class: "button-primary", r#type: "submit", "Look up" }
                 }
-                button { class: "button-primary", r#type: "submit", "Look up" }
-            }
-            div { class: "lookup-actions",
-                button {
-                    class: "button",
-                    title: "Look up a key of the map at random (R)",
-                    onclick: move |_| tracer.run_scenario(&random_tree, Scenario::Random),
-                    IconGlyph { icon: Icon::Shuffle }
-                    "Random"
-                }
-                div { class: "button-pair", role: "group", "aria-label": "Neighboring leaves",
-                    button {
-                        class: "button",
-                        disabled: previous.is_none(),
-                        title: "Look up the first key of the leaf to the left ([)",
-                        "aria-label": "Previous leaf",
-                        onclick: move |_| tracer.run_beside(&left_tree, -1),
-                        IconGlyph { icon: Icon::Left }
-                        "Leaf"
-                    }
-                    button {
-                        class: "button",
-                        disabled: next.is_none(),
-                        title: "Look up the first key of the leaf to the right (])",
-                        "aria-label": "Next leaf",
-                        onclick: move |_| tracer.run_beside(&right_tree, 1),
-                        "Leaf"
-                        IconGlyph { icon: Icon::Right }
+                p { id: "lookup-error", class: "lookup-error", role: "alert",
+                    if let Some(error) = error {
+                        "{error}. Try {kind.example()}."
                     }
                 }
-            }
-            div { class: "scenarios", role: "group", "aria-label": "Lookups worth seeing",
-                span { class: "scenarios-label", "Try" }
-                for scenario in Scenario::offered(kind).iter().copied() {
-                    {
-                        let tree = scenario_tree.clone();
-                        rsx! {
-                            button {
-                                class: "scenario",
-                                onclick: move |_| tracer.run_scenario(&tree, scenario),
-                                onmouseenter: move |evt| {
-                                    let point = evt.client_coordinates();
-                                    spotlight.show_hint(Hint::new((point.x, point.y), scenario.label(), scenario.shows()));
-                                },
-                                onmouseleave: move |_| spotlight.clear(),
-                                {scenario.label()}
+                div { class: "lookup-actions",
+                    button {
+                        class: "button",
+                        onclick: move |_| {
+                            tracer.run_scenario(&random_tree, Scenario::Random);
+                            open.set(false);
+                        },
+                        IconGlyph { icon: Icon::Shuffle }
+                        "Random key"
+                        kbd { class: "key-hint inline", "R" }
+                    }
+                    div { class: "button-pair", role: "group", "aria-label": "Neighboring leaves",
+                        button {
+                            class: "button",
+                            disabled: previous.is_none(),
+                            "aria-label": "First key of the previous leaf",
+                            onclick: move |_| {
+                                tracer.run_beside(&left_tree, -1);
+                                open.set(false);
+                            },
+                            IconGlyph { icon: Icon::Left }
+                            "Leaf"
+                        }
+                        button {
+                            class: "button",
+                            disabled: next.is_none(),
+                            "aria-label": "First key of the next leaf",
+                            onclick: move |_| {
+                                tracer.run_beside(&right_tree, 1);
+                                open.set(false);
+                            },
+                            "Leaf"
+                            IconGlyph { icon: Icon::Right }
+                        }
+                    }
+                }
+                p { class: "popover-heading", "Worth seeing" }
+                ul { class: "scenario-list",
+                    for scenario in Scenario::offered(kind).iter().copied() {
+                        {
+                            let tree = scenario_tree.clone();
+                            rsx! {
+                                li {
+                                    button {
+                                        class: "scenario-row",
+                                        onclick: move |_| {
+                                            tracer.run_scenario(&tree, scenario);
+                                            open.set(false);
+                                        },
+                                        span { class: "scenario-name", {scenario.title()} }
+                                        span { class: "scenario-shows", {scenario.shows()} }
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
-            p { id: "lookup-error", class: "lookup-error", role: "alert",
-                if let Some(error) = error {
-                    "{error}. Try {kind.example()}."
+                p { class: "popover-footnote",
+                    kbd { "/" }
+                    " search · "
+                    kbd { "R" }
+                    " random · "
+                    kbd { "[" }
+                    kbd { "]" }
+                    " leaves · "
+                    kbd { "↑" }
+                    kbd { "↓" }
+                    " path · "
+                    kbd { "←" }
+                    kbd { "→" }
+                    " guide"
                 }
             }
         }

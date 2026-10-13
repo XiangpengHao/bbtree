@@ -52,6 +52,15 @@ From the original note:
   steps first, every bbtree term defined where it is used, one shared hover
   across the views, lookups that land on the interesting cases, motion that
   replays the lookup's way down, and a one-column layout for small screens.
+- **One screen, and a guide (2026-10-12, fourth pass).** The header and
+  the lookup bar took two rows for little, and readers were still lost on
+  where to start, the path cards and the page map. The controls became one
+  toolbar: the current key and its outcome as a button that opens the
+  search, and the tree as a button that opens the build controls. The path
+  sits left, the inspected node right, its page and its slots behind tabs,
+  so nothing scrolls at 1440×900. A guide under the path (`guide.rs`) reads
+  the page step by step, from the lookup on screen, with numbered marks
+  pinned to the parts it names.
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -135,8 +144,17 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   key between two (where an insert would go). Keys: `/` to type, `R`
   random, `[` `]` the leaves beside, `↑` `↓` along the path
   (`shortcuts.rs`).
+- **The toolbar**: the search, as the current key and its outcome
+  (`trace.rs`); the tree's build controls (`workload.rs`); both open
+  panels (`popover.rs`).
 - **The headline** (`path_summary.rs`): where the lookup ended, how many
-  nodes and cache lines it read, the path's legend, and a replay.
+  nodes and cache lines it read, and a replay; the path's legend sits in
+  the path's corner.
+- **The guide** (`guide.rs`), under the path, open at first: start here,
+  the path, reading a card, one step per node of the lookup, reading the
+  page, and lookups worth seeing. Each step's words come from the lookup on
+  screen, it pins numbered marks to the parts it names, measured in the
+  page, and it shows the node it talks about in the inspector.
 - **The path** (`path_tree.rs`): one card per node from the root down, each
   hanging under the edge its parent took, with a bold ink connector. A card
   shows:
@@ -157,14 +175,16 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   ones mark; the result and the notch drop in; the edge to the next card
   draws. Between lookups the cards glide to their new places.
 - **The inspector** (`node_inspector.rs`), for the card you pick, the leaf
-  by default, in three columns on wide screens:
+  by default, right of the path: the search as steps, then a tab for the
+  page and one for the slots:
   - What the search did, as numbered steps drawn from the trace: skip the
     shared bytes (fence prefix, D26; search prefix, D33), compare every
     inline key at once (D18), search the tied keys, and the outcome: the
     edge taken with the keys either side, the slot found, a separator's way
     to its head (D17), or the slot an insert would take. Pointing at a step
     lights up what it read in the page and the rulers.
-  - The page as 16 rows of 64-byte cache lines (`memory_map.rs`). Every
+  - The page as 16 rows of 64-byte cache lines (`memory_map.rs`), rows
+    numbered 0 to 15 and bytes across. Every
     slot sits where the layout puts it, empty slots are faint, and the slots
     the lookup read are marked: tied keys outlined, the result filled. Each
     cache line the lookup surely reads gets a dot, in the order it reads

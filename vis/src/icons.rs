@@ -13,6 +13,10 @@ pub(crate) enum Icon {
     Shuffle,
     /// Plays the lookup's way down again.
     Replay,
+    Search,
+    /// Opens a menu.
+    Disclose,
+    Close,
 }
 
 impl Icon {
@@ -27,6 +31,9 @@ impl Icon {
                 "M2 4.5h2.5c3 0 4 7 7 7H14M12 9.5l2 2-2 2M2 11.5h2.5c1.2 0 2-1 2.6-2.2M9 6.7c.6-1.2 1.4-2.2 2.5-2.2H14M12 2.5l2 2-2 2"
             }
             Icon::Replay => "M3 8a5 5 0 1 0 1.5-3.6M3 2.5v3h3",
+            Icon::Search => "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10zM10.6 10.6L14 14",
+            Icon::Disclose => "M4.5 6.5L8 10l3.5-3.5",
+            Icon::Close => "M4 4l8 8M12 4l-8 8",
         }
     }
 }

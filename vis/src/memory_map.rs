@@ -426,12 +426,19 @@ pub(crate) fn MemoryMap(
                 "role": "img",
                 "aria-label": "The page, {page.size()} bytes in {lines} cache lines of 64 bytes; the lookup read {certain} of them for sure",
                 onmouseleave: move |_| spotlight.clear(),
+                text {
+                    class: "byte-tick",
+                    x: GUTTER - 20.0,
+                    y: TOP - 5.0,
+                    text_anchor: "end",
+                    "line"
+                }
                 for column in [0usize, 16, 32, 48] {
                     text {
                         class: "byte-tick",
                         x: GUTTER + column as f64 * BYTE_WIDTH + 1.0,
                         y: TOP - 5.0,
-                        "+{column}"
+                        if column == 0 { "byte 0" } else { "{column}" }
                     }
                 }
                 for line in 0..lines {
@@ -444,10 +451,11 @@ pub(crate) fn MemoryMap(
                     }
                     text {
                         class: "line-offset",
+                        "data-line": "{line}",
                         x: GUTTER - 20.0,
                         y: TOP + line as f64 * LINE_HEIGHT + 11.5,
                         text_anchor: "end",
-                        "{line * LINE:03x}"
+                        "{line}"
                     }
                 }
                 g { key: "{replay}-{at.level()}-{at.index()}",
@@ -477,6 +485,7 @@ pub(crate) fn MemoryMap(
                             rsx! {
                                 rect {
                                     class: piece.class(lit),
+                                    "data-slot": "{slot}",
                                     style: "animation-delay:{piece.delay()}ms;",
                                     x: piece.x,
                                     y: piece.y,
