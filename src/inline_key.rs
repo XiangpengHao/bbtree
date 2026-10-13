@@ -191,8 +191,11 @@ impl InlineKey for u64 {
     /// top, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
-        self.checked_shl(shift_bits).unwrap_or(0)
+        if offset < size_of::<Self>() {
+            self << (8 * offset)
+        } else {
+            0
+        }
     }
 }
 
@@ -205,9 +208,11 @@ impl InlineKey for u128 {
     /// top 8 bytes, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
-        let shifted = self.checked_shl(shift_bits).unwrap_or(0);
-        (shifted >> InlineWord::BITS) as InlineWord
+        if offset < size_of::<Self>() {
+            ((self << (8 * offset)) >> InlineWord::BITS) as InlineWord
+        } else {
+            0
+        }
     }
 }
 

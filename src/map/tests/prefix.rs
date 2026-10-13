@@ -320,3 +320,88 @@ fn narrow_parent_windows_survive_demotion_and_fence_changes() {
         assert_eq!(copy.get(key.as_str()), expected.get(key.as_str()));
     }
 }
+
+/// Fixed-width keys whose encodings all start with the same bytes: dense
+/// integers and byte arrays behind a shared head. Their roots and border
+/// nodes have no fence prefix, so their internal nodes keep local prefixes;
+/// lookups past either end, keys that differ inside the shared bytes, and
+/// every structural change must agree with std.
+fn dense_fixed_width_keys_match_std<K: Ord + Copy + core::fmt::Debug>(key: impl Fn(u64) -> K) {
+    use std::collections::BTreeMap;
+
+    let rng = TestRng::new(0xD33);
+    let mut order: Vec<u64> = (0..6000).collect();
+    rng.shuffle(&mut order);
+    let mut expected = BTreeMap::new();
+    let mut actual = BBTreeMap::new();
+    for (value, &index) in order.iter().enumerate() {
+        assert_eq!(
+            actual.insert(key(index), value),
+            expected.insert(key(index), value)
+        );
+    }
+    actual.check_invariants();
+    let mut queries: Vec<K> = (0..7000).map(&key).collect();
+    for shift in [8, 16, 24, 32, 40, 48, 56, 63] {
+        queries.push(key(1 << shift));
+        queries.push(key((1 << shift) | 17));
+        queries.push(key(u64::MAX >> (63 - shift)));
+    }
+    queries.push(key(u64::MAX));
+    for query in &queries {
+        assert_eq!(actual.get(query), expected.get(query));
+        assert_eq!(
+            actual.range(query..).take(3).collect::<Vec<_>>(),
+            expected.range(query..).take(3).collect::<Vec<_>>()
+        );
+    }
+    let separators: Vec<K> = actual.separator_keys().into_iter().copied().collect();
+    for separator in separators.iter().step_by(3) {
+        assert_eq!(actual.remove(separator), expected.remove(separator));
+        actual.check_invariants();
+    }
+    // Appends down the right border, then keys that shrink the shared bytes.
+    for (value, query) in queries.iter().enumerate() {
+        assert_eq!(actual.insert(*query, value), expected.insert(*query, value));
+    }
+    actual.check_invariants();
+    for index in (0..6000).step_by(2) {
+        assert_eq!(actual.remove(&key(index)), expected.remove(&key(index)));
+    }
+    actual.check_invariants();
+    let cut = key(3001);
+    let mut actual_upper = actual.split_off(&cut);
+    let mut expected_upper = expected.split_off(&cut);
+    actual.check_invariants();
+    actual_upper.check_invariants();
+    actual.append(&mut actual_upper);
+    expected.append(&mut expected_upper);
+    let actual = actual.clone();
+    actual.check_invariants();
+    assert!(actual.iter().eq(expected.iter()));
+    for query in &queries {
+        assert_eq!(actual.get(query), expected.get(query));
+    }
+}
+
+#[test]
+fn dense_integer_keys_match_std() {
+    dense_fixed_width_keys_match_std(|index| index);
+    dense_fixed_width_keys_match_std(|index| u128::from(index) | (7 << 100));
+    dense_fixed_width_keys_match_std(|index| (index as i64).wrapping_sub(3000));
+}
+
+#[test]
+fn byte_arrays_behind_a_shared_head_match_std() {
+    dense_fixed_width_keys_match_std(|index| {
+        let mut key = [0x5A; 16];
+        key[8..].copy_from_slice(&index.to_be_bytes());
+        key
+    });
+    dense_fixed_width_keys_match_std(|index| {
+        let mut key = [0; 32];
+        key[..6].copy_from_slice(&0x0199_AABB_CCDDu64.to_be_bytes()[2..]);
+        key[6..14].copy_from_slice(&index.to_be_bytes());
+        key
+    });
+}

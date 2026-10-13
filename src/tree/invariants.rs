@@ -282,14 +282,13 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
         }
         if let Some(prefix) = self.local_prefix_len() {
             assert!(self.len() >= 2);
-            assert!(prefix >= self.prefix_len() + 8);
-            let bytes = plan
-                .local_prefix_bytes()
+            assert!(prefix >= self.prefix_len() + plan.local_prefix_min_extra());
+            let inliner = plan
+                .local_prefix_inliner()
                 .expect("only nodes whose plan says so have local prefixes");
             let keys = self.keys();
-            let prefix_bytes = &bytes.bytes(&keys[0])[..prefix];
             for key in keys.iter() {
-                assert!(bytes.bytes(key).starts_with(prefix_bytes));
+                assert!(inliner.common_prefix_len(&keys[0], key) >= prefix);
             }
         }
         let prefix_len = self.local_prefix_len().unwrap_or_else(|| self.prefix_len());

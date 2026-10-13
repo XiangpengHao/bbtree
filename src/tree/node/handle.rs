@@ -27,8 +27,8 @@
 //!    the slot updates the header with it (D17).
 //! 6. **Inline keys follow keys.** In a node with inline keys (D18), inline
 //!    key `i` is key `i`'s window at the node's prefix length for every
-//!    `i < len` (05-fence-key.md). An internal byte-string node may instead
-//!    keep windows at a local search prefix; queries validate the extra
+//!    `i < len` (05-fence-key.md). An internal node may instead keep
+//!    windows at a local search prefix (D33); queries validate the extra
 //!    bytes, and every key-changing primitive first restores fence windows
 //!    (`inline_keys.rs`). Exported key/bound windows always use the fences.
 //!    Every operation moves keys through
@@ -516,14 +516,19 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// or not; see `search_index`.
     // Keep this typed result adapter with its caller, which already owns
     // the node and height. Outlining it returns both through a stack result
-    // at each visit; the actual search_index body remains free to outline.
+    // at each visit. The node search itself is inlined where the plan says.
     #[inline(always)]
     pub(crate) fn search<Q>(self, key: &SearchKey<'_, K, S, Q>) -> SearchResult<Self>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.search_index(key) {
+        let index = if Self::plan().inlines_node_search() {
+            self.search_index_inlined(key)
+        } else {
+            self.search_index(key)
+        };
+        match index {
             // SAFETY: `search_index` returns `Ok(index)` with `index < len`.
             Ok(index) => SearchResult::Found(unsafe { Kv::new_unchecked(self, index) }),
             // SAFETY: `search_index` returns `Err(index)` with `index <= len`.
@@ -535,7 +540,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// prefix used by structural operations.
     #[inline]
     pub(in crate::tree) fn local_prefix_len(&self) -> Option<usize> {
-        Self::plan().local_prefix_bytes()?;
+        Self::plan().local_prefix_inliner()?;
         // SAFETY: this live node has inline keys, and its borrow prevents
         // concurrent header mutation.
         let prefix = unsafe { self.node.search_prefix_len() };
@@ -558,8 +563,25 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     where
         K: Borrow<Q>,
     {
+        self.inline_target_at(
+            key,
+            self.local_prefix_len().unwrap_or_else(|| self.prefix_len()),
+        )
+    }
+
+    /// [`Self::inline_target`], for a node whose windows are at
+    /// `prefix_len`, which the caller has read.
+    #[inline(always)]
+    fn inline_target_at<Q: ?Sized>(
+        &self,
+        key: &SearchKey<'_, K, S, Q>,
+        prefix_len: usize,
+    ) -> Option<InlineTarget>
+    where
+        K: Borrow<Q>,
+    {
         if NodePtr::<K, V, S>::has_inline_keys() {
-            key.inline_target(self.local_prefix_len().unwrap_or_else(|| self.prefix_len()))
+            key.inline_target(prefix_len)
         } else {
             None
         }
@@ -572,30 +594,34 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     }
 
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` the edge
-    /// where `key` belongs. In bounds for any `Ord` and `InlineKey`,
-    /// consistent or not.
-    ///
-    /// If the node has inline keys and `key` has one to compare (D18), taken
-    /// at the node's prefix length, the search runs over them; otherwise over
-    /// the keys, as the node's plan says (D19).
-    /// After monomorphization, a map without inline keys has only the
-    /// latter.
+    /// where `key` belongs: [`Self::search_index_inlined`], inlined or not
+    /// as LLVM decides at each caller (`NodePlan::inlines_node_search`).
     fn search_index<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if let Some(prefix) = self.local_prefix_len()
-            && let Some(first) = self.reborrow().keys().first()
-            && let Some(order) = key.cmp_prefix(first, self.prefix_len(), prefix)
-        {
-            match order {
-                Ordering::Less => return Err(0),
-                Ordering::Greater => return Err(self.len()),
-                Ordering::Equal => {}
-            }
-        }
-        if let Some(target) = self.inline_target(key)
+        self.search_index_inlined(key)
+    }
+
+    /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` the edge
+    /// where `key` belongs. In bounds for any `Ord` and `InlineKey`,
+    /// consistent or not.
+    ///
+    /// If the node has inline keys and `key` has one to compare (D18), taken
+    /// at the node's prefix length, or at its local search prefix (D33) once
+    /// `key` has the bytes it adds, the search runs over them; otherwise over
+    /// the keys, as the node's plan says (D19).
+    /// After monomorphization, a map without inline keys has only the
+    /// latter.
+    #[inline(always)]
+    fn search_index_inlined<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let prefix_len = self.search_prefix_len(key)?;
+        if let Some(target) = self.inline_target_at(key, prefix_len)
             && let Some(run) = self.inline_equal_run(target)
         {
             return self.search_run(run, key, target);
@@ -606,6 +632,28 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
             KeySearch::Binary => {
                 Self::binary_search_index(keys, |probe| key.key().cmp(probe.borrow()))
             }
+        }
+    }
+
+    /// Where `key`'s search of this node compares windows: at the node's
+    /// fence prefix, or at its local search prefix (D33) once `key` has the
+    /// bytes the node's keys share up to it. `Err` with the first or last
+    /// edge for a key without them, as it sorts before or after them all.
+    #[inline(always)]
+    fn search_prefix_len<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized,
+    {
+        let Some(local) = self.local_prefix_len() else {
+            return Ok(self.prefix_len());
+        };
+        core::hint::cold_path();
+        let first = &self.reborrow().keys()[0];
+        match key.cmp_prefix(first, self.prefix_len(), local) {
+            Some(Ordering::Less) => Err(0),
+            Some(Ordering::Greater) => Err(self.len()),
+            Some(Ordering::Equal) | None => Ok(local),
         }
     }
 
@@ -1175,11 +1223,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V,
     fn key_window(self, index: usize) -> Window {
         assert!(index < self.len(), "key index out of bounds");
         if self.local_prefix_len().is_some() {
-            let inliner = Self::plan().inliner().expect("local byte-string prefix");
-            return Window::new(
-                self.prefix_len(),
-                inliner.inline_key_at(&self.keys()[0], self.prefix_len()),
-            );
+            let plan = Self::plan();
+            let inliner = plan.inliner().expect("local prefix");
+            let window = inliner.inline_key_at(&self.keys()[0], self.prefix_len());
+            // Every key shares the bytes a window the node hands out keeps;
+            // a narrow plan's raw windows have zeros after them.
+            let kept_bits = 8 * plan.local_prefix_min_extra() as u32;
+            let window = window & !InlineWord::MAX.checked_shr(kept_bits).unwrap_or(0);
+            return Window::new(self.prefix_len(), window);
         }
         // SAFETY: `index < len` and the node has no active local windows.
         // The slots rehydrate narrow heap-byte windows before export.
@@ -1246,10 +1297,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
         windows: impl ExactSizeIterator<Item = InlineWord>,
     ) {
         assert_eq!(windows.len(), self.len());
-        let slots = self
-            .key_slots()
-            .inline_keys()
-            .expect("local byte-string prefix");
+        let slots = self.key_slots().inline_keys().expect("local prefix");
         // SAFETY: one plain-data word per initialized key, within capacity;
         // this handle owns exclusive access to slots and the inline header.
         unsafe {
@@ -1264,7 +1312,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
     /// with it ([`Window::moved_back_to`]), given `fill`, the window there of
     /// a key whose encoding shares the node's prefix: one of the node's
     /// fences, or one of its keys. An active local search prefix first
-    /// reads one built-in byte string to restore fence windows; subsequent
+    /// reads one key's window to restore fence windows; subsequent
     /// shifts read no key and invoke no user code. Does nothing if the node's
     /// prefix is no longer than `fill`'s, which includes every node without
     /// inline keys.

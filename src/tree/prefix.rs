@@ -21,7 +21,7 @@
 //!
 //! An operation changes the tree's shape without calling user encodings,
 //! so that a panicking `InlineKey` can't stop it halfway. Active local
-//! search windows first read one built-in byte string to restore the
+//! search windows first read one key's window, a std key's, to restore the
 //! fence windows (`tree/node/inline_keys.rs`). A prefix may have to shrink
 //! during it: it shrinks to the parent's, the shift of a window filled from
 //! the parent's separator ([`Window::moved_back_to`]), which bounds the node

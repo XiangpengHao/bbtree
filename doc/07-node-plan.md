@@ -39,8 +39,9 @@ documented with its reason:
 | keys | inline keys, leaf / internal | also stored | search over tied inline keys |
 |---|---|---|---|
 | without inline keys | none | nothing | as the key type picks (D19) |
-| with an `InlineKey` impl (std integers, `WithInlineKey`) | the impl's width in both | nothing | as the key type picks (D19) |
-| std byte arrays | 2 / 2 (D32) | internal: children before keys (D39) | binary; one candidate compares whole (D38) |
+| std integers | the impl's width in both | internal: a local prefix (D33) | as the key type picks (D19) |
+| every key under `WithInlineKey` | the impl's width in both | nothing | as the key type picks (D19) |
+| std byte arrays | 2 / 2 (D32) | internal: children before keys (D39), a local prefix (D33) | binary; one candidate compares whole (D38) |
 | std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36); internal: a local prefix (D33) | binary |
 
 The rows differ in what a tie costs: a load from the node (arrays), a read

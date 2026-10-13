@@ -1,7 +1,8 @@
 # Decisions
 
 Decisions made so far, with the reason and what follows from each.
-To change a decision, add a new entry that supersedes it; don't edit the old one.
+Each entry states a decision as it holds now. To change one, edit it in place;
+the file is not a history of decisions.
 
 ## Scope (from 00-init)
 
@@ -10,7 +11,8 @@ To change a decision, add a new entry that supersedes it; don't edit the old one
 strong reason and is documented in README.md. Design as if it could be merged
 into std someday; flag anything that would prevent that.
 
-**D2. Zero dependencies.** `serde` and `rand` are optional features.
+**D2. Zero dependencies.** `serde` and `rand` support, when added, are
+optional features.
 
 **D3. `no_std`.**
 
@@ -21,32 +23,16 @@ Verus is optional but welcome.
 
 ## Nodes
 
-**D6. Nodes are 4 KB.** (2026-10-07)
-A node is a multiple of 4 KB only when the minimum capacity doesn't fit in
-4 KB (huge K/V). There are no smaller nodes: no mini-pages, no size classes.
-
-- Consequence: every non-empty map costs at least 4 KB (std: 192 B for a
-  one-entry u64→u64 map). Accepted.
-
-**D7. Nodes are always 4 KB-aligned.** (2026-10-07)
-
-- A node never straddles a page: one TLB entry per node, and hardware
-  prefetchers, which stop at page boundaries, can stream the whole node.
-- The low 12 bits of every node address are zero, which leaves room to pack an
-  index next to the pointer.
-- Consequence: per-node aligned allocation from the system allocator is too
-  expensive (D8).
-- Consequence, to measure: the L1d set index is address bits 6–11, which is
-  the page offset, so every node's header and first search probe land in the
-  same L1 set. If it hurts, offset the key array per node ("coloring").
-
 **D8. Own allocator trait.** (2026-10-07)
 Every allocation is a node, counted, with a size known in advance; no runtime
 surprises. System and custom allocators are both supported through our trait.
 
-- Consequence: the default allocator cannot request each node as
-  `Layout(4096, 4096)`. Measured with glibc (20k nodes, each fully written,
-  RSS delta):
+- Not built yet: until it is, each node is one global-allocator call
+  (`tree/node/page.rs`).
+- Consequence: a default allocator should carve aligned pages from large
+  chunks (see "Proposed, not decided"). Per-node aligned requests cost
+  glibc up to twice the memory; measured with 4 KB nodes (20k nodes, each
+  fully written, RSS delta):
 
   | Strategy                                   | RSS per 4 KB node |
   |--------------------------------------------|-------------------|
@@ -56,57 +42,50 @@ surprises. System and custom allocators are both supported through our trait.
   | carve from 256 KB chunks                   | 4154 B            |
   | carve from 2 MB chunks                     | 4098 B            |
 
-**D9. Keys grow from the front of the node, values from the back.** (2026-10-07)
+**D9. A node is a header, its keys, and the slots that follow them.** (2026-10-07)
 
 ```
-| len | k0 k1 k2 … →            free            ← … v2 v1 v0 |
-0     H                                                     4096
+leaf      | header | k0 k1 … k_n | head v0 v1 … v_n |
+internal  | header | k0 k1 … k_n | e0 e1 … e_n+1     |
 ```
 
-- Key `i` sits at `H + i·size_of::<K>()`, value `i` at
-  `end − (i+1)·size_of::<V>()`.
-- With no parent pointer (D11) and no fences (D10), the header is just
-  `len: u16`. Node kind comes from the height, as in std.
-- Keys are aligned by rounding `H` up to `align_of::<K>()`. Values are aligned
-  because the node end is 4 KB-aligned. The free gap needs no padding.
-- An insert is one memmove of the keys after the position and one memmove of
-  the values; a split is one memcpy for each half.
+- Without inline keys, the header is `len: u16` and a leaf's `has_head`
+  flag (D17). The keys are an array, and the trailing slots, a leaf's head
+  and values or an internal node's edges (D12), an array right after the
+  keys' capacity. Node kind comes from the height, as in std.
+- Trailing slot `i + 1` goes with key `i`, so splitting, stealing and
+  merging move trailing slots the same way in both kinds.
+- An insert is one shift of the keys after the position and one of the
+  trailing slots; a split is one copy of each half.
+- With inline keys, leaves pair keys with values (D29), internal nodes keep
+  keys and edges apart (D32), and fixed arrays put edges first (D39); the
+  layouts are in `tree/node/layout.rs`.
 
-**D10. Not taken from bf-tree:** slotted layout, fence keys, prefix
-compression, preview bytes, mini-pages. (2026-10-07)
-Fixed-size generic K/V needs none of the slotted machinery. Fences would need
-`K: Clone`. Prefix compression and preview bytes need byte-comparable keys.
+**D10. Not taken from bf-tree:** slotted layout, stored fence keys,
+mini-pages. (2026-10-07)
+Fixed-size generic K/V needs none of the slotted machinery, and stored fences
+would need `K: Clone`. Prefix stripping and preview bytes come in another
+form: windows of an order-preserving encoding, past what a node's fences
+share, with no fence stored (D18, D26).
 
-**D12. Internal nodes put the edges at the end.** (2026-10-07)
+**D12. An internal node's edges are its trailing slots.** (2026-10-07)
 
-```
-| len | k0 k1 k2 … →      free      ← … v2 v1 v0 | e0 e1 … e_cap |
-0     H                                     vals_end            4096
-```
+- Edge `i` is trailing slot `i`: the child left of key `i`, and edge
+  `len` the last (D9).
+- Keys sit at the same offset in leaves and internal nodes without inline
+  keys, so one search routine serves both.
+- Capacity is the largest `n` that fits, computed per `(K, V)` at compile
+  time (`tree/node/layout.rs`).
 
-- The `cap + 1` edges (8 B each) fill the end of the node. Values grow down
-  from `vals_end`, the start of the edge array rounded down to
-  `align_of::<V>()`.
-- Keys sit at the same offset in leaves and internal nodes, so one search
-  routine serves both.
-- Capacity is the largest `n` that fits, computed per `(K, V)` at compile time.
-  u64→u64: leaf 255, internal 170.
-
-**D13. Every node holds at least 12 entries.** (2026-10-07)
-Refines D6: the node size is the smallest multiple of 4 KB at which both a
-leaf and an internal node hold ≥ 12 entries, and the node stays 4 KB-aligned
-(D7).
-
-- 4 KB is enough while `K + V` ≤ ~332 B (the internal node is the tighter
-  of the two). Larger entries get 8 KB, 12 KB, … nodes.
-- A type aligned to more than 4 KB raises the node alignment to its own,
-  which is still a multiple of 4 KB.
-- u64→u64 is unaffected: leaf 255, internal 170, 4 KB.
+**D13. Every node holds at least 12 keys.** (2026-10-07)
+A node kind's size is the smallest multiple of 1 KB (D15) at which it holds
+≥ 12 keys, with a leaf's values and head or an internal node's edges (D21).
+A type aligned to more than 1 KB raises the node's alignment, and its size
+step, to its own.
 
 **D15. Nodes are 1 KB, aligned to their own size.** (2026-10-07)
-Supersedes the 4 KB size in D6 and the 4 KB alignment in D7. A node is the
-smallest multiple of 1 KB at which both kinds hold ≥ 12 entries (D13), and it
-is aligned to max(1 KB, align of K, align of V).
+A node is the smallest multiple of 1 KB at which it holds ≥ 12 keys (D13),
+and it is aligned to max(1 KB, align of K, align of its trailing slots).
 
 - Why: a sweep at 10M u64→u64 entries (mimalloc, branchless search, append
   fast path) put 1 KB ahead of every other size, and ahead of std on all three
@@ -124,14 +103,15 @@ is aligned to max(1 KB, align of K, align of V).
   Random inserts get worse with node size because each one shifts about half
   the node: at 4 KB that pulls 2.2× std's cache lines from DRAM per insert.
   The 8 KB memory jump is mimalloc's overhead on large aligned blocks.
-- A self-aligned 1 KB node never crosses a 4 KB page, so D7's one-TLB-entry
-  argument still holds.
+- A self-aligned 1 KB node never crosses a 4 KB page: one TLB entry per
+  node, and hardware prefetchers, which stop at page boundaries, can stream
+  the whole node.
 - 1 KB alignment leaves 10 free low address bits, so node capacity is capped
   at 1023.
-- 12 entries fit in 1 KB while `K + V` ≤ ~76 B (the internal node binds);
-  larger entries get 2 KB, 3 KB, … nodes. u64→u64: leaf 63, internal 42.
-- A one-entry map costs 1 KB instead of 4 KB.
-- To revisit after in-node prefetching and with other key/value types.
+- A leaf holds 12 entries in 1 KB while `K + V` ≤ ~76 B; larger entries get
+  2 KB, 3 KB, … leaves (D21). u64→u64 without inline keys: leaf 63,
+  internal 63.
+- A one-entry map costs 1 KB (std: 192 B for a one-entry u64→u64 map).
 
 **D16. Leaves and internal nodes stay sorted.** (2026-10-07)
 Unsorted leaf storage, fully unsorted or as a sorted prefix plus an unsorted
@@ -155,24 +135,14 @@ tail, was prototyped and rejected.
   could not produce key order from unsorted leaves without storing a
   comparator in the map (one more word, plus user code in `Drop`/`Debug`) or
   a per-leaf permutation (the slotted layout D10 rejected).
-- Possible later: a branch-free linear count instead of binary search inside
-  sorted leaves. It's ~5% faster on inserts, and faster on gets only with
-  AVX-512 (167 vs 185 ns); it would be gated on target features.
 
 **D17. B+-tree: values live only in leaves; separators are moved, not copied.** (2026-10-07)
-Supersedes the value area of internal nodes in D12, and settles the
-B-tree-vs-B+-tree proposal.
-
-```
-internal  | len | k0 k1 … →            free              | e0 e1 … e_cap |
-leaf      | len | k0 k1 … →     free     ← … v1 v0 | head |
-```
 
 - Internal nodes hold keys and edges only. **Separator keys are stored
   physically in internal nodes**, which are the hot part of the tree: an
   internal-node search compares against keys inline in that node and never
   follows a pointer into a leaf.
-- Leaves hold keys and values as in D9, plus one key-less **head** value: every
+- Leaves hold keys and values (D9), plus one key-less **head** value: every
   leaf except the leftmost stores the value of the separator key just to its
   left in key order. That key lives in an internal node: the lowest common
   ancestor of the two leaves.
@@ -185,9 +155,10 @@ leaf      | len | k0 k1 … →     free     ← … v1 v0 | head |
 - **Lookup always ends at a leaf.** A match on an internal separator continues
   down the leftmost path of its right subtree to that leaf's head.
 - Why: values only in leaves, as intended from the start (00-init: database
-  B-trees). Internal fanout rises (u64→u64: 42 → 63 children per 1 KB), and
-  large values never sit in internal nodes. Inner nodes are a tiny fraction of
-  the tree, so the extra work on separator hits doesn't matter.
+  B-trees). Internal fanout is higher (u64→u64: 64 children per 1 KB, 43
+  with values in internal nodes), and large values never sit in internal
+  nodes. Inner nodes are a tiny fraction of the tree, so the extra work on
+  separator hits doesn't matter.
 - Alternative considered: keep every key physically in its leaf and let
   internal nodes point at it. Rejected because moves inside leaves (shifts,
   splits, steals) would invalidate those pointers; the structural relation
@@ -200,23 +171,24 @@ Design in 04-inline-key.md.
   - a public `InlineKey` trait anyone can implement, newtypes included (option
     (b));
   - a default strategy that gives std byte-string keys (`String`, `str`,
-    `Vec<u8>`, `Box<str>`, …) inline keys automatically, by compile-time type
-    identity (option (d)).
-- **In types:** `BBTreeMap<K, V, A = Global, S = Auto>`. Existing code is
-  unchanged and gets inline keys for std string keys. Other key types opt in with a
-  one-line impl plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()` stays
-  `Auto`-only, since a generic `new()` breaks inference. There is no separate
-  alias type. Until the allocator parameter lands, `S` is the third parameter.
+    `Vec<u8>`, `Box<str>`, byte arrays, …) and the 64- and 128-bit integers
+    (D31) inline keys automatically, by compile-time type identity (option
+    (d)).
+- **In types:** `BBTreeMap<K, V, S = Auto>`; the allocator parameter (D8)
+  is to go before `S`. Existing code is unchanged and gets inline keys for
+  std string and integer keys. Other key types opt in with a one-line impl
+  plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()` stays
+  `Auto`-only, since a generic `new()` breaks inference. There is no
+  separate alias type.
 - **Lint:** node handles carry five type parameters, so `clippy.toml` raises
   `type-complexity-threshold` to 300.
-- **Width:** windows are 8 bytes (`InlineWord = u64`), and a key type says
-  how many of their first bytes nodes keep, `InlineKey::WIDTH`, 2, 4 or 8
-  (2026-10-09): 8 for std byte strings, whose ties read the heap; 2 for
-  `u64`, `i64`, `u128` and `i128`, which implement `InlineKey`. At 8 bytes,
-  real neighbours tie 24–70% of the time; at 16 bytes, 1–20%
-  (04-inline-key.md Q7). The integers first opted in with `WithInlineKey`;
-  `Auto` gives them inline keys since D31.
-- **The trait gives windows** (2026-10-08): `inline_key_at(offset)`, bytes
+- **Width:** windows are 8 bytes (`InlineWord = u64`), and nodes keep the
+  first `InlineKey::WIDTH` bytes of them, 2, 4 or 8. Under `Auto`: heap
+  byte strings, whose ties read the heap, 8 in leaves and 4 in internal
+  nodes (D43); byte arrays 2 (D32); `u64`, `i64`, `u128` and `i128` 2
+  (D31). At 8 bytes, real neighbours tie 24–70% of the time; at 16 bytes,
+  1–20% (04-inline-key.md Q7).
+- **The trait gives windows:** `inline_key_at(offset)`, bytes
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
   Windows stay 8 bytes for every key type; nodes keep `WIDTH` of them.
@@ -236,24 +208,13 @@ Design in 04-inline-key.md.
   every heap miss. Plain binary search was 10–35% faster than branchless on
   them, with integers unchanged.
 
-**D20. Node prefetch.** (2026-10-07)
-When a search enters a node, it prefetches the node's whole key area, sized by
-capacity, not `len`, so it never waits on the header miss.
-- Interleaved A/B on the B+-tree, bbtree only, median ns:
-  - u64 10M: get_hit 208 → 163, insert 191 → 167;
-  - hash32 1M: get 340 → 277;
-  - str-json 1M: get 492 → 474.
-- Sizing it by `len` didn't help.
-- `String` keys gain little: their cost is the heap reads behind the keys,
-  which inline keys address (04-inline-key.md).
-
 **D21. Node size per kind.** (2026-10-07)
 - **Internal node size** depends only on the key: the smallest multiple of
   1 KB holding ≥ 12 keys and 13 edges.
 - **Leaf node size** depends on key and value: ≥ 12 entries plus the head.
-- Supersedes the shared node size. Under D17 internal nodes hold no values, so
-  a shared size made internal nodes of large-value maps huge (u64 →
-  `[u8; 1000]`: 13 KB, ~800 keys).
+- Why: internal nodes hold no values (D17), so one size for both kinds would
+  make internal nodes of large-value maps huge (u64 → `[u8; 1000]`: 13 KB,
+  ~800 keys).
 
 **D22. Removal: physical, rebalanced bottom-up, nodes at least 1/8 full.** (2026-10-08)
 - **No tombstones.** `remove_entry` and `pop_first`/`pop_last` hand the key
@@ -262,8 +223,8 @@ capacity, not `len`, so it never waits on the header miss.
   Removing costs one shift in the leaf, as inserting does (D16).
 - **Underfull** means fewer than `max(capacity / 8, 4)` keys, for a node below
   the root, by its kind's capacity: 7 keys for a u64→u64 leaf of 63, 4 for
-  a `String`→u64 leaf of 25. The floor of 4 (2 until the path change of
-  D24) bounds the height: see the last bullet.
+  a `String`→u64 leaf of 25. The floor of 4 bounds the height: see the
+  last bullet.
 - **Bottom-up, like insert (D11).** On the way back up, each level fixes the
   child it went into if that child is underfull:
   - it merges the child with a sibling (the left one if there is one) when
@@ -287,12 +248,9 @@ capacity, not `len`, so it never waits on the header miss.
 - Consequence: a non-root internal node has at least 5 children, so a tree
   is at most 23 levels above its leaves: one level more would need
   2·5^23 KB of leaves, more than 2^64 bytes. Every path has a slot per level
-  (D24). With the earlier floor of 2, a 3-child minimum allowed 34 levels,
-  and paths of 35 slots, about 370 bytes.
+  (D24).
 
 **D23. Iteration: a cursor per end, each a path (D24).** (2026-10-08)
-Supersedes the path-stack frame and `MAX_HEIGHT` bullets under "Proposed,
-not decided".
 
 - **A position is an edge of a leaf.** Past a leaf's last entry, the next
   one is the separator of the lowest node on the path with a key beyond it,
@@ -312,15 +270,13 @@ not decided".
   every older cache miss. Over many small maps, that serialized one map's
   misses behind the previous one's: one forwarding conflict per map,
   28.2 → 11.5 ns per entry for 1M 4-entry maps once removed.
-- **Sizes:** `Iter` 520 B, `Range` 512 B (std: 72 B, 48 B). Before D24, an
-  end kept its leaf, the leaf's parent and an index per level, and walked
-  down from the root when the parent ran out: `Iter` 232 B.
+- **Sizes:** `Iter` 560 B, `Range` 552 B (D33, D35; std's `Iter`: 72 B).
 - **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) use a `ValMut`
   borrow type, as std's do: its handles copy, so both ends hold some, and
   only read the structure and keys; handing out a value as `&mut V` is
   unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
-  (range). That is the one `unsafe` in `tree/walk.rs`.
+  (range).
 - **Owning iteration** (`DyingWalk`, for `IntoIter` and for dropping a
   tree, which is dropping one) takes the tree apart as it goes: each entry
   is moved out of its slot, nothing shifts and nothing rebalances, and an
@@ -329,13 +285,11 @@ not decided".
   last. A `Dying` borrow type's handles copy, so both ends hold some;
   moving an entry out and freeing a node are unsafe, vouched for by the
   walk. Entries without drop glue are skipped a leaf at a time when the map
-  is dropped. Before, `IntoIter` popped from either end, rebalancing as it
-  went, and dropping a tree was a separate teardown. 1M entries, one run
-  (ns per entry): consuming `for` loop, u64→u64 15.1 → 7.5 (std 8.9),
-  `String`→u64 91.9 → 74.7 (std 74.4); dropping, u64→u64 2.1 → 2.4 (std
-  6.6), `String`→u64 64 → 67–72 (std 71), where the teardown dropped a
-  leaf's entries in one loop and the walk steps a cursor per entry.
-- Measured with D24, one run each, mimalloc, Ryzen 9 9900X (ns per entry;
+  is dropped. 1M entries, one run (ns per entry): consuming `for` loop,
+  u64→u64 7.5 (std 8.9), `String`→u64 74.7 (std 74.4); dropping, u64→u64
+  2.4 (std 6.6), `String`→u64 67–72 (std 71). Popping from either end
+  instead, rebalancing as it went, took 15.1 and 91.9.
+- Measured, one run each, mimalloc, Ryzen 9 9900X (ns per entry;
   per scan for `range64`):
 
   | workload | bbtree | std |
@@ -349,7 +303,7 @@ not decided".
   | iterate, 1M real JSON objects | 17.9 | 6.0 |
 
 - **Open:** small maps are 3–5× std, from instruction count (about 72 per
-  entry), as before D24. A range is copied after both ends are positioned
+  entry). A range is copied after both ends are positioned
   (`take` moves it, for one), at about 15 forwarding conflicts per scan; it
   can't wait to position them, having no type for the bounds' key to keep
   them in.
@@ -363,38 +317,37 @@ not decided".
   at a time, to its bottom node, from which nothing leads up, and holds the
   `&mut` of the tree to grow a new root.
 - **Who uses it:**
-  - lookups search down one;
-  - an insert searches down one, inserts at the leaf, carries splits up the
-    path, then goes back down through the halves that took the new entry,
-    so the path ends at it;
+  - an insert that reaches a full leaf searches down one (D37), inserts at
+    the leaf, carries splits up the path, then goes back down through the
+    halves that took the new entry, so the path ends at it;
   - a removal goes up the path from where the entry came out, fixing each
     underfull child (D22) and stopping at the first level that loses no
     key; a separator's successor comes up from the leftmost leaf right of
     it;
   - an entry keeps the path its search found: reading or changing it goes
     straight to the bottom node, removing or inserting goes up the path;
-  - each end of a walk is one (D23).
+  - each end of a walk is one (D23), and a range's bounds are searched
+    with one;
+  - point lookups and inserts into a leaf with room hold only the current
+    node (D32, D37).
 - **Why pointers, not indexes.** An index path is valid under the same
   condition as a pointer path, that nothing else changes the tree, which
   `&mut` already gives; it only turns a broken condition into a panic, and
-  costs a walk down from the root at each use. Before, an entry walked down
-  on every `get`, and insert and removal were recursions generic over how
-  to find their way, with an insert recording where the new entry went
-  (`Position`, `InsertionTarget`, `Placement`, `RemovalTarget`): all gone.
+  costs a walk down from the root at each use.
 - **24 slots** (`MAX_HEIGHT` 23, from D22's floor of 4), 248 B. The slots are
   uninitialized until written; a path is made detached and started where it
   stays, and is never moved once written inside the tree code: moving one
   copies it with wide loads, which wait on the narrow stores that wrote it
   (D23). Passing the path by value to `remove`, wrapping it in a search
-  result, or returning it from a constructor each did: the first version
-  took 31 ns per `get` on a 1k map (HEAD 10.9), and `pop_first` was 1.6×.
-  An entry and an iterator still move when returned.
-- **Not done:** 8 levels in place and a `Vec` for the rest, which made a path
+  result, or returning it from a constructor each did, and made a 1k `get`
+  take 31 ns instead of 10.9, and `pop_first` 1.6× as long. An entry and
+  an iterator still move when returned.
+- **Rejected:** 8 levels in place and a `Vec` for the rest, which made a path
   112 B (`Iter` 248 B). Choosing the storage at every level cost 50–70
   instructions per operation, and `get` +13% at 10M, where fewer
   instructions let more independent lookups overlap.
-- Measured, one run each, against the index paths and recursions before
-  (ns per call):
+- Measured, one run each, against index paths and recursive insert and
+  removal (ns per call):
 
   | | 10M u64→u64 before | after | std | 1k u64→u64 before | after | std |
   |---|--:|--:|--:|--:|--:|--:|
@@ -404,8 +357,6 @@ not decided".
   | entry_upsert | 170 | 151 | 240 | 31.5 | 28.1 | 31.7 |
   | pop_first | 27.2 | 16.3 | 21.0 | 14.0 | 9.6 | 10.8 |
 
-- **Open:** a lookup records its path, about 36 instructions more than the
-  loop it replaced, which shows on small maps only (+17% at 1k).
 
 **D25. Bulk changes: a builder of full nodes, fed by draining in order.** (2026-10-08)
 
@@ -416,8 +367,7 @@ not decided".
   for that border, so a panic part-way takes it apart as any other.
 - **`collect` and `from`** sort, keep the last of equal keys (as std), and
   build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
-  18.2 bytes per entry; inserting the sorted entries one by one, as before,
-  took 18.6 ns and 33.0 bytes (half-full nodes).
+  18.2 bytes per entry.
 - **`append`, `retain` and `extract_if`** drain entries in order by value
   from the front (D23's owning walk; no `Ord`), and rebuild with the
   builder, keeping std's
@@ -438,13 +388,13 @@ not decided".
   from counting the shorter tree's entries a node at a time, as std's do.
   1M u64→u64, one cut (µs): at the median 12 000 by popping before → 95
   (std 320); at 1%, 2 400 → 3 (std 5).
-- **Cost, for now:** `append` O(n + m) as std's; `retain` O(n) as std's, but
+- **Cost:** `append` O(n + m) as std's; `retain` O(n) as std's, but
   moving the entries it keeps; `extract_if` O(n) wherever its range is,
   where std's is O(log n) plus the part it touches; `split_off` O(log n),
   plus the shorter tree's nodes to count. A drained entry costs about a
   step of a walk.
 
-**D26. Per-node prefix stripping: a node's inline keys skip what its fences share.** (2026-10-08, exact since 2026-10-09)
+**D26. Per-node prefix stripping: a node's inline keys skip what its fences share.** (2026-10-08)
 Design and measurements in 05-fence-key.md.
 
 - **What a node stores:** `prefix_len`, exactly what its fences (the
@@ -454,40 +404,20 @@ Design and measurements in 05-fence-key.md.
 - **For every key with inline keys:** the trait gives windows of an encoding
   (D18), so newtypes get it as std byte strings do.
 - **Only a separator change moves a fence,** never an insert into a node.
-  The change itself reads no key, so that a panicking `InlineKey` can't
-  stop it halfway: a node that must shrink takes its parent's prefix, by a
-  shift filled from the parent's separator. Once the entry is counted, the
-  nodes whose fences changed fit them, reading their keys.
-- **Exact, not "at most":** the first version kept prefixes at most what
-  the fences share, grown only where inline keys tied. Exact needs no gate
-  and no test-only growth rule, and rebalanced nodes keep their prefixes,
-  for 4–23% on inserts, gets and removals of keys that rarely share
-  prefixes.
+  The change itself reads no key: a node that must shrink takes its
+  parent's prefix, by a shift filled from the parent's separator. Once the
+  entry is counted, the nodes whose fences changed fit them, reading their
+  keys.
+- **Exact, not "at most":** a prefix is a function of the fences, so there
+  is no gate and no growth rule, and rebalanced nodes keep their prefixes.
+  Against prefixes grown only where inline keys tie, that costs 4–23% on
+  inserts, gets and removals of keys that rarely share prefixes.
+- **Where the fences share too little** for a node's windows to tell its
+  keys apart, an internal node keeps a local search prefix (D33).
 - **Measured:** 24–34% faster at 1M on keys with shared prefixes (paths,
   addresses), 9–12% on Wikipedia titles' inserts and gets; on random strings,
   inserts about 25%, gets 5–10% and removals 21–23% slower than without
   stripping.
-
-**D27. Prefetch behind a default `prefetch` feature; benchmarks time without it.** (2026-10-09)
-Refines D20.
-
-- **Library:** the `prefetch` feature, on by default, gates the one
-  software prefetch, `prefetch_search_area` (`tree/node/handle.rs`). Without it
-  a search reads the node as it goes.
-- **Benchmarks:** `bench` depends on bbtree without default features, so a
-  run times the code's own memory access unless built with
-  `--features prefetch`. The report header records which.
-- Why: prefetch hides layout and access-pattern effects, and how much it
-  helps depends on how many lines it asks for. In the A/B below, the same
-  layout moved by ±5–10% depending only on what was prefetched, so a
-  layout change can't be judged with prefetch on.
-- The A/B that prompted it: prefetching whole leaves (keys and values) in
-  inline-key layouts, a stand-in for interleaving keys and values, made
-  10M `str-json` gets 7–9% and inserts 6–7% faster but `u64` gets with
-  inline keys 7% slower; prefetching inline keys only was slower on every
-  String-like key (`hash32` gets +33%).
-- Measured with the feature off (10M `get_hit`, one run): `u64` 166 →
-  199 ns, `str-json` 339 → 427 ns, `u64` with inline keys 135 → 133 ns.
 
 **D28. Branch early, loop late: a node's kind is decided once per step.** (2026-10-09)
 
@@ -498,11 +428,9 @@ Refines D20.
   the loop, as a type.
 - **Enforced by the types:** what depends on the kind, a node's capacity
   and where its slots are, is only for `PageKind` handles (`Leaf`,
-  `Internal`); a `LeafOrInternal` handle can only be told its kind. Before,
-  `NodeKind::is_leaf` answered at run time for `LeafOrInternal`, so every
-  such method also compiled on untyped handles and decided the kind inside:
-  a descent decided it three to six times per level, a steal or merge five
-  to eight times.
+  `Internal`); a `LeafOrInternal` handle can only be told its kind.
+  Deciding inside each method instead had a descent decide it three to six
+  times per level, and a steal or merge five to eight times.
 - **What it took:** the descent forces each level once and searches it as
   that kind; `TrailingSlots` (a leaf's head and values, an internal node's
   edges) makes splitting, stealing and merging one code for both kinds;
@@ -514,7 +442,7 @@ Refines D20.
 - **Why:** the inline-key count of a node with 8-byte inline keys was one
   `filter().count()` in two arms, a leaf's and an internal node's; where
   their capacities differed, LLVM summed the compares' bits one at a time.
-- **Measured** against the commit before, prefetch off, medians of three
+- **Measured** against kinds decided inside each method, medians of three
   interleaved runs (ns per op; per entry for `iterate`, per scan for
   `range64`), instructions per op in brackets:
 
@@ -533,24 +461,20 @@ Refines D20.
   31-slot leaf has, still sums the bits one at a time (31 slots: 222
   instructions, 25: 34).
 
-**D29. Nodes with inline keys pair each key with its trailing slot.** (2026-10-09)
-Supersedes D9's layout and D12's edges at the end of the node.
+**D29. Leaves with inline keys pair each key with its value.** (2026-10-09)
 
-- **Layout** (`layout.rs`): a node's trailing slots are a leaf's head and
-  values, or an internal node's edges, slot `i + 1` beside key `i`. With
-  inline keys, keys and trailing slots are `(key, slot)` entries growing up
-  after the inline keys, slot 0 alone in an entry before entry 0, its key's
-  place unused. Without inline keys, the keys are an array, and the
-  trailing slots one right after the keys' capacity; nothing grows down.
+- **Layout** (`layout.rs`): with inline keys, a leaf's keys and values are
+  `(key, value)` entries after the inline keys, the head alone in an entry
+  before entry 0, its key's place unused. Internal nodes keep keys and
+  edges apart (D32).
 - **Why:** a search runs over the inline keys, and in a leaf it then reads
   the key it ends at, which brings its value along.
-- **Cost:** an entry pads its key to its slot's alignment, and the extra
+- **Cost:** an entry pads its key to its value's alignment, and the extra
   entry takes one key's room: `String` → `u64` holds 24 keys instead of 25,
   `u64` with inline keys 55 instead of 56, `u128` with inline keys 28
   instead of 38.
-- **Measured** against D28, prefetch off, medians of three interleaved
-  runs (ns per op), with leaves alone paired as an experiment, and both
-  kinds as built:
+- **Measured** on D28's tree, medians of three interleaved runs (ns per
+  op):
 
   | cell | separate | leaves paired | both paired |
   |---|--:|--:|--:|
@@ -563,25 +487,24 @@ Supersedes D9's layout and D12's edges at the end of the node.
   | `u64`, no inline keys, 10M `get_hit` | 199 | 179 | 181 |
   | `u64`, no inline keys, 10M `insert_random` | 165 | 180 | 180 |
 
-- **Open:** pairing internal nodes costs lookups what pairing leaves gains
-  (`hash32` DRAM fills per lookup: 11.4 separate, 8.3 leaves paired, 10.9
-  both). An internal node usually reads only an edge after its inline
-  keys, and edges side by side may keep each node's few edge lines in
-  cache; not profiled yet. Inserts are slower in every paired layout.
+- **Internal nodes are not paired:** it cost lookups what pairing leaves
+  gains (`hash32` DRAM fills per lookup: 11.4 separate, 8.3 leaves paired,
+  10.9 both). An internal search reads only an edge after its inline keys
+  (D32). Inserts are slower in every paired layout.
 
-**D30. Inserts search like lookups: no append fast path.** (2026-10-09)
+**D30. The insert descent has no per-node append check.** (2026-10-09)
 
-- **Before:** `insert` and `entry` searched each node expecting the key to
-  go after its last: a key greater than the node's last key went straight
-  down the last edge, skipping the node's search. With inline keys, that
-  check built the key's window at the node's prefix length and compared it
-  with the last inline key, and the full key only on a tie.
-- **Why removed:** a shortcut for one workload, ascending keys, that every
-  other insert pays for: with inline keys, 41 instructions more per random
-  insert at 10M. And it was all of what looked like inline keys' loss on
-  sequential inserts: its check, not the search.
-- **Measured** on the commit before, prefetch off, one run, ns per insert,
-  instructions in brackets:
+- **What:** `insert` and `entry` search each node as a lookup does. No node
+  first checks whether the key goes after its last key and then straight
+  down its last edge. Ascending inserts take D45's last-leaf shortcut
+  instead.
+- **Why:** a shortcut for one workload, ascending keys, that every other
+  insert pays for: with inline keys, the check took the key's window at
+  each node's prefix and compared it with the last inline key, 41
+  instructions more per random insert at 10M. It was also all of what
+  looked like inline keys' loss on sequential inserts.
+- **Measured** with prefetch off, one run, ns per insert, instructions in
+  brackets:
 
   | cell | with the check | without |
   |---|--:|--:|
@@ -592,22 +515,16 @@ Supersedes D9's layout and D12's edges at the end of the node.
   | `u64`, 10M `insert_random` | 179 [442] | 169 [441] |
   | `u64` with inline keys, 10M `insert_random` | 132 [415] | 131 [374] |
 
-- **Open:** sequential inserts are 3–5× slower than with the check. With
-  inline keys and D29's layout, a 10M sequential insert takes 41.6 ns
-  [506], std's `BTreeMap` 38.7 ns [751]; at 1k, 11.9 and 12.2 ns.
-
 **D31. `Auto` gives the 64- and 128-bit integers inline keys.** (2026-10-09)
-Supersedes D18's integers opting in.
 
 - **What:** `Auto` recognizes `u64`, `i64`, `u128` and `i128` by their type,
   as it does std byte strings, and uses their own `InlineKey` impls:
   2-byte inline keys, as `WithInlineKey` gives them. Other integers have
   no impl and get none; a newtype around one of the four gets none either,
   unless it implements `InlineKey` and the map uses `WithInlineKey`.
-- **Why now:** sequential inserts were the loss that kept them opt-in, and
-  that was the append check (D30). The count over 2-byte slots runs in
-  explicit AVX-512 vectors whatever the capacity, and since D28 no count
-  is compiled for two node kinds at once.
+- **Why:** the count over 2-byte slots runs in explicit AVX-512 vectors
+  whatever the capacity, and since D28 no count is compiled for two node
+  kinds at once. Without D30's append check, sequential inserts gain too.
 - **Measured,** `u64` → `u64` without and with inline keys, on D28's
   layout, `insert_sequential` with D30 applied, prefetch off, ns per op,
   one run (three for the 10M `remove_random`, `pop_first` and `range64`):
@@ -621,25 +538,23 @@ Supersedes D18's integers opting in.
   | 1k `insert_random` / `remove_random` | 16.3 / 46.1 | 14.5 / 43.2 |
   | bytes per entry, map / set | 23.4 / 11.8 | 26.5 / 14.9 |
 
-  Dense keys (`u64-seq`, 0 to N) gain less: 10M `get_hit` 26%,
-  `insert_random` 13%, 1M `get_hit` 10%. Nodes on the tree's borders, the
-  root among them, have no prefix (D26), so their inline keys are the top
-  bytes of the integers, all zero for small ones.
+  Dense keys (`u64-seq`, 0 to N) tie on the root and the tree's borders,
+  which have no fence prefix (D26): their inline keys there are the
+  integers' top bytes, all zero for small ones. Those nodes keep a local
+  prefix (D33).
 - **Cost:** 2 bytes more per entry, 3 at the leaves' fill: 13% more for
   `u64` → `u64`, 26% for a `u64` set. A node holds 55 `u64` keys
   instead of 63.
 
 **D32. Internal nodes split keys from children.** (2026-10-10)
-Updates D29's internal layout, D22's split point, D23's folds and D24's
-point lookups. The experiments behind D32–D45 are in
-[06-cost-model.md](06-cost-model.md).
+The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 
 - **Internal nodes keep keys and child pointers in separate arrays.**
   Leaves with inline keys still pair each key with its value (D29). An
   internal search ends at a child pointer and rarely reads a full key, so
   child pointers should share cache lines with each other, not with keys.
   A leaf search reads the key it ends at and then its value, so pairing
-  still pays there. Settles D29's open question.
+  still pays there.
 - **Nodes stay aligned to 1 KiB (D15).** Tried 64 bytes: it only saves
   memory under glibc's malloc. mimalloc puts 1 KiB blocks on 1 KiB
   boundaries either way, and an A/B showed the same instructions and RSS,
@@ -652,18 +567,18 @@ point lookups. The experiments behind D32–D45 are in
   explicit bounds are still searched when the range is made.
 - **A split at a node's end leaves the arriving side
   `min(2 × minimum, capacity / 2)` entries;** the old node keeps the rest.
-  A split in the middle stays even. Sorted inserts now leave full nodes
+  A split in the middle stays even. Sorted inserts leave full nodes
   behind, not half-full ones, and the headroom above the minimum keeps one
   removal from undoing the split. Inserts that fit pay nothing.
   At 10M `u64`: sequential insert 37.9 → 23.8 bytes/entry (−37%), random
   insert 27.0 → 27.2 (+0.7%).
-- **Fixed byte arrays get 2-byte inline keys under `Auto`, down from 8.**
+- **Fixed byte arrays get 2-byte inline keys under `Auto`.**
   `[u8; 16]`, `[u8; 20]` and `[u8; 32]` hold their bytes in the node, so
   a tie costs a load from the same node, not a heap read; narrower
   summaries mean fewer cache lines per search. Heap strings keep 8 (D43
   narrows their internal nodes to 4); `WithInlineKey` keeps each impl's
-  width. 10M `hash32`: hits 318.1 → 300.4 ns, misses 282.1 → 207.4,
-  inserts 336.0 → 310.9; DRAM fills per hit 10.7 → 6.1.
+  width. 10M `hash32`, 8 → 2 bytes: hits 318.1 → 300.4 ns, misses 282.1 →
+  207.4, inserts 336.0 → 310.9; DRAM fills per hit 10.7 → 6.1.
 - **Search details.** A byte-string query's windows are read from its own
   bytes, not from a 128-byte zero-padded copy. On x86-64 without POPCNT, a
   sorted SSE2 mask that fits one 64-bit word gives both bounds directly,
@@ -679,33 +594,45 @@ point lookups. The experiments behind D32–D45 are in
   the empty tail move. Replacing a value borrows it in place instead of
   copying the path. 10M ordered `u64` insert: 36.0 → 34.0 ns; random
   insert unchanged.
-- **An internal byte-string node can keep a longer local search prefix.**
-  - **When:** all of the node's 8-byte windows tie and its keys share at
-    least 8 more bytes past the fence prefix (05-fence-key.md). The longer
-    offset goes in 2 spare header bytes.
-  - **Search:** a query first checks that it has those extra bytes; if not,
-    it goes to the first or last child.
+- **An internal node keeps a local search prefix where its fences don't
+  help.**
+  - **Keys:** std heap byte strings, std byte arrays and std integers,
+    whose windows the nodes read without calling user code.
+  - **When:** all of the node's windows tie at its fence prefix
+    (05-fence-key.md), and its keys share at least a window's bytes more:
+    the root and the tree's borders, which lack fences, and dense keys.
+    The local prefix goes in 2 spare header bytes; the fence prefix stays
+    the node's prefix for everything structural.
+  - **Search:** a query first checks, against the node's first key, that
+    it has the bytes the keys share up to the local prefix; if not, it goes
+    to the first or last child. Heap strings check from the fence prefix,
+    32 bytes at a time; fixed-width keys from byte 0, a window at a time,
+    a loop the key's size bounds. Every internal node search reads the
+    local prefix's header field; nothing else changes for a node without
+    one.
+  - **Leaves keep none:** a leaf's fence prefix lets a hit be confirmed
+    from its window and length; a local one would need the key's bytes, a
+    heap read for strings.
   - **Mutation:** the fence prefix itself never changes, so child prefixes
     and moved windows still use it. Before keys move, the node restores its
     ordinary windows; afterwards it rebuilds the local ones. Windows handed
     out by split, merge and clone are always the ordinary ones.
-  - **Why:** paths share long prefixes; the root has no fences, so its
-    prefix is 0 and all its windows tie. On 1M paths, full-key comparisons
-    per query fall 7.7 → 3.6. Only seven internal nodes qualify; JSON has
-    none.
-  - **Measured:** 10M paths 3–4% faster for insert, hit and miss; 1M path
-    hits 492 → 455 ns.
+  - **Measured** (10M, pinned): dense `u64` hits 130.9 → 119.8 ns, inserts
+    148.1 → 140.7; 1M paths hits 354.9 → 345.3; UUIDv7-like `[u8; 16]`
+    lookups 366 → 270 instructions, and 1k of them 27.7 → 7.5 ns. Random
+    `u64` and JSON unchanged; `hash32` hits 173.3 → 180.3, inserts 183.9
+    → 192.0, the header check (+28 instructions a lookup).
+  - **Rejected:** a min/max prefix in every node instead of fences (06).
 - **A range iterator caches a checked leaf interval.** Repeated
   `next`/`next_back` step inside it; switching direction, crossing a leaf
-  or folding first syncs the path. `Range`/`RangeMut` grow 512 → 552
-  bytes. 10M `range64`: `u64` 736 → 685 ns (−7%), JSON 1302 → 1204 ns.
+  or folding first syncs the path; it costs `Range`/`RangeMut` 40 bytes.
+  10M `range64`: `u64` 736 → 685 ns (−7%), JSON 1302 → 1204 ns.
 
 **D34. Align leaf pairs so a key and its value share a cache line.** (2026-10-10)
 
 - **What:** when a leaf entry (key and value) is a power of two up to 64
-  bytes, entries start at a multiple of its size. `u64` → `u64` pairs
-  (16 B) now start at byte 144, not 136; `String` → `u64` (32 B) at 256,
-  not 232.
+  bytes, entries start at a multiple of its size: `u64` → `u64` pairs
+  (16 B) at byte 144, not 136; `String` → `u64` (32 B) at 256, not 232.
 - **Why:** a quarter of `u64` pairs and half of `String` pairs crossed a
   cache line, so a hit could load one more line just for the value.
 - **Cost:** none in capacity or allocation. The page size and
@@ -722,7 +649,7 @@ point lookups. The experiments behind D32–D45 are in
   exact remaining count. `next`/`next_back` step inside the cached leaf
   run; a consuming fold hands over to D32's counted per-leaf loop.
   Owning iteration and drop are unchanged.
-- **Cost:** `Iter`, `IterMut` and `Keys` grow 520 → 560 bytes.
+- **Cost:** 40 bytes in `Iter`, `IterMut` and `Keys`.
 - **Measured,** manual `next()`, 2M entries, baseline x86-64: `u64`
   4.50 → 3.99 ns/entry (−11%), `hash32` 9.36 → 8.73 (−7%). The native
   10M fold is unchanged (2.21 ns/entry).
@@ -745,9 +672,9 @@ point lookups. The experiments behind D32–D45 are in
   leaves never have ambiguous runs, so JSON pays upkeep and gains nothing
   on lookups; its timings stayed flat.
 - **Measured** at 10M paths: hits −10.7%, misses −31.2%.
-- **Pitfall:** the first version made JSON hits 25% slower. A second
-  caller made LLVM outline a tiny summary-view wrapper, and its population
-  count grew from 26 to 244 instructions. The wrapper is now forced inline.
+- **Pitfall:** the summary-view wrapper is forced inline. Outlined, as
+  LLVM did once it had a second caller, its population count grew from 26
+  to 244 instructions, and JSON hits got 25% slower.
 
 **D37. Inserts record a path only when the leaf is full.** (2026-10-10)
 
@@ -814,9 +741,10 @@ point lookups. The experiments behind D32–D45 are in
     Unknown borrowed query types still use `Ord`.
   - The thin `NodeRef::search` adapter, which only re-attaches the
     caller's node and height to the found index, is `#[inline(always)]`.
-    The search body itself may still be outlined.
-  - Local-prefix guards (D33) compare 32 bytes at a time; a cold helper
-    orders a mismatch.
+    The search body is inlined for fixed-width keys and left to LLVM for
+    heap strings (`NodePlan::inlines_node_search`, D33).
+  - Local-prefix guards (D33) on heap strings compare 32 bytes at a time,
+    inline.
   - Native 8-byte leaf summaries use an equality mask.
 - **Why:** with the `Option`, an outlined helper re-tested for null and
   kept a generic `memcmp` fallback. Without forced inlining, every internal
@@ -870,8 +798,6 @@ point lookups. The experiments behind D32–D45 are in
   misses are 2.2% slower; the other borrowed cells improved about 2%.
 
 **D45. Remember the last leaf after a split, so ascending inserts can append.** (2026-10-10)
-Supersedes D30's rejection of an append fast path; D30's per-node check
-stays rejected.
 
 - **What:** the map owner keeps an optional pointer to the tree's last
   leaf.
@@ -884,11 +810,9 @@ stays rejected.
     or any `&mut` access that can change the tree's structure. The next
     qualifying split sets it again. `Entry` handles never set it; clones,
     `split_off` outputs and new maps start without it.
-- **Safety:** the comparison and inline key are computed before anything
-  changes. The check hands back a private token, and only consuming it
-  moves the key and value in, so a panicking `Ord` or `InlineKey` leaves
-  the map unchanged and the pointer cleared.
-- **Why this is not D30:** D30's check ran in every node of every insert
+- **Safety:** the check hands back a private token, and only consuming it
+  moves the key and value in.
+- **Why not D30's check:** it ran in every node of every insert
   (+41 instructions per random insert). This one is a single `Option`
   test per insert while unset. For random keys it can only be set at a
   new maximum: about 17 times over 10M inserts. No counters, no tuned
@@ -900,33 +824,33 @@ stays rejected.
   121.7 → 45.3 (std 198.9), paths 185.9 → 63.1 (std 256.0).
 
 **D46. No software prefetch.** (2026-10-10)
-Supersedes D20 and D27.
 
-- **What:** the library issues no prefetch instructions, and the `prefetch`
-  feature is gone. Hardware prefetchers work as before. AGENTS.md forbids
-  explicit prefetching anywhere, including benchmarks and prototypes.
+- **What:** the library issues no prefetch instructions and has no
+  `prefetch` feature. Hardware prefetchers work as they do. AGENTS.md
+  forbids explicit prefetching anywhere, including benchmarks and
+  prototypes.
 - **Why:**
-  - Prefetch hides what the layout does with memory, so layout changes
-    can't be judged with it on (D27). The benchmarks already ran without
-    it, which made the default build one that no decision was measured on.
+  - Prefetch hides what the layout does with memory: the same layout moved
+    by ±5–10% depending only on what was prefetched, so layout changes
+    can't be judged with it on, and the build users run must be the one
+    measured.
   - It fetched every key line up to capacity, at every level, whatever the
     search needed. After D32's separate internal arrays, `u64` and
     `String` internal nodes prefetched their full keys, which a search
     rarely reads, and not their child pointers, which it always does.
   - Memory latency is a layout problem: put what an operation needs in
     the lines it already loads.
-- **Measured** on D45's working copy, 10M, prefetch off → on, one run each
-  (the off and on runs were about 9 hours apart):
+- **Measured** on D45's tree, 10M, prefetch off → on, one run each (the
+  off and on runs were about 9 hours apart):
   - Misses got slower: `u64` 92.9 → 116.5 ns (+25%), JSON 235.9 → 263.7
     (+12%), `hash32` 138.4 → 184.5 (+33%). `hash32` hits too: 183.8 →
     195.6 (+6%).
   - DRAM fills per lookup rose 4–6×: `u64` hit 3.8 → 14.9, `hash32` miss
     3.9 → 25.5.
-- **Cost:** the default build gives up what prefetch did help: random
-  inserts (`u64` 137.1 → 105.0, JSON 276.7 → 240.3, `hash32` 197.9 →
-  158.4), `u64` `range64` (659.3 → 504.9) and some hits (`u64` 130.2 →
-  116.9, JSON 305.2 → 285.0, paths 563.0 → 469.3). These are the
-  prefetch-on numbers the default build no longer reaches.
+- **Cost:** what prefetch helps, given up: random inserts (`u64` 137.1 →
+  105.0, JSON 276.7 → 240.3, `hash32` 197.9 → 158.4), `u64` `range64`
+  (659.3 → 504.9) and some hits (`u64` 130.2 → 116.9, JSON 305.2 → 285.0,
+  paths 563.0 → 469.3), off → on.
 
 **D47. Node plans: every per-key-type choice in one place.** (2026-10-11)
 Design and measurements in 07-node-plan.md.
@@ -953,8 +877,25 @@ Design and measurements in 07-node-plan.md.
   narrowing type recognition before comparing type identities.
 - **Rejected:** a public `KeyBytes` trait and `WithKeyBytes` strategy for
   byte-ordered newtypes: no measured gain over `WithInlineKey` (311 vs
-  315 ns per lookup on path newtypes), as the wins of std heap strings need
-  key reads while keys move, which user code can't do safely.
+  315 ns per lookup on path newtypes).
+
+**D48. A panic in user code is not reconciled.** (2026-10-12)
+
+- **What:** when user-provided code panics (`Ord`, `InlineKey`, `Clone`,
+  `Drop`), the map does whatever is simplest. Calls into user code are not
+  ordered around changes, and a panic need not leave a valid map behind.
+- **Why:** after a panic in user code there is no state the map can
+  gracefully reconcile, and designing around it constrains every
+  structural operation.
+- **Still sound:** no undefined behavior, whatever user code does (D14).
+  User code runs between structural changes, not inside one, so unwinding
+  never leaves what unchecked code trusts (lengths, node minimums) half
+  done (D26, D37). A change that must call it inside one goes behind an
+  abort-on-unwind guard.
+- **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
+  panicking one need not leave a valid map; the tests that still check one
+  (`map/tests/drops.rs`, `map/tests/inline_key.rs`) go when a change
+  breaks them.
 
 ## Navigation
 
@@ -981,9 +922,10 @@ already makes for its own reasons (is the node full? does the merge fit? is
 this a leaf?). That check returns a token, and the unchecked operation
 requires the token: one check, no duplicates, nothing on the hot path.
 
-- **One memory primitive:** `Slots<T, Dir>`, a fixed-capacity array in a page
-  that grows up (keys, edges) or down (values). Insert, remove, move a run to
-  another node, view as a slice. Written and tested once.
+- **One memory primitive:** `Slots<T>`, a fixed-capacity array of slots in a
+  page, side by side or a stride apart (keys, values, edges, inline keys).
+  Insert, remove, move a run to another node, view as a slice. Written and
+  tested once (`tree/node/slots.rs`).
 - **Positions are proofs:** `Edge` (index ≤ len) and `Kv` (index < len).
   They come from our own search (in bounds for any `Ord`), first/last
   positions, or checked constructors that are off the hot path.
@@ -996,30 +938,24 @@ requires the token: one check, no duplicates, nothing on the hot path.
   split/merge, off the hot path.
 - **Paths lend one mutable node at a time** (built with the tree layer).
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the slots,
-  handle and page modules of `tree/node/` and the tree's path module.
+  handle, page and vector-count modules of `tree/node/`, and the tree's
+  path and walk modules.
 
 **D44. A child's prefix is never shorter than its parent's, even with a lying encoding.** (2026-10-10)
 
 - **What:** when a refit computes a child's prefix, or the border beside a
   replaced separator shrinks, the target is floored at the parent's
   current prefix. A valid `InlineKey` already guarantees this; the floor
-  keeps it when a custom encoding breaks its ordering contract. No user
-  callback runs while keys are half moved.
-- **Why:** while testing D45, a reversed encoding asked for a child prefix
-  of 6 under a parent prefix of 7, and split promotion hit a debug
-  assertion. The assertion stays; the missing invariant is now enforced at
-  refit. This fix stands whether or not D45 is kept.
+  keeps it when a custom encoding breaks its ordering contract.
+- **Why:** a reversed encoding asked for a child prefix of 6 under a
+  parent prefix of 7, and split promotion hit a debug assertion. The
+  assertion stays, and the invariant is enforced at refit.
 - **Test:** the adversarial-encoding test checks every parent/child pair
   after each operation, without calling the lying encoder, and keeps its
   exactly-once drop ledger.
 
 ## Proposed, not decided
 
-- **Path-stack frame** = one word: node address | index in the low 10 bits
-  (D15), using strict-provenance `map_addr`. Caps node capacity at 1023.
-- **Stack depth `MAX_HEIGHT`:** D13 fixes it. Capacity ≥ 12 means a
-  non-root internal node has ≥ 6 children, so the height is ≤ 21. That gives
-  ~170 B per stack with one-word entries.
 - **Exact allocation count before mutating:** insert counts the full nodes on
   its path from the leaf upward, allocates that many first, and so can fail
   without changing the tree. Name of the fallible insert (`try_insert` is
@@ -1031,6 +967,6 @@ requires the token: one check, no duplicates, nothing on the hot path.
   deviation); an optional `nightly` feature restores it.
 - **`alloc`:** whether core code depends on `alloc` or only the default
   allocator does.
-- **Fill factor:** right-biased split for appends, redistribution to a sibling
-  before splitting. (The full-node bulk build for `FromIterator`/`append`
-  is D25.)
+- **Fill factor:** redistribution to a sibling before splitting (deferred in
+  06-cost-model.md). End-biased splits are D32; the full-node bulk build for
+  `FromIterator`/`append` is D25.

@@ -172,7 +172,7 @@ main suite.
 | Short fitting-insert path | accepted | D33 |
 | Range construction without the extra copy | not adopted | |
 | SIMD scan of full `u64` leaf keys | rejected | |
-| Local search prefix for long strings | accepted | D33 |
+| Local search prefix where fences don't help | accepted | D33 |
 | Bulk compare of long suffixes | rejected | |
 | Cached range leaf run | accepted | D33 |
 | Aligned leaf pairs | accepted | D34 |
@@ -200,6 +200,7 @@ main suite.
 | 2 KiB upper levels only | deferred (model) | |
 | Sign-biased portable summaries | rejected (codegen) | |
 | Map-owned page arena | deferred (model) | |
+| Min/max node prefixes instead of fences | rejected | |
 
 ### Node size and layout
 
@@ -291,14 +292,39 @@ summaries to save one dependent load. Hits 131.3 → 360.7, misses 96.1 →
 315.7; DRAM fills 3.8 → 16.1 per lookup. Rejected: summaries are the
 better filter.
 
-**Local search prefix for long strings (D33).** On 1M paths, a query
-needs 7.7 full-key comparisons, because the root has prefix 0 and its
-windows all tie. Giving the seven internal nodes whose keys share 8+ more
-bytes their own validated prefix cuts this to 3.6 (eight-byte word
-compares: 41.5 → 17.9). 10M paths 3–4% faster; 1M path hits 492 → 455,
-instructions 1128 → 809. JSON has no such nodes and doesn't change.
-Accepted. Carrying a parent's matched prefix down instead is unsound: it
-says nothing about an outer child's other side.
+**Local search prefix where fences don't help (D33).** A node whose
+windows all tie at its fence prefix searches its keys whole: on 1M paths,
+7.7 full-key comparisons a query, because the root has prefix 0. Dense
+integers tie the same way at the root and borders (every dense `u64`
+root), UUIDv7-like arrays wherever their timestamp is shared. Such a node
+keeps windows at what its keys share, checked once against its first key.
+Model: a node with one pays a key read it would make anyway; every other
+internal node, one header field and a branch, off the dependent chain.
+Measured: dense `u64` hits −8.5%, inserts −5%; 1M paths −2.7%; UUIDv7-like
+`[u8; 16]` 366 → 270 instructions at 10M, 27.7 → 7.5 ns at 1k. The check
+costs random keys 16–28 instructions a lookup: no time for `u64`, +4% for
+`hash32`, whose benchmark lookups also call their `get` out of line where
+the tree before inlined it. JSON has no such nodes and is unchanged.
+Accepted.
+Code generation decided most of the work. A call anywhere in the descent
+loop, even a cold one, kept the loop's state in stack slots (+30 to +100
+instructions). Comparing 64 shared path bytes a window at a time took 300
+more instructions than in 32-byte chunks. Node searches are forced inline
+for fixed-width keys (outlined, `hash32` lookups took 442 instructions
+instead of 271) and left to LLVM for heap strings (forced inline, the
+benchmark's `String` lookups took 449 instead of 433).
+Carrying a parent's matched prefix down instead is unsound: it says
+nothing about an outer child's other side.
+
+**Min/max node prefixes instead of fences.** One prefix per node, what its
+first and last keys share, would drop fences. Built, optimized and
+measured (2026-10-12): JSON hits 309 → 446 ns, Wikipedia 423 → 527,
+`hash32` 175 → 189; Codex's tuning got JSON to 409. Why, by adding each
+cost to the fence tree alone: a prefix the fences don't guarantee must be
+checked against a key at about two levels a lookup, and a leaf hit
+confirmed from the key's bytes; for strings both read heap lines (+1.3
+DRAM lines a lookup), and the bookkeeping adds about 120 instructions.
+Rejected; local prefixes go only where fences fail.
 
 **Bulk compare of long suffixes.** About 100 fewer instructions per path
 operation, but more branch misses: paths 1–2.5% slower, JSON 1–2% slower.
@@ -410,7 +436,7 @@ and value on failure, adding a 32-byte copy for `hash32` and 12
 instructions for JSON; the final version checks a borrowed key and
 returns a token that moves the key only on success. Baseline x86-64:
 ordered `u64` 43.5 → 5.5, JSON 143.7 → 47.9; random +0.9% / +0.2%.
-Accepted, superseding D30's rejection.
+Accepted (D45); D30's per-node check stays rejected.
 
 ### Scans
 

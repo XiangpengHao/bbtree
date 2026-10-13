@@ -22,9 +22,8 @@ is the free space (`remaining_size`).
 ```
 
 bf-tree needs per-record metadata (offsets, lengths) because records are
-variable-length. bbtree's K and V are fixed-size, so the same two-direction
-shape becomes simply keys growing from the front and values growing from the
-back (decisions D9).
+variable-length. bbtree's K and V are fixed-size, so a node is simply arrays:
+the keys, then the values (decisions D9).
 
 ### Shared header word: `NodeMeta` (`src/nodes/node_meta.rs`)
 
@@ -90,10 +89,10 @@ back (decisions D9).
 
 | bf-tree | bbtree |
 |---|---|
-| Metadata grows from the front, payload from the back | Keys grow from the front, values from the back (decisions D9). |
-| Count + flags packed in one `u16`; header const-asserted | Header is just `len: u16`, const-asserted. |
+| Metadata grows from the front, payload from the back | Keys, then values, each an array (decisions D9). |
+| Count + flags packed in one `u16`; header const-asserted | Header is `len: u16` and a head flag, plus prefix lengths in nodes with inline keys; layouts const-asserted. |
 | Node kind decided by the parent (`children_is_leaf`) | Same idea via a height counter carried down from the root, as in std. |
-| Inner nodes page-aligned | All nodes page-aligned (decisions D7), via our own allocator (D8). |
+| Inner nodes page-aligned | All nodes aligned to their own size, 1 KB or more, so none crosses a page (decisions D15); our own allocator is planned (D8). |
 | No parent pointers | Same. Iterators, entries and cursors carry a path stack instead (decisions D11). |
 | Configuration limits checked once, at construction | Const-asserted per `(K, V)`: minimum capacity, so an insert needs at most one split per level and the exact allocation count is known before mutating. |
 | Debug cross-checks; const-asserted layouts | Same. |
@@ -101,10 +100,12 @@ back (decisions D9).
 
 Not taken:
 
-- **Fence keys and prefix compression.** Fences would need `K: Clone`, and
-  prefix compression needs byte-comparable keys.
-- **Preview / look-ahead bytes.** Generic `Ord` gives only a comparison, no
-  bytes to copy.
+- **Stored fence keys.** They would need `K: Clone`. bbtree strips what a
+  node's fences share without storing them, from windows of an
+  order-preserving encoding (decisions D26).
+- **Preview bytes from `Ord`.** Generic `Ord` gives only a comparison, no
+  bytes to copy; keys with an `InlineKey` encoding get them as inline keys
+  (decisions D18).
 - **Byte-packed payload read with `read_unaligned`.** We hand out `&K`/`&V`,
   which must be aligned.
 - **Re-descending from the root to reach the next leaf.** It would call `Ord`
