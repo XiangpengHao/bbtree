@@ -1,5 +1,5 @@
 //! Joining two trees whose keys don't overlap into one, around a separator
-//! entry between them, comparing no keys: [`Subtree::join`]. The inverse of
+//! entry between them, comparing no keys: [`Root::join`]. The inverse of
 //! a cut (`cut.rs`): it touches the
 //! nodes along one border of the taller tree, down to the shorter one's
 //! height, and the two spines beside the separator, O(log n) of them.
@@ -28,12 +28,14 @@
 
 use core::mem;
 
-use super::node::handle::{
-    BalancingContext, ForceResult, Insertion, Internal, Leaf, Rebalance, Subtree,
-};
 use super::node::inline_keys::{InlinedKey, Separator};
+use super::node::internal::Internal;
+use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, PageByKind};
-use super::path::{FirstEdge, LastEdge, NodeEnd, Path, PathMut};
+use super::node::siblings::Siblings;
+use super::node::{Child, Insertion, Node};
+use super::path::{FirstEdge, Immut, LastEdge, NodeEnd, Path, PathMut};
+use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
 /// Where a join left its separator: in the node at `height` on the border
@@ -48,7 +50,7 @@ struct SeparatorPlace {
     hung: bool,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Joins this tree, the separator, its key `separator` with its window
     /// at the trees' shared prefix and its `value`, and `right`, whose keys
     /// ascend in that order, which both have entries, and whose keys share
@@ -62,11 +64,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// prefixes, once the tree is whole: a panic then leaves it valid, with
     /// this tree's owner.
     pub(crate) fn join(&mut self, separator: InlinedKey<K, S>, value: V, mut right: Self) {
-        let mut node = right.borrow_mut();
+        let mut node = right.top_mut();
         let separator = loop {
-            node = match node.force() {
-                ForceResult::Leaf(mut leaf) => break leaf.put_separator_head(separator, value),
-                ForceResult::Internal(internal) => internal.first_edge().descend(),
+            node = match node {
+                Node::Leaf(leaf) => break leaf.put_separator_head(separator, value),
+                Node::Internal(internal) => internal.child(0),
             };
         };
         if self.height() >= right.height() {
@@ -86,6 +88,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         let place = {
             let mut path = PathMut::new(self);
             Self::descend_border::<End>(&mut path, shorter.height());
+            let shorter = shorter.into_top();
             if End::IS_LAST {
                 Self::absorb_or_hang_right(&mut path, separator, shorter)
             } else {
@@ -103,7 +106,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     fn descend_border<End: NodeEnd>(path: &mut PathMut<'_, K, V, S>, height: usize) {
         path.start_at_root();
         while path.height() > height {
-            let border = End::edge(&path.view());
+            let border = End::edge(path.node());
             path.set_index(border);
             path.descend();
         }
@@ -115,14 +118,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     fn absorb_or_hang_right(
         path: &mut PathMut<'_, K, V, S>,
         separator: Separator<K, S>,
-        shorter: Self,
+        shorter: Node<K, V, S>,
     ) -> SeparatorPlace {
         let height = path.height();
-        let index = path.view().len();
-        let absorbed = match path.node_mut().force() {
-            ForceResult::Leaf(mut node) => node.absorb(separator, shorter),
-            ForceResult::Internal(mut node) => node.absorb(separator, shorter),
-        };
+        let index = path.node().len();
+        let absorbed = path.node().absorb(separator, shorter);
         let (separator, shorter) = match absorbed {
             Ok(page) => {
                 PageByKind::deallocate(page);
@@ -139,7 +139,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         // Inserted at the last edge, the separator is the last key of the
         // border node one level up, in the right half if it split.
         Self::descend_border::<LastEdge>(path, height + 1);
-        let index = path.view().len() - 1;
+        let index = path.node().len() - 1;
         Self::stock_beside_separator(path, height + 1, index)
     }
 
@@ -150,17 +150,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     fn absorb_or_hang_left(
         path: &mut PathMut<'_, K, V, S>,
         separator: Separator<K, S>,
-        shorter: Self,
+        shorter: Node<K, V, S>,
     ) -> SeparatorPlace {
         let height = path.height();
-        let index = Subtree::borrow(&shorter).len();
+        let index = shorter.len();
         path.ascend();
-        let displaced = path.internal_mut().edge_at(0).replace_child(shorter);
+        let displaced = path.internal().replace_child(0, shorter);
         path.descend();
-        let absorbed = match path.node_mut().force() {
-            ForceResult::Leaf(mut node) => node.absorb(separator, displaced),
-            ForceResult::Internal(mut node) => node.absorb(separator, displaced),
-        };
+        let absorbed = path.node().absorb(separator, displaced);
         let (separator, displaced) = match absorbed {
             Ok(page) => {
                 PageByKind::deallocate(page);
@@ -184,7 +181,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// under `separator`, in the node one level up: under a new root if the
     /// node is the root; splitting up the path while full, each split's
     /// right half hung right of its left half the same way.
-    fn hang_beside(path: &mut PathMut<'_, K, V, S>, separator: Separator<K, S>, right: Self) {
+    fn hang_beside(
+        path: &mut PathMut<'_, K, V, S>,
+        separator: Separator<K, S>,
+        right: Node<K, V, S>,
+    ) {
         let mut carried = (separator, right);
         loop {
             let (separator, right) = carried;
@@ -195,12 +196,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
             }
             let index = path.index();
             match path
-                .internal_mut()
-                .edge_at(index)
-                .insert(separator, right, FreshPage::allocate)
+                .internal()
+                .insert(index, separator, right, FreshPage::allocate)
             {
                 Insertion::Fit(_) => return,
-                Insertion::Split(split) => carried = (split.separator, split.right.forget_type()),
+                Insertion::Split(split) => {
+                    carried = (split.separator, Node::Internal(split.right));
+                }
             }
         }
     }
@@ -215,25 +217,25 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         height: usize,
         index: usize,
     ) -> SeparatorPlace {
-        let kv = path.internal_mut().kv_at(index);
-        if height == 1 {
-            Self::stock_children::<Leaf>(kv.into_balancing_context(), height, index)
+        let node = path.internal();
+        if node.has_leaf_children() {
+            Self::stock_children(node.siblings::<Leaf<K, V, S>>(index), height, index)
         } else {
-            Self::stock_children::<Internal>(kv.into_balancing_context(), height, index)
+            Self::stock_children(node.siblings::<Internal<K, V, S>>(index), height, index)
         }
     }
 
-    /// [`Self::stock_beside_separator`], for children of kind `ChildKind`.
-    fn stock_children<ChildKind: Rebalance>(
-        mut context: BalancingContext<'_, K, V, S, ChildKind>,
+    /// [`Self::stock_beside_separator`], for children of kind `C`.
+    fn stock_children<C: Child<K, V, S>>(
+        mut siblings: Siblings<K, V, S, C>,
         height: usize,
         index: usize,
     ) -> SeparatorPlace {
-        let min_len = context.child_min_len();
-        if context.right_child_len() < min_len {
-            let steals = min_len - context.right_child_len();
+        let min_len = C::min_len();
+        if siblings.right_len() < min_len {
+            let steals = min_len - siblings.right_len();
             for _ in 0..steals {
-                context
+                siblings
                     .steal_left()
                     .expect("a child too full to share a node can spare keys");
             }
@@ -246,10 +248,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                 hung: true,
             };
         }
-        if context.left_child_len() < min_len {
-            let left_len = context.left_child_len();
+        if siblings.left_len() < min_len {
+            let left_len = siblings.left_len();
             for _ in 0..min_len - left_len {
-                context
+                siblings
                     .steal_right()
                     .expect("a child too full to share a node can spare keys");
             }
@@ -299,7 +301,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         path.set_index(edge);
         path.descend();
         while path.height() > 0 {
-            let border = End::edge(&path.view());
+            let border = End::edge(path.node());
             path.set_index(border);
             path.descend();
         }
@@ -312,7 +314,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// The tree of `left`'s entries and then `right`'s, every one of whose
     /// keys must be greater, joined around `left`'s last entry
     /// ([`Self::join`]); or the one with entries; or `None` if neither has
@@ -368,7 +370,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// `tree`, if it has entries; otherwise it is taken apart, and `None`.
     fn with_entries(tree: Option<Self>) -> Option<Self> {
         let tree = tree?;
-        if tree.borrow().len() > 0 {
+        if tree.top().len() > 0 {
             return Some(tree);
         }
         tree.destroy(PageByKind::deallocate);
@@ -376,30 +378,30 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-/// A tree held apart from any map, as the pieces [`Subtree::concat`] joins
+/// A tree held apart from any map, as the pieces [`Root::concat`] joins
 /// are, and the entries after an `extract_if`'s range while its walk lasts:
 /// taken apart if dropped.
-pub(crate) struct DetachedTree<K, V, S: InlineKeyStrategy<K>>(Option<Subtree<K, V, S>>);
+pub(crate) struct DetachedTree<K, V, S: InlineKeyStrategy<K>>(Option<Root<K, V, S>>);
 
 impl<K, V, S: InlineKeyStrategy<K>> DetachedTree<K, V, S> {
-    pub(crate) fn new(tree: Option<Subtree<K, V, S>>) -> Self {
+    pub(crate) fn new(tree: Option<Root<K, V, S>>) -> Self {
         Self(tree)
     }
 
-    pub(crate) fn tree_mut(&mut self) -> Option<&mut Subtree<K, V, S>> {
+    pub(crate) fn tree_mut(&mut self) -> Option<&mut Root<K, V, S>> {
         self.0.as_mut()
     }
 
-    pub(crate) fn take(&mut self) -> Option<Subtree<K, V, S>> {
+    pub(crate) fn take(&mut self) -> Option<Root<K, V, S>> {
         self.0.take()
     }
 
     /// The first entry, for `Debug` to print where std's walk would.
     pub(crate) fn first_entry(&self) -> Option<(&K, &V)> {
-        let mut path = Path::detached();
-        path.attach(self.0.as_ref()?.borrow());
+        let mut path = Path::<Immut<'_>, K, V, S>::detached();
+        path.attach(self.0.as_ref()?.top());
         if path.descend_to_first_key() {
-            Some(path.kv().into_key_value())
+            Some(path.key_value())
         } else {
             None
         }

@@ -9,84 +9,38 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use super::handle::{ForceResult, Immut, Internal, Leaf, NodeKind, NodeRef, SeparatorKeys};
+use super::internal::Internal;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
+use super::leaf::Leaf;
 use super::node_plan::NodePlan;
-use super::slots::{
-    InlineKeySlots, KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots,
-};
+use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 pub(super) use type_identity::{ByteString, SameType, StdInteger};
 
-/// A node kind that pages are allocated for, known at compile time: [`Leaf`]
-/// or [`Internal`]. Each kind has a page layout of its own (D21), and a page
-/// holds nodes of the kind it was allocated for only. Everything that
-/// depends on a node's layout, its capacity and where its slots are, is
-/// for handles of these kinds only: a traversal decides a node's kind once,
-/// with `NodeRef::force`, and its code knows it from then on.
+/// A kind of node pages are allocated for: [`Leaf`] or [`Internal`], each
+/// with a page layout of its own (D21). A page holds nodes of the kind it was
+/// allocated for only. What depends on a node's layout, its capacity and
+/// where its slots are, takes the kind as a type, so that it folds to the
+/// kind's constants.
 ///
 /// # Safety
 ///
 /// `IS_LEAF` is whether nodes of this kind are leaves, the nodes at height
-/// 0: a page of this kind gets the layout of that kind of node, and the node
-/// code accesses the node made from it with that kind's offsets and
-/// capacity.
-pub(crate) unsafe trait PageKind: NodeKind + Sized {
+/// 0, and `page_layout` is the layout of their pages: a page of this kind
+/// gets the layout of that kind of node, and the node code accesses the node
+/// made from it with that kind's offsets and capacity.
+pub(crate) unsafe trait PageKind: Sized {
     const IS_LEAF: bool;
 
-    /// The keys a node of this kind lends, in order: a leaf's own, or an
-    /// internal node's separator keys (D17, D49).
-    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>>: KeyList<'a, K>;
-
-    /// `page`, sorted by its kind, this one.
-    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S>;
-
-    /// The keys of `node`.
-    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
-        node: NodeRef<Immut<'a>, K, V, S, Self>,
-    ) -> Self::Keys<'a, K, V, S>;
+    /// The allocation layout of every page of this kind (D21) and strategy
+    /// (D18): one of the layout constants, picked after monomorphization.
+    /// Using it also runs those constants' compile-time assertions.
+    fn page_layout() -> Layout;
 }
 
-// SAFETY: leaves are the nodes at height 0.
-unsafe impl PageKind for Leaf {
-    const IS_LEAF: bool = true;
-
-    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>> = NodeKeys<'a, K>;
-
-    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
-        ForceResult::Leaf(page)
-    }
-
-    #[inline(always)]
-    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
-        node: NodeRef<Immut<'a>, K, V, S, Self>,
-    ) -> NodeKeys<'a, K> {
-        node.leaf_keys()
-    }
-}
-
-// SAFETY: internal nodes are the nodes above height 0.
-unsafe impl PageKind for Internal {
-    const IS_LEAF: bool = false;
-
-    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>> = SeparatorKeys<'a, K, V, S>;
-
-    fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
-        ForceResult::Internal(page)
-    }
-
-    #[inline(always)]
-    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
-        node: NodeRef<Immut<'a>, K, V, S, Self>,
-    ) -> SeparatorKeys<'a, K, V, S> {
-        SeparatorKeys::of(node)
-    }
-}
-
-/// An allocated page for a node of kind `Kind` ([`Leaf`] or [`Internal`])
-/// of a map with keys `K`, values `V` and inline-key strategy `S`, that
-/// holds no node.
+/// An allocated page for a node of kind `Kind` ([`Leaf`] or [`Internal`]),
+/// that holds no node.
 ///
 /// A `FreshPage` owns its page, like a `Box` that has nothing in it: this is
 /// the only way to create a node, and what a node turns back into once it is
@@ -98,29 +52,24 @@ unsafe impl PageKind for Internal {
 ///
 /// Invariant: the page comes from the global allocator, with
 /// [`Self::layout`], and nothing else uses it.
-pub(crate) struct FreshPage<K, V, S, Kind> {
+pub(crate) struct FreshPage<Kind> {
     page: NonNull<u8>,
-    _marker: PhantomData<fn() -> (K, V)>,
-    _strategy: PhantomData<fn() -> S>,
     /// The kind of node the page is for.
-    _kind: PhantomData<Kind>,
+    _kind: PhantomData<fn() -> Kind>,
 }
 
 /// A fresh page sorted by the kind of node it is for: what releasing a node
 /// whose kind is known only at run time gives back.
-pub(crate) type PageByKind<K, V, S> =
-    ForceResult<FreshPage<K, V, S, Leaf>, FreshPage<K, V, S, Internal>>;
+pub(crate) enum PageByKind<K, V, S> {
+    Leaf(FreshPage<Leaf<K, V, S>>),
+    Internal(FreshPage<Internal<K, V, S>>),
+}
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
-    /// The allocation layout of every page of this kind (D21) and strategy
-    /// (D18): one of the layout constants, picked after monomorphization.
-    /// Using it also runs those constants' compile-time assertions.
+impl<Kind: PageKind> FreshPage<Kind> {
+    /// The allocation layout of every page of this kind; see
+    /// [`PageKind::page_layout`].
     pub(super) fn layout() -> Layout {
-        if Kind::IS_LEAF {
-            NodePtr::<K, V, S>::leaf_layout().page
-        } else {
-            NodePtr::<K, V, S>::internal_layout().page
-        }
+        Kind::page_layout()
     }
 
     /// Takes ownership of a page. Its contents are treated as uninitialized.
@@ -142,14 +91,12 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
         );
         Self {
             page,
-            _marker: PhantomData,
-            _strategy: PhantomData,
             _kind: PhantomData,
         }
     }
 }
 
-impl<K, V, S, Kind> FreshPage<K, V, S, Kind> {
+impl<Kind> FreshPage<Kind> {
     /// Hands the page back, e.g. for deallocation by the global allocator
     /// with [`Self::layout`].
     pub(crate) fn into_raw(self) -> NonNull<u8> {
@@ -163,7 +110,7 @@ impl<K, V, S, Kind> FreshPage<K, V, S, Kind> {
 /// cache-line alignment, or larger alignment required by their key/value
 /// types. The smaller alignment permits tighter packing
 /// in allocators that keep metadata beside each allocation.
-impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
+impl<Kind: PageKind> FreshPage<Kind> {
     /// A page from the global allocator.
     ///
     /// Calls [`handle_alloc_error`] if the allocation fails.
@@ -189,7 +136,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
     }
 }
 
-impl<K, V, S, Kind> fmt::Debug for FreshPage<K, V, S, Kind> {
+impl<Kind> fmt::Debug for FreshPage<Kind> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("FreshPage").field(&self.page).finish()
     }
@@ -199,21 +146,21 @@ impl<K, V, S: InlineKeyStrategy<K>> PageByKind<K, V, S> {
     /// Gives the page back to the global allocator, with its kind's layout.
     pub(crate) fn deallocate(self) {
         match self {
-            ForceResult::Leaf(page) => page.deallocate(),
-            ForceResult::Internal(page) => page.deallocate(),
+            Self::Leaf(page) => page.deallocate(),
+            Self::Internal(page) => page.deallocate(),
         }
     }
 }
 
-impl<K, V, S> From<FreshPage<K, V, S, Leaf>> for PageByKind<K, V, S> {
-    fn from(page: FreshPage<K, V, S, Leaf>) -> Self {
-        ForceResult::Leaf(page)
+impl<K, V, S> From<FreshPage<Leaf<K, V, S>>> for PageByKind<K, V, S> {
+    fn from(page: FreshPage<Leaf<K, V, S>>) -> Self {
+        Self::Leaf(page)
     }
 }
 
-impl<K, V, S> From<FreshPage<K, V, S, Internal>> for PageByKind<K, V, S> {
-    fn from(page: FreshPage<K, V, S, Internal>) -> Self {
-        ForceResult::Internal(page)
+impl<K, V, S> From<FreshPage<Internal<K, V, S>>> for PageByKind<K, V, S> {
+    fn from(page: FreshPage<Internal<K, V, S>>) -> Self {
+        Self::Internal(page)
     }
 }
 
@@ -255,7 +202,7 @@ impl InlineKeyNodeHeader {
 /// internal nodes store as edges, and paths as the nodes on them
 /// (`tree/path.rs`). The kinds have different layouts (D21), so every slot
 /// array it hands out needs the caller to know the kind. Everything it offers
-/// is raw: the typed handles in `handle.rs` are the only users.
+/// is raw: the node handles, [`Leaf`] and [`Internal`], are its users.
 #[repr(transparent)]
 pub(crate) struct NodePtr<K, V, S> {
     page: NonNull<u8>,
@@ -291,7 +238,7 @@ impl<K, V, S> NodePtr<K, V, S> {
     /// - The node's keys, values, head and edges have all been moved out,
     ///   dropped or deliberately leaked, and neither this pointer nor any
     ///   copy of it (an edge, a handle) is used afterwards.
-    pub(super) unsafe fn into_fresh_page<Kind: PageKind>(self) -> FreshPage<K, V, S, Kind> {
+    pub(super) unsafe fn into_fresh_page<Kind: PageKind>(self) -> FreshPage<Kind> {
         // The page came from a `FreshPage` (`from_fresh_page` is the only
         // constructor) for the node's kind, which is `Kind` (caller), and
         // the same `K`, `V` and `S`, so it is allocated with
@@ -299,8 +246,6 @@ impl<K, V, S> NodePtr<K, V, S> {
         // hands over every use of it: it is a `FreshPage` again.
         FreshPage {
             page: self.page,
-            _marker: PhantomData,
-            _strategy: PhantomData,
             _kind: PhantomData,
         }
     }
@@ -371,7 +316,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// Whether the map's nodes hold inline keys (D18): those of both kinds
     /// do, or neither does.
     pub(in crate::tree) fn has_inline_keys() -> bool {
-        Self::plan::<Leaf>().inline_width().is_some()
+        Self::plan::<Leaf<K, V, S>>().inline_width().is_some()
     }
 
     /// Whether each separator key is the head of the leftmost leaf right of
@@ -379,16 +324,16 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// have inline keys.
     #[inline(always)]
     pub(in crate::tree) fn has_separator_keys_in_heads() -> bool {
-        Self::plan::<Internal>().has_separator_keys_in_heads()
+        Self::plan::<Internal<K, V, S>>().has_separator_keys_in_heads()
     }
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
-        let plan = Self::plan::<Leaf>();
+        let plan = Self::plan::<Leaf<K, V, S>>();
         NodeLayout::<K, V>::leaf(plan.inline_width(), plan.has_length_tags())
     }
 
     pub(in crate::tree) fn internal_layout() -> InternalLayout {
-        NodeLayout::<K, V>::internal(Self::inline_width::<Internal>())
+        NodeLayout::<K, V>::internal(Self::inline_width::<Internal<K, V, S>>())
     }
 
     /// Where the keys and inline keys of a node of kind `Kind` sit.
@@ -420,8 +365,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// It also initializes the columns beside the keys
     /// ([`KeyColumns::initialize`]): every inline-key slot up to the capacity
     /// gets the greatest inline key, so that searches may count the slots
-    /// past `len` (handle.rs, invariant 6).
-    pub(super) fn from_fresh_page<Kind: PageKind>(page: FreshPage<K, V, S, Kind>) -> Self {
+    /// past `len` (`tree/node/mod.rs`, invariant 4).
+    pub(super) fn from_fresh_page<Kind: PageKind>(page: FreshPage<Kind>) -> Self {
         let node = Self {
             page: page.into_raw(),
             _marker: PhantomData,
@@ -540,16 +485,16 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// The node is an internal node that has not been released; nothing
     /// writes its header concurrently.
     #[inline(always)]
-    pub(super) unsafe fn separator_slots(self) -> SeparatorSlots<K, S> {
+    pub(super) unsafe fn separator_slots(self) -> SeparatorSlots<K, V, S> {
         // SAFETY: forwarded; the node is internal (caller).
         unsafe {
             if Self::has_separator_keys_in_heads() {
                 SeparatorSlots::Windows {
-                    columns: self.key_columns::<Internal>(),
+                    columns: self.key_columns::<Internal<K, V, S>>(),
                     prefix_len: self.prefix_len().unwrap_or(0),
                 }
             } else {
-                SeparatorSlots::Keys(self.key_slots::<Internal>())
+                SeparatorSlots::Keys(self.key_slots::<Internal<K, V, S>>())
             }
         }
     }
@@ -990,7 +935,8 @@ mod test_pages {
 
     use super::{FreshPage, PageByKind, PageKind};
     use crate::inline_key::{Auto, InlineKeyStrategy};
-    use crate::tree::node::handle::{ForceResult, Internal, Leaf};
+    use crate::tree::node::internal::Internal;
+    use crate::tree::node::leaf::Leaf;
 
     /// A page allocator for tests: hands out pages for either node kind of a
     /// map with keys `K`, values `V` and strategy `S` from the global
@@ -1025,8 +971,8 @@ mod test_pages {
 
         /// A page for a node of kind `Kind`, reusing the most recently
         /// released page of that kind's layout if any.
-        pub(in crate::tree) fn fresh<Kind: PageKind>(&self) -> FreshPage<K, V, S, Kind> {
-            let layout = FreshPage::<K, V, S, Kind>::layout();
+        pub(in crate::tree) fn fresh<Kind: PageKind>(&self) -> FreshPage<Kind> {
+            let layout = FreshPage::<Kind>::layout();
             let mut released = self.released.borrow_mut();
             let reusable = (released.iter()).rposition(|&(_, page_layout)| page_layout == layout);
             let page = match reusable {
@@ -1046,6 +992,16 @@ mod test_pages {
             unsafe { FreshPage::new(page) }
         }
 
+        /// [`Self::fresh`], for a leaf.
+        pub(in crate::tree) fn fresh_leaf(&self) -> FreshPage<Leaf<K, V, S>> {
+            self.fresh()
+        }
+
+        /// [`Self::fresh`], for an internal node.
+        pub(in crate::tree) fn fresh_internal(&self) -> FreshPage<Internal<K, V, S>> {
+            self.fresh()
+        }
+
         /// Takes a page for either kind back, and scribbles over it so that
         /// nothing can rely on what it held.
         ///
@@ -1055,9 +1011,9 @@ mod test_pages {
         /// layout than its kind's, or is released twice.
         pub(in crate::tree) fn release(&self, page: impl Into<PageByKind<K, V, S>>) {
             let (page, layout) = match page.into() {
-                ForceResult::Leaf(page) => (page.into_raw(), FreshPage::<K, V, S, Leaf>::layout()),
-                ForceResult::Internal(page) => {
-                    (page.into_raw(), FreshPage::<K, V, S, Internal>::layout())
+                PageByKind::Leaf(page) => (page.into_raw(), FreshPage::<Leaf<K, V, S>>::layout()),
+                PageByKind::Internal(page) => {
+                    (page.into_raw(), FreshPage::<Internal<K, V, S>>::layout())
                 }
             };
             assert!(
@@ -1115,8 +1071,9 @@ mod tests {
 
     use super::{ByteString, FreshPage, NodeHeader, NodePtr, PageKind, SameType, TestPages};
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
-    use crate::tree::node::handle::{Internal, Leaf};
+    use crate::tree::node::internal::Internal;
     use crate::tree::node::layout::NodeLayout;
+    use crate::tree::node::leaf::Leaf;
     use crate::tree::node::slots::{InlineKeySlots, Slots};
     use crate::tree::test_support::{CacheLineAligned, PageAligned, Tracked};
 
@@ -1130,7 +1087,7 @@ mod tests {
         fn page_bytes<K, V, S: InlineKeyStrategy<K>, Kind: PageKind>(
             node: NodePtr<K, V, S>,
         ) -> Range<usize> {
-            let layout = FreshPage::<K, V, S, Kind>::layout();
+            let layout = FreshPage::<Kind>::layout();
             let start = node.page.addr().get();
             assert!(start.is_multiple_of(layout.align()));
             start..start + layout.size()
@@ -1182,12 +1139,12 @@ mod tests {
     /// head key slot is entry 0's key (D49).
     fn assert_slots_are_aligned_and_disjoint<K, V, S: InlineKeyStrategy<K>>() {
         let pages = TestPages::<K, V, S>::new();
-        let leaf = NodePtr::from_fresh_page(pages.fresh::<Leaf>());
-        let internal = NodePtr::from_fresh_page(pages.fresh::<Internal>());
-        let leaf_page = SlotRange::page_bytes::<K, V, S, Leaf>(leaf);
-        let internal_page = SlotRange::page_bytes::<K, V, S, Internal>(internal);
-        let leaf_capacity = NodePtr::<K, V, S>::capacity::<Leaf>();
-        let internal_capacity = NodePtr::<K, V, S>::capacity::<Internal>();
+        let leaf = NodePtr::from_fresh_page(pages.fresh::<Leaf<K, V, S>>());
+        let internal = NodePtr::from_fresh_page(pages.fresh::<Internal<K, V, S>>());
+        let leaf_page = SlotRange::page_bytes::<K, V, S, Leaf<K, V, S>>(leaf);
+        let internal_page = SlotRange::page_bytes::<K, V, S, Internal<K, V, S>>(internal);
+        let leaf_capacity = NodePtr::<K, V, S>::capacity::<Leaf<K, V, S>>();
+        let internal_capacity = NodePtr::<K, V, S>::capacity::<Internal<K, V, S>>();
 
         let keeps_keys = NodePtr::<K, V, S>::internal_layout().keeps_keys();
         assert_eq!(
@@ -1199,21 +1156,21 @@ mod tests {
         // nothing is dereferenced.
         let (leaf_keys, values, head_and_values, internal_keys, internal_columns, edges) = unsafe {
             (
-                leaf.key_slots::<Leaf>(),
+                leaf.key_slots::<Leaf<K, V, S>>(),
                 SlotRange::of(leaf.value_slots(), leaf_capacity),
                 SlotRange::of(leaf.head_and_value_slots(), leaf_capacity + 1),
-                keeps_keys.then(|| internal.key_slots::<Internal>()),
-                internal.key_columns::<Internal>(),
+                keeps_keys.then(|| internal.key_slots::<Internal<K, V, S>>()),
+                internal.key_columns::<Internal<K, V, S>>(),
                 SlotRange::of(internal.edge_slots(), internal_capacity + 1),
             )
         };
         assert_eq!(
             leaf_keys.inline_keys().map(InlineKeySlots::width),
-            NodePtr::<K, V, S>::inline_width::<Leaf>()
+            NodePtr::<K, V, S>::inline_width::<Leaf<K, V, S>>()
         );
         assert_eq!(
             internal_columns.inline_keys().map(InlineKeySlots::width),
-            NodePtr::<K, V, S>::inline_width::<Internal>()
+            NodePtr::<K, V, S>::inline_width::<Internal<K, V, S>>()
         );
         let leaf_inline_keys =
             (leaf_keys.inline_keys()).map(|slots| SlotRange::of_inline_keys(slots, leaf_capacity));
@@ -1236,8 +1193,13 @@ mod tests {
         // SAFETY: allocated nodes of the requested kind; only addresses
         // and the allocation-initialized tag slots are inspected.
         unsafe {
-            assert!(internal.key_columns::<Internal>().length_tags().is_none());
-            if let Some(tags) = leaf.key_columns::<Leaf>().length_tags() {
+            assert!(
+                internal
+                    .key_columns::<Internal<K, V, S>>()
+                    .length_tags()
+                    .is_none()
+            );
+            if let Some(tags) = leaf.key_columns::<Leaf<K, V, S>>().length_tags() {
                 assert!(
                     tags.run(0, leaf_capacity)
                         .as_ref()
@@ -1298,8 +1260,8 @@ mod tests {
         // SAFETY: the nodes hold nothing, each is of the kind it is released
         // as, and nothing uses them afterwards.
         unsafe {
-            pages.release(leaf.into_fresh_page::<Leaf>());
-            pages.release(internal.into_fresh_page::<Internal>());
+            pages.release(leaf.into_fresh_page::<Leaf<K, V, S>>());
+            pages.release(internal.into_fresh_page::<Internal<K, V, S>>());
         }
         pages.assert_all_released();
     }
@@ -1377,11 +1339,11 @@ mod tests {
             NodeLayout::<Vec<u8>, u64>::FOUR_BYTE_INLINE_INTERNAL
         );
         assert_eq!(
-            NodePtr::<String, u64, Auto>::inline_width::<Leaf>(),
+            NodePtr::<String, u64, Auto>::inline_width::<Leaf<String, u64, Auto>>(),
             Some(InlineWidth::Eight)
         );
         assert_eq!(
-            NodePtr::<String, u64, Auto>::inline_width::<Internal>(),
+            NodePtr::<String, u64, Auto>::inline_width::<Internal<String, u64, Auto>>(),
             Some(InlineWidth::Four)
         );
         assert_eq!(
@@ -1411,14 +1373,14 @@ mod tests {
     #[test]
     fn a_new_node_is_empty() {
         let pages = TestPages::<u32, u64>::new();
-        let node = NodePtr::from_fresh_page(pages.fresh::<Leaf>());
+        let node = NodePtr::<u32, u64, Auto>::from_fresh_page(pages.fresh_leaf());
         // SAFETY: the page is allocated and holds a node.
         assert_eq!(unsafe { (node.len(), node.has_head()) }, (0, false));
         // SAFETY: as above.
         assert_eq!(unsafe { node.prefix_len() }, None);
         // SAFETY: the node is a leaf that holds nothing, and nothing uses it
         // afterwards.
-        pages.release(unsafe { node.into_fresh_page::<Leaf>() });
+        pages.release(unsafe { node.into_fresh_page::<Leaf<u32, u64, Auto>>() });
         pages.assert_all_released();
     }
 
@@ -1428,34 +1390,34 @@ mod tests {
     fn a_new_node_with_inline_keys_has_no_prefix() {
         let pages = TestPages::<String, u64>::new();
         // A page full of stale bytes, which the header must overwrite.
-        pages.release(pages.fresh::<Internal>());
-        let node = NodePtr::from_fresh_page(pages.fresh::<Internal>());
+        pages.release(pages.fresh_internal());
+        let node = NodePtr::<String, u64, Auto>::from_fresh_page(pages.fresh_internal());
         // SAFETY: the page is allocated and holds a node.
         assert_eq!(unsafe { (node.len(), node.prefix_len()) }, (0, Some(0)));
         // SAFETY: the node is an internal node that holds nothing, and
         // nothing uses it afterwards.
-        pages.release(unsafe { node.into_fresh_page::<Internal>() });
+        pages.release(unsafe { node.into_fresh_page::<Internal<String, u64, Auto>>() });
         pages.assert_all_released();
     }
 
     #[test]
     fn released_pages_are_handed_out_again() {
         let pages = TestPages::<u64, u64>::new();
-        let first = pages.fresh::<Leaf>().into_raw();
-        let second = pages.fresh::<Leaf>().into_raw();
+        let first = pages.fresh_leaf().into_raw();
+        let second = pages.fresh_leaf().into_raw();
         assert_ne!(first, second);
         // SAFETY: both came from `pages` as leaf pages, hold nothing, and
         // nothing else uses them.
         unsafe {
-            pages.release(FreshPage::<_, _, Auto, Leaf>::new(first));
-            pages.release(FreshPage::<_, _, Auto, Leaf>::new(second));
+            pages.release(FreshPage::<Leaf<u64, u64, Auto>>::new(first));
+            pages.release(FreshPage::<Leaf<u64, u64, Auto>>::new(second));
         }
         assert_eq!(pages.in_use(), 0);
-        let reused = pages.fresh::<Leaf>();
+        let reused = pages.fresh_leaf();
         assert_eq!(pages.in_use(), 1);
         assert_eq!(reused.into_raw(), second);
         // SAFETY: as above.
-        pages.release(unsafe { FreshPage::<_, _, Auto, Leaf>::new(second) });
+        pages.release(unsafe { FreshPage::<Leaf<u64, u64, Auto>>::new(second) });
         pages.assert_all_released();
     }
 
@@ -1466,18 +1428,18 @@ mod tests {
         // Without inline keys, both kinds are 1 KB pages: a leaf's page can
         // hold an internal node.
         let pages = TestPages::<u32, u64>::new();
-        pages.release(pages.fresh::<Leaf>());
-        pages.release(pages.fresh::<Internal>());
+        pages.release(pages.fresh_leaf());
+        pages.release(pages.fresh_internal());
         assert_eq!(pages.allocated_count(), 1);
         pages.assert_all_released();
 
         // A 13 KB leaf and a 1 KB internal node: neither reuses the other's.
         let pages = TestPages::<u64, [u8; 1000]>::new();
-        pages.release(pages.fresh::<Leaf>());
-        let internal = pages.fresh::<Internal>();
+        pages.release(pages.fresh_leaf());
+        let internal = pages.fresh_internal();
         assert_eq!((pages.allocated_count(), pages.in_use()), (2, 1));
         pages.release(internal);
-        pages.release(pages.fresh::<Leaf>());
+        pages.release(pages.fresh_leaf());
         assert_eq!(pages.allocated_count(), 2);
         pages.assert_all_released();
     }

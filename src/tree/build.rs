@@ -18,16 +18,19 @@
 
 #![forbid(unsafe_code)]
 
-use super::node::handle::{EdgeRoom, ForceResult, Leaf, LeafOrInternal, NodeMut, Subtree};
+use super::node::Node;
 use super::node::inline_keys::{InlinedKey, KeyInliner};
+use super::node::internal::Internal;
+use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, PageByKind};
 use super::path::{LastEdge, PathMut};
+use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order.
 pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
     /// `None` until the first entry.
-    tree: Option<Subtree<K, V, S>>,
+    tree: Option<Root<K, V, S>>,
     /// The entries pushed so far.
     length: usize,
     /// The entries `extend` has taken from its iterators: those pushed, and
@@ -49,7 +52,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// along its right border, whose prefixes are what every key of the
     /// tree shares, in any tree (D50). It counts only the entries it
     /// appends.
-    pub(crate) fn continuing(tree: Subtree<K, V, S>) -> Self {
+    pub(crate) fn continuing(tree: Root<K, V, S>) -> Self {
         Self {
             tree: Some(tree),
             length: 0,
@@ -86,19 +89,20 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         loop {
             let tree = self
                 .tree
-                .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
+                .get_or_insert_with(|| Root::new_leaf(FreshPage::allocate()));
             tree.cover_key(&next.0);
             // To tell a key that shares less without the tree, whose
-            // rightmost leaf is lent below.
+            // rightmost leaf is changed below.
             let shared = tree.shared_prefix().clone();
-            let mut leaf = Self::rightmost_leaf(tree.borrow_mut());
+            let leaf = Self::rightmost_leaf(tree.top_mut());
             let prefix_len = leaf.prefix_len();
             let leaf_is_full = loop {
-                let EdgeRoom::Fits(edge) = leaf.reborrow_mut().last_edge().check_room() else {
+                let len = leaf.len();
+                if len == Leaf::<K, V, S>::capacity() {
                     break true;
-                };
+                }
                 let (key, value) = next;
-                edge.insert_fit(InlinedKey::new(key, prefix_len), value);
+                leaf.insert_fit(len, InlinedKey::new(key, prefix_len), value);
                 self.length += 1;
                 next = match entries.next() {
                     Some(entry) => entry,
@@ -138,7 +142,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// Fitting reads keys while the builder still holds the tree: a
     /// panicking `InlineKey` takes it apart, as it does any tree not
     /// finished, where a tree held anywhere else would leak.
-    pub(crate) fn finish(mut self) -> (Option<Subtree<K, V, S>>, usize) {
+    pub(crate) fn finish(mut self) -> (Option<Root<K, V, S>>, usize) {
         if let Some(tree) = &mut self.tree {
             tree.fix_border::<LastEdge>(&mut PageByKind::deallocate);
             tree.fit_border_siblings::<LastEdge>();
@@ -146,14 +150,12 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         (self.tree.take(), self.length)
     }
 
-    /// The rightmost leaf of the tree under `node`.
-    fn rightmost_leaf(
-        mut node: NodeMut<'_, K, V, S, LeafOrInternal>,
-    ) -> NodeMut<'_, K, V, S, Leaf> {
+    /// The rightmost leaf under `node`.
+    fn rightmost_leaf(mut node: Node<K, V, S>) -> Leaf<K, V, S> {
         loop {
-            node = match node.force() {
-                ForceResult::Leaf(leaf) => return leaf,
-                ForceResult::Internal(internal) => internal.last_edge().descend(),
+            node = match node {
+                Node::Leaf(leaf) => return leaf,
+                Node::Internal(internal) => internal.child(internal.len()),
             };
         }
     }
@@ -169,18 +171,18 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// panicking `InlineKey` would leave one there that searches past the
     /// last key misread. Off the border, a prefix it leaves short of the
     /// fences is one searches allow (`prefix.rs`).
-    fn fit_closed_nodes(tree: &mut Subtree<K, V, S>, top: usize) {
+    fn fit_closed_nodes(tree: &mut Root<K, V, S>, top: usize) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
         let mut path = PathMut::new(tree);
         path.start_at_root();
         while path.height() > top {
-            path.set_index(path.view().len());
+            path.set_index(path.node().len());
             path.descend();
         }
         // The edge left of the separator, the node's last key.
-        path.set_index(path.view().len() - 1);
+        path.set_index(path.node().len() - 1);
         path.descend_to_leaf::<LastEdge>();
         while path.height() < top {
             path.ascend();
@@ -195,29 +197,30 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// one level up if it has room; or else in a new node there, which hangs
     /// one level further up the same way; or under a new root. Returns the
     /// height of the node that took the separator.
-    fn start_leaf(tree: &mut Subtree<K, V, S>, separator: InlinedKey<K, S>, value: V) -> usize {
-        let shared = tree.shared_prefix().clone();
-        let mut leaf = Subtree::new_leaf(FreshPage::allocate());
-        leaf.borrow_mut().set_empty_prefix_len(shared.len());
-        let separator = leaf.borrow_mut().put_separator_head(separator, value);
-        let mut child = leaf.forget_type();
-        // Its new levels along the right border take what every key shares.
-        *child.shared_prefix_mut() = shared;
+    fn start_leaf(tree: &mut Root<K, V, S>, separator: InlinedKey<K, S>, value: V) -> usize {
+        let shared_len = tree.shared_prefix().len();
+        let leaf = Leaf::new(FreshPage::allocate());
+        leaf.set_empty_prefix_len(shared_len);
+        let separator = leaf.put_separator_head(separator, value);
+        let mut child = Node::Leaf(leaf);
         let mut path = PathMut::new(tree);
         path.descend_to_last_key();
         while path.height() < path.root_height() {
             path.ascend();
-            if let EdgeRoom::Fits(edge) = path.internal_mut().last_edge().check_room() {
-                edge.insert_fit(separator, child);
+            let node = path.internal();
+            let len = node.len();
+            if len < Internal::<K, V, S>::capacity() {
+                node.insert_fit(len, separator, child);
                 return path.height();
             }
-            child.push_internal_level(FreshPage::allocate());
+            // Its new levels along the right border take what every key
+            // shares.
+            let level = Internal::new(FreshPage::allocate(), child);
+            level.set_empty_prefix_len(shared_len);
+            child = Node::Internal(level);
         }
         path.push_root(FreshPage::allocate());
-        let EdgeRoom::Fits(edge) = path.internal_mut().last_edge().check_room() else {
-            unreachable!("a new root has room");
-        };
-        edge.insert_fit(separator, child);
+        path.internal().insert_fit(0, separator, child);
         path.height()
     }
 }

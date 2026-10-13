@@ -11,7 +11,7 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::node::handle::ValMut;
+use crate::tree::path::ValMut;
 use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// A mutable iterator over the entries of a `BBTreeMap`, in key order.
@@ -298,7 +298,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(map.get("b"), Some(&12));
     /// ```
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
-        let root = self.root.as_mut().map(|root| root.borrow_valmut());
+        let root = self.root.as_mut().map(|root| root.top_mut());
         IterMut {
             walk: BorrowedWalk::new(root, self.length),
         }
@@ -367,8 +367,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         };
         RangeMut {
             walk: {
-                let (root, shared) = root.borrow_valmut_and_shared_prefix();
-                RangeWalk::new(root, shared, range.start_bound(), range.end_bound())
+                let top = root.top_mut();
+                RangeWalk::new(
+                    top,
+                    root.shared_prefix(),
+                    range.start_bound(),
+                    range.end_bound(),
+                )
             },
         }
     }

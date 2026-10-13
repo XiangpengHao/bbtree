@@ -13,9 +13,13 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 
-use super::node::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
+use super::invariants::NodeChecks;
+use super::node::Node;
 use super::node::inline_keys::Separator;
-use super::node::page::TestPages;
+use super::node::internal::Internal;
+use super::node::leaf::Leaf;
+use super::node::page::{NodePtr, TestPages};
+use super::root::Root;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 
 /// A deterministic xorshift64* generator; shared by reference.
@@ -269,14 +273,12 @@ impl<'l> FromTracked<'l> for Bulky<'l> {
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
-    NodeRef<Immut<'a>, K, V, S, Leaf>
-{
+impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// The `(key id, value id)` of each entry, in order.
     pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
         (0..self.len())
             .map(|index| {
-                let (key, value) = self.kv_at(index).into_key_value();
+                let (key, value) = self.key_value(index);
                 (key.tracked_id(), value.tracked_id())
             })
             .collect()
@@ -284,54 +286,48 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
 
     /// The id of the head, if the leaf has one.
     pub(super) fn head_id(self) -> Option<usize> {
-        self.head().map(|head| head.into_value().tracked_id())
+        self.has_head().then(|| self.head_value().tracked_id())
     }
 
     /// The id of the head's key, if the leaf has a head and separator keys
     /// are heads (D49).
     pub(super) fn head_key_id(self) -> Option<usize> {
-        self.head()
-            .and_then(|head| head.into_key_and_value().0)
-            .map(K::tracked_id)
+        (self.has_head() && NodePtr::<K, V, S>::has_separator_keys_in_heads())
+            .then(|| self.head_key().tracked_id())
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
-    NodeRef<Immut<'a>, K, V, S, Internal>
-{
+impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// The `(key id, value id)` of each separator, in order, its value read
     /// from the head that holds it (D17).
     pub(super) fn tracked_ids(self) -> Vec<(usize, usize)> {
         (0..self.len())
             .map(|index| {
-                let separator = self.kv_at(index);
-                let value = separator.into_value_head().into_value();
-                (separator.into_key().tracked_id(), value.tracked_id())
+                let value = self.head_leaf(index).head_value();
+                (self.key(index).tracked_id(), value.tracked_id())
             })
             .collect()
     }
 }
 
-impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
-    NodeRef<Immut<'a>, K, V, S, LeafOrInternal>
-{
-    /// The `(key id, value id)` of every entry of the subtree, in order; see
-    /// [`NodeRef::for_each_entry`].
-    pub(super) fn subtree_tracked_ids(self) -> Vec<(usize, usize)> {
+impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// The `(key id, value id)` of every entry under this node, in order;
+    /// see [`Node::for_each_entry`].
+    pub(super) fn tracked_ids_under(self) -> Vec<(usize, usize)> {
         let mut ids = Vec::new();
         self.for_each_entry(&mut |key, value| ids.push((key.tracked_id(), value.tracked_id())));
         ids
     }
 
-    /// The id of the head of the subtree's leftmost leaf, if it has one: the
-    /// value of the separator just left of the subtree (D17).
+    /// The id of the head of the leftmost leaf under this node, if it has
+    /// one: the value of the separator just left of the node (D17).
     pub(super) fn leftmost_head_id(self) -> Option<usize> {
         self.leftmost_leaf().head_id()
     }
 
-    /// The id of the key of the separator just left of the subtree, given
+    /// The id of the key of the separator just left of this node, given
     /// `separator`, as it came out of its node: its own, where internal
-    /// nodes keep keys, or the subtree's leftmost leaf's head's (D49).
+    /// nodes keep keys, or the leftmost leaf's head's under this node (D49).
     pub(super) fn separator_key_id(self, separator: &Separator<K, S>) -> usize {
         match separator.key() {
             Some(key) => key.tracked_id(),
@@ -340,52 +336,55 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
         }
     }
 
-    fn leftmost_leaf(self) -> NodeRef<Immut<'a>, K, V, S, Leaf> {
+    fn leftmost_leaf(self) -> Leaf<K, V, S> {
         let mut node = self;
         loop {
-            match node.force() {
-                ForceResult::Leaf(leaf) => return leaf,
-                ForceResult::Internal(internal) => node = internal.first_edge().descend(),
+            match node {
+                Node::Leaf(leaf) => return leaf,
+                Node::Internal(internal) => node = internal.child(0),
             }
         }
     }
 }
 
-impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, LeafOrInternal> {
-    /// Panics unless every node of the subtree has the inline keys of its
-    /// keys, in order, and a prefix length of 0, or has neither (D18); see
-    /// [`NodeRef::assert_inline_keys_match`].
-    pub(crate) fn assert_subtree_inline_keys_match(self) {
-        match self.force() {
-            ForceResult::Leaf(leaf) => leaf.assert_inline_keys_match(),
-            ForceResult::Internal(internal) => {
+impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// Panics unless every node under and at this one has the inline keys
+    /// of its keys, in order, and a prefix length of 0, or has neither
+    /// (D18); see [`NodeChecks::assert_inline_keys_match`].
+    pub(crate) fn assert_inline_keys_match_under(self) {
+        match self {
+            Node::Leaf(leaf) => leaf.assert_inline_keys_match(),
+            Node::Internal(internal) => {
                 internal.assert_inline_keys_match();
                 for index in 0..=internal.len() {
-                    (internal.edge_at(index).descend()).assert_subtree_inline_keys_match();
+                    internal.child(index).assert_inline_keys_match_under();
                 }
             }
         }
     }
 
-    /// Calls `entry` on every entry of the subtree in key order: each leaf's
-    /// keys and values, and each separator's key with its value from the head
-    /// that holds it (D17). A head in the subtree's leftmost leaf belongs to
-    /// a separator outside the subtree, and is skipped.
-    pub(super) fn for_each_entry(self, entry: &mut impl FnMut(&'a K, &'a V)) {
-        match self.force() {
-            ForceResult::Leaf(leaf) => {
+    /// Calls `entry` on every entry under this node in key order: each
+    /// leaf's keys and values, and each separator's key with its value from
+    /// the head that holds it (D17). A head in the leftmost leaf belongs to
+    /// a separator outside, and is skipped.
+    pub(super) fn for_each_entry<'a>(self, entry: &mut impl FnMut(&'a K, &'a V))
+    where
+        K: 'a,
+        V: 'a,
+    {
+        match self {
+            Node::Leaf(leaf) => {
                 for index in 0..leaf.len() {
-                    let (key, value) = leaf.kv_at(index).into_key_value();
+                    let (key, value) = leaf.key_value(index);
                     entry(key, value);
                 }
             }
-            ForceResult::Internal(internal) => {
+            Node::Internal(internal) => {
                 for index in 0..=internal.len() {
-                    internal.edge_at(index).descend().for_each_entry(entry);
+                    internal.child(index).for_each_entry(entry);
                     if index < internal.len() {
-                        let separator = internal.kv_at(index);
-                        let value = separator.into_value_head().into_value();
-                        entry(separator.into_key(), value);
+                        let value = internal.head_leaf(index).head_value();
+                        entry(internal.key(index), value);
                     }
                 }
             }
@@ -429,7 +428,7 @@ impl PageAligned {
 /// pages from a [`TestPages`] pool.
 pub(super) struct TestTree<'p, K, V, S: InlineKeyStrategy<K> = Auto> {
     /// `None` only while the root is being replaced.
-    root: Option<Subtree<K, V, S>>,
+    root: Option<Root<K, V, S>>,
     pages: &'p TestPages<K, V, S>,
 }
 
@@ -437,18 +436,18 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// A tree with an empty leaf as its root.
     pub(super) fn new(pages: &'p TestPages<K, V, S>) -> Self {
         Self {
-            root: Some(Subtree::new_leaf(pages.fresh()).forget_type()),
+            root: Some(Root::new_leaf(pages.fresh())),
             pages,
         }
     }
 
-    pub(super) fn root(&self) -> &Subtree<K, V, S> {
+    pub(super) fn root(&self) -> &Root<K, V, S> {
         self.root
             .as_ref()
             .expect("the root is always there between calls")
     }
 
-    pub(super) fn root_mut(&mut self) -> &mut Subtree<K, V, S> {
+    pub(super) fn root_mut(&mut self) -> &mut Root<K, V, S> {
         self.root
             .as_mut()
             .expect("the root is always there between calls")
@@ -461,7 +460,7 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// One `entry(key, value)` per entry, in order.
     pub(super) fn entries<T>(&self, mut entry: impl FnMut(&K, &V) -> T) -> Vec<T> {
         let mut entries = Vec::new();
-        self.root().borrow().for_each_entry(&mut |key, value| {
+        self.root().top().for_each_entry(&mut |key, value| {
             entries.push(entry(key, value));
         });
         entries
@@ -472,7 +471,7 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     pub(super) fn pop_empty_roots(&mut self) {
         let pages = self.pages;
         let root = self.root_mut();
-        while root.height() > 0 && root.borrow().len() == 0 {
+        while root.height() > 0 && root.top().len() == 0 {
             pages.release(root.pop_internal_level());
         }
     }

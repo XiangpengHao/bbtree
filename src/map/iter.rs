@@ -12,7 +12,8 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::node::handle::{Immut, KeyRun};
+use crate::tree::node::leaf::KeyRun;
+use crate::tree::path::Immut;
 use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
@@ -419,7 +420,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, S> {
-        let root = self.root.as_ref().map(|root| root.borrow());
+        let root = self.root.as_ref().map(|root| root.top());
         Iter {
             walk: BorrowedWalk::new(root, self.length),
         }
@@ -500,7 +501,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         };
         Range {
             walk: RangeWalk::new(
-                root.borrow(),
+                root.top(),
                 root.shared_prefix(),
                 range.start_bound(),
                 range.end_bound(),

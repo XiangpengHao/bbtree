@@ -7,8 +7,9 @@ use core::cell::Cell;
 use core::cmp::Ordering;
 
 use crate::map::BBTreeMap;
-use crate::tree::node::handle::{EdgeRoom, ForceResult};
+use crate::tree::node::Node;
 use crate::tree::node::inline_keys::SearchKey;
+use crate::tree::node::leaf::Leaf;
 
 /// Changes the query's number after one search's comparisons. Its size
 /// selects ordinary binary search, which calls the query's comparator.
@@ -29,11 +30,14 @@ impl<'a> RedirectedKey<'a> {
 
     fn after_first_search(mut self, map: &mut BBTreeMap<Self, u64>, number: u64) -> Self {
         self.remaining.set(usize::MAX);
-        let root = map.root.as_mut().unwrap().borrow_mut();
-        let Err(edge) = root.search_tree_for_insert(&SearchKey::new(&self)) else {
+        let root = map.root.as_mut().unwrap().top_mut();
+        let Err((leaf, _)) = root.find_for_insert(&SearchKey::new(&self)) else {
             panic!("the first search must be vacant");
         };
-        assert!(matches!(edge.check_room(), EdgeRoom::Full(_)));
+        assert_eq!(
+            leaf.len(),
+            Leaf::<Self, u64, crate::inline_key::Auto>::capacity()
+        );
         let comparisons = usize::MAX - self.remaining.get();
         assert!(comparisons > 0);
         self.remaining.set(comparisons);
@@ -76,10 +80,10 @@ fn full_leaf_replay_can_find_an_existing_key() {
     loop {
         map.insert(RedirectedKey::new(count, &remaining), count);
         count += 1;
-        let ForceResult::Leaf(leaf) = map.root.as_mut().unwrap().borrow_mut().force() else {
+        let Node::Leaf(leaf) = map.root.as_mut().unwrap().top() else {
             panic!("stop before the first split");
         };
-        if matches!(leaf.last_edge().check_room(), EdgeRoom::Full(_)) {
+        if leaf.len() == Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
             break;
         }
     }
@@ -106,27 +110,27 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     loop {
         map.insert(RedirectedKey::new(2 * count, &remaining), 2 * count);
         count += 1;
-        if let ForceResult::Internal(root) = map.root.as_mut().unwrap().borrow_mut().force() {
-            let ForceResult::Leaf(right) = root.last_edge().descend().force() else {
+        if let Node::Internal(root) = map.root.as_mut().unwrap().top() {
+            let Node::Leaf(right) = root.child(root.len()) else {
                 panic!("stop before a second level grows");
             };
-            if matches!(right.last_edge().check_room(), EdgeRoom::Full(_)) {
+            if right.len() == Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
                 break;
             }
         }
     }
     assert_eq!(map.remove(&RedirectedKey::new(0, &remaining)), Some(0));
     let target = RedirectedKey::new(1, &remaining);
-    let Err(edge) = map
+    let Err((leaf, _)) = map
         .root
         .as_mut()
         .unwrap()
-        .borrow_mut()
-        .search_tree_for_insert(&SearchKey::new(&target))
+        .top_mut()
+        .find_for_insert(&SearchKey::new(&target))
     else {
         panic!("the replay destination must be vacant");
     };
-    assert!(matches!(edge.check_room(), EdgeRoom::Fits(_)));
+    assert!(leaf.len() < Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity());
     let query = RedirectedKey::new(2 * count, &remaining).after_first_search(&mut map, 1);
     assert_eq!(map.insert(query, 1), None);
     remaining.set(usize::MAX);
@@ -183,11 +187,11 @@ impl AscendingInserts {
     }
 
     fn rightmost_full(&self) -> bool {
-        let mut node = self.map.root.as_ref().unwrap().borrow();
+        let mut node = self.map.root.as_ref().unwrap().top();
         loop {
-            match node.force() {
-                ForceResult::Leaf(leaf) => return leaf.len() == self.leaf_capacity,
-                ForceResult::Internal(internal) => node = internal.last_edge().descend(),
+            match node {
+                Node::Leaf(leaf) => return leaf.len() == self.leaf_capacity,
+                Node::Internal(internal) => node = internal.child(internal.len()),
             }
         }
     }

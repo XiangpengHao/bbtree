@@ -17,6 +17,7 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::page::PageByKind;
+use crate::tree::root::Root;
 use crate::tree::walk::DyingWalk;
 
 /// An owning iterator over the entries of a `BBTreeMap`, sorted by key.
@@ -316,7 +317,7 @@ impl<K, V, S: InlineKeyStrategy<K>> IntoIterator for BBTreeMap<K, V, S> {
         let tree = self.root.take();
         let length = mem::take(&mut self.length);
         IntoIter {
-            walk: DyingWalk::new(tree, length, PageByKind::deallocate),
+            walk: DyingWalk::new(tree.map(Root::into_top), length, PageByKind::deallocate),
         }
     }
 }

@@ -68,10 +68,10 @@ associated constant; it is a value that folds after monomorphization. Folding
 is fragile (D36, D41 pitfalls), so the code follows rules:
 
 - **Derive, don't pass.** Code asks for the plan where it uses it, from type
-  parameters (`NodePtr::plan::<Kind>()`, `NodeRef::plan()`), and never takes
-  it as an argument or keeps it in a field. `KeySlots` carries `Kind` as a
-  type parameter for this reason: its methods derive the plan instead of
-  holding one.
+  parameters (`NodePtr::plan::<Kind>()`, `Leaf::plan()`,
+  `Internal::plan()`), and never takes it as an argument or keeps it in a
+  field. `KeySlots` carries the node type as a type parameter for this
+  reason: its methods derive the plan instead of holding one.
 - **Dispatchers that hold plan-derived values are `#[inline(always)]`**:
   `NodePlan`'s accessors, `KeyColumns`' methods, `NodePtr::key_columns`.
   Without it, `KeyColumns::insert` stayed out of line and every insert

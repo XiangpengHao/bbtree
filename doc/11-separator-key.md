@@ -90,8 +90,9 @@ L2:  [banana's value], berry, blueberry
 
 When a query's inline key ties with separator `i`'s, the search needs the
 full key. It follows edge `i + 1`, then edge 0 at each level down to a
-leaf, and reads slot 0. Today `into_value_head` (`tree/search.rs`) walks
-the same path to find a separator's value; here the walk finds its key.
+leaf, and reads slot 0. `Internal::head_leaf` (`tree/node/internal.rs`)
+walks the same path to find a separator's value; here the walk finds its
+key.
 
 - **Nothing to keep up to date.** The walk finds the place from the tree
   itself every time. Nothing is ever inserted before slot 0 of a leaf other
@@ -208,7 +209,7 @@ Separators move between levels:
   into the leaf use the parent's window, read so.
 - **Heads (D17).** Heads stay, and gain their separator's key: it moves
   with the head's value in splits, moves between siblings, merges and
-  removals (`Rebalance` in `tree/node/handle.rs`), and walks, clones,
+  removals (`Child`, `Siblings` in `tree/node/`), and walks, clones,
   teardown and joins take it from the head. Keys without inline keys keep
   D17 unchanged, so the code holds both kinds of separator
   (`SeparatorSlots`).

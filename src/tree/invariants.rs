@@ -2,24 +2,22 @@
 //! tests and in fuzzing builds (`--cfg fuzzing`, which `cargo fuzz` sets),
 //! where the fuzz targets (`fuzz/`) call them through the map's
 //! `check_invariants`: the whole tree's shape, order and counts
-//! ([`Subtree::check_invariants`]), and on every node, that its inline
+//! ([`Root::check_invariants`]), and on every node, that its inline
 //! keys and length tags match its keys, and its prefix length is what its
 //! fences share, or along the borders, what every key shares (D50).
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
 
-use super::node::handle::{
-    ForceResult, Immut, Internal, KeyList, LeafOrInternal, NodeRef, Subtree,
-};
 use super::node::inline_keys::KeyInliner;
-use super::node::node_plan::NodePlan;
-use super::node::page::PageKind;
-use super::node::shared_prefix::SharedPrefix;
+use super::node::internal::Internal;
+use super::node::{Child, KeyList, Node};
+use super::root::Root;
+use super::shared_prefix::SharedPrefix;
 
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Panics unless this is a well-formed B+-tree of `length` entries
     /// (D17):
     ///
@@ -47,7 +45,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// Calls `Ord` and the strategy's inline-key encoding: a tree whose keys
     /// break their contracts fails it.
     pub(crate) fn check_invariants(&self, length: usize) {
-        let root = self.borrow();
+        let root = self.top();
         if length > 0 || root.height() > 0 {
             assert!(root.len() > 0, "the root of a non-empty map has no keys");
         }
@@ -59,7 +57,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
             separators: 0,
             leaf_depth: root.height(),
         };
-        walk.check_subtree(root, KeyBounds::UNBOUNDED, 0);
+        walk.check_nodes_under(root, KeyBounds::UNBOUNDED, 0);
         assert_eq!(
             walk.separators + 1,
             walk.leaves,
@@ -69,7 +67,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Panics unless no node's prefix length is shorter than its parent's
     /// (D44), and every node along the tree's left and right borders, which
     /// lacks a fence, has the tree's shared prefix (D50): a search for a key
@@ -79,11 +77,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// contracts, whose maps give wrong answers.
     pub(crate) fn check_prefix_lens(&self) {
         let shared_len = self.shared_prefix().len();
-        Self::check_prefix_lens_in(self.borrow(), shared_len, shared_len, true, true);
+        Self::check_prefix_lens_in(self.top(), shared_len, shared_len, true, true);
     }
 
     fn check_prefix_lens_in(
-        node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
+        node: Node<K, V, S>,
         shared_len: usize,
         parent_prefix: usize,
         on_left_border: bool,
@@ -98,11 +96,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
             prefix == shared_len || !(on_left_border || on_right_border),
             "prefix {prefix} on the tree's border, where every key shares {shared_len}"
         );
-        if let ForceResult::Internal(internal) = node.force() {
+        if let Node::Internal(internal) = node {
             let len = internal.len();
             for index in 0..=len {
                 Self::check_prefix_lens_in(
-                    internal.edge_at(index).descend(),
+                    internal.child(index),
                     shared_len,
                     prefix,
                     on_left_border && index == 0,
@@ -114,23 +112,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
 }
 
 #[cfg(test)]
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Every node's prefix length (05-fence-key.md), from the root down, each
     /// node before its children.
     pub(crate) fn node_prefix_lens(&self) -> Vec<usize> {
         let mut prefix_lens = Vec::new();
-        Self::collect_prefix_lens(self.borrow(), &mut prefix_lens);
+        Self::collect_prefix_lens(self.top(), &mut prefix_lens);
         prefix_lens
     }
 
-    fn collect_prefix_lens(
-        node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>,
-        prefix_lens: &mut Vec<usize>,
-    ) {
+    fn collect_prefix_lens(node: Node<K, V, S>, prefix_lens: &mut Vec<usize>) {
         prefix_lens.push(node.prefix_len());
-        if let ForceResult::Internal(internal) = node.force() {
+        if let Node::Internal(internal) = node {
             for index in 0..=internal.len() {
-                Self::collect_prefix_lens(internal.edge_at(index).descend(), prefix_lens);
+                Self::collect_prefix_lens(internal.child(index), prefix_lens);
             }
         }
     }
@@ -139,27 +134,24 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// (D17), and where separator keys are heads, so is the key (D49).
     pub(crate) fn separator_keys(&self) -> Vec<&K> {
         let mut keys = Vec::new();
-        Self::collect_separator_keys(self.borrow(), &mut keys);
+        Self::collect_separator_keys(self.top(), &mut keys);
         keys
     }
 
-    fn collect_separator_keys<'a>(
-        node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
-        keys: &mut Vec<&'a K>,
-    ) {
-        if let ForceResult::Internal(internal) = node.force() {
+    fn collect_separator_keys(node: Node<K, V, S>, keys: &mut Vec<&K>) {
+        if let Node::Internal(internal) = node {
             for index in 0..=internal.len() {
-                Self::collect_separator_keys(internal.edge_at(index).descend(), keys);
+                Self::collect_separator_keys(internal.child(index), keys);
                 if index < internal.len() {
-                    keys.push(internal.kv_at(index).into_key());
+                    keys.push(internal.key(index));
                 }
             }
         }
     }
 }
 
-/// The open interval of keys a subtree may hold: strictly between the
-/// separators left and right of the edge leading to it.
+/// The open interval of keys under a node: strictly between the separators
+/// left and right of the edge leading to it.
 #[derive(Clone, Copy)]
 struct KeyBounds<'a, K> {
     lower: Option<&'a K>,
@@ -210,31 +202,31 @@ struct InOrderWalk<'a, K> {
 }
 
 impl<'a, K: Ord> InOrderWalk<'a, K> {
-    fn check_subtree<V, S: InlineKeyStrategy<K>>(
+    fn check_nodes_under<V, S: InlineKeyStrategy<K>>(
         &mut self,
-        node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
+        node: Node<K, V, S>,
         bounds: KeyBounds<'a, K>,
         depth: usize,
     ) {
-        match node.force() {
-            ForceResult::Leaf(leaf) => {
+        match node {
+            Node::Leaf(leaf) => {
                 let keys = self.check_node(leaf, &bounds, depth);
                 assert_eq!(depth, self.leaf_depth, "leaves at different depths");
                 let is_leftmost = self.leaves == 0;
                 assert_eq!(
-                    leaf.head().is_some(),
+                    leaf.has_head(),
                     !is_leftmost,
                     "every leaf but the leftmost has a head, and only those"
                 );
                 self.leaves += 1;
                 keys.iter().for_each(|key| self.visit(key));
             }
-            ForceResult::Internal(internal) => {
+            Node::Internal(internal) => {
                 let keys = self.check_node(internal, &bounds, depth);
                 for index in 0..=keys.len() {
-                    let child = internal.edge_at(index).descend();
+                    let child = internal.child(index);
                     let child_bounds = bounds.of_child(keys, index);
-                    self.check_subtree(child, child_bounds, depth + 1);
+                    self.check_nodes_under(child, child_bounds, depth + 1);
                     if let Some(key) = keys.get(index) {
                         self.separators += 1;
                         self.visit(key);
@@ -248,21 +240,21 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
     /// and prefix length, at least its minimum of keys below the root, and
     /// every key within its bounds, sharing what every key shares. Returns
     /// its keys.
-    fn check_node<V, S: InlineKeyStrategy<K>, Kind: PageKind>(
+    fn check_node<V, S: InlineKeyStrategy<K>, C: Child<K, V, S>>(
         &self,
-        node: NodeRef<Immut<'a>, K, V, S, Kind>,
+        node: C,
         bounds: &KeyBounds<'a, K>,
         depth: usize,
-    ) -> Kind::Keys<'a, K, V, S> {
+    ) -> C::Keys<'a> {
         node.assert_inline_keys_match();
         node.assert_prefix_fits_fences(bounds.lower, bounds.upper, self.shared_prefix.len());
         let keys = node.keys();
         if depth > 0 {
             assert!(
-                !node.is_underfull(),
+                node.len() >= C::min_len(),
                 "a node below the root has {} keys, fewer than its minimum of {}",
                 keys.len(),
-                node.min_len()
+                C::min_len()
             );
         }
         for key in keys.iter() {
@@ -284,12 +276,13 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, Kind> {
+/// The checks of one node, of either kind.
+pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
     /// Panics unless the node has inline keys exactly if its map's strategy
     /// gives its keys some, and then has the first bytes of its keys'
     /// windows at its prefix length, as many as this kind keeps, in order
     /// (D18, 05-fence-key.md); a node without has prefix 0.
-    pub(crate) fn assert_inline_keys_match(self) {
+    fn assert_inline_keys_match(self) {
         let plan = Self::plan();
         if let Some(tags) = self.length_tags() {
             assert!(plan.has_length_tags());
@@ -299,13 +292,13 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
         }
         let prefix_len = self.prefix_len();
         if let Some(inliner) = plan.inliner()
-            && NodePlan::<K>::of::<S, Internal>().rehydrates_windows()
+            && Internal::<K, V, S>::plan().rehydrates_windows()
         {
             // A narrow internal window may next fill a leaf's prefix, so
             // every window a node of this map hands out keeps all the bytes
             // a leaf does.
             for (index, key) in self.keys().iter().enumerate() {
-                let window = self.kv_at(index).window();
+                let window = self.window(index);
                 assert_eq!(window.prefix_len(), self.prefix_len());
                 assert_eq!(
                     window.inline_key(),
@@ -343,12 +336,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
     /// Panics unless the node's prefix length is what its fences, `lower`
     /// and `upper`, share (05-fence-key.md), or `shared_len`, what every key
     /// shares, if either is missing (D50).
-    pub(crate) fn assert_prefix_fits_fences(
-        self,
-        lower: Option<&K>,
-        upper: Option<&K>,
-        shared_len: usize,
-    ) {
+    fn assert_prefix_fits_fences(self, lower: Option<&K>, upper: Option<&K>, shared_len: usize) {
         let shared = KeyInliner::<K>::resolve::<S>().map_or(0, |inliner| {
             inliner.fence_prefix_len(lower, upper, shared_len)
         });
@@ -359,3 +347,5 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'_>, K, V, S, 
         );
     }
 }
+
+impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> NodeChecks<K, V, S> for C {}

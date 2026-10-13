@@ -26,13 +26,16 @@
 
 use core::borrow::Borrow;
 
-use super::node::handle::{Edge, Internal, Leaf, NodeMut, Rebalance, Subtree};
+use super::node::Child;
 use super::node::inline_keys::{InlinedKey, SearchKey};
+use super::node::internal::Internal;
+use super::node::leaf::Leaf;
 use super::node::page::PageByKind;
 use super::path::{FirstEdge, MAX_HEIGHT, PathMut};
+use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Removes the entry whose key equals `key` and returns it, with the key
     /// as stored, counting it out of `length`; or `None` if there is none.
     ///
@@ -96,7 +99,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Removes the entry the path ends at and returns it, counting it out of
     /// `length`, fixing the nodes up the path, and leaves the path detached;
-    /// frees pages as [`Subtree::remove_entry`] does. Compares no keys.
+    /// frees pages as [`Root::remove_entry`] does. Compares no keys.
     ///
     /// # Panics
     ///
@@ -109,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         let separator_height = self.height();
         let separator_index = self.index();
         let (entry, changed) = if separator_height == 0 {
-            let (entry, _) = self.leaf_mut().kv_at(separator_index).remove();
+            let entry = self.leaf().remove(separator_index);
             (entry, self.fix_up_the_path(0, &mut release, |_| {}))
         } else {
             self.fit_left_of_separator();
@@ -118,15 +121,14 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             self.set_index(separator_index + 1);
             self.descend_to_leaf::<FirstEdge>();
             let succession = self
-                .leaf_mut()
-                .head()
-                .and_then(|head| head.remove_with_first_key())
+                .leaf()
+                .take_head_and_first_key()
                 .expect("the leaf right of a separator has a head and keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
             let changed = self.fix_up_the_path(separator_height, &mut release, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
-                replaced = Some(node.kv_at(separator_index).replace_separator(successor));
+                replaced = Some(node.replace_separator(separator_index, successor));
             });
             let replaced = replaced.expect("the path goes up past the separator");
             let key = (succession.removed_key)
@@ -150,7 +152,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         &mut self,
         must_reach: usize,
         release: &mut impl FnMut(PageByKind<K, V, S>),
-        mut at_must_reach: impl FnMut(NodeMut<'_, K, V, S, Internal>),
+        mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
         let mut changed = ChangedFences::up_to(must_reach);
         let mut child_lost_a_key = true;
@@ -159,17 +161,15 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             self.ascend();
             let (height, index) = (self.height(), self.index());
             changed.indexes[height] = index;
-            let mut node = self.internal_mut();
+            let node = self.internal();
             if height == must_reach {
-                at_must_reach(node.reborrow_mut());
+                at_must_reach(node);
             }
             if child_lost_a_key {
-                let leaf_children = node.has_leaf_children();
-                let child = node.edge_at(index);
-                let fix = if leaf_children {
-                    child.fix_underfull_child::<Leaf>(release)
+                let fix = if node.has_leaf_children() {
+                    node.fix_underfull_child::<Leaf<K, V, S>>(index, release)
                 } else {
-                    child.fix_underfull_child::<Internal>(release)
+                    node.fix_underfull_child::<Internal<K, V, S>>(index, release)
                 };
                 child_lost_a_key =
                     matches!(fix, ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRight);
@@ -270,57 +270,55 @@ impl ChangedFences {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'_, K, V, S, Internal>> {
-    /// Fixes the child at this edge if a removal left it underfull, one key
-    /// short of its `min_len` (D22): merges it with a sibling, the left one
-    /// if it has one, or, if the two don't fit in one node with the separator
-    /// between them, moves one entry over from the sibling. The page a merge
-    /// frees goes to `release`. Only a merge takes a key from this node.
+impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
+    /// Fixes the child at edge `index` if a removal left it underfull, one
+    /// key short of its minimum (D22): merges it with a sibling, the left
+    /// one if it has one, or, if the two don't fit in one node with the
+    /// separator between them, moves one entry over from the sibling. The
+    /// page a merge frees goes to `release`. Only a merge takes a key from
+    /// this node.
     ///
     /// A sibling too full to merge with holds more than `capacity - min_len`
     /// keys, so it can spare one; after at most `min_len` such steals in a
     /// row, the two fit.
     ///
-    /// The children are of kind `ChildKind`, which the caller decided once
-    /// for the node (`NodeRef::has_leaf_children`).
+    /// The children are of kind `C`, which the caller decided once for the
+    /// node ([`Internal::has_leaf_children`]).
     ///
     /// # Panics
     ///
     /// If the node has no keys, so that the child has no sibling: a node
     /// that a removal went through holds a key until it fixes its child,
-    /// which is the only time it can lose one. If the children are of the
-    /// other kind.
-    fn fix_underfull_child<ChildKind: Rebalance>(
+    /// which is the only time it can lose one.
+    fn fix_underfull_child<C: Child<K, V, S>>(
         self,
+        index: usize,
         release: &mut impl FnMut(PageByKind<K, V, S>),
     ) -> ChildFix {
-        if !self.reborrow().descend_as::<ChildKind>().is_underfull() {
+        if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;
         }
-        let (separator, child_is_right) = match self.left_kv() {
-            Ok(left_separator) => (left_separator, true),
-            Err(edge) => match edge.right_kv() {
-                Ok(right_separator) => (right_separator, false),
-                Err(_) => unreachable!("an internal node a removal went through has a key"),
-            },
-        };
-        let context = separator.into_balancing_context::<ChildKind>();
-        let left_len = context.left_child_len();
-        let mut context = match context.can_merge() {
-            Ok(mergeable) => {
-                release(mergeable.merge().1);
-                return if child_is_right {
-                    ChildFix::MergedIntoLeft { left_len }
-                } else {
-                    ChildFix::MergedRight
-                };
-            }
-            Err(context) => context,
-        };
-        let stolen = if child_is_right {
-            context.steal_left()
+        let (separator, child_is_right) = if index > 0 {
+            (index - 1, true)
+        } else if index < self.len() {
+            (index, false)
         } else {
-            context.steal_right()
+            unreachable!("an internal node a removal went through has a key")
+        };
+        let mut siblings = self.siblings::<C>(separator);
+        let left_len = siblings.left_len();
+        if siblings.can_merge() {
+            release(siblings.merge());
+            return if child_is_right {
+                ChildFix::MergedIntoLeft { left_len }
+            } else {
+                ChildFix::MergedRight
+            };
+        }
+        let stolen = if child_is_right {
+            siblings.steal_left()
+        } else {
+            siblings.steal_right()
         };
         stolen.expect("a sibling too full to merge with can spare a key");
         if child_is_right {

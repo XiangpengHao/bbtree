@@ -27,6 +27,7 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
+use super::layout::KeyArea;
 use super::node_plan::NodePlan;
 use super::page::{ByteString, InlineKeyNodeHeader, PageKind, SameType, StdInteger};
 use super::vector_count::VectorCount;
@@ -194,7 +195,7 @@ impl<K> KeyInliner<K> {
 pub(in crate::tree) trait InlineSlot: Copy + Ord + VectorCount {
     /// Whether one pass that counts every slot up to the capacity compiles
     /// to vector compares on the target, which makes it faster than a binary
-    /// search (`handle.rs`): 16- and 32-bit lanes on x86-64 and AArch64, but
+    /// search (`inline_key_search.rs`): 16- and 32-bit lanes on x86-64 and AArch64, but
     /// 64-bit ones only with AVX-512 (04, Q6).
     const COUNTS_IN_VECTORS: bool;
 
@@ -264,7 +265,7 @@ impl Window {
     /// What a key without inline keys carries: nothing a node stores.
     pub(super) const NONE: Self = Self::new(0, 0);
 
-    pub(super) const fn new(prefix_len: usize, inline_key: InlineWord) -> Self {
+    pub(in crate::tree) const fn new(prefix_len: usize, inline_key: InlineWord) -> Self {
         Self {
             prefix_len,
             inline_key,
@@ -656,7 +657,7 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
     /// Only recognized built-in byte orderings use fixed-word comparison;
     /// explicit strategies and unrecognized queries retain their `Ord`.
     #[inline]
-    pub(super) fn cmp_full(&self, stored: &K) -> Ordering
+    pub(in crate::tree) fn cmp_full(&self, stored: &K) -> Ordering
     where
         K: Borrow<Q>,
         Q: Ord,
@@ -749,6 +750,53 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
     }
 }
 
+/// The inline keys of a node's keys at a new prefix length, computed before
+/// any is written ([`Child::refit_prefix`](super::Child::refit_prefix)), kept at the node's width: as
+/// many as [`KeyArea::MAX_INLINE_KEYS_SIZE`] bytes hold, which every node's
+/// inline keys fit in (`tree/node/layout.rs`), on the stack.
+pub(super) enum RefitBuffer {
+    Two([u16; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
+    Four([u32; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
+    Eight([u64; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
+}
+
+impl RefitBuffer {
+    pub(super) fn new(width: InlineWidth) -> Self {
+        match width {
+            InlineWidth::Two => Self::Two([0; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
+            InlineWidth::Four => Self::Four([0; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
+            InlineWidth::Eight => Self::Eight([0; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
+        }
+    }
+
+    /// Keeps the first bytes of `window` as inline key `index`.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the buffer, which no node's key is.
+    pub(super) fn set(&mut self, index: usize, window: InlineWord) {
+        match self {
+            Self::Two(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+            Self::Four(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+            Self::Eight(inline_keys) => inline_keys[index] = InlineSlot::of_window(window),
+        }
+    }
+
+    /// Inline key `index`, as the window it starts.
+    fn inline_key(&self, index: usize) -> InlineWord {
+        match self {
+            Self::Two(inline_keys) => inline_keys[index].window(),
+            Self::Four(inline_keys) => inline_keys[index].window(),
+            Self::Eight(inline_keys) => inline_keys[index].window(),
+        }
+    }
+
+    /// The first `len` inline keys.
+    pub(super) fn inline_keys(&self, len: usize) -> impl ExactSizeIterator<Item = InlineWord> {
+        (0..len).map(|index| self.inline_key(index))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::borrow::ToOwned;
@@ -763,7 +811,8 @@ mod tests {
         WINDOW_LEN, Window,
     };
     use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
-    use crate::tree::node::handle::{Internal, Leaf};
+    use crate::tree::node::internal::Internal;
+    use crate::tree::node::leaf::Leaf;
     use crate::tree::test_support::TestRng;
 
     #[test]
@@ -894,7 +943,7 @@ mod tests {
     #[test]
     fn strategies_keep_their_keys_widths() {
         fn width<K, S: crate::InlineKeyStrategy<K>>() -> Option<InlineWidth> {
-            NodePlan::<K>::of::<S, Leaf>().inline_width()
+            NodePlan::<K>::of::<S, Leaf<K, (), S>>().inline_width()
         }
         assert_eq!(width::<String, Auto>(), Some(InlineWidth::Eight));
         assert_eq!(width::<[u8; 16], Auto>(), Some(InlineWidth::Two));
@@ -1132,8 +1181,12 @@ mod tests {
                     let key = SearchKey::<Vec<u8>, Auto, [u8]>::new(&search);
                     let target = key.inline_target(prefix_len).unwrap();
                     let compared = match width {
-                        InlineWidth::Four => key.cmp_tied::<Internal>(target, &stored),
-                        InlineWidth::Eight => key.cmp_tied::<Leaf>(target, &stored),
+                        InlineWidth::Four => {
+                            key.cmp_tied::<Internal<Vec<u8>, (), Auto>>(target, &stored)
+                        }
+                        InlineWidth::Eight => {
+                            key.cmp_tied::<Leaf<Vec<u8>, (), Auto>>(target, &stored)
+                        }
                         InlineWidth::Two => unreachable!(),
                     };
                     assert_eq!(compared, search.cmp(&stored));
@@ -1144,7 +1197,10 @@ mod tests {
         let key = SearchKey::<UserName, WithInlineKey, UserName>::new(&name);
         let target = key.inline_target(0).unwrap();
         assert_eq!(
-            key.cmp_tied::<Internal>(target, &UserName("ferrit".to_owned())),
+            key.cmp_tied::<Internal<UserName, (), WithInlineKey>>(
+                target,
+                &UserName("ferrit".to_owned())
+            ),
             Ordering::Less
         );
     }
@@ -1313,7 +1369,10 @@ mod tests {
             stored[2 + rng.below(18)] = rng.below(256) as u8;
             let key: SearchKey<'_, [u8; 20], Auto, [u8; 20]> = SearchKey::new(&search);
             let target = key.inline_target(0).unwrap();
-            assert_eq!(key.cmp_tied::<Leaf>(target, &stored), search.cmp(&stored));
+            assert_eq!(
+                key.cmp_tied::<Leaf<[u8; 20], (), Auto>>(target, &stored),
+                search.cmp(&stored)
+            );
         }
     }
 
@@ -1323,7 +1382,7 @@ mod tests {
     fn arrays_compare_short_borrowed_slices() {
         let key = SearchKey::<[u8; 20], Auto, [u8]>::new(&[0, 0, 1]);
         assert_eq!(
-            key.cmp_tied::<Leaf>(key.inline_target(0).unwrap(), &[0; 20]),
+            key.cmp_tied::<Leaf<[u8; 20], (), Auto>>(key.inline_target(0).unwrap(), &[0; 20]),
             Ordering::Greater,
             "a shorter slice can sort after the array despite a tied prefix"
         );
@@ -1336,7 +1395,7 @@ mod tests {
                     let key = SearchKey::<[u8; 20], Auto, [u8]>::new(search);
                     let target = key.inline_target(0).unwrap();
                     assert_eq!(
-                        key.cmp_tied::<Internal>(target, &stored),
+                        key.cmp_tied::<Internal<[u8; 20], (), Auto>>(target, &stored),
                         search.cmp(&stored),
                         "{len} bytes, byte {changed} = {byte}"
                     );

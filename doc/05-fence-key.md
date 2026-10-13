@@ -1,12 +1,13 @@
 # 05 — Fence keys: per-node prefix stripping
 
 Status: implemented (D26), in `tree/prefix.rs` and the node operations of
-`tree/node/handle.rs`; measured in "Measured". Builds on inline keys
+`tree/node/leaf.rs` and `tree/node/internal.rs`; measured in "Measured". Builds on inline keys
 (04-inline-key.md). Applies to every key with inline keys: std byte strings,
 byte arrays and the 64- and 128-bit integers under `Auto`, and keys with an
 `InlineKey` impl under `WithInlineKey`, through their encoding. Where a
-fence is missing, on the root and the borders, the tree's shared prefix
-stands in (D50, "The shared prefix"), in `tree/node/shared_prefix.rs`.
+fence is missing, on the root and the borders, the root's fences, the
+tree's shared prefix, stand in (D50, "The shared prefix"), in
+`tree/root.rs` and `tree/shared_prefix.rs`.
 
 ## Problem
 
@@ -156,7 +157,7 @@ An operation does its upkeep in two steps:
   bytes it needs, both filled from that key. At `d ≥ 8`, every window is
   that one.
 - **Once the entry is counted, the nodes whose fences changed fit them**
-  (`NodeMut::refit_prefix`): each reads its two fences, and, if what they
+  (`Child::refit_prefix`): each reads its two fences, and, if what they
   share changed, its keys. A node whose first and last inline keys differ
   in their first byte reads neither: its fences lie outside its keys, so
   they share no more than its prefix, and fitting only ever grows one. On
@@ -206,16 +207,18 @@ An operation does its upkeep in two steps:
 
 ## The shared prefix (D50)
 
-A node on a border has one fence, the root none: fences give them nothing,
-yet their keys often share many bytes (dense integers, UUIDv7-like arrays,
-paths behind a common head). Every window there ties, and searches compare
-whole keys.
+The root has no parent, so no separator above it gives it fences, and a
+node on a border has no separator above it on one side: they would get
+nothing from fences, yet their keys often share many bytes (dense integers,
+UUIDv7-like arrays, paths behind a common head). Every window there ties,
+and searches compare whole keys.
 
-- **Kept** by the tree, beside its root: the leading bytes of the encoding
-  every key shares, up to 64, by their bytes for byte strings and by their
-  encoding otherwise (`SharedPrefix`). The root and the border nodes take
-  its length as their prefix, so `prefix_len` is what a node's fences
-  share, a missing fence counting as the shared bytes.
+- **Kept** by the root, as its fences (`Root`): the leading bytes of the
+  encoding every key shares, up to 64, by their bytes for byte strings and
+  by their encoding otherwise (`SharedPrefix`). A node with no separator
+  above it on a side takes the root's fence there, so the root and the
+  border nodes take its length as their prefix, and `prefix_len` is what
+  every node's fences share.
 - **Search:** a query is checked against the bytes once, before the root;
   one without them sorts before or after every key, and reads no node.
   Every query that goes down has them, so every node skips its prefix

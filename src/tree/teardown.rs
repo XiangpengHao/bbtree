@@ -1,16 +1,25 @@
-//! Taking an owned tree apart: [`Subtree::destroy`], a walk that moves
-//! every entry out from the front and frees each node once past it
+//! Taking an owned tree apart: [`Root::destroy`], a walk that moves every
+//! entry out from the front and frees each node once past it
 //! ([`DyingWalk`]), dropped at once.
 
 #![forbid(unsafe_code)]
 
-use super::node::handle::{ForceResult, LeafOrInternal, NodeKind, NodeMut, Subtree};
+use super::node::Node;
 use super::node::page::PageByKind;
+use super::root::Root;
 use super::walk::DyingWalk;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
-    /// Drops every key and value in ascending key order, each key before its
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+    /// Takes the tree apart; see [`Node::destroy`].
+    pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
+        self.into_top().destroy(release);
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// Takes apart this node and every node under it, which the caller owns:
+    /// drops every key and value in ascending key order, each key before its
     /// value, as std's `BTreeMap` does (D1), and hands every page to
     /// `release`, sorted by the kind of node it held. A separator's value is
     /// its right leaf's head (D17), dropped right after the separator's key;
@@ -18,39 +27,31 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
     /// as a split's right half has, goes first, its key, where separator keys
     /// are heads (D49), before it.
     ///
-    /// The tree must be well-formed: every leaf right of a separator has a
+    /// The nodes must be well-formed: every leaf right of a separator has a
     /// head (D17).
     ///
-    /// If a key's or value's `Drop` panics, the rest of the tree is still
-    /// taken apart, in the same order, before the panic goes on, as in std's
-    /// collections: either way, every key and value is dropped once and every
-    /// page released once. A second panic while doing so aborts, as any panic
+    /// If a key's or value's `Drop` panics, the rest is still taken apart, in
+    /// the same order, before the panic goes on, as in std's collections:
+    /// either way, every key and value is dropped once and every page
+    /// released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
     pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
-        let mut tree = self.forget_type();
-        let head = tree.borrow_mut().take_leftmost_head();
+        let head = self.take_leftmost_head();
         // Without a count of the entries, the walk ends where the tree does:
         // only its front moves.
-        let walk = DyingWalk::new(Some(tree), usize::MAX, release);
+        let walk = DyingWalk::new(Some(self), usize::MAX, release);
         drop(head);
         drop(walk);
     }
-}
 
-impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
     /// Takes the head out of the leftmost leaf under this node, if it has
     /// one, with its key where separator keys are heads (D49).
     fn take_leftmost_head(self) -> Option<(Option<K>, V)> {
         let mut node = self;
         loop {
-            node = match node.force() {
-                ForceResult::Leaf(leaf) => {
-                    return leaf.head().map(|head| {
-                        let (key, value, _) = head.remove();
-                        (key, value)
-                    });
-                }
-                ForceResult::Internal(internal) => internal.first_edge().descend(),
+            node = match node {
+                Node::Leaf(leaf) => return leaf.has_head().then(|| leaf.take_head()),
+                Node::Internal(internal) => internal.child(0),
             };
         }
     }

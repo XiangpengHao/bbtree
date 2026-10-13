@@ -278,10 +278,10 @@ Design in 04-inline-key.md.
   misses behind the previous one's: one forwarding conflict per map,
   28.2 → 11.5 ns per entry for 1M 4-entry maps once removed.
 - **Sizes:** `Iter` 560 B, `Range` 552 B (D33, D35; std's `Iter`: 72 B).
-- **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) use a `ValMut`
-  borrow type, as std's do: its handles copy, so both ends hold some, and
-  only read the structure and keys; handing out a value as `&mut V` is
-  unsafe. The walks vouch for handing out each value once: their ends move
+- **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) give their
+  paths a `ValMut` borrow type, as std's give their handles: the paths
+  copy, so both ends hold some, and only read the structure and keys;
+  handing out a value as `&mut V` is unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
   (range).
 - **Owning iteration** (`DyingWalk`, for `IntoIter` and for dropping a
@@ -289,7 +289,7 @@ Design in 04-inline-key.md.
   is moved out of its slot, nothing shifts and nothing rebalances, and an
   end frees each node as it goes up out of it, past its last edge (its
   first, going backward); the nodes on the path where the ends meet go
-  last. A `Dying` borrow type's handles copy, so both ends hold some;
+  last. Paths of the `Dying` borrow type copy, so both ends hold some;
   moving an entry out and freeing a node are unsafe, vouched for by the
   walk. Entries without drop glue are skipped a leaf at a time when the map
   is dropped. 1M entries, one run (ns per entry): consuming `for` loop,
@@ -319,10 +319,11 @@ Design in 04-inline-key.md.
 
 - **One type** (`tree/path.rs`): the node at each height from the root
   down to a position in one of them, and the index taken at each, as a
-  `u16`. It stands for a borrow of the whole tree: shared or value-mutating
-  paths copy handles out, and an exclusive path (`PathMut`) lends one handle
-  at a time, to its bottom node, from which nothing leads up, and holds the
-  `&mut` of the tree to grow a new root.
+  `u16`. It stands for a borrow of the whole tree, which its borrow type
+  says: shared, value-mutating and dying paths copy, and an exclusive path
+  (`PathMut`) changes the tree through its bottom node, from which nothing
+  leads up, and holds the `&mut` of the root to grow a new one. The nodes
+  it hands out are plain handles (D14).
 - **Who uses it:**
   - an insert that reaches a full leaf searches down one (D37), inserts at
     the leaf, carries splits up the path, then goes back down through the
@@ -430,23 +431,22 @@ Design and measurements in 05-fence-key.md.
 **D28. Branch early, loop late: a node's kind is decided once per step.** (2026-10-09)
 
 - **The rule:** a traversal decides whether a node is a leaf or internal
-  once, at the top of each step (`NodeRef::force`, or the height a loop
-  already knows), and the code after it is for that kind. Likewise a choice
-  fixed for a whole loop, such as the end a border is on, is made before
-  the loop, as a type.
-- **Enforced by the types:** what depends on the kind, a node's capacity
-  and where its slots are, is only for `PageKind` handles (`Leaf`,
-  `Internal`); a `LeafOrInternal` handle can only be told its kind.
-  Deciding inside each method instead had a descent decide it three to six
-  times per level, and a steal or merge five to eight times.
-- **What it took:** the descent forces each level once and searches it as
-  that kind; `TrailingSlots` (a leaf's head and values, an internal node's
-  edges) makes splitting, stealing and merging one code for both kinds;
-  `BalancingContext` is typed by its children's kind, which
-  `has_leaf_children` decides once per node; a walk's cursor reads its leaf
-  edge without deciding (its invariant); prefix refits take the kind as a
-  type (`PrefixGrowth`); `NodeEnd` is a type (`FirstEdge`, `LastEdge`);
-  `append` builds through one `extend`.
+  once, where it reads the node's page from an edge, a path or the root
+  (`Node::at`, the one cast, from the height), and the code after it is for
+  that kind. Likewise a choice fixed for a whole loop, such as the end a
+  border is on, is made before the loop, as a type.
+- **Enforced by the types:** each kind is its own type (D51), and what
+  depends on the kind, a node's capacity and where its slots are, is in
+  that type's code alone. Deciding inside each method instead had a descent
+  decide it three to six times per level, and a steal or merge five to
+  eight times.
+- **What it takes:** a descent decides the root's kind once, then loops
+  over internal nodes, the leaf's search after the loop; going down an
+  edge, an internal node's height tells its children's kind. Code for
+  either kind of children (`Siblings`, prefix fits) goes through `Child`,
+  decided once per node (`has_leaf_children`); a walk's cursor reads its
+  leaf edge without deciding (its invariant); `NodeEnd` is a type
+  (`FirstEdge`, `LastEdge`); `append` builds through one `extend`.
 - **Why:** the inline-key count of a node with 8-byte inline keys was one
   `filter().count()` in two arms, a leaf's and an internal node's; where
   their capacities differed, LLVM summed the compares' bits one at a time.
@@ -705,10 +705,15 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   - A recognized byte-string query holds a plain slice view instead of an
     `Option`; the type checks that recognize it also guard its accessor.
     Unknown borrowed query types still use `Ord`.
-  - The thin `NodeRef::search` adapter, which only re-attaches the
-    caller's node and height to the found index, is `#[inline(always)]`.
-    The search body is inlined for fixed-width keys and left to LLVM for
-    heap strings (`NodePlan::inlines_node_search`).
+  - The thin `search` adapter of each node kind, which only picks the
+    search body by the plan, is `#[inline(always)]`. The search body is
+    inlined for fixed-width keys and left to LLVM for heap strings
+    (`NodePlan::inlines_node_search`), except in an insert's search, which
+    always inlines its leaf's (`Leaf::search_inlined`): out of line, it cost
+    a random JSON insert 40 instructions more (D51).
+  - A lookup that ends at a separator reads its value out of line
+    (`Found::separator_key_value`): inlined, the walk down to the head made
+    LLVM keep a counter for it in every descent's loop (D51).
   - The shared-prefix check (D50) on heap strings compares 32 bytes at a
     time, inline.
   - Native 8-byte leaf summaries use an equality mask.
@@ -903,14 +908,15 @@ Design, census and measurements in 11-separator-key.md.
 - **Open:** ties walk: `u64` and `hash32` misses, and paths, which tie
   about once per lookup.
 
-**D50. The tree keeps what every key shares; border nodes take it as their prefix.** (2026-10-13)
+**D50. The root keeps what every key shares as its fences; border nodes take them.** (2026-10-13)
 Design in 05-fence-key.md, "The shared prefix".
 
-- **What:** beside its root, a tree keeps the leading bytes of the
-  encoding every key shares (D18), up to 64 (`SharedPrefix`,
-  `tree/node/shared_prefix.rs`): one pointer, null while nothing is shared.
-  The root and the nodes along the borders, which lack a fence, take its
-  length as their prefix, where they had 0 (D26). Every key with inline
+- **What:** the root has no parent to give it fences, so the tree keeps
+  them with it (`Root`, D51): the leading bytes of the encoding every key
+  shares (D18), up to 64 (`SharedPrefix`, `tree/shared_prefix.rs`), one
+  pointer, null while nothing is shared. The root, and every node with no
+  separator above it on a side, along the tree's borders, take its length
+  as their prefix, where they had 0 (D26). Every key with inline
   keys gets it, `InlineKey` impls included.
 - **Search:** a lookup, an entry, a range bound or an insert checks the
   query against those bytes once, before the root. A query without them
@@ -953,6 +959,42 @@ Design in 05-fence-key.md, "The shared prefix".
   Not measured again: UUIDv7-like `[u8; 16]` at 1k, 27.7 → 7.5 ns with
   local prefixes, whose root's local prefix was what every key shares.
 
+**D51. A root, internal nodes and leaves, each its own type.** (2026-10-13)
+Design in 12-tree-structure.md.
+
+- **What:** `Leaf` and `Internal` are page handles with the operations of
+  their kind, and `Root` owns the tree: the top node and its height, its
+  fences as the shared prefix (D50), and the append hint (D45). `Node`, a
+  leaf or an internal node by its height, is what an edge, a path or the
+  root leads to, and the one place a kind is decided (D28). What both
+  kinds share is composition (pages, slots, inline-key column) and `Child`,
+  for code that works at either level: `Siblings` (merges and moves
+  between children), joins and prefix fits.
+- **Why:** leaves and internal nodes diverged (D29, D36, D49), but a handle
+  generic over kind pushed both through one interface, and the root's
+  state sat on a type every split half also was. With one type per role,
+  each kind's layout and search change without the other's.
+- **Measured** against D50, one run each (ns per op; instructions in
+  brackets), 10M but paths at 1M:
+
+  | cell | before | after |
+  |---|--:|--:|
+  | `u64` hit / miss | 128 / 92 [240 / 215] | 125 / 90 [211 / 187] |
+  | `u64` dense hit / miss | 134 / 94 [294 / 270] | 133 / 89 [263 / 240] |
+  | `hash32` hit / miss | 148 / 104 [264 / 232] | 152 / 108 [258 / 228] |
+  | JSON hit / miss | 240 / 191 [385 / 347] | 238 / 187 [374 / 338] |
+  | paths 1M hit / miss | 376 / 322 [642 / 575] | 375 / 292 [607 / 545] |
+  | `u64`, dense `u64`, `hash32` random insert | 140, 150, 171 [347, 437, 394] | 147, 148, 174 [343, 438, 399] |
+  | JSON, paths 1M random insert | 240, 421 [603, 1,187] | 248, 371 [609, 1,201] |
+  | `u64` random remove, `range64` | 253, 630 [651, 1,593] | 250, 625 [649, 1,588] |
+
+  Times vary by about 10 ns between runs of one binary. JSON inserts ran
+  3% slower in each of three runs, with 6 more branches each.
+- **Pitfalls:** LLVM inlined differently once one function served what
+  per-borrow-type copies had: lookups went 4 instructions up until the
+  walk to a found separator's head moved out of line (D41), and JSON
+  inserts 40 until their leaf search was forced inline (D41).
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a path stack.** (2026-10-07)
@@ -972,30 +1014,36 @@ Design in 05-fence-key.md, "The shared prefix".
 
 ## Safety
 
-**D14. Unsafe lives behind zero-overhead typed abstractions.** (2026-10-07)
-Every runtime fact the unsafe code needs is a check the B-tree algorithm
-already makes for its own reasons (is the node full? does the merge fit? is
-this a leaf?). That check returns a token, and the unchecked operation
-requires the token: one check, no duplicates, nothing on the hot path.
+**D14. Types make safe what is stable; explored code keeps plain contracts.** (2026-10-07)
+The node code, its layouts, prefixes and searches, keeps changing (D26–D50),
+so a node handle is a page pointer with no access of its own, whose
+contracts, access, positions and room, the code that holds it keeps by hand
+(`tree/node/mod.rs`); what has stopped changing keeps its types (D51).
 
 - **One memory primitive:** `Slots<T>`, a fixed-capacity array of slots in a
   page, side by side or a stride apart (keys, values, edges, inline keys).
   Insert, remove, move a run to another node, view as a slice. Written and
   tested once (`tree/node/slots.rs`).
-- **Positions are proofs:** `Edge` (index ≤ len) and `Kv` (index < len).
-  They come from our own search (in bounds for any `Ord`), first/last
-  positions, or checked constructors that are off the hot path.
-- **Room and merge are tokens:** the insert-or-split decision yields the token
-  `insert_fit` needs; the should-we-merge check yields the token `merge` needs.
-- **Handles carry the height,** so `force` (leaf or internal) and `descend`
-  are safe; no caller ever asserts a node's kind.
-- **Edges come only from owned subtrees:** `Subtree { ptr, height }` goes in,
-  and removing an edge gives one back. The height match is asserted on
-  split/merge, off the hot path.
-- **Paths lend one mutable node at a time** (built with the tree layer).
-- **Enforced:** `#![forbid(unsafe_code)]` in every module except the slots,
-  handle, page and vector-count modules of `tree/node/`, and the tree's
-  path and walk modules.
+- **Pages are owned until a node holds them:** `FreshPage`, typed by the
+  kind of node it is for, is the only way to make a node and what a node
+  turns back into.
+- **Paths and walks carry a borrow type** (`Immut`, `Mut`, `ValMut`,
+  `Dying`): it makes them `Send` and `Sync` as the borrow they stand for,
+  and the walks hand out each entry once by construction (D23).
+- **Checks the algorithm makes anyway, once:** room before an insert,
+  whether siblings fit before a merge, a node's kind from its height. A
+  method on the hot path checks positions and room in debug builds only;
+  one off it checks them always.
+- **Enforced:** `#![forbid(unsafe_code)]` in every module except the node
+  modules that touch pages (`node/mod.rs`, `page.rs`, `slots.rs`,
+  `leaf.rs`, `internal.rs`, `siblings.rs`, `inline_key_search.rs`,
+  `vector_count.rs`), and the tree's `root.rs`, `path.rs`, `search.rs` and
+  `walk.rs`.
+- **Was:** after std's `node.rs`, one handle generic over access and kind,
+  positions and room as proof types, and edges as owned subtrees; it froze
+  the structure the proofs were about, and pushed leaves and internal nodes
+  through one interface (12-tree-structure.md). Which contracts get types
+  again is phase 2's question, once the design settles.
 
 **D44. A child's prefix is never shorter than its parent's, even with a lying encoding.** (2026-10-10)
 

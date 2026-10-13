@@ -1,18 +1,19 @@
-//! Copying an owned tree: [`Subtree::clone_tree`], node by node, so that the
+//! Copying an owned tree: [`Root::clone_tree`], node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
 //! `Ord` and no `InlineKey`: every inline key is copied (D18), every node's
 //! prefix length (05-fence-key.md), and what every key shares (D50).
 
 #![forbid(unsafe_code)]
 
-use super::node::handle::{
-    EdgeRoom, ForceResult, Immut, LeafOrInternal, NodeKind, NodeRef, Subtree,
-};
+use super::node::Node;
 use super::node::inline_keys::{InlinedKey, Separator};
+use super::node::internal::Internal;
+use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageByKind};
+use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// A copy of the tree, with every key and value cloned in key order,
     /// each separator's value right after its key (D17), its head's own
     /// where separator keys are heads (D49), on pages from the global
@@ -22,64 +23,55 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// released, before the panic goes on: nothing leaks, and the tree is
     /// unchanged.
     pub(crate) fn clone_tree(&self) -> Self {
-        let mut copy = Self::clone_subtree(self.borrow());
-        *copy.shared_prefix_mut() = self.shared_prefix().clone();
-        copy
+        Root::new(self.top().clone_nodes(), self.shared_prefix().clone())
     }
+}
 
-    fn clone_subtree(node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>) -> Self {
-        match node.force() {
-            ForceResult::Leaf(leaf) => {
-                let mut copy = PartialCopy::new(Subtree::new_leaf(FreshPage::allocate()));
-                let mut copy_leaf = copy.tree_mut().borrow_mut();
-                if let Some(head) = leaf.head() {
-                    let (key, value) = head.into_key_and_value();
-                    let key = key.cloned();
-                    copy_leaf.put_head(key, value.clone());
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// A copy of this node and every node under it, which nothing owns until
+    /// the caller hangs it under an edge or makes it a tree's root.
+    fn clone_nodes(self) -> Self {
+        match self {
+            Node::Leaf(leaf) => {
+                let copy = Leaf::new(FreshPage::allocate());
+                let guard = PartialCopy::new(Node::Leaf(copy));
+                if leaf.has_head() {
+                    let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
+                        .then(|| leaf.head_key().clone());
+                    copy.put_head(key, leaf.head_value().clone());
                 }
-                copy_leaf.set_empty_prefix_len(leaf.prefix_len());
-                let mut edge = leaf.first_edge();
-                while let Ok(kv) = edge.right_kv() {
-                    let window = kv.window();
-                    let (key, value) = kv.into_key_value();
+                copy.set_empty_prefix_len(leaf.prefix_len());
+                for index in 0..leaf.len() {
+                    let window = leaf.window(index);
+                    let (key, value) = leaf.key_value(index);
                     let key = InlinedKey::from_parts(key.clone(), window);
                     let value = value.clone();
-                    let EdgeRoom::Fits(copy_edge) =
-                        copy_leaf.reborrow_mut().last_edge().check_room()
-                    else {
-                        unreachable!("a leaf's entries fit in a leaf of its kind");
-                    };
-                    copy_edge.insert_fit(key, value);
-                    edge = kv.right_edge();
+                    // A leaf's entries fit in a leaf of its kind.
+                    copy.insert_fit(index, key, value);
                 }
-                copy.finish().forget_type()
+                guard.finish()
             }
-            ForceResult::Internal(internal) => {
-                let first_child = Self::clone_subtree(internal.first_edge().descend());
-                let mut copy = PartialCopy::new(first_child);
-                let mut copy_root = copy.tree_mut().push_internal_level(FreshPage::allocate());
-                copy_root.set_empty_prefix_len(internal.prefix_len());
-                let mut edge = internal.first_edge();
-                while let Ok(separator) = edge.right_kv() {
-                    let window = separator.window();
+            Node::Internal(internal) => {
+                let first_child = internal.child(0).clone_nodes();
+                let guard = PartialCopy::new(first_child);
+                let copy = Internal::new(FreshPage::allocate(), first_child);
+                let guard = guard.grown(Node::Internal(copy));
+                copy.set_empty_prefix_len(internal.prefix_len());
+                for index in 0..internal.len() {
+                    let window = internal.window(index);
                     // Where separator keys are heads (D49), the leaf copies
                     // them, as it copies its head.
-                    let key = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                    let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
                         Separator::without_key(window)
                     } else {
-                        let key = separator.into_key().clone();
+                        let key = internal.key(index).clone();
                         Separator::with_key(InlinedKey::from_parts(key, window))
                     };
-                    let child = Self::clone_subtree(separator.right_edge().descend());
-                    let EdgeRoom::Fits(copy_edge) =
-                        copy_root.reborrow_mut().last_edge().check_room()
-                    else {
-                        unreachable!("a node's separators fit in a node of its kind");
-                    };
-                    copy_edge.insert_fit(key, child);
-                    edge = separator.right_edge();
+                    let child = internal.child(index + 1).clone_nodes();
+                    // A node's separators fit in a node of its kind.
+                    copy.insert_fit(index, separator, child);
                 }
-                copy.finish()
+                guard.finish()
             }
         }
     }
@@ -87,33 +79,33 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
 
 /// A copy being made: taken apart if a `clone` panics, so that nothing
 /// cloned so far leaks.
-struct PartialCopy<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> {
-    /// `None` once finished.
-    tree: Option<Subtree<K, V, S, Kind>>,
+struct PartialCopy<K, V, S: InlineKeyStrategy<K>> {
+    /// The top of what was copied so far; `None` once finished.
+    top: Option<Node<K, V, S>>,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> PartialCopy<K, V, S, Kind> {
-    fn new(tree: Subtree<K, V, S, Kind>) -> Self {
-        Self { tree: Some(tree) }
+impl<K, V, S: InlineKeyStrategy<K>> PartialCopy<K, V, S> {
+    fn new(top: Node<K, V, S>) -> Self {
+        Self { top: Some(top) }
     }
 
-    fn tree_mut(&mut self) -> &mut Subtree<K, V, S, Kind> {
-        self.tree
-            .as_mut()
-            .expect("a copy is unfinished until `finish`")
+    /// The copy, with `top` above what it held, which `top` owns now.
+    fn grown(mut self, top: Node<K, V, S>) -> Self {
+        self.top = Some(top);
+        self
     }
 
-    fn finish(mut self) -> Subtree<K, V, S, Kind> {
-        self.tree
+    fn finish(mut self) -> Node<K, V, S> {
+        self.top
             .take()
             .expect("a copy is unfinished until `finish`")
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Drop for PartialCopy<K, V, S, Kind> {
+impl<K, V, S: InlineKeyStrategy<K>> Drop for PartialCopy<K, V, S> {
     fn drop(&mut self) {
-        if let Some(tree) = self.tree.take() {
-            tree.destroy(PageByKind::deallocate);
+        if let Some(top) = self.top.take() {
+            top.destroy(PageByKind::deallocate);
         }
     }
 }

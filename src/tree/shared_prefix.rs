@@ -10,7 +10,7 @@ use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 
-use super::inline_keys::{KeyInliner, SearchKey, Window};
+use super::node::inline_keys::{KeyInliner, SearchKey, Window};
 use crate::inline_key::{InlineKey, InlineKeyStrategy};
 
 /// The leading bytes of the encoding of every key of a tree (D18), as many

@@ -31,7 +31,8 @@
 //! calls no user code, so its internal nodes may read a window's other
 //! bytes from the key while keys move (D43).
 //!
-//! Layouts (`layout.rs`), slots (`slots.rs`), searches (`handle.rs`) and
+//! Layouts (`layout.rs`), slots (`slots.rs`), searches (`leaf.rs`,
+//! `internal.rs`) and
 //! prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`) read the plan; none of
 //! them asks what the key type is.
 //!
@@ -236,7 +237,8 @@ impl<K> NodePlan<K> {
         self.whole_key_equality
     }
 
-    /// Whether every search inlines its node search (`handle.rs`), or
+    /// Whether every search inlines its node search (`leaf.rs`,
+    /// `internal.rs`), or
     /// leaves that to LLVM at each caller, as for std heap byte strings.
     /// Other keys' node searches are short, and LLVM, weighing the local
     /// prefix branch, outlined some, each level then returning through the
@@ -299,7 +301,8 @@ mod tests {
 
     use super::{KeySearch, NodePlan};
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
-    use crate::tree::node::handle::{Internal, Leaf};
+    use crate::tree::node::internal::Internal;
+    use crate::tree::node::leaf::Leaf;
     use crate::tree::node::page::PageKind;
     use crate::tree::test_support::Tracked;
 
@@ -354,12 +357,21 @@ mod tests {
     #[test]
     fn keys_without_inline_keys_store_nothing_else() {
         let plain = PlanRow::without_inline_keys(KeySearch::Branchless);
-        assert_eq!(PlanRow::of::<u32, Auto, Leaf>(), plain);
-        assert_eq!(PlanRow::of::<u32, Auto, Internal>(), plain);
-        assert_eq!(PlanRow::of::<[u8; 8], Auto, Leaf>(), plain);
+        assert_eq!(PlanRow::of::<u32, Auto, Leaf<u32, (), Auto>>(), plain);
+        assert_eq!(PlanRow::of::<u32, Auto, Internal<u32, (), Auto>>(), plain);
+        assert_eq!(
+            PlanRow::of::<[u8; 8], Auto, Leaf<[u8; 8], (), Auto>>(),
+            plain
+        );
         let plain = PlanRow::without_inline_keys(KeySearch::Binary);
-        assert_eq!(PlanRow::of::<Tracked<'_>, Auto, Leaf>(), plain);
-        assert_eq!(PlanRow::of::<Vec<i8>, Auto, Internal>(), plain);
+        assert_eq!(
+            PlanRow::of::<Tracked<'_>, Auto, Leaf<Tracked<'_>, (), Auto>>(),
+            plain
+        );
+        assert_eq!(
+            PlanRow::of::<Vec<i8>, Auto, Internal<Vec<i8>, (), Auto>>(),
+            plain
+        );
     }
 
     #[test]
@@ -368,22 +380,31 @@ mod tests {
             inline_width: Some(InlineWidth::Two),
             ..PlanRow::without_inline_keys(KeySearch::Branchless)
         };
-        assert_eq!(PlanRow::of::<u64, Auto, Leaf>(), two_bytes);
-        assert_eq!(PlanRow::of::<i128, Auto, Internal>(), two_bytes);
-        assert_eq!(PlanRow::of::<u64, WithInlineKey, Internal>(), two_bytes);
+        assert_eq!(PlanRow::of::<u64, Auto, Leaf<u64, (), Auto>>(), two_bytes);
+        assert_eq!(
+            PlanRow::of::<i128, Auto, Internal<i128, (), Auto>>(),
+            two_bytes
+        );
+        assert_eq!(
+            PlanRow::of::<u64, WithInlineKey, Internal<u64, (), WithInlineKey>>(),
+            two_bytes
+        );
 
         // A std byte string under `WithInlineKey` is a key like any other.
         let eight_bytes = PlanRow {
             inline_width: Some(InlineWidth::Eight),
             ..PlanRow::without_inline_keys(KeySearch::Binary)
         };
-        assert_eq!(PlanRow::of::<String, WithInlineKey, Leaf>(), eight_bytes);
         assert_eq!(
-            PlanRow::of::<String, WithInlineKey, Internal>(),
+            PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
             eight_bytes
         );
         assert_eq!(
-            PlanRow::of::<[u8; 32], WithInlineKey, Internal>(),
+            PlanRow::of::<String, WithInlineKey, Internal<String, (), WithInlineKey>>(),
+            eight_bytes
+        );
+        assert_eq!(
+            PlanRow::of::<[u8; 32], WithInlineKey, Internal<[u8; 32], (), WithInlineKey>>(),
             eight_bytes
         );
     }
@@ -392,18 +413,18 @@ mod tests {
     fn byte_arrays_keep_two_bytes() {
         for (leaf, internal, full_search) in [
             (
-                PlanRow::of::<[u8; 16], Auto, Leaf>(),
-                PlanRow::of::<[u8; 16], Auto, Internal>(),
+                PlanRow::of::<[u8; 16], Auto, Leaf<[u8; 16], (), Auto>>(),
+                PlanRow::of::<[u8; 16], Auto, Internal<[u8; 16], (), Auto>>(),
                 KeySearch::Branchless,
             ),
             (
-                PlanRow::of::<[u8; 20], Auto, Leaf>(),
-                PlanRow::of::<[u8; 20], Auto, Internal>(),
+                PlanRow::of::<[u8; 20], Auto, Leaf<[u8; 20], (), Auto>>(),
+                PlanRow::of::<[u8; 20], Auto, Internal<[u8; 20], (), Auto>>(),
                 KeySearch::Binary,
             ),
             (
-                PlanRow::of::<[u8; 32], Auto, Leaf>(),
-                PlanRow::of::<[u8; 32], Auto, Internal>(),
+                PlanRow::of::<[u8; 32], Auto, Leaf<[u8; 32], (), Auto>>(),
+                PlanRow::of::<[u8; 32], Auto, Internal<[u8; 32], (), Auto>>(),
                 KeySearch::Binary,
             ),
         ] {
@@ -426,7 +447,7 @@ mod tests {
                 ..PlanRow::without_inline_keys(full_search)
             };
             assert_eq!(
-                PlanRow::of::<K, Auto, Leaf>(),
+                PlanRow::of::<K, Auto, Leaf<K, (), Auto>>(),
                 PlanRow {
                     inline_width: Some(InlineWidth::Eight),
                     length_tags: true,
@@ -434,7 +455,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                PlanRow::of::<K, Auto, Internal>(),
+                PlanRow::of::<K, Auto, Internal<K, (), Auto>>(),
                 PlanRow {
                     inline_width: Some(InlineWidth::Four),
                     rehydrates_windows: true,
@@ -452,10 +473,10 @@ mod tests {
 
     #[test]
     fn length_tags_are_byte_lengths() {
-        let leaf = NodePlan::<String>::of::<Auto, Leaf>();
+        let leaf = NodePlan::<String>::of::<Auto, Leaf<String, (), Auto>>();
         assert_eq!(leaf.length_tag(&String::from("tags")), Some(4));
         assert_eq!(leaf.length_tag(&"x".repeat(65_537)), Some(1));
-        let internal = NodePlan::<String>::of::<Auto, Internal>();
+        let internal = NodePlan::<String>::of::<Auto, Internal<String, (), Auto>>();
         assert_eq!(internal.length_tag(&String::from("tags")), None);
     }
 }

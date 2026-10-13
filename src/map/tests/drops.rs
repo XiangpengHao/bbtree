@@ -921,8 +921,9 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
-    use crate::tree::node::handle::{EdgeRoom, ForceResult};
+    use crate::tree::node::Node;
     use crate::tree::node::inline_keys::SearchKey;
+    use crate::tree::node::leaf::Leaf;
 
     let budget = Cell::new(usize::MAX);
     let mut map = BBTreeMap::new();
@@ -930,10 +931,10 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     loop {
         map.insert(BudgetedKey::new(count, &budget), count);
         count += 1;
-        let ForceResult::Leaf(leaf) = map.root.as_mut().unwrap().borrow_mut().force() else {
+        let Node::Leaf(leaf) = map.root.as_mut().unwrap().top() else {
             panic!("stop before the first split");
         };
-        if matches!(leaf.last_edge().check_room(), EdgeRoom::Full(_)) {
+        if leaf.len() == Leaf::<BudgetedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
             break;
         }
     }
@@ -943,8 +944,8 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
         map.root
             .as_ref()
             .unwrap()
-            .borrow()
-            .search_tree_for_insert(&SearchKey::new(&query))
+            .top()
+            .find_for_insert(&SearchKey::new(&query))
             .is_err()
     );
     let first_search_comparisons = usize::MAX - budget.get();

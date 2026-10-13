@@ -17,7 +17,7 @@ use core::ops::RangeBounds;
 use super::{BBTreeSet, SetValZST};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::{self, ExtractionWalk, Keys};
-use crate::tree::node::handle::KeyRun;
+use crate::tree::node::leaf::KeyRun;
 
 /// An iterator over the items of a `BBTreeSet`.
 ///

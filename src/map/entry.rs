@@ -15,10 +15,10 @@ use core::fmt;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::node::handle::Subtree;
 use crate::tree::node::inline_keys::SearchKey;
 use crate::tree::node::page::{FreshPage, PageByKind};
 use crate::tree::path::PathMut;
+use crate::tree::root::Root;
 
 /// A view into a single entry in a map, which may either be vacant or
 /// occupied.
@@ -50,7 +50,7 @@ enum VacantPlace<'a, K, V, S> {
     /// Into the leaf edge the path ends at.
     InTree(PathMut<'a, K, V, S>),
     /// Into a new tree, a leaf, for the map that has none.
-    NoTree(&'a mut Option<Subtree<K, V, S>>),
+    NoTree(&'a mut Option<Root<K, V, S>>),
 }
 
 /// A view into an occupied entry in a `BBTreeMap`. It is part of the
@@ -339,9 +339,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
         let mut path = match place {
             VacantPlace::InTree(path) => path,
             VacantPlace::NoTree(root) => {
-                let mut path = PathMut::new(
-                    root.insert(Subtree::new_leaf(FreshPage::allocate()).forget_type()),
-                );
+                let mut path = PathMut::new(root.insert(Root::new_leaf(FreshPage::allocate())));
                 path.start_at_root();
                 path
             }

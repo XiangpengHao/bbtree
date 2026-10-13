@@ -41,9 +41,9 @@ use super::into_iter::Deallocate;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::join::DetachedTree;
-use crate::tree::node::handle::Subtree;
 use crate::tree::node::page::PageByKind;
 use crate::tree::path::{FirstEdge, KeySide};
+use crate::tree::root::Root;
 use crate::tree::walk::DyingWalk;
 
 /// An iterator produced by calling `extract_if` on [`BBTreeMap`].
@@ -184,7 +184,8 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
             }
             None => self.after.take().expect("the tree, cut or not"),
         };
-        self.source.rest = DyingWalk::new(Some(range), usize::MAX, PageByKind::deallocate);
+        self.source.rest =
+            DyingWalk::new(Some(range.into_top()), usize::MAX, PageByKind::deallocate);
         if let Some(past_end) = self.after.tree_mut()
             && cut_past_end
         {
@@ -264,7 +265,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
         let kept = mem::replace(&mut self.kept, TreeBuilder::new());
         let dropped = kept.dropped();
         let (kept, _) = kept.finish();
-        self.map.root = Subtree::concat(kept, self.after.take());
+        self.map.root = Root::concat(kept, self.after.take());
         self.map.length = self.length - dropped;
         if self.had_tree {
             self.map.keep_a_tree();

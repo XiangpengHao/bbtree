@@ -31,11 +31,9 @@
 //!
 //! # Safety argument
 //!
-//! Besides the path module itself, this is the one module of the tree's
-//! path code (D14) with `unsafe` code. A walk with [`ValMut`] hands out
-//! values as `&mut V`, and one with [`Dying`] moves entries out, which is
-//! sound only if it hands out each entry at most once. Every walk ensures
-//! that by construction:
+//! A walk with [`ValMut`] hands out values as `&mut V`, and one with
+//! [`Dying`] moves entries out, which is sound only if it hands out each
+//! entry at most once. Every walk ensures that by construction:
 //!
 //! - its ends start at the tree's first and last positions, or at a range's
 //!   bounds with the front not after the back, which making the range checks;
@@ -72,93 +70,63 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::ops::Bound;
 
+use core::marker::PhantomData;
 use core::mem::needs_drop;
 
-use super::node::handle::{
-    CopyableBorrow, Dying, Edge, ForceResult, Head, Immut, Internal, KeyRun, Kv, Leaf, LeafEntry,
-    LeafOrInternal, LeafRun, NodeByKind, NodeRef, Subtree, ValMut,
-};
 use super::node::inline_keys::SearchKey;
-use super::node::page::PageByKind;
-use super::node::shared_prefix::SharedPrefix;
-use super::path::{FirstEdge, KeySide, LastEdge, NodeEnd, Path};
+use super::node::leaf::{KeyRun, Leaf, LeafRun};
+use super::node::page::{NodePtr, PageByKind};
+use super::node::{EntrySlots, Node};
+use super::path::{
+    CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, Path, ValMut,
+};
+use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
-
-/// A handle to a tree's root, which a walk starts from.
-pub(crate) type Root<B, K, V, S> = NodeRef<B, K, V, S, LeafOrInternal>;
 
 /// A borrow type that walks can hand out entries with: what it hands out
 /// for an entry.
-pub(crate) trait WalkBorrow<K, V, S>: CopyableBorrow + Sized {
+pub(crate) trait WalkBorrow<K, V>: CopyableBorrow + Sized {
     type Item;
 
-    /// The entry at `position`, as this borrow type hands it out.
+    /// The entry in `slots`, as this borrow type hands it out.
     ///
     /// # Safety
     ///
-    /// The walk hands out the entry at `position` only this once.
-    unsafe fn item(position: EntryPosition<Self, K, V, S>) -> Self::Item;
+    /// The slots are an entry of the walk's tree, initialized, which the
+    /// walk hands out only this once.
+    unsafe fn item(slots: EntrySlots<K, V>) -> Self::Item;
 }
 
-impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for Immut<'a> {
+impl<'a, K: 'a, V: 'a> WalkBorrow<K, V> for Immut<'a> {
     type Item = (&'a K, &'a V);
 
-    unsafe fn item(position: EntryPosition<Self, K, V, S>) -> (&'a K, &'a V) {
-        match position {
-            EntryPosition::InLeaf(kv) => kv.into_key_value(),
-            EntryPosition::InLeafRun(entry) => entry.into_key_value(),
-            EntryPosition::Separator(separator, head) => head.into_separator_entry(separator),
-        }
+    unsafe fn item(slots: EntrySlots<K, V>) -> (&'a K, &'a V) {
+        // SAFETY: the slots are initialized and shared for the walk's
+        // borrow (caller).
+        unsafe { (slots.key.as_ref(), slots.value.as_ref()) }
     }
 }
 
-impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for ValMut<'a, K, V> {
+impl<'a, K: 'a, V: 'a> WalkBorrow<K, V> for ValMut<'a, K, V> {
     type Item = (&'a K, &'a mut V);
 
-    unsafe fn item(position: EntryPosition<Self, K, V, S>) -> (&'a K, &'a mut V) {
-        // SAFETY: the caller hands out the entry, and so its value, only
-        // this once.
-        unsafe {
-            match position {
-                EntryPosition::InLeaf(kv) => kv.into_key_value_mut(),
-                EntryPosition::InLeafRun(entry) => entry.into_key_value_mut(),
-                EntryPosition::Separator(separator, head) => {
-                    head.into_separator_entry_mut(separator)
-                }
-            }
-        }
+    unsafe fn item(mut slots: EntrySlots<K, V>) -> (&'a K, &'a mut V) {
+        // SAFETY: the slots are initialized and apart; the key stays shared,
+        // and the caller hands out the entry, and so its value, only this
+        // once.
+        unsafe { (slots.key.as_ref(), slots.value.as_mut()) }
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for Dying<K, V> {
+impl<K, V> WalkBorrow<K, V> for Dying<K, V> {
     type Item = (K, V);
 
-    unsafe fn item(position: EntryPosition<Self, K, V, S>) -> (K, V) {
+    unsafe fn item(slots: EntrySlots<K, V>) -> (K, V) {
         // SAFETY: the caller hands out the entry only this once, so its key
         // and value are moved out once, from nodes not yet freed: a walk
         // frees a node only once past it (module safety argument).
-        unsafe {
-            match position {
-                EntryPosition::InLeaf(kv) => kv.take_key_value(),
-                EntryPosition::InLeafRun(entry) => entry.take_key_value(),
-                EntryPosition::Separator(separator, head) => head.take_separator_entry(separator),
-            }
-        }
+        unsafe { (slots.key.read(), slots.value.read()) }
     }
-}
-
-/// An entry a cursor moved over.
-pub(crate) enum EntryPosition<B, K, V, S> {
-    /// An entry of a leaf, beside its value.
-    InLeaf(Kv<NodeRef<B, K, V, S, Leaf>>),
-    /// An entry whose slot pointers were advanced by a cached leaf run.
-    InLeafRun(LeafEntry<B, K, V, S>),
-    /// A separator, whose value is the head of the leftmost leaf right of it
-    /// (D17).
-    Separator(
-        Kv<NodeRef<B, K, V, S, Internal>>,
-        Head<NodeRef<B, K, V, S, Leaf>>,
-    ),
 }
 
 /// One end of a walk: a path to a position between two entries of a leaf,
@@ -194,7 +162,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// [`Path::search_to_edge`].
     fn start_beside_key<Q>(
         &mut self,
-        root: Root<B, K, V, S>,
+        root: Node<K, V, S>,
         key: &SearchKey<'_, K, S, Q>,
         side: KeySide,
         shared: &SharedPrefix,
@@ -208,23 +176,19 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
 
     /// Starts at the `End` of the tree under `root`: its first position,
     /// where a walk forward starts, or its last, where one backward does.
-    fn start_at_end<End: NodeEnd>(&mut self, root: Root<B, K, V, S>) {
+    fn start_at_end<End: NodeEnd>(&mut self, root: Node<K, V, S>) {
         self.path.attach(root);
-        let root_edge = End::edge(&self.path.node(self.path.height()));
+        let root_edge = End::edge(root);
         self.path.set_index(root_edge);
         self.path.descend_to_leaf::<End>();
     }
 
-    /// The leaf edge the cursor stands at. It has started.
-    fn leaf_edge(&self) -> Edge<NodeRef<B, K, V, S, Leaf>> {
+    /// The leaf and the edge of it the cursor stands at. It has started.
+    #[inline(always)]
+    fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
         // SAFETY: a started cursor's path is attached and ends at an edge of
         // a leaf (type invariant).
         unsafe { self.path.leaf_edge() }
-    }
-
-    /// The key at `index` of the node at `height` on the path, a separator.
-    fn separator(&self, height: usize, index: usize) -> Kv<NodeRef<B, K, V, S, Internal>> {
-        self.path.internal(height).kv_at(index)
     }
 
     /// Folds `count` entries beside this cursor within its current leaf.
@@ -243,11 +207,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         fold: &mut impl FnMut(A, B::Item) -> A,
     ) -> A
     where
-        B: WalkBorrow<K, V, S>,
+        B: WalkBorrow<K, V>,
     {
-        let edge = self.leaf_edge();
-        let index = edge.index();
-        let leaf = edge.into_node();
+        let (leaf, index) = self.leaf_edge();
         let (start, end) = if End::IS_LAST {
             self.path.set_leaf_index(index - count);
             (index - count, index)
@@ -262,8 +224,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
                 start + offset
             };
             // SAFETY: this loop visits each of the caller's unvisited
-            // entries once. The path has already moved past all of them.
-            let item = unsafe { B::item(EntryPosition::InLeaf(leaf.kv_at(index))) };
+            // entries once, each below the leaf's length. The path has
+            // already moved past all of them.
+            let item = unsafe { B::item(leaf.entry_slots(index)) };
             accumulator = fold(accumulator, item);
         }
         accumulator
@@ -284,21 +247,21 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline]
     unsafe fn next(
         &mut self,
-        root: Root<B, K, V, S>,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
+        root: Node<K, V, S>,
+        leave: &mut impl FnMut(Node<K, V, S>),
     ) -> Option<B::Item>
     where
-        B: WalkBorrow<K, V, S>,
+        B: WalkBorrow<K, V>,
     {
         if !self.path.is_attached() {
             self.start_at_end::<FirstEdge>(root);
         }
-        let edge = self.leaf_edge();
-        let index = edge.index();
-        if let Ok(kv) = edge.right_kv() {
+        let (leaf, index) = self.leaf_edge();
+        if index < leaf.len() {
             self.path.set_leaf_index(index + 1);
-            // SAFETY: forwarded from the caller.
-            return Some(unsafe { B::item(EntryPosition::InLeaf(kv)) });
+            // SAFETY: the entry is below the leaf's length; forwarded from
+            // the caller.
+            return Some(unsafe { B::item(leaf.entry_slots(index)) });
         }
         // SAFETY: the cursor is at its leaf's last edge, and the caller
         // permits handing out the next entry.
@@ -313,23 +276,20 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// The cursor is at its leaf's last edge. If there is a next entry,
     /// the walk hands it out only this once.
     #[inline(never)]
-    unsafe fn next_separator(
-        &mut self,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
-    ) -> Option<B::Item>
+    unsafe fn next_separator(&mut self, leave: &mut impl FnMut(Node<K, V, S>)) -> Option<B::Item>
     where
-        B: WalkBorrow<K, V, S>,
+        B: WalkBorrow<K, V>,
     {
         let height = (1..=self.path.root_height())
             .find(|&height| self.path.index_at(height) < self.path.node(height).len())?;
         self.ascend_leaving(height, leave);
-        let separator = self.separator(height, self.path.index());
-        self.path.set_index(separator.index() + 1);
+        let (node, index) = (self.path.internal(height), self.path.index());
+        self.path.set_index(index + 1);
         self.path.descend_to_leaf::<FirstEdge>();
-        let head =
-            (self.leaf_edge().into_node().head()).expect("a leaf right of a separator has a head");
-        // SAFETY: forwarded from the caller.
-        Some(unsafe { B::item(EntryPosition::Separator(separator, head)) })
+        let (head, _) = self.leaf_edge();
+        // SAFETY: separator `index` is in the node, and its entry is
+        // initialized; forwarded from the caller.
+        Some(unsafe { B::item(node.separator_entry_slots(index, head)) })
     }
 
     /// Moves back over the previous entry and hands it out, or returns
@@ -348,21 +308,21 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline]
     unsafe fn next_back(
         &mut self,
-        root: Root<B, K, V, S>,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
+        root: Node<K, V, S>,
+        leave: &mut impl FnMut(Node<K, V, S>),
     ) -> Option<B::Item>
     where
-        B: WalkBorrow<K, V, S>,
+        B: WalkBorrow<K, V>,
     {
         if !self.path.is_attached() {
             self.start_at_end::<LastEdge>(root);
         }
-        let edge = self.leaf_edge();
-        let index = edge.index();
-        if let Ok(kv) = edge.left_kv() {
+        let (leaf, index) = self.leaf_edge();
+        if index > 0 {
             self.path.set_leaf_index(index - 1);
-            // SAFETY: forwarded from the caller.
-            return Some(unsafe { B::item(EntryPosition::InLeaf(kv)) });
+            // SAFETY: the entry is below the leaf's length; forwarded from
+            // the caller.
+            return Some(unsafe { B::item(leaf.entry_slots(index - 1)) });
         }
         // SAFETY: the cursor is at its leaf's first edge, and the caller
         // permits handing out the previous entry.
@@ -378,19 +338,18 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline(never)]
     unsafe fn previous_separator(
         &mut self,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
+        leave: &mut impl FnMut(Node<K, V, S>),
     ) -> Option<B::Item>
     where
-        B: WalkBorrow<K, V, S>,
+        B: WalkBorrow<K, V>,
     {
         let height =
             (1..=self.path.root_height()).find(|&height| self.path.index_at(height) > 0)?;
-        let leaf = self.leaf_edge().into_node();
-        let head = leaf.head().expect("a leaf right of a separator has a head");
-        let separator = self.separator(height, self.path.index_at(height) - 1);
-        let separator_index = separator.index();
-        // SAFETY: forwarded from the caller.
-        let item = unsafe { B::item(EntryPosition::Separator(separator, head)) };
+        let (head, _) = self.leaf_edge();
+        let (node, separator_index) = (self.path.internal(height), self.path.index_at(height) - 1);
+        // SAFETY: separator `separator_index` is in the node, and its entry
+        // is initialized; forwarded from the caller.
+        let item = unsafe { B::item(node.separator_entry_slots(separator_index, head)) };
         self.ascend_leaving(height, leave);
         self.path.set_index(separator_index);
         self.path.descend_to_leaf::<LastEdge>();
@@ -404,8 +363,8 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// the first position of the tree under `root`.
     fn skip_to_next_leaf(
         &mut self,
-        root: Root<B, K, V, S>,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
+        root: Node<K, V, S>,
+        leave: &mut impl FnMut(Node<K, V, S>),
     ) -> bool {
         if !self.path.is_attached() {
             self.start_at_end::<FirstEdge>(root);
@@ -425,14 +384,14 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// Goes up the path from the cursor's leaf to `height`, above it,
     /// handing `leave` each node it goes up out of, once off the path: the
     /// leaf, then the internal nodes above it.
-    fn ascend_leaving(&mut self, height: usize, leave: &mut impl FnMut(NodeByKind<B, K, V, S>)) {
-        let leaf = self.leaf_edge().into_node();
+    fn ascend_leaving(&mut self, height: usize, leave: &mut impl FnMut(Node<K, V, S>)) {
+        let (leaf, _) = self.leaf_edge();
         self.path.ascend();
-        leave(ForceResult::Leaf(leaf));
+        leave(Node::Leaf(leaf));
         while self.path.height() < height {
             let node = self.path.internal(self.path.height());
             self.path.ascend();
-            leave(ForceResult::Internal(node));
+            leave(Node::Internal(node));
         }
     }
 
@@ -445,9 +404,12 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     }
 }
 
-/// The two ends of a walk over the tree under `root`.
+/// The two ends of a walk over the tree under its root, kept as its page
+/// and height, which the walk reads as a [`Node`] where it starts an end:
+/// 16 bytes, where the node, sorted by its kind, takes 24.
 struct Ends<B, K, V, S> {
-    root: Root<B, K, V, S>,
+    root: NodePtr<K, V, S>,
+    root_height: usize,
     front: Cursor<B, K, V, S>,
     back: Cursor<B, K, V, S>,
 }
@@ -460,20 +422,35 @@ impl<B: CopyableBorrow, K, V, S> Clone for Ends<B, K, V, S> {
 
 impl<B: CopyableBorrow, K, V, S> Copy for Ends<B, K, V, S> {}
 
+// SAFETY: the ends have the access their borrow type gives to the tree, as
+// their paths do, and nothing more: see the `Send` and `Sync` impls of
+// `Path`, whose bounds these are.
+unsafe impl<B, K, V, S> Send for Ends<B, K, V, S> where Path<B, K, V, S>: Send {}
+// SAFETY: as for `Send`.
+unsafe impl<B, K, V, S> Sync for Ends<B, K, V, S> where Path<B, K, V, S>: Sync {}
+
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
     /// Ends that have not started, in the tree under `root`.
-    fn unstarted(root: Root<B, K, V, S>) -> Self {
+    fn unstarted(root: Node<K, V, S>) -> Self {
         Self {
-            root,
+            root: root.node_ptr(),
+            root_height: root.height(),
             front: Cursor::unstarted(),
             back: Cursor::unstarted(),
         }
     }
 
+    /// The tree's root.
+    #[inline(always)]
+    fn root(&self) -> Node<K, V, S> {
+        Node::at(self.root, self.root_height)
+    }
+
     /// The same ends, with shared access for as long as `self` is borrowed.
     fn reborrow(&self) -> Ends<Immut<'_>, K, V, S> {
         Ends {
-            root: self.root.reborrow(),
+            root: self.root,
+            root_height: self.root_height,
             front: self.front.reborrow(),
             back: self.back.reborrow(),
         }
@@ -497,7 +474,7 @@ impl<K, V, S> Clone for BorrowedWalk<Immut<'_>, K, V, S> {
     }
 }
 
-impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S> {
+impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S> {
     pub(crate) const EMPTY: Self = Self {
         range: RangeWalk::EMPTY,
         length: 0,
@@ -505,7 +482,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V
 
     /// A lazy walk over the `length` entries under `root`, if any. It does
     /// not search for either end, so constructing it needs no `Ord` bound.
-    pub(crate) fn new(root: Option<Root<B, K, V, S>>, length: usize) -> Self {
+    pub(crate) fn new(root: Option<Node<K, V, S>>, length: usize) -> Self {
         Self {
             range: RangeWalk {
                 ends: root.map(Ends::unstarted),
@@ -591,9 +568,9 @@ impl<K, V, S> Clone for FullWalk<Immut<'_>, K, V, S> {
     }
 }
 
-impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
+impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
     /// A walk over the `length` entries of the tree under `root`, if any.
-    pub(crate) fn new(root: Option<Root<B, K, V, S>>, length: usize) -> Self {
+    pub(crate) fn new(root: Option<Node<K, V, S>>, length: usize) -> Self {
         Self {
             ends: root.map(Ends::unstarted),
             length,
@@ -628,20 +605,21 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
         let Some(ends) = self.ends.as_mut() else {
             return accumulator;
         };
+        let root = ends.root();
         let cursor = if End::IS_LAST {
             &mut ends.back
         } else {
             &mut ends.front
         };
         if self.length > 0 && !cursor.path.is_attached() {
-            cursor.start_at_end::<End>(ends.root);
+            cursor.start_at_end::<End>(root);
         }
         while self.length > 0 {
-            let edge = cursor.leaf_edge();
+            let (leaf, index) = cursor.leaf_edge();
             let available = if End::IS_LAST {
-                edge.index()
+                index
             } else {
-                edge.into_node().len() - edge.index()
+                leaf.len() - index
             };
             let count = available.min(self.length);
             self.length -= count;
@@ -669,7 +647,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
 
     /// [`Self::next`], handing `leave` the nodes the front end goes up out
     /// of, which neither end comes back to (module safety argument).
-    fn next_leaving(&mut self, leave: &mut impl FnMut(NodeByKind<B, K, V, S>)) -> Option<B::Item> {
+    fn next_leaving(&mut self, leave: &mut impl FnMut(Node<K, V, S>)) -> Option<B::Item> {
         if self.length == 0 {
             return None;
         }
@@ -677,15 +655,12 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
         let ends = self.ends.as_mut()?;
         // SAFETY: an entry was left between the ends, so the front end moves
         // past one the back end has not (module safety argument).
-        unsafe { ends.front.next(ends.root, leave) }
+        unsafe { ends.front.next(ends.root(), leave) }
     }
 
     /// Moves back one entry, handing `leave` the nodes the back end goes
     /// up out of, which neither end comes back to (module safety argument).
-    fn next_back_leaving(
-        &mut self,
-        leave: &mut impl FnMut(NodeByKind<B, K, V, S>),
-    ) -> Option<B::Item> {
+    fn next_back_leaving(&mut self, leave: &mut impl FnMut(Node<K, V, S>)) -> Option<B::Item> {
         if self.length == 0 {
             return None;
         }
@@ -693,7 +668,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S>
         let ends = self.ends.as_mut()?;
         // SAFETY: an entry was left between the ends, so the back end moves
         // past one the front end has not (module safety argument).
-        unsafe { ends.back.next_back(ends.root, leave) }
+        unsafe { ends.back.next_back(ends.root(), leave) }
     }
 
     /// The entries left, with shared access for as long as `self` is
@@ -718,9 +693,12 @@ pub(crate) struct RangeWalk<B, K, V, S> {
     run: Option<RangeLeafRun<B, K, V, S>>,
 }
 
+/// A run of one leaf's entries between a range walk's ends, with the
+/// walk's borrow.
 struct RangeLeafRun<B, K, V, S> {
-    entries: LeafRun<B, K, V, S>,
+    entries: LeafRun<K, V, S>,
     reverse: bool,
+    _borrow: PhantomData<B>,
 }
 
 impl<B: CopyableBorrow, K, V, S> Clone for RangeLeafRun<B, K, V, S> {
@@ -731,6 +709,13 @@ impl<B: CopyableBorrow, K, V, S> Clone for RangeLeafRun<B, K, V, S> {
 
 impl<B: CopyableBorrow, K, V, S> Copy for RangeLeafRun<B, K, V, S> {}
 
+// SAFETY: the run's pointers give the access the walk's borrow type gives
+// to the leaf they point into, and nothing more: see the `Send` and `Sync`
+// impls of `Path`, whose bounds these are.
+unsafe impl<B, K, V, S> Send for RangeLeafRun<B, K, V, S> where Path<B, K, V, S>: Send {}
+// SAFETY: as for `Send`.
+unsafe impl<B, K, V, S> Sync for RangeLeafRun<B, K, V, S> where Path<B, K, V, S>: Sync {}
+
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> RangeLeafRun<B, K, V, S> {
     /// The chosen cursor is attached. The other cursor either bounds this
     /// run in the same leaf, or cannot be reached before a leaf boundary.
@@ -740,38 +725,31 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> RangeLeafRun<B, K, V, S> 
         } else {
             (&ends.front, &ends.back)
         };
-        let edge = cursor.leaf_edge();
-        let leaf = edge.into_node();
+        let (leaf, index) = cursor.leaf_edge();
         let mut limit = if End::IS_LAST { 0 } else { leaf.len() };
         if other.path.is_attached() {
-            let other_edge = other.leaf_edge();
-            if leaf.node_ptr().is(other_edge.into_node().node_ptr()) {
-                limit = other_edge.index();
+            let (other_leaf, other_index) = other.leaf_edge();
+            if leaf.node_ptr().is(other_leaf.node_ptr()) {
+                limit = other_index;
             }
         }
         let interval = if End::IS_LAST {
-            limit..edge.index()
+            limit..index
         } else {
-            edge.index()..limit
+            index..limit
         };
         Self {
             entries: LeafRun::new(leaf, interval),
             reverse: End::IS_LAST,
+            _borrow: PhantomData,
         }
     }
 
-    fn next<End: NodeEnd>(&mut self) -> Option<LeafEntry<B, K, V, S>> {
+    fn next<End: NodeEnd>(&mut self) -> Option<EntrySlots<K, V>> {
         if End::IS_LAST {
             self.entries.next_back()
         } else {
             self.entries.next()
-        }
-    }
-
-    fn reborrow(&self) -> RangeLeafRun<Immut<'_>, K, V, S> {
-        RangeLeafRun {
-            entries: self.entries.reborrow(),
-            reverse: self.reverse,
         }
     }
 }
@@ -791,7 +769,8 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> RangeWalk<Immut<'a>, K, V, S> {
         if let Some(run) = &mut self.run
             && !run.reverse
         {
-            let keys = run.entries.take_keys();
+            // SAFETY: the run's keys are shared for the walk's borrow, `'a`.
+            let keys = unsafe { run.entries.take_keys() };
             if keys.len() > 0 {
                 return Some(keys);
             }
@@ -801,7 +780,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> RangeWalk<Immut<'a>, K, V, S> {
     }
 }
 
-impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
+impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
     /// A walk over no entries.
     pub(crate) const EMPTY: Self = Self {
         ends: None,
@@ -817,7 +796,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
     /// If `start > end`, if `start == end` and both are excluded, or if `Ord`
     /// is so inconsistent that the start is found after the end.
     pub(crate) fn new<Q>(
-        root: Root<B, K, V, S>,
+        root: Node<K, V, S>,
         shared: &SharedPrefix,
         start: Bound<&Q>,
         end: Bound<&Q>,
@@ -879,13 +858,14 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
     /// a range whose other end was still unbounded and unstarted.
     fn ends_apart<End: NodeEnd>(&mut self) -> Option<&mut Ends<B, K, V, S>> {
         let ends = self.ends.as_mut()?;
+        let root = ends.root();
         let cursor = if End::IS_LAST {
             &mut ends.back
         } else {
             &mut ends.front
         };
         if !cursor.path.is_attached() {
-            cursor.start_at_end::<End>(ends.root);
+            cursor.start_at_end::<End>(root);
         }
         if ends.front.path.is_attached()
             && ends.back.path.is_attached()
@@ -917,7 +897,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
         {
             // SAFETY: the run stays between the ends and advances once
             // per entry. Moving the other end first discards this run.
-            return Some(unsafe { B::item(EntryPosition::InLeafRun(entry)) });
+            return Some(unsafe { B::item(entry) });
         }
         self.step_outside_run::<End>()
     }
@@ -934,10 +914,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
             };
             // SAFETY: a cached run never changes its cursor's leaf; this
             // is the same allocation used to bound and start the run.
-            let index = unsafe {
-                run.entries
-                    .edge_index(cursor.leaf_edge().into_node(), run.reverse)
-            };
+            let index = unsafe { run.entries.edge_index(cursor.leaf_edge().0, run.reverse) };
             cursor.path.set_leaf_index(index);
         }
     }
@@ -953,7 +930,7 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
             self.run = Some(run);
             // SAFETY: the ends are apart, and this newly bounded run
             // contains only entries neither end has handed out.
-            return Some(unsafe { B::item(EntryPosition::InLeafRun(entry)) });
+            return Some(unsafe { B::item(entry) });
         }
         // SAFETY: the ends are apart but the leaf run is empty, so its
         // cursor stands at a leaf boundary. Any separator crossed is
@@ -989,32 +966,31 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
             return accumulator;
         };
         if !ends.front.path.is_attached() {
-            ends.front.start_at_end::<FirstEdge>(ends.root);
+            ends.front.start_at_end::<FirstEdge>(ends.root());
         }
         if !ends.back.path.is_attached() {
-            ends.back.start_at_end::<LastEdge>(ends.root);
+            ends.back.start_at_end::<LastEdge>(ends.root());
         }
         let (cursor, other) = if End::IS_LAST {
             (&mut ends.back, &ends.front)
         } else {
             (&mut ends.front, &ends.back)
         };
-        let other_edge = other.leaf_edge();
+        let (other_leaf, other_index) = other.leaf_edge();
         loop {
-            let edge = cursor.leaf_edge();
-            let leaf = edge.into_node();
-            let same_leaf = leaf.node_ptr().is(other_edge.into_node().node_ptr());
+            let (leaf, index) = cursor.leaf_edge();
+            let same_leaf = leaf.node_ptr().is(other_leaf.node_ptr());
             let limit = if same_leaf {
-                other_edge.index()
+                other_index
             } else if End::IS_LAST {
                 0
             } else {
                 leaf.len()
             };
             let count = if End::IS_LAST {
-                edge.index() - limit
+                index - limit
             } else {
-                limit - edge.index()
+                limit - index
             };
             // SAFETY: both ends are attached and in order. This run stops
             // at either the leaf boundary or the other end, whichever
@@ -1043,7 +1019,11 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
     pub(crate) fn reborrow(&self) -> RangeWalk<Immut<'_>, K, V, S> {
         RangeWalk {
             ends: self.ends.as_ref().map(Ends::reborrow),
-            run: self.run.as_ref().map(RangeLeafRun::reborrow),
+            run: self.run.map(|run| RangeLeafRun {
+                entries: run.entries,
+                reverse: run.reverse,
+                _borrow: PhantomData,
+            }),
         }
     }
 }
@@ -1068,9 +1048,9 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
     ///
     /// A walk that only its front moves needs no count: given `usize::MAX`,
     /// it ends where the tree does.
-    pub(crate) fn new(tree: Option<Subtree<K, V, S>>, length: usize, release: R) -> Self {
+    pub(crate) fn new(tree: Option<Node<K, V, S>>, length: usize, release: R) -> Self {
         Self {
-            walk: FullWalk::new(tree.map(Subtree::into_dying), length),
+            walk: FullWalk::new(tree, length),
             release,
         }
     }
@@ -1118,11 +1098,11 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
         };
         if !needs_drop::<K>() && !needs_drop::<V>() && !ends.back.path.is_attached() {
             let release = &mut self.release;
-            let mut leave = |node: NodeByKind<Dying<K, V>, K, V, S>| {
+            let mut leave = |node: Node<K, V, S>| {
                 // SAFETY: as for `next`.
                 release(unsafe { node.free() });
             };
-            while ends.front.skip_to_next_leaf(ends.root, &mut leave) {}
+            while ends.front.skip_to_next_leaf(ends.root(), &mut leave) {}
             self.walk.length = 0;
         } else {
             while let Some(entry) = self.next() {
@@ -1145,7 +1125,7 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
             ends.back.path
         } else {
             let mut path = Path::detached();
-            path.attach(ends.root);
+            path.attach(ends.root());
             path
         };
         for height in path.height()..=path.root_height() {
@@ -1153,7 +1133,7 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
             // path is freed, and every entry on it moved out or skipped for
             // having no drop glue (module safety argument); each node here
             // is freed once, after its children.
-            (self.release)(unsafe { path.node(height).force().free() });
+            (self.release)(unsafe { path.node(height).free() });
         }
     }
 }

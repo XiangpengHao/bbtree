@@ -1,5 +1,5 @@
-//! Tests of the node operations in `tree/node/handle.rs`, each against a model
-//! of what the node holds: on leaves and on internal nodes.
+//! Tests of the node operations, `leaf.rs`'s and `internal.rs`'s, each
+//! against a model of what the node holds.
 
 #![forbid(unsafe_code)]
 

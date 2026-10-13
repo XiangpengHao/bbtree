@@ -1,4 +1,4 @@
-//! Leaf operations of `tree/node/handle.rs` against a model: searches, inserts
+//! Leaf operations (`tree/node/leaf.rs`) against a model: searches, inserts
 //! that fit or split, and removals, for keys and values of every shape.
 
 use core::cmp::Ordering;
@@ -9,75 +9,60 @@ use std::string::String;
 use std::vec::Vec;
 
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
-use crate::tree::node::handle::{
-    EdgeRoom, ForceResult, Immut, Insertion, Leaf, NodeMut, NodeRef, SearchResult, Split, Subtree,
-};
+use crate::tree::invariants::NodeChecks;
 use crate::tree::node::inline_keys::{InlinedKey, SearchKey, Separator};
+use crate::tree::node::leaf::Leaf;
 use crate::tree::node::page::{NodePtr, TestPages};
+use crate::tree::node::{Insertion, Node, Split};
+use crate::tree::root::Root;
 use crate::tree::test_support::{
     Bulky, CacheLineAligned, DropLedger, FromTracked, PageAligned, TestRng, TestTree, Tracked,
 };
 
 /// Appends an entry to a leaf that has room.
-fn push_back<K, V, S: InlineKeyStrategy<K>>(leaf: NodeMut<'_, K, V, S, Leaf>, key: K, value: V) {
-    match leaf.last_edge().check_room() {
-        EdgeRoom::Fits(edge) => {
-            edge.insert_fit(InlinedKey::new(key, 0), value);
-        }
-        EdgeRoom::Full(_) => panic!("the leaf is full"),
-    }
+fn push_back<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, key: K, value: V) {
+    assert!(leaf.len() < Leaf::<K, V, S>::capacity(), "the leaf is full");
+    leaf.insert_fit(leaf.len(), InlinedKey::new(key, 0), value);
 }
 
 /// The root of a tree that must be a leaf.
-fn root_leaf<K, V, S: InlineKeyStrategy<K>>(
-    tree: &mut Subtree<K, V, S>,
-) -> NodeMut<'_, K, V, S, Leaf> {
-    match tree.borrow_mut().force() {
-        ForceResult::Leaf(leaf) => leaf,
-        ForceResult::Internal(_) => panic!("the root is internal"),
+fn root_leaf<K, V, S: InlineKeyStrategy<K>>(tree: &Root<K, V, S>) -> Leaf<K, V, S> {
+    match tree.top() {
+        Node::Leaf(leaf) => leaf,
+        Node::Internal(_) => panic!("the root is internal"),
     }
 }
 
-/// Shared access to the root of a tree that must be a leaf.
-fn root_leaf_ref<K, V, S: InlineKeyStrategy<K>>(
-    tree: &Subtree<K, V, S>,
-) -> NodeRef<Immut<'_>, K, V, S, Leaf> {
-    match tree.borrow().force() {
-        ForceResult::Leaf(leaf) => leaf,
-        ForceResult::Internal(_) => panic!("the root is internal"),
-    }
+/// Takes `leaf`, which the caller owns, apart, releasing its page to
+/// `pages`.
+fn destroy_leaf<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, pages: &TestPages<K, V, S>) {
+    Node::Leaf(leaf).destroy(|page| pages.release(page));
 }
 
 /// Where a search of `leaf` for `key` ends: `Ok` at an equal key, `Err`
 /// at the edge where it belongs, as `slice::binary_search` says.
 fn search_position<K: core::borrow::Borrow<Q>, V, S: InlineKeyStrategy<K>, Q: Ord + ?Sized>(
-    leaf: NodeRef<Immut<'_>, K, V, S, Leaf>,
+    leaf: Leaf<K, V, S>,
     key: &Q,
 ) -> Result<usize, usize> {
-    match leaf.search(&SearchKey::new(key)) {
-        SearchResult::Found(kv) => Ok(kv.index()),
-        SearchResult::GoDown(edge) => Err(edge.index()),
-    }
+    leaf.search(&SearchKey::new(key))
 }
 
 #[test]
 fn search_matches_slice_binary_search() {
     let pages = TestPages::<u64, u64>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
+    let leaf = Leaf::new(pages.fresh_leaf());
     let keys: Vec<u64> = (0..40).map(|key| key * 2).collect();
     for &key in &keys {
-        push_back(leaf.borrow_mut(), key, key + 1000);
+        push_back(leaf, key, key + 1000);
     }
     for probe in 0..85 {
-        if let SearchResult::Found(kv) = leaf.borrow().search(&SearchKey::new(&probe)) {
-            assert_eq!(*kv.value(), probe + 1000);
+        if let Ok(index) = leaf.search(&SearchKey::new(&probe)) {
+            assert_eq!(*leaf.key_value(index).1, probe + 1000);
         }
-        assert_eq!(
-            search_position(leaf.borrow(), &probe),
-            keys.binary_search(&probe)
-        );
+        assert_eq!(search_position(leaf, &probe), keys.binary_search(&probe));
     }
-    leaf.destroy(|page| pages.release(page));
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
 }
 
@@ -89,27 +74,27 @@ fn string_search_matches_slice_binary_search() {
     for (prefix, width) in [("", 4), ("", 8), ("", 9), ("tied/prefix/", 4)] {
         let pages = TestPages::<String, u64>::new();
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
-        let mut leaf = Subtree::new_leaf(pages.fresh());
+        let leaf = Leaf::new(pages.fresh_leaf());
         let key = |number: usize| format!("{prefix}{number:0width$}");
         // A full leaf of every other number, probed with every number
         // from below its first key to past its last.
-        let capacity = NodePtr::<String, u64, Auto>::capacity::<Leaf>();
+        let capacity = Leaf::<String, u64, Auto>::capacity();
         let keys: Vec<String> = (0..capacity).map(|number| key(number * 2)).collect();
         for (number, key) in keys.iter().enumerate() {
-            push_back(leaf.borrow_mut(), key.clone(), number as u64);
+            push_back(leaf, key.clone(), number as u64);
         }
-        leaf.borrow().assert_inline_keys_match();
+        leaf.assert_inline_keys_match();
         for probe in (0..2 * capacity + 3).map(key) {
             let expected = keys.binary_search(&probe);
-            assert_eq!(search_position(leaf.borrow(), probe.as_str()), expected);
-            assert_eq!(search_position(leaf.borrow(), &probe), expected);
+            assert_eq!(search_position(leaf, probe.as_str()), expected);
+            assert_eq!(search_position(leaf, &probe), expected);
         }
         // Shorter and longer keys with the same inline key.
         for probe in [key(4) + "\0", key(4) + "0", String::from(&key(4)[..1])] {
             let expected = keys.binary_search(&probe);
-            assert_eq!(search_position(leaf.borrow(), probe.as_str()), expected);
+            assert_eq!(search_position(leaf, probe.as_str()), expected);
         }
-        leaf.destroy(|page| pages.release(page));
+        destroy_leaf(leaf, &pages);
         pages.assert_all_released();
     }
 }
@@ -117,19 +102,19 @@ fn string_search_matches_slice_binary_search() {
 #[test]
 fn search_borrows_keys() {
     let pages = TestPages::<String, ()>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
+    let leaf = Leaf::new(pages.fresh_leaf());
     for key in ["apple", "banana", "cherry"] {
-        push_back(leaf.borrow_mut(), String::from(key), ());
+        push_back(leaf, String::from(key), ());
     }
-    match leaf.borrow().search(&SearchKey::new("banana")) {
-        SearchResult::Found(kv) => assert_eq!(kv.key(), "banana"),
-        SearchResult::GoDown(_) => panic!("banana is there"),
+    match leaf.search(&SearchKey::new("banana")) {
+        Ok(index) => assert_eq!(leaf.key(index), "banana"),
+        Err(_) => panic!("banana is there"),
     }
-    match leaf.borrow().search(&SearchKey::new("blueberry")) {
-        SearchResult::Found(_) => panic!("blueberry is not there"),
-        SearchResult::GoDown(edge) => assert_eq!(edge.index(), 2),
+    match leaf.search(&SearchKey::new("blueberry")) {
+        Ok(_) => panic!("blueberry is not there"),
+        Err(edge) => assert_eq!(edge, 2),
     }
-    leaf.destroy(|page| pages.release(page));
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
 }
 
@@ -186,25 +171,24 @@ where
     let rng = TestRng::new(7);
     let ledger = DropLedger::new();
     let pages = TestPages::<Chaotic<'_, PADDING>, Tracked<'_>, S>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
+    let leaf = Leaf::new(pages.fresh_leaf());
     let searches = if cfg!(miri) { 60 } else { 1000 };
     for _ in 0..searches {
         let probe = Chaotic::new(&rng);
-        let found = leaf.borrow_mut().search(&SearchKey::new(&probe));
-        let edge = match found {
-            SearchResult::Found(kv) => {
-                assert!(kv.index() < kv.reborrow().into_node().len());
-                let _ = kv.value().id();
-                kv.right_edge()
+        let edge = match leaf.search(&SearchKey::new(&probe)) {
+            Ok(index) => {
+                assert!(index < leaf.len());
+                let _ = leaf.key_value(index).1.id();
+                index + 1
             }
-            SearchResult::GoDown(edge) => edge,
+            Err(edge) => edge,
         };
-        assert!(edge.index() <= edge.reborrow().into_node().len());
-        if let EdgeRoom::Fits(edge) = edge.check_room() {
-            edge.insert_fit(InlinedKey::new(Chaotic::new(&rng), 0), ledger.track());
+        assert!(edge <= leaf.len());
+        if leaf.len() < Leaf::<Chaotic<'_, PADDING>, Tracked<'_>, S>::capacity() {
+            leaf.insert_fit(edge, InlinedKey::new(Chaotic::new(&rng), 0), ledger.track());
         }
     }
-    leaf.destroy(|page| pages.release(page));
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
     ledger.assert_all_dropped_once();
 }
@@ -252,7 +236,7 @@ impl LeafModel {
     /// map has them, against its keys.
     fn assert_matches<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
         &self,
-        leaf: NodeRef<Immut<'_>, Tracked<'l>, V, S, Leaf>,
+        leaf: Leaf<Tracked<'l>, V, S>,
     ) {
         assert_eq!(leaf.tracked_ids(), self.entries);
         assert_eq!(leaf.head_id(), self.head);
@@ -265,9 +249,10 @@ impl LeafModel {
     /// halves both meet the minimum occupancy.
     fn assert_split_halves<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
         &self,
-        split: &Split<'_, Tracked<'l>, V, S, Leaf>,
+        left: Leaf<Tracked<'l>, V, S>,
+        split: &Split<Tracked<'l>, S, Leaf<Tracked<'l>, V, S>>,
     ) {
-        let right = split.right.borrow();
+        let right = split.right;
         let separator_value = right.head_id().expect("the right half has a head");
         // The separator's key goes up, or where separator keys are heads,
         // into the right half's head (D49).
@@ -277,16 +262,15 @@ impl LeafModel {
                 .head_key_id()
                 .expect("the right half's head has a key"),
         };
-        let mut halves = split.left.reborrow().tracked_ids();
+        let mut halves = left.tracked_ids();
         halves.push((separator_key, separator_value));
         halves.extend(right.tracked_ids());
         assert_eq!(halves, self.entries);
-        assert_eq!(split.left.reborrow().head_id(), self.head);
-        assert_eq!(split.left.reborrow().head_key_id(), self.head_key);
-        assert!(!split.left.is_underfull());
+        assert_eq!(left.head_id(), self.head);
+        assert_eq!(left.head_key_id(), self.head_key);
+        assert!(!left.is_underfull());
         assert!(!right.is_underfull());
-        assert_eq!(right.height(), 0);
-        split.left.reborrow().assert_inline_keys_match();
+        left.assert_inline_keys_match();
         right.assert_inline_keys_match();
     }
 }
@@ -300,7 +284,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
 ) -> usize {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
     let rng = TestRng::new(1);
-    let mut tree = Subtree::new_leaf(pages.fresh()).forget_type();
+    let mut tree = Root::new_leaf(pages.fresh());
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
@@ -315,15 +299,15 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let index = rng.below(len + 1);
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 model.entries.insert(index, (key.id(), value.tracked_id()));
-                let edge = root_leaf(&mut tree).edge_at(index);
-                match edge.insert(InlinedKey::new(key, 0), value, || pages.fresh()) {
-                    Insertion::Fit(kv) => assert_eq!(kv.index(), index),
+                let leaf = root_leaf(&tree);
+                match leaf.insert(index, InlinedKey::new(key, 0), value, || pages.fresh()) {
+                    Insertion::Fit(fitted) => assert_eq!(fitted, index),
                     Insertion::Split(split) => {
-                        model.assert_split_halves(&split);
+                        model.assert_split_halves(leaf, &split);
                         let parts = SplitLeaf {
                             separator: split.separator,
                             right: split.right,
-                            left_len: split.left.len(),
+                            left_len: leaf.len(),
                         };
                         tree = parts.reassemble(tree, &pages, &rng, &mut model.entries);
                         splits += 1;
@@ -332,17 +316,15 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
             }
             4 | 5 if len > 0 => {
                 let index = rng.below(len);
-                let ((key, value), edge) = root_leaf(&mut tree).kv_at(index).remove();
+                let (key, value) = root_leaf(&tree).remove(index);
                 assert_eq!((key.id(), value.tracked_id()), model.entries.remove(index));
-                assert_eq!(edge.index(), index);
             }
             6 if len > 0 => {
                 let index = rng.below(len);
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 let new_ids = (key.id(), value.tracked_id());
-                let (old_key, old_value) = root_leaf(&mut tree)
-                    .kv_at(index)
-                    .replace_key_value(InlinedKey::new(key, 0), value);
+                let (old_key, old_value) =
+                    root_leaf(&tree).replace_key_value(index, InlinedKey::new(key, 0), value);
                 assert_eq!((old_key.id(), old_value.tracked_id()), model.entries[index]);
                 model.entries[index] = new_ids;
             }
@@ -350,48 +332,30 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let index = rng.below(len);
                 let value = V::from_tracked(ledger.track());
                 model.entries[index].1 = value.tracked_id();
-                let mut kv = root_leaf(&mut tree).kv_at(index);
-                let old_value = if rng.below(2) == 0 {
-                    core::mem::replace(kv.value_mut(), value)
-                } else {
-                    core::mem::replace(kv.into_value_mut(), value)
-                };
+                let leaf = root_leaf(&tree);
+                let old_value = core::mem::replace(leaf.value_mut(index), value);
                 drop(old_value);
             }
-            8 => {
-                let leaf = root_leaf_ref(&tree);
-                let index = rng.below(len + 1);
-                match leaf.edge_at(index).left_kv() {
-                    Ok(kv) => assert_eq!(kv.key().id(), model.entries[index - 1].0),
-                    Err(edge) => assert_eq!(edge.index(), 0),
-                }
-                match leaf.edge_at(index).right_kv() {
-                    Ok(kv) => {
-                        assert_eq!(kv.key().id(), model.entries[index].0);
-                        assert_eq!(kv.left_edge().index(), index);
-                        assert_eq!(kv.right_edge().index(), index + 1);
-                    }
-                    Err(edge) => assert_eq!(edge.index(), len),
-                }
-                assert_eq!(leaf.first_edge().index(), 0);
-                assert_eq!(leaf.last_edge().index(), len);
-                assert_eq!(leaf.first_kv().map(|kv| kv.index()), (len > 0).then_some(0));
-                assert_eq!(leaf.last_kv().map(|kv| kv.index()), len.checked_sub(1));
+            8 if len > 0 => {
+                let leaf = root_leaf(&tree);
+                let index = rng.below(len);
+                assert_eq!(leaf.key(index).id(), model.entries[index].0);
+                let (key, value) = leaf.key_value(index);
+                assert_eq!((key.id(), value.tracked_id()), model.entries[index]);
+                assert_eq!(leaf.keys().len(), len);
             }
             9 => {
-                let mut leaf = root_leaf(&mut tree);
+                let leaf = root_leaf(&tree);
                 match (model.head, rng.below(3)) {
                     (Some(head_id), 0) => {
-                        let head = leaf.head().expect("the model says there is a head");
-                        let (key, value, _) = head.remove();
+                        let (key, value) = leaf.take_head();
                         assert_eq!(value.tracked_id(), head_id);
                         assert_eq!(key.as_ref().map(Tracked::id), model.head_key);
                         model.head = None;
                         model.head_key = None;
                     }
                     (Some(head_id), 1) => {
-                        let head = leaf.head().expect("the model says there is a head");
-                        match head.remove_with_first_key() {
+                        match leaf.take_head_and_first_key() {
                             Some(succession) => {
                                 assert_eq!(succession.value.tracked_id(), head_id);
                                 let removed_key = succession.removed_key.as_ref().map(Tracked::id);
@@ -421,7 +385,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
             }
             _ => {}
         }
-        model.assert_matches(root_leaf_ref(&tree));
+        model.assert_matches(root_leaf(&tree));
     }
     tree.destroy(|page| pages.release(page));
     pages.assert_all_released();
@@ -450,7 +414,7 @@ fn random_operations_match_a_model() {
 /// The parts of a root leaf that split, besides the leaf itself.
 struct SplitLeaf<K, V, S> {
     separator: Separator<K, S>,
-    right: Subtree<K, V, S, Leaf>,
+    right: Leaf<K, V, S>,
     left_len: usize,
 }
 
@@ -462,29 +426,21 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
     /// loses the removed entry.
     fn reassemble(
         self,
-        mut tree: Subtree<Tracked<'l>, V, S>,
+        mut tree: Root<Tracked<'l>, V, S>,
         pages: &TestPages<Tracked<'l>, V, S>,
         rng: &TestRng,
         entries: &mut Vec<(usize, usize)>,
-    ) -> Subtree<Tracked<'l>, V, S> {
+    ) -> Root<Tracked<'l>, V, S> {
         let root = tree.push_internal_level(pages.fresh());
         assert_eq!(root.len(), 0);
-        let EdgeRoom::Fits(edge) = root.last_edge().check_room() else {
-            panic!("a new root has room");
-        };
-        let mut root = edge
-            .insert_fit(self.separator, self.right.forget_type())
-            .into_node();
-        root.reborrow().assert_inline_keys_match();
+        root.insert_fit(0, self.separator, Node::Leaf(self.right));
+        root.assert_inline_keys_match();
 
         let right_len = entries.len() - self.left_len - 1;
         let in_left = self.left_len > 0 && (right_len == 0 || rng.below(2) == 0);
-        let child = root.reborrow_mut().edge_at(usize::from(!in_left)).descend();
-        let ForceResult::Leaf(child) = child.force() else {
-            panic!("the children are leaves");
-        };
+        let child = root.leaf_child(usize::from(!in_left));
         let index = rng.below(child.len());
-        let ((key, value), _) = child.kv_at(index).remove();
+        let (key, value) = child.remove(index);
         let value = value.tracked_id();
         let model_index = if in_left {
             index
@@ -493,18 +449,14 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
         };
         assert_eq!((key.id(), value), entries.remove(model_index));
 
-        let context = root.kv_at(0).into_balancing_context::<Leaf>();
+        let siblings = root.siblings::<Leaf<Tracked<'l>, V, S>>(0);
         assert_eq!(
-            context.left_child_len() + 1 + context.right_child_len(),
+            siblings.left_len() + 1 + siblings.right_len(),
             entries.len()
         );
-        let Ok(mergeable) = context.can_merge() else {
-            panic!("the halves fit again");
-        };
-        let (merged, page) = mergeable.merge();
-        pages.release(page);
-        assert_eq!(merged.index(), 0);
-        assert_eq!(merged.into_node().len(), 0);
+        assert!(siblings.can_merge(), "the halves fit again");
+        pages.release(siblings.merge());
+        assert_eq!(root.len(), 0);
 
         pages.release(tree.pop_internal_level());
         assert_eq!(tree.height(), 0);
@@ -521,7 +473,7 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     with_head: bool,
 ) {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
+    let leaf = Leaf::new(pages.fresh_leaf());
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
@@ -533,29 +485,29 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
         let key =
             NodePtr::<Tracked<'l>, V, S>::has_separator_keys_in_heads().then(|| ledger.track());
         model.head_key = key.as_ref().map(Tracked::id);
-        leaf.borrow_mut().put_head(key, value);
+        leaf.put_head(key, value);
     }
-    while let EdgeRoom::Fits(edge) = leaf.borrow_mut().last_edge().check_room() {
+    while leaf.len() < Leaf::<Tracked<'l>, V, S>::capacity() {
         let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
         model.entries.push((key.id(), value.tracked_id()));
-        edge.insert_fit(InlinedKey::new(key, 0), value);
+        leaf.insert_fit(leaf.len(), InlinedKey::new(key, 0), value);
     }
     let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
     model
         .entries
         .insert(position, (key.id(), value.tracked_id()));
-    let edge = leaf.borrow_mut().edge_at(position);
-    let Insertion::Split(split) = edge.insert(InlinedKey::new(key, 0), value, || pages.fresh())
+    let Insertion::Split(split) =
+        leaf.insert(position, InlinedKey::new(key, 0), value, || pages.fresh())
     else {
         panic!("a full leaf splits");
     };
-    model.assert_split_halves(&split);
+    model.assert_split_halves(leaf, &split);
     let Split {
         separator, right, ..
     } = split;
     drop(separator);
-    right.destroy(|page| pages.release(page));
-    leaf.destroy(|page| pages.release(page));
+    destroy_leaf(right, &pages);
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
 }
 
@@ -565,7 +517,7 @@ fn split_and_insert_at_every_position() {
         ledger: &'l DropLedger,
         heads: &[bool],
     ) {
-        for position in 0..=NodePtr::<Tracked<'l>, V, S>::capacity::<Leaf>() {
+        for position in 0..=Leaf::<Tracked<'l>, V, S>::capacity() {
             for &with_head in heads {
                 split_at::<V, S>(ledger, position, with_head);
             }
@@ -588,9 +540,9 @@ fn split_and_insert_at_every_position() {
 fn boundary_insert_remove_keeps_split_headroom() {
     for at_front in [false, true] {
         let pages = TestPages::<u64, u64>::new();
-        let mut tree = Subtree::new_leaf(pages.fresh()).forget_type();
+        let mut tree = Root::new_leaf(pages.fresh());
         let mut length = 0;
-        let capacity = NodePtr::<u64, u64, Auto>::capacity::<Leaf>() as u64;
+        let capacity = Leaf::<u64, u64, Auto>::capacity() as u64;
         for key in 1..=capacity {
             tree.insert(key, key, || pages.fresh(), || pages.fresh(), &mut length);
         }
@@ -603,7 +555,7 @@ fn boundary_insert_remove_keeps_split_headroom() {
             &mut length,
         );
         assert_eq!(tree.height(), 1);
-        let root = tree.borrow().node_ptr();
+        let root = tree.top().node_ptr();
         let allocated = pages.allocated_count();
         let in_use = pages.in_use();
 
@@ -615,7 +567,7 @@ fn boundary_insert_remove_keeps_split_headroom() {
             };
             assert_eq!(removed, Some((boundary_key, boundary_key)));
             assert_eq!(tree.height(), 1, "deletion must not undo the split");
-            assert!(tree.borrow().node_ptr().is(root));
+            assert!(tree.top().node_ptr().is(root));
             assert_eq!(pages.in_use(), in_use, "no node should be merged away");
             assert_eq!(
                 tree.insert(
@@ -638,48 +590,44 @@ fn boundary_insert_remove_keeps_split_headroom() {
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn checked_positions_reject_out_of_bounds_indices() {
     let pages = TestPages::<u32, u64>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
-    assert!(leaf.borrow().first_kv().is_none());
-    assert!(leaf.borrow().last_kv().is_none());
-    assert!(catch_unwind(AssertUnwindSafe(|| leaf.borrow_mut().kv_at(0).index())).is_err());
-    push_back(leaf.borrow_mut(), 1, 10);
-    push_back(leaf.borrow_mut(), 2, 20);
-    assert!(catch_unwind(AssertUnwindSafe(|| leaf.borrow_mut().edge_at(3).index())).is_err());
-    assert!(catch_unwind(AssertUnwindSafe(|| leaf.borrow_mut().kv_at(2).index())).is_err());
-    assert!(leaf.borrow().first_edge().left_kv().is_err());
-    assert!(leaf.borrow().last_edge().right_kv().is_err());
-    assert_eq!(
-        leaf.borrow().keys().iter().copied().collect::<Vec<_>>(),
-        [1, 2]
+    let leaf = Leaf::new(pages.fresh_leaf());
+    assert!(catch_unwind(AssertUnwindSafe(|| *leaf.key(0))).is_err());
+    push_back(leaf, 1, 10);
+    push_back(leaf, 2, 20);
+    assert!(catch_unwind(AssertUnwindSafe(|| leaf.remove(2))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| *leaf.key_value(2).1)).is_err());
+    assert!(
+        catch_unwind(AssertUnwindSafe(
+            || leaf.replace_key(2, InlinedKey::new(3, 0))
+        ))
+        .is_err()
     );
-    assert!(leaf.borrow().inline_keys().is_none());
-    leaf.destroy(|page| pages.release(page));
+    assert_eq!(leaf.keys().iter().copied().collect::<Vec<_>>(), [1, 2]);
+    assert!(leaf.inline_keys().is_none());
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
 }
 
 #[test]
 fn zero_sized_keys_and_values() {
     let pages = TestPages::<(), ()>::new();
-    let mut leaf = Subtree::new_leaf(pages.fresh());
+    let leaf = Leaf::new(pages.fresh_leaf());
     let mut len = 0;
-    while let EdgeRoom::Fits(edge) = leaf.borrow_mut().first_edge().check_room() {
-        edge.insert_fit(InlinedKey::new((), 0), ());
+    while leaf.len() < Leaf::<(), (), Auto>::capacity() {
+        leaf.insert_fit(0, InlinedKey::new((), 0), ());
         len += 1;
     }
     assert_eq!(len, 1023);
-    let middle = leaf.borrow_mut().edge_at(len / 2);
-    let Insertion::Split(split) = middle.insert(InlinedKey::new((), 0), (), || pages.fresh())
+    let Insertion::Split(split) =
+        leaf.insert(len / 2, InlinedKey::new((), 0), (), || pages.fresh())
     else {
         panic!("a full leaf splits");
     };
-    assert_eq!(split.left.len() + 1 + split.right.borrow().len(), len + 1);
-    assert!(split.right.borrow().head().is_some());
-    split.right.destroy(|page| pages.release(page));
-    assert!(matches!(
-        leaf.borrow().search(&SearchKey::new(&())),
-        SearchResult::Found(_)
-    ));
-    leaf.destroy(|page| pages.release(page));
+    assert_eq!(leaf.len() + 1 + split.right.len(), len + 1);
+    assert!(split.right.has_head());
+    destroy_leaf(split.right, &pages);
+    assert!(leaf.search(&SearchKey::new(&())).is_ok());
+    destroy_leaf(leaf, &pages);
     pages.assert_all_released();
 }
 

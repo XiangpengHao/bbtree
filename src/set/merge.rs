@@ -28,7 +28,7 @@ use core::ops::ControlFlow;
 
 use super::Iter;
 use crate::inline_key::InlineKeyStrategy;
-use crate::tree::node::handle::KeyRun;
+use crate::tree::node::leaf::KeyRun;
 
 /// A set's elements in order, a leaf's run of keys at a time: the run being
 /// visited, and the walk past it.

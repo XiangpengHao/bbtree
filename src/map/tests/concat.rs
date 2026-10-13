@@ -1,4 +1,4 @@
-//! Joining trees (`tree/join.rs`), through [`Subtree::concat`], which puts
+//! Joining trees (`tree/join.rs`), through [`Root::concat`], which puts
 //! back together the pieces `extract_if` cuts: on trees of every pair of
 //! heights up to 3, with roots and borders of every fill, so that every way
 //! a join goes comes up. The shorter root is absorbed by the taller tree's
@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::BBTreeMap;
-use crate::tree::node::handle::Subtree;
+use crate::tree::root::Root;
 use crate::tree::test_support::{FromNumber, TestRng};
 
 /// A map of the keys made from `numbers`, which ascend, each with its number
@@ -80,7 +80,7 @@ where
         let mut right = random_shape::<K>(&rng, &right_numbers);
         let expected: Vec<usize> = left.values().chain(right.values()).copied().collect();
         let joined = BBTreeMap {
-            root: Subtree::concat(left.root.take(), right.root.take()),
+            root: Root::concat(left.root.take(), right.root.take()),
             length: expected.len(),
         };
         (left.length, right.length) = (0, 0);

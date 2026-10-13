@@ -6,12 +6,15 @@
 //! internal node's separators, keys or windows (D49), and [`NodeKeys`]
 //! lends a node's keys in place, as a [`KeyList`].
 
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::hint;
 use core::marker::PhantomData;
 use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
-use super::handle::Internal;
 use super::inline_keys::{InlineSlot, InlinedKey, Separator, Window};
+use super::internal::Internal;
 use super::node_plan::NodePlan;
 use super::page::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
@@ -419,6 +422,69 @@ pub(crate) trait KeyList<'a, K: 'a>: Copy {
         // SAFETY: `index < len`.
         (0..self.len()).map(move |index| unsafe { self.get_unchecked(index) })
     }
+
+    /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` where it
+    /// belongs, by a branchless binary search: every search runs the full
+    /// `log2(len)` steps with no early exit, and each step only picks the
+    /// next `base` with `select_unpredictable`, which compiles to a
+    /// conditional move instead of a mispredicted branch. The loop narrows
+    /// to `base`, the last key not greater than `key` (or 0), and one final
+    /// comparison classifies it.
+    ///
+    /// In bounds by construction, whatever `Ord` answers: the loop keeps
+    /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
+    /// so `base < len` at the end. `Ok(base)` is then `< len`, and
+    /// `Err(base)`/`Err(base + 1)` are `<= len`.
+    fn branchless_search_index<Q>(self, key: &Q) -> Result<usize, usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let mut size = self.len();
+        if size == 0 {
+            return Err(0);
+        }
+        let mut base = 0;
+        while size > 1 {
+            let half = size / 2;
+            let mid = base + half;
+            // SAFETY: `mid < base + size <= len`.
+            let probe = unsafe { self.get_unchecked(mid) };
+            let probe_is_greater = probe.borrow().cmp(key) == Ordering::Greater;
+            base = hint::select_unpredictable(probe_is_greater, base, mid);
+            size -= half;
+        }
+        // SAFETY: `base < base + size <= len`, with `size == 1` here.
+        let last_not_greater = unsafe { self.get_unchecked(base) };
+        match last_not_greater.borrow().cmp(key) {
+            Ordering::Equal => Ok(base),
+            Ordering::Less => Err(base + 1),
+            Ordering::Greater => Err(base),
+        }
+    }
+
+    /// `Ok(i)` if key `i` is the one searched for, otherwise `Err(i)` with
+    /// `i` where it belongs, by a plain binary search that stops as soon as
+    /// it finds it: `cmp_key(probe)` orders the key searched for against key
+    /// `probe`.
+    ///
+    /// In bounds by construction, whatever `cmp_key` answers: the loop keeps
+    /// `low <= high <= len` and probes only `mid` with `low <= mid < high`,
+    /// so `Ok(mid)` is `< len` and `Err(low)` is `<= len`.
+    fn binary_search_index(self, cmp_key: impl Fn(&K) -> Ordering) -> Result<usize, usize> {
+        let (mut low, mut high) = (0, self.len());
+        while low < high {
+            let mid = low + (high - low) / 2;
+            // SAFETY: `mid < high <= len`.
+            let probe = unsafe { self.get_unchecked(mid) };
+            match cmp_key(probe) {
+                Ordering::Less => high = mid,
+                Ordering::Equal => return Ok(mid),
+                Ordering::Greater => low = mid + 1,
+            }
+        }
+        Err(low)
+    }
 }
 
 impl<'a, K> KeyList<'a, K> for NodeKeys<'a, K> {
@@ -584,7 +650,7 @@ impl InlineKeySlots {
                     source.move_run_to(start, count, destination, dest_start);
                 }
                 // Unreachable: whatever it left in `dest`, inline keys
-                // steer searches only (`handle.rs`).
+                // steer searches only (`tree/node/mod.rs`).
                 _ => {}
             }
         }
@@ -653,7 +719,7 @@ impl KeyColumns {
 
     /// Fills every slot of a node that holds no keys yet: each inline key
     /// with the greatest, all ones, as slots past the length hold (invariant
-    /// 6 in `handle.rs`), and each length tag with 0.
+    /// 4 in `tree/node/mod.rs`), and each length tag with 0.
     ///
     /// # Safety
     ///
@@ -673,7 +739,7 @@ impl KeyColumns {
     }
 
     /// Gives slots `vacated`, which a node no longer holds keys in, the
-    /// greatest inline key again (invariant 6). Their length tags stay
+    /// greatest inline key again (invariant 4). Their length tags stay
     /// stale: nothing reads a tag past the length.
     ///
     /// # Safety
@@ -1042,9 +1108,9 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
 ///
 /// Invariant: the variant is the plan's: [`Self::Keys`] in a map without
 /// inline keys, [`Self::Windows`] in a map with them.
-pub(super) enum SeparatorSlots<K, S> {
+pub(super) enum SeparatorSlots<K, V, S> {
     /// The separator keys themselves, which the node keeps.
-    Keys(KeySlots<K, S, Internal>),
+    Keys(KeySlots<K, S, Internal<K, V, S>>),
     /// The separators' windows at the node's prefix length, in its inline
     /// keys: each key is the head of the leftmost leaf right of it (D49).
     Windows {
@@ -1053,18 +1119,18 @@ pub(super) enum SeparatorSlots<K, S> {
     },
 }
 
-impl<K, S> Clone for SeparatorSlots<K, S> {
+impl<K, V, S> Clone for SeparatorSlots<K, V, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K, S> Copy for SeparatorSlots<K, S> {}
+impl<K, V, S> Copy for SeparatorSlots<K, V, S> {}
 
 /// Every method is `#[inline(always)]`, as [`KeyColumns`]' are: which
 /// variant a node's separators are is a constant of its map only where the
 /// method is inlined.
-impl<K, S: InlineKeyStrategy<K>> SeparatorSlots<K, S> {
+impl<K, V, S: InlineKeyStrategy<K>> SeparatorSlots<K, V, S> {
     /// Separator `index`'s window at the node's fence prefix, as kept:
     /// [`Window::NONE`] in a node without inline keys.
     ///

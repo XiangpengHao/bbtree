@@ -2,7 +2,7 @@
 //! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15), as a
 //! B+-tree that stores each key once (D17).
 //!
-//! The map owns at most one [`Subtree`]: none until the first insert, so
+//! The map owns at most one tree, by its [`Root`]: none until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. Point searches and ordinary
 //! fitting inserts descend from the root; increasing inserts can reuse a
 //! last leaf remembered after a split. An insert that splits records a
@@ -42,9 +42,9 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
-use crate::tree::node::handle::Subtree;
 use crate::tree::node::page::{FreshPage, PageByKind};
-use crate::tree::path::{FirstEdge, KeySide, LastEdge, Path};
+use crate::tree::path::{FirstEdge, Immut, KeySide, LastEdge, Path};
+use crate::tree::root::Root;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
 pub use extract_if::ExtractIf;
@@ -84,7 +84,7 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// assert_eq!(map.len(), 1);
 /// ```
 pub struct BBTreeMap<K, V, S: InlineKeyStrategy<K> = Auto> {
-    root: Option<Subtree<K, V, S>>,
+    root: Option<Root<K, V, S>>,
     length: usize,
 }
 
@@ -153,7 +153,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// `range` checks its bounds.
     fn keep_a_tree(&mut self) {
         self.root
-            .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
+            .get_or_insert_with(|| Root::new_leaf(FreshPage::allocate()));
     }
 
     /// Returns the number of elements in the map.
@@ -227,10 +227,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        self.root
-            .as_ref()?
-            .find(key)
-            .map(|found| found.into_key_value())
+        self.root.as_ref()?.find(key)
     }
 
     /// Returns the first key-value pair in the map. The key in this pair is
@@ -251,10 +248,10 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let mut path = Path::detached();
-        path.attach(self.root.as_ref()?.borrow());
+        let mut path = Path::<Immut<'_>, K, V, S>::detached();
+        path.attach(self.root.as_ref()?.top());
         if path.descend_to_first_key() {
-            Some(path.kv().into_key_value())
+            Some(path.key_value())
         } else {
             None
         }
@@ -307,10 +304,10 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let mut path = Path::detached();
-        path.attach(self.root.as_ref()?.borrow());
+        let mut path = Path::<Immut<'_>, K, V, S>::detached();
+        path.attach(self.root.as_ref()?.top());
         if path.descend_to_last_key() {
-            Some(path.kv().into_key_value())
+            Some(path.key_value())
         } else {
             None
         }
@@ -368,10 +365,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        self.root
-            .as_mut()?
-            .find_mut(key)
-            .map(|found| found.into_value_mut())
+        self.root.as_mut()?.find_mut(key)
     }
 
     /// Inserts a key-value pair into the map.
@@ -396,7 +390,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         let root = self
             .root
-            .get_or_insert_with(|| Subtree::new_leaf(FreshPage::allocate()).forget_type());
+            .get_or_insert_with(|| Root::new_leaf(FreshPage::allocate()));
         root.insert(
             key,
             value,
@@ -516,10 +510,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let lower = self.root.as_mut().expect("a map with entries has a tree");
         let upper = lower.split_off_at(key, KeySide::Before);
         let (lower_length, upper_length) = if lower.height() < upper.height() {
-            let lower_length = Subtree::borrow(lower).count_entries();
+            let lower_length = lower.top().count_entries();
             (lower_length, length - lower_length)
         } else {
-            let upper_length = Subtree::borrow(&upper).count_entries();
+            let upper_length = upper.top().count_entries();
             (length - upper_length, upper_length)
         };
         self.length = lower_length;
@@ -542,7 +536,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Panics unless the map is a well-formed B+-tree of `len()` entries
     /// (D17): in order, balanced, every node at least at its minimum, every
     /// separator's value in a leaf's head, and every node's inline keys and
-    /// prefix as its keys and fences give them; `Subtree::check_invariants`
+    /// prefix as its keys and fences give them; `Root::check_invariants`
     /// (`tree/invariants.rs`) lists each check. Compiled for tests and for
     /// fuzzing builds (`--cfg fuzzing`, which `cargo fuzz` sets), where the
     /// fuzz targets (`fuzz/`) call it.
@@ -590,7 +584,7 @@ impl<K, V> Default for BBTreeMap<K, V> {
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Clone for BBTreeMap<K, V, S> {
     fn clone(&self) -> Self {
         Self {
-            root: self.root.as_ref().map(Subtree::clone_tree),
+            root: self.root.as_ref().map(Root::clone_tree),
             length: self.length,
         }
     }

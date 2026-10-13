@@ -96,8 +96,8 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 
 - **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
   and whose `shared_prefix()` is the bytes every key shares (D50).
-- **`NodeView`** wraps a `NodeRef<Immut, LeafOrInternal>` and answers through
-  the existing handle methods:
+- **`NodeView`** wraps a `Node`, a leaf or an internal node by its height,
+  and answers through the node types' own methods:
   - id (the page address), height, `len`, capacity, `min_len`;
   - `prefix_len`;
   - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `length_tag(i)`
@@ -136,8 +136,8 @@ reads no node for it; `placed_by_shared_prefix` says whether it sorts
 before or after every key.
 
 A key found in an internal node is a separator (D17). The trace then follows
-`into_value_head` down to the leaf whose head holds the value, and in debug
-builds asserts that it reaches the very value `into_value_head` returns.
+`Internal::head_leaf` down to the leaf whose head holds the value, and in
+debug builds asserts that it reaches the very value `head_leaf` finds.
 
 The node code changes only in visibility: `inline_target` and
 `NodeInlineKeys::equal_run` are `pub(in crate::tree)`. A test traces every
