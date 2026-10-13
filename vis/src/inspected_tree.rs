@@ -4,7 +4,7 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use bbtree::inspect::NodeView;
+use bbtree::inspect::{NodeView, PageMap};
 use bbtree::{Auto, BBTreeMap};
 
 use crate::node_inspector::{KeyRow, NodeDetail};
@@ -105,6 +105,9 @@ pub(crate) trait InspectedTree {
     /// node's search skips, if the key is its bytes.
     fn key_text_split(&self, at: NodeAt, index: usize) -> (String, String);
 
+    /// The layout of the node at `at`'s page.
+    fn page_map(&self, at: NodeAt) -> PageMap;
+
     /// Everything the inspector shows of the node at `at`, read from the
     /// node itself.
     fn detail(&self, at: NodeAt) -> NodeDetail;
@@ -189,6 +192,10 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
         let node = self.node(at);
         let skipped = node.local_prefix_len().unwrap_or(node.prefix_len());
         node.key(index).text_split_at(skipped)
+    }
+
+    fn page_map(&self, at: NodeAt) -> PageMap {
+        self.node(at).page_map()
     }
 
     fn detail(&self, at: NodeAt) -> NodeDetail {

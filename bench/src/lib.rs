@@ -29,6 +29,7 @@ mod parallel_setup;
 mod perf_counters;
 mod random;
 mod report;
+mod run_comparison;
 mod suite_runner;
 mod suites;
 mod values;
@@ -38,6 +39,7 @@ use cell_runner::CellRun;
 use command_line::Invocation;
 use datasets::{DataDirectory, DatasetFetch};
 use memory::RunMode;
+use run_comparison::RunComparison;
 use suite_runner::SuiteRunner;
 
 pub use memory::{BaseAllocator, CountingAllocator};
@@ -58,6 +60,9 @@ pub fn run(counting_allocator: Option<&'static CountingAllocator>) -> ExitCode {
         Ok(Invocation::FetchData) => DataDirectory::from_environment()
             .and_then(|directory| DatasetFetch::fetch_into(&directory)),
         Ok(Invocation::RunSuites(request)) => SuiteRunner::new(request, mode).run(),
+        Ok(Invocation::CompareRuns(request)) => {
+            RunComparison::load(&request).map(|comparison| print!("{}", comparison.markdown()))
+        }
         Ok(Invocation::MeasureCell(request)) => CellRun::new(request, mode).measure_and_report(),
         Err(message) => Err(format!("{message}\n\n{}", Invocation::usage())),
     };

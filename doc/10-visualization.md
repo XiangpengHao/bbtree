@@ -1,6 +1,6 @@
 # 10 — Visualization: browsing the real tree in a browser
 
-Status (2026-10-11): the `inspect` feature with lookup traces
+Status (2026-10-12): the `inspect` feature with lookup traces
 (`tree/inspect.rs`, `map/mod.rs`), and the visualizer in `vis/`.
 Inserts and removals are still to come.
 
@@ -43,6 +43,15 @@ From the original note:
   a tree, and it didn't say what was going on. The visualizer now follows one
   key: its path from the root as linked node cards, each node's page as
   cache lines, and the search's own steps.
+- **Teach, for a reader who knows B-trees but not bbtree (2026-10-12,
+  third pass).** A critique and audit (22/40 heuristics, 13/20 technical)
+  found the second design showed bbtree's state but not its ideas: no
+  legend, the explanation below the fold, three unlinked views of one node,
+  no motion, and no layout below 1000 px. The third pass keeps the look and
+  the rule below, and adds what a learner needs: the search as numbered
+  steps first, every bbtree term defined where it is used, one shared hover
+  across the views, lookups that land on the interesting cases, motion that
+  replays the lookup's way down, and a one-column layout for small screens.
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -120,34 +129,58 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   strings), by random inserts, ascending inserts or `collect`. Each build
   looks up a random key, so there is always a path to see.
 - **Look up** any key, or a random one, or step to the first key of the
-  previous or next leaf.
+  previous or next leaf; or try a lookup worth seeing (`scenarios.rs`): a
+  separator (found in the root, its value a leaf's head), a key past the
+  last one (the right border, no fence prefixes), and for URLs a missing
+  key between two (where an insert would go). Keys: `/` to type, `R`
+  random, `[` `]` the leaves beside, `↑` `↓` along the path
+  (`shortcuts.rs`).
+- **The headline** (`path_summary.rs`): where the lookup ended, how many
+  nodes and cache lines it read, the path's legend, and a replay.
 - **The path** (`path_tree.rs`): one card per node from the root down, each
   hanging under the edge its parent took, with a bold ink connector. A card
   shows:
-  - the node's keys over its capacity, and the prefix its search skips (its
-    shared bytes in a tooltip);
+  - the node's keys over its capacity, the prefix its search skips, and the
+    cache lines the lookup read of it;
   - its slots as a ruler: tied slots outlined in highlighter yellow, the
-    found slot filled, and a notch at the edge taken;
+    found slot filled, a notch at the edge taken, a red caret where an
+    absent key would go. Pointing at a slot names its key; clicking it
+    looks the key up;
   - what the lookup did there, in a few words.
 
   The parent's other children sit beside the card as gauges of how full
-  they are, fanned from their own edge slots. Clicking a gauge looks up that
-  node's first key. A separator's way to its value is dashed.
+  they are, on a faint fan; pointing at one draws its own edge, clicking it
+  looks up that node's first key. A separator's way to its value is dashed.
+
+  Every lookup plays its way down, a level every 260 ms: all the inline
+  keys of a ruler flash at once, as the search compares them all; the tied
+  ones mark; the result and the notch drop in; the edge to the next card
+  draws. Between lookups the cards glide to their new places.
 - **The inspector** (`node_inspector.rs`), for the card you pick, the leaf
-  by default:
-  - What the search did, in sentences drawn from the trace: the bytes
-    skipped and why (fence prefix, D26; search prefix, D33), the inline key
-    compared and how many slots tied (D18), and the edge taken with the keys
-    either side, or the slot found, or the slot an insert would take.
+  by default, in three columns on wide screens:
+  - What the search did, as numbered steps drawn from the trace: skip the
+    shared bytes (fence prefix, D26; search prefix, D33), compare every
+    inline key at once (D18), search the tied keys, and the outcome: the
+    edge taken with the keys either side, the slot found, a separator's way
+    to its head (D17), or the slot an insert would take. Pointing at a step
+    lights up what it read in the page and the rulers.
   - The page as 16 rows of 64-byte cache lines (`memory_map.rs`). Every
-    slot sits where the layout puts it, room is faint, and the slots the
-    lookup read are highlighted: candidates outlined, the result filled.
-    Each cache line the lookup touches gets a dot: the header's, all the
-    inline keys' (the count reads them all), the candidates' and the
-    result's.
-  - The slots in a table, scrolled to the lookup's row. Keys show only the
-    bytes past the shared prefix. Inline keys are hex bytes, and child links
-    look up their child's first key.
+    slot sits where the layout puts it, empty slots are faint, and the slots
+    the lookup read are marked: tied keys outlined, the result filled. Each
+    cache line the lookup surely reads gets a dot, in the order it reads
+    them, replayed with each lookup: the header's, all the inline keys'
+    (the count over the capacity reads them all on x86-64), a lone tied
+    key's, and the result's. The search among two or more tied keys is a
+    binary search (`search_run`), whose probes the trace doesn't record, so
+    their lines get hollow dots: maybe read. The headline counts both.
+  - The slots in a table (`slot_table.rs`), scrolled to the lookup's row.
+    Keys show only the bytes past the shared prefix; clicking one looks it
+    up. Inline keys are hex bytes, and child links look up their child's
+    first key. The empty slots are one row.
+  - The three views share one pointer (`spotlight.rs`): pointing at a slot
+    in any of them lights it up in the others, with a hint by the pointer.
+    Terms in the text (`concepts.rs`) define themselves on hover or focus,
+    with the design note behind them, and light up what they name.
 - **The tree's shape** (`tree_shape.rs`): one top-down read of every node
   per build gives each level's nodes in key order, with parents, children,
   key counts and prefixes. That is enough to name nodes, find neighbors and
@@ -160,17 +193,21 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   - Two neutral grays for the header and length tags.
   - Highlighter yellow for whatever the lookup read.
   - Type: Martian Mono for titles, IBM Plex Sans for prose, IBM Plex Mono
-    for data.
+    for data; nothing below 11 px, and secondary text at 4.5:1 or more.
+  - Motion explains the lookup and nothing else; with reduced motion,
+    nothing travels or grows, and the reads still arrive in order, as
+    fades.
 
 ### What it shows
 
 - **u64, 1M random inserts:** the fence prefix grows 0, 5, 6, 7 bytes from
   the root down. At the root every 2-byte inline key is `00 00`, so all of
-  them tie and each is compared in full. In a leaf, one inline key matches,
-  and the lookup touches 3 of 16 cache lines.
+  them tie and the search runs among them on full keys. In a leaf, one
+  inline key matches, and the lookup reads 3 of 16 cache lines.
 - **A key past the end of the tree** follows the right border, where every
-  fence prefix is 0. All 30 keys in the leaf tie on `00 00`, and the lookup
-  touches 10 of 16 lines. Ascending inserts land there.
+  fence prefix is 0. All the keys in the leaf tie on `00 00`, and the
+  search among them may read most of the page. Ascending inserts land
+  there.
 - **String URLs:** the root keeps a 25-byte search prefix
   (`https://shop.example.com/`); the levels below skip 35, 36 and 38 bytes,
   with 8-byte inline keys.

@@ -1,2 +1,17 @@
 @import "tailwindcss";
 @source "./src/**/*.rs";
+
+/* The palette and type are defined once, in assets/main.css; these name
+ * them for the utilities. */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-graphite: var(--graphite);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --text-caption: 11px;
+  --text-small: 12px;
+  --text-ui: 13px;
+  --text-body: 14px;
+}

@@ -2,7 +2,7 @@
 name = "bbtree-vis"
 
 [web.app]
-title = "bbtree"
+title = "bbtree: how a lookup finds its key"
 
 [web.resource]
 style = []

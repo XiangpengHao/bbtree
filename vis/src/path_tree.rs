@@ -1,7 +1,13 @@
 //! The tree as one lookup sees it: a card for each node on the way from the
 //! root to the key, each under the edge its parent took, with the parent's
-//! other children beside it as gauges of how full they are. Click a card to
-//! inspect it, a gauge to look up its first key.
+//! other children beside it as gauges of how full they are.
+//!
+//! Every lookup plays its way down: at each node all the inline keys light
+//! up at once, as the search compares them, the tied ones stay outlined,
+//! the result drops in, and the edge to the next node draws. Between
+//! lookups the cards glide to their new places. Point at a ruler's slot to
+//! see its key and click it to look it up; click a card to inspect it, a
+//! gauge to look up its first key.
 
 use std::fmt::Write;
 use std::rc::Rc;
@@ -11,6 +17,8 @@ use dioxus::prelude::*;
 
 use crate::count_text::Group;
 use crate::inspected_tree::LoadedTree;
+use crate::memory_map::PageMarks;
+use crate::spotlight::{Hint, NodePart, Spotlight};
 use crate::trace::{Trace, TraceStep, Tracer};
 use crate::tree_shape::NodeAt;
 
@@ -20,16 +28,19 @@ struct PathLayout {
     gauges: Vec<GaugeSpot>,
     /// How many siblings didn't fit, past the gauges on each side.
     more: Vec<MoreSpot>,
-    /// The parent edge each card hangs from, bold; those of the gauges,
-    /// faint; and the value's way, dashed.
-    taken: String,
-    others: String,
-    value_way: String,
+    /// Each card's way down from its parent's edge, the root's empty.
+    taken: Vec<String>,
+    /// Whether a card's way down leads to a separator's value.
+    value_way: Vec<bool>,
+    /// Narrow: cards span the panel, labels sit above them, no gauges.
+    narrow: bool,
+    height: f64,
 }
 
 /// Where a card sits, and its ruler.
 #[derive(Clone, PartialEq)]
 struct CardSpot {
+    row: usize,
     step: TraceStep,
     x: f64,
     y: f64,
@@ -37,6 +48,8 @@ struct CardSpot {
     /// Where the ruler of slots starts and how wide each slot is.
     ruler_x: f64,
     slot_width: f64,
+    /// Cache lines the lookup read of the node: surely, and possibly.
+    lines_read: (usize, usize),
 }
 
 /// The count of siblings past the last gauge that fit.
@@ -47,7 +60,7 @@ struct MoreSpot {
     hidden: usize,
 }
 
-/// A sibling of a path node, drawn as a gauge.
+/// A sibling of a path node, drawn as a gauge, and its edge from the parent.
 #[derive(Clone, PartialEq)]
 struct GaugeSpot {
     at: NodeAt,
@@ -55,79 +68,130 @@ struct GaugeSpot {
     y: f64,
     fill: f64,
     label: String,
+    curve: String,
 }
 
 impl PathLayout {
     const GUTTER: f64 = 150.0;
     const RIGHT: f64 = 28.0;
+    /// Below this width, cards span the panel.
+    const NARROW: f64 = 720.0;
     /// Room kept beside a card for the count of siblings that don't fit.
     const BESIDE: f64 = 56.0;
-    const CARD_HEIGHT: f64 = 66.0;
+    const CARD_HEIGHT: f64 = 70.0;
     /// From one row's top to the next, when there is room.
-    const ROW_HEIGHT: f64 = 90.0;
-    const RULER_TOP: f64 = 26.0;
+    const ROW_HEIGHT: f64 = 96.0;
+    /// Above each card in a narrow panel, for its level's name.
+    const LABEL_HEIGHT: f64 = 22.0;
+    const RULER_TOP: f64 = 28.0;
     const RULER_HEIGHT: f64 = 14.0;
+    const RULER_INSET: f64 = 14.0;
     const GAUGE_WIDTH: f64 = 11.0;
-    const GAUGE_HEIGHT: f64 = 38.0;
+    const GAUGE_HEIGHT: f64 = 40.0;
     const GAUGE_GAP: f64 = 5.0;
     /// Room for "+12" past the gauges that don't fit.
     const MORE_WIDTH: f64 = 34.0;
+    /// The pace of a lookup's way down, which the stylesheet's animations
+    /// follow: each level starts this long after the one above.
+    const LEVEL_MS: u32 = 260;
+
+    /// The least height that fits `rows` nodes, side by side with the
+    /// inspector.
+    fn least_height(rows: usize) -> f64 {
+        rows.max(1) as f64 * (Self::CARD_HEIGHT + 16.0) + 20.0
+    }
+
+    /// The height the path wants for `rows` nodes, at `width`.
+    fn wanted_height(rows: usize, width: f64) -> f64 {
+        let rows = rows.max(1) as f64;
+        if width > 0.0 && width < Self::NARROW {
+            rows * (Self::CARD_HEIGHT + Self::LABEL_HEIGHT + 26.0) + 12.0
+        } else {
+            rows * Self::ROW_HEIGHT + 20.0
+        }
+    }
 
     fn of(tree: &LoadedTree, trace: &Trace, width: f64, height: f64) -> Self {
+        let narrow = width < Self::NARROW;
         let shape = tree.shape();
         let steps = trace.steps();
         let rows = steps.len().max(1) as f64;
-        let row_height = ((height - 24.0) / rows).clamp(Self::CARD_HEIGHT + 16.0, Self::ROW_HEIGHT);
-        let left = Self::GUTTER;
-        let right = (width - Self::RIGHT).max(left + 320.0);
-        let card_width = ((right - left) * 0.58).clamp(320.0, 680.0);
+        let row_height = if narrow {
+            Self::CARD_HEIGHT + Self::LABEL_HEIGHT + 26.0
+        } else {
+            ((height - 20.0) / rows).clamp(Self::CARD_HEIGHT + 16.0, Self::ROW_HEIGHT)
+        };
+        let (left, right) = if narrow {
+            (16.0, width - 16.0)
+        } else {
+            (
+                Self::GUTTER,
+                (width - Self::RIGHT).max(Self::GUTTER + 320.0),
+            )
+        };
+        let card_width = if narrow {
+            right - left
+        } else {
+            ((right - left) * 0.58).clamp(320.0, 680.0)
+        };
         let mut layout = Self {
             cards: Vec::new(),
             gauges: Vec::new(),
             more: Vec::new(),
-            taken: String::new(),
-            others: String::new(),
-            value_way: String::new(),
+            taken: Vec::new(),
+            value_way: Vec::new(),
+            narrow,
+            height: 12.0 + rows * row_height,
         };
-        let mut value_way = false;
+        let mut toward_value = false;
         for (row, step) in steps.iter().enumerate() {
             let at = step.at();
             let level = shape.level(at.level());
-            let y = 12.0 + row as f64 * row_height + (row_height - Self::CARD_HEIGHT) / 2.0;
+            let top = 10.0 + row as f64 * row_height;
+            let y = if narrow {
+                top + Self::LABEL_HEIGHT
+            } else {
+                top + (row_height - Self::CARD_HEIGHT) / 2.0
+            };
             let parent = row.checked_sub(1).map(|row| layout.cards[row].clone());
             let anchor = parent
                 .as_ref()
                 .and_then(|parent| Some((parent, parent.step.edge_taken()?)))
                 .map(|(parent, edge)| parent.ruler_x + edge as f64 * parent.slot_width);
             let x = match anchor {
+                Some(_) if narrow => left,
                 Some(anchor) => (anchor - card_width / 2.0).clamp(
                     left + Self::BESIDE,
                     (right - card_width - Self::BESIDE).max(left + Self::BESIDE),
                 ),
                 None => left + (right - left - card_width) / 2.0,
             };
-            let ruler_x = x + 14.0;
-            let slot_width = (card_width - 28.0) / level.capacity().max(1) as f64;
+            let ruler_x = x + Self::RULER_INSET;
+            let slot_width =
+                (card_width - 2.0 * Self::RULER_INSET) / level.capacity().max(1) as f64;
+            let page = tree.page_map(at);
             let card = CardSpot {
+                row,
                 step: step.clone(),
                 x,
                 y,
                 width: card_width,
                 ruler_x,
                 slot_width,
+                lines_read: PageMarks::of_step(step, at.level() == 0).lines_read(&page),
             };
+            let mut way = String::new();
             if let (Some(parent), Some(anchor)) = (&parent, anchor) {
-                let from_y = parent.y + Self::RULER_TOP + Self::RULER_HEIGHT + 6.0;
-                let path = if value_way {
-                    &mut layout.value_way
-                } else {
-                    &mut layout.taken
-                };
-                Self::curve(path, (anchor, from_y), (x + card_width / 2.0, y));
-                layout.place_gauges(tree, parent, &card, (left, right), from_y);
+                let from_y = parent.y + Self::RULER_TOP + Self::RULER_HEIGHT + 4.0;
+                Self::curve(&mut way, (anchor, from_y), (x + card_width / 2.0, y));
+                if !narrow {
+                    layout.place_gauges(tree, parent, &card, (left, right), from_y);
+                }
             }
+            layout.taken.push(way);
+            layout.value_way.push(toward_value);
             if step.found().is_some() && at.level() > 0 {
-                value_way = true;
+                toward_value = true;
             }
             layout.cards.push(card);
         }
@@ -179,25 +243,25 @@ impl PathLayout {
             for (nth, &edge) in edges.iter().take(fits).enumerate() {
                 let at = NodeAt::new(card.step.at().level(), children.start + edge);
                 let x = start + nth as f64 * step;
-                let fill = level.len(at.index()) as f64 / level.capacity().max(1) as f64;
+                let len = level.len(at.index());
+                let mut curve = String::new();
+                Self::curve(
+                    &mut curve,
+                    (parent.ruler_x + edge as f64 * parent.slot_width, from_y),
+                    (x + Self::GAUGE_WIDTH / 2.0, y),
+                );
                 self.gauges.push(GaugeSpot {
                     at,
                     x,
                     y,
-                    fill,
+                    fill: len as f64 / level.capacity().max(1) as f64,
                     label: format!(
-                        "{} · {}/{} keys · look up its first key",
-                        shape.node_name(at),
-                        level.len(at.index()),
+                        "{} of {} keys, child {edge} of its parent",
+                        len,
                         level.capacity()
                     ),
+                    curve,
                 });
-                let anchor = parent.ruler_x + edge as f64 * parent.slot_width;
-                Self::curve(
-                    &mut self.others,
-                    (anchor, from_y),
-                    (x + Self::GAUGE_WIDTH / 2.0, y),
-                );
             }
             let hidden = edges.len() - fits.min(edges.len());
             if hidden > 0 {
@@ -217,9 +281,17 @@ impl PathLayout {
         let middle = (from.1 + to.1) / 2.0;
         let _ = write!(
             path,
-            "M{} {}C{} {middle} {} {middle} {} {}",
+            "M{:.1} {:.1}C{:.1} {middle:.1} {:.1} {middle:.1} {:.1} {:.1}",
             from.0, from.1, from.0, to.0, to.0, to.1
         );
+    }
+
+    /// The faint fan of every gauge's edge.
+    fn fan(&self) -> String {
+        self.gauges
+            .iter()
+            .map(|gauge| gauge.curve.as_str())
+            .collect()
     }
 }
 
@@ -229,10 +301,14 @@ pub(crate) fn PathTree(
     tree: LoadedTree,
     trace: Trace,
     inspected: Option<NodeAt>,
+    /// Changes with every lookup, so the way down replays.
+    replay: u64,
     tracer: Tracer,
+    spotlight: Spotlight,
 ) -> Element {
     let mut size = use_signal(|| (0.0f64, 0.0f64));
     let mounted: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+    let mut pointed_gauge = use_signal(|| None::<usize>);
     let measure = use_callback(move |_: ()| {
         if let Some(element) = mounted.peek().clone() {
             spawn(async move {
@@ -248,11 +324,21 @@ pub(crate) fn PathTree(
     let (width, height) = size();
     let layout = (width > 0.0).then(|| PathLayout::of(&tree, &trace, width, height));
     let shape = tree.shape();
-    let wanted = trace.steps().len() as f64 * PathLayout::ROW_HEIGHT + 24.0;
+    let wanted = PathLayout::wanted_height(trace.steps().len(), width);
+    let least = PathLayout::least_height(trace.steps().len());
+    let narrow = layout.as_ref().is_some_and(|layout| layout.narrow);
+    let fan = layout.as_ref().map(PathLayout::fan).unwrap_or_default();
+    let gauge_curve = pointed_gauge().and_then(|index| {
+        layout
+            .as_ref()
+            .and_then(|layout| layout.gauges.get(index))
+            .map(|gauge| gauge.curve.clone())
+    });
     rsx! {
         section {
-            class: "path-tree relative max-h-[60%] min-h-0 flex-none overflow-hidden",
-            style: "height:{wanted}px;",
+            class: if narrow { "path-tree narrow" } else { "path-tree" },
+            style: "--wanted:{wanted}px;--least:{least}px;--level-ms:{PathLayout::LEVEL_MS}ms;",
+            "aria-label": "The lookup's path from the root",
             onmounted: move |evt| {
                 let mut mounted = mounted;
                 mounted.set(Some(evt.data()));
@@ -260,38 +346,71 @@ pub(crate) fn PathTree(
             },
             onresize: move |_| measure.call(()),
             if let Some(layout) = layout {
-                svg { class: "pointer-events-none absolute inset-0", width, height,
-                    path { class: "edge-other", d: layout.others }
-                    path { class: "edge-taken", d: layout.taken }
-                    path { class: "edge-value", d: layout.value_way }
+                svg {
+                    class: "path-edges",
+                    width,
+                    height: layout.height.max(height),
+                    "aria-hidden": "true",
+                    path { class: "edge-other", d: fan }
+                    if let Some(curve) = gauge_curve {
+                        path { class: "edge-sibling", d: curve }
+                    }
+                    for (row, way) in layout.taken.iter().enumerate().skip(1) {
+                        if layout.value_way[row] {
+                            path {
+                                key: "{replay}-{row}",
+                                class: "edge-taken edge-value",
+                                style: "--row:{row - 1};",
+                                d: way.as_str(),
+                            }
+                        } else {
+                            path {
+                                key: "{replay}-{row}",
+                                class: "edge-taken draws",
+                                style: "--row:{row - 1};",
+                                "pathLength": "1",
+                                d: way.as_str(),
+                            }
+                        }
+                    }
                 }
                 for card in layout.cards.iter() {
                     div {
-                        class: "pointer-events-none absolute flex flex-col items-start",
-                        style: "left:20px;top:{card.y + 14.0}px;width:{PathLayout::GUTTER - 36.0}px;",
-                        span { class: "display text-[11px]", {shape.level_name(card.step.at().level())} }
-                        span { class: "data text-[11px] text-[var(--muted)]",
+                        key: "label-{card.row}",
+                        class: "level-label",
+                        style: if narrow { format!("transform:translate({}px,{}px);", card.x, card.y - PathLayout::LABEL_HEIGHT) } else { format!("transform:translate(20px,{}px);", card.y + 12.0) },
+                        span { class: "display", {shape.level_name(card.step.at().level())} }
+                        span { class: "data level-place",
                             "{Group(card.step.at().index() + 1)} of {Group(shape.level(card.step.at().level()).node_count())}"
                         }
                     }
                 }
-                for gauge in layout.gauges {
-                    Gauge { tree: tree.clone(), gauge, tracer }
-                }
-                for more in layout.more {
-                    span {
-                        class: "data absolute text-[11px] text-[var(--muted)]",
-                        style: "left:{more.x}px;top:{more.y + 11.0}px;width:{PathLayout::MORE_WIDTH}px;text-align:center;",
-                        "+{more.hidden}"
-                    }
-                }
-                for card in layout.cards {
+                for card in layout.cards.iter().cloned() {
                     PathCard {
-                        key: "{card.step.at().level()}",
+                        key: "card-{card.row}",
                         tree: tree.clone(),
                         selected: inspected == Some(card.step.at()),
                         card,
+                        replay,
                         tracer,
+                        spotlight,
+                    }
+                }
+                for (index, gauge) in layout.gauges.into_iter().enumerate() {
+                    Gauge {
+                        tree: tree.clone(),
+                        gauge,
+                        tracer,
+                        spotlight,
+                        on_point: move |pointed: bool| pointed_gauge.set(pointed.then_some(index)),
+                    }
+                }
+                for more in layout.more {
+                    span {
+                        class: "data more-siblings",
+                        style: "transform:translate({more.x}px,{more.y + 13.0}px);width:{PathLayout::MORE_WIDTH}px;",
+                        title: "{more.hidden} more siblings",
+                        "+{more.hidden}"
                     }
                 }
             }
@@ -301,17 +420,35 @@ pub(crate) fn PathTree(
 
 /// A sibling: how full it is, and a way to look up its first key.
 #[component]
-fn Gauge(tree: LoadedTree, gauge: GaugeSpot, tracer: Tracer) -> Element {
+fn Gauge(
+    tree: LoadedTree,
+    gauge: GaugeSpot,
+    tracer: Tracer,
+    spotlight: Spotlight,
+    on_point: EventHandler<bool>,
+) -> Element {
     let mut tracer = tracer;
+    let mut spotlight = spotlight;
     let at = gauge.at;
+    let name = tree.shape().node_name(at);
+    let label = gauge.label.clone();
     rsx! {
         button {
-            class: "gauge absolute",
-            style: "left:{gauge.x}px;top:{gauge.y}px;width:{PathLayout::GAUGE_WIDTH}px;height:{PathLayout::GAUGE_HEIGHT}px;",
-            title: "{gauge.label}",
-            "aria-label": "{gauge.label}",
+            class: "gauge",
+            tabindex: "-1",
+            style: "transform:translate({gauge.x}px,{gauge.y}px);width:{PathLayout::GAUGE_WIDTH}px;height:{PathLayout::GAUGE_HEIGHT}px;",
+            "aria-label": "{name}: {gauge.label}. Look up its first key",
+            onmouseenter: move |evt| {
+                let point = evt.client_coordinates();
+                spotlight.show_hint(Hint::new((point.x, point.y), name.clone(), format!("{label}. Click to look up its first key.")));
+                on_point.call(true);
+            },
+            onmouseleave: move |_| {
+                spotlight.clear();
+                on_point.call(false);
+            },
             onclick: move |_| tracer.run_into(&tree, at),
-            span { class: "gauge-fill", style: "height:{gauge.fill * 100.0}%;" }
+            span { class: "gauge-fill", style: "transform:scaleY({gauge.fill});" }
         }
     }
 }
@@ -319,7 +456,14 @@ fn Gauge(tree: LoadedTree, gauge: GaugeSpot, tracer: Tracer) -> Element {
 /// One node on the path: its fill, its prefix, and its slots as a ruler,
 /// the ones the search compared marked.
 #[component]
-fn PathCard(tree: LoadedTree, card: CardSpot, selected: bool, tracer: Tracer) -> Element {
+fn PathCard(
+    tree: LoadedTree,
+    card: CardSpot,
+    selected: bool,
+    replay: u64,
+    tracer: Tracer,
+    spotlight: Spotlight,
+) -> Element {
     let step = card.step.clone();
     let at = step.at();
     let shape = tree.shape();
@@ -330,50 +474,169 @@ fn PathCard(tree: LoadedTree, card: CardSpot, selected: bool, tracer: Tracer) ->
     let tied = step.tied().unwrap_or(0..0);
     let found = step.found();
     let edge = step.edge_taken();
-    let ruler_width = card.width - 28.0;
+    let insert_at = match step.outcome() {
+        TraceOutcome::Absent { insert_at } => Some(insert_at),
+        _ => None,
+    };
+    let compared = step.inline_key().is_some();
+    let ruler_width = card.width - 2.0 * PathLayout::RULER_INSET;
     let note = card.note(&tree, len);
     let first = (len > 0).then(|| CardSpot::short_key(&tree, at, 0));
     let last = (len > 1).then(|| CardSpot::short_key(&tree, at, len - 1));
-    let shared = (prefix > 0 && len > 0)
-        .then(|| tree.key_text_split(at, 0).0)
-        .filter(|shared| !shared.is_empty());
+    let (lines, maybe) = card.lines_read;
+    let pointed = spotlight.part_of(at);
+    let name = shape.node_name(at);
+    let label =
+        format!("{name}: {len} of {capacity} keys; {note}; {lines} cache lines read. Inspect it.");
+    let slot_width = card.slot_width;
     let mut tracer = tracer;
+    let mut spotlight = spotlight;
+    let point_tree = tree.clone();
+    let pick_tree = tree.clone();
+    let slot_under = move |x: f64| {
+        let slot = (x / slot_width).floor();
+        (slot >= 0.0 && (slot as usize) < len).then_some(slot as usize)
+    };
     rsx! {
-        button {
-            class: if selected { "path-card selected absolute text-left" } else { "path-card absolute text-left" },
-            style: "left:{card.x}px;top:{card.y}px;width:{card.width}px;height:{PathLayout::CARD_HEIGHT}px;",
+        div {
+            class: if selected { "path-card selected" } else { "path-card" },
+            style: "transform:translate({card.x}px,{card.y}px);width:{card.width}px;height:{PathLayout::CARD_HEIGHT}px;--row:{card.row};",
+            role: "button",
+            tabindex: "0",
+            "aria-pressed": if selected { "true" } else { "false" },
+            "aria-label": label,
             onclick: move |_| tracer.inspect(at),
-            div { class: "data absolute inset-x-3.5 top-1.5 flex items-center gap-2.5 whitespace-nowrap text-[11.5px] leading-4",
-                span { class: "shrink-0 font-medium text-[var(--ink)]", "{len}/{capacity}" }
-                span { class: "fill-track shrink-0",
-                    span { class: "fill-bar", style: "width:{len as f64 / capacity.max(1) as f64 * 100.0}%;" }
+            onkeydown: move |evt| {
+                if matches!(evt.key(), Key::Enter) || evt.key() == Key::Character(" ".to_string()) {
+                    evt.prevent_default();
+                    tracer.inspect(at);
+                }
+            },
+            div { class: "card-top data",
+                span { class: "card-count", "{len}/{capacity}" }
+                span { class: "fill-track", "aria-hidden": "true",
+                    span { class: "fill-bar", style: "transform:scaleX({len as f64 / capacity.max(1) as f64});" }
                 }
                 if prefix > 0 {
-                    span {
-                        class: "shrink-0 text-[var(--graphite)]",
-                        title: shared.map(|shared| format!("Every key here starts with {shared}")).unwrap_or_default(),
-                        "prefix {prefix} B"
+                    span { class: "card-chip", "prefix {prefix} B" }
+                }
+                if lines > 0 {
+                    span { class: "card-chip card-lines",
+                        match (lines, maybe) {
+                            (1, 0) => "1 line".to_string(),
+                            (lines, 0) => format!("{lines} lines"),
+                            (lines, maybe) => format!("{lines}–{} lines", lines + maybe),
+                        }
                     }
                 }
-                span { class: "ml-auto min-w-0 truncate text-[var(--graphite)]", {note} }
+                span { class: "card-note", {note} }
             }
             div {
-                class: "absolute",
-                style: "left:14px;top:{PathLayout::RULER_TOP}px;width:{ruler_width}px;height:{PathLayout::RULER_HEIGHT}px;",
-                for slot in 0..capacity {
-                    span {
-                        class: if found == Some(slot) { "slot slot-found" } else if tied.contains(&slot) { "slot slot-tied" } else if slot < len { "slot slot-key" } else { "slot slot-room" },
-                        style: "left:{slot as f64 * card.slot_width}px;width:{(card.slot_width - 1.0).max(0.5)}px;",
+                class: "ruler",
+                style: "left:{PathLayout::RULER_INSET}px;top:{PathLayout::RULER_TOP}px;width:{ruler_width}px;height:{PathLayout::RULER_HEIGHT}px;",
+                onmousemove: move |evt| {
+                    let point = evt.client_coordinates();
+                    match slot_under(evt.element_coordinates().x) {
+                        Some(slot) if spotlight.peek_part_of(at) != Some(NodePart::Entry(slot)) => {
+                            let (shared, rest) = point_tree.key_text_split(at, slot);
+                            let kind = if at.level() == 0 { "key" } else { "separator" };
+                            spotlight.point_at_part(
+                                at,
+                                NodePart::Entry(slot),
+                                Some(Hint::new((point.x, point.y), format!("slot {slot}"), format!("{kind} {shared}{rest} · click to look it up"))),
+                            );
+                        }
+                        Some(_) => spotlight.move_hint((point.x, point.y)),
+                        None => spotlight.clear(),
+                    }
+                },
+                onmouseleave: move |_| spotlight.clear(),
+                onclick: move |evt| {
+                    evt.stop_propagation();
+                    if let Some(slot) = slot_under(evt.element_coordinates().x) {
+                        let (shared, rest) = pick_tree.key_text_split(at, slot);
+                        tracer.run(&pick_tree, &format!("{shared}{rest}"));
+                    }
+                },
+                div { class: "ruler-marks", key: "{replay}",
+                    for slot in 0..capacity {
+                        span {
+                            class: SlotMark::of(slot, len, found, &tied, compared).class(pointed == Some(NodePart::Entry(slot))),
+                            style: "left:{slot as f64 * card.slot_width}px;width:{(card.slot_width - 1.0).max(0.5)}px;",
+                        }
+                    }
+                    if let Some(edge) = edge {
+                        span {
+                            class: "edge-notch",
+                            style: "left:{edge as f64 * card.slot_width - 1.5}px;",
+                        }
+                    }
+                    if let Some(insert_at) = insert_at {
+                        span {
+                            class: "insert-caret",
+                            style: "left:{insert_at as f64 * card.slot_width - 1.0}px;",
+                        }
+                    }
+                    if let Some(NodePart::Child(child)) = pointed {
+                        span {
+                            class: "edge-pointed",
+                            style: "left:{child as f64 * card.slot_width - 1.5}px;",
+                        }
                     }
                 }
-                if let Some(edge) = edge {
-                    span { class: "edge-notch", style: "left:{edge as f64 * card.slot_width - 1.5}px;" }
-                }
             }
-            div { class: "data absolute inset-x-3.5 bottom-1.5 flex justify-between gap-3 text-[10.5px] leading-3 text-[var(--muted)]",
+            div { class: "card-bounds data",
                 span { class: "truncate", {first.unwrap_or_default()} }
                 span { class: "truncate text-right", {last.unwrap_or_default()} }
             }
+        }
+    }
+}
+
+/// How a ruler draws one slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SlotMark {
+    /// Where the lookup ended.
+    Found,
+    /// A key whose inline key tied with the searched key's.
+    Tied,
+    /// A key the compare of inline keys placed, if it ran.
+    Key {
+        compared: bool,
+    },
+    Empty,
+}
+
+impl SlotMark {
+    fn of(
+        slot: usize,
+        len: usize,
+        found: Option<usize>,
+        tied: &std::ops::Range<usize>,
+        compared: bool,
+    ) -> Self {
+        if found == Some(slot) {
+            SlotMark::Found
+        } else if tied.contains(&slot) {
+            SlotMark::Tied
+        } else if slot < len {
+            SlotMark::Key { compared }
+        } else {
+            SlotMark::Empty
+        }
+    }
+
+    fn class(self, pointed: bool) -> &'static str {
+        match (self, pointed) {
+            (SlotMark::Found, false) => "slot slot-found",
+            (SlotMark::Found, true) => "slot slot-found slot-pointed",
+            (SlotMark::Tied, false) => "slot slot-tied",
+            (SlotMark::Tied, true) => "slot slot-tied slot-pointed",
+            (SlotMark::Key { compared: true }, false) => "slot slot-key compared",
+            (SlotMark::Key { compared: true }, true) => "slot slot-key compared slot-pointed",
+            (SlotMark::Key { compared: false }, false) => "slot slot-key",
+            (SlotMark::Key { compared: false }, true) => "slot slot-key slot-pointed",
+            (SlotMark::Empty, _) => "slot slot-room",
         }
     }
 }
@@ -388,16 +651,16 @@ impl CardSpot {
                 let bound = |index| Self::short_key(tree, at, index);
                 match (edge.checked_sub(1), edge < len) {
                     (Some(left), true) => {
-                        format!("edge {edge}: {} < key < {}", bound(left), bound(edge))
+                        format!("child {edge}: {} < key < {}", bound(left), bound(edge))
                     }
-                    (None, _) => format!("edge 0: key < {}", bound(0)),
-                    (Some(left), false) => format!("edge {edge}: key > {}", bound(left)),
+                    (None, _) => format!("child 0: key < {}", bound(0)),
+                    (Some(left), false) => format!("child {edge}: key > {}", bound(left)),
                 }
             }
             TraceOutcome::Found { index } if at.level() == 0 => format!("found at slot {index}"),
-            TraceOutcome::Found { index } => format!("slot {index} is a separator: value below"),
-            TraceOutcome::Absent { insert_at } => format!("not here: would go at slot {insert_at}"),
-            TraceOutcome::ToHead { edge } => format!("edge {edge}, toward the value"),
+            TraceOutcome::Found { index } => format!("separator at slot {index}: value below"),
+            TraceOutcome::Absent { insert_at } => format!("absent: would go at slot {insert_at}"),
+            TraceOutcome::ToHead { edge } => format!("child {edge}, toward the value"),
             TraceOutcome::Head => "its head holds the value".to_string(),
         }
     }

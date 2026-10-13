@@ -23,7 +23,8 @@
         };
         llvmPackages = pkgs.llvmPackages_latest;
         # Keep this exact nightly aligned with the Rust install step in CI.
-        rustToolchain = pkgs.rust-bin.nightly."2026-10-07".default.override {
+        rustNightly = pkgs.rust-bin.nightly."2026-10-07";
+        rustToolchain = rustNightly.default.override {
           extensions = [
             "rust-src"
             "rust-analyzer"
@@ -59,6 +60,16 @@
             pkgs.binaryen
           ];
           ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
+        };
+
+        # The perf workflow's shell on its self-hosted runner
+        # (.github/workflows/perf.yml): what building and running the bench
+        # with `--perf` needs, and no more, since the runner downloads it.
+        devShells.bench = pkgs.mkShell {
+          packages = [
+            rustNightly.minimal
+            pkgs.perf
+          ];
         };
       }
     );

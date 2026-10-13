@@ -7,6 +7,7 @@ use gloo_timers::future::TimeoutFuture;
 
 use crate::count_text::Group;
 use crate::inspected_tree::{InspectedMap, LoadedTree, VisKey};
+use crate::scenarios::Scenario;
 use crate::trace::Tracer;
 
 /// The kinds of key on offer, each picked for what bbtree does with it.
@@ -27,8 +28,41 @@ impl KeyKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             KeyKind::Integers => "u64",
-            KeyKind::Urls => "String URLs",
-            KeyKind::Ids => "[u8; 16] ids",
+            KeyKind::Urls => "URLs",
+            KeyKind::Ids => "16-byte ids",
+        }
+    }
+
+    /// What the kind shows of bbtree, for its hint.
+    pub(crate) fn shows(self) -> &'static str {
+        match self {
+            KeyKind::Integers => {
+                "u64 keys: 2-byte inline keys, and fence prefixes that grow with depth."
+            }
+            KeyKind::Urls => {
+                "String keys sharing long prefixes: 8-byte inline keys past fence and search prefixes."
+            }
+            KeyKind::Ids => {
+                "[u8; 16] keys: 2-byte inline keys, and internal nodes that put children before keys."
+            }
+        }
+    }
+
+    /// A key greater than every key of this kind the builds make.
+    pub(crate) fn past_the_end(self) -> &'static str {
+        match self {
+            KeyKind::Integers => "18446744073709551615",
+            KeyKind::Urls => "https://shop.example.com/~",
+            KeyKind::Ids => "ffffffffffffffffffffffffffffffff",
+        }
+    }
+
+    /// A key just after `key` that no build of this kind makes, if keys of
+    /// the kind leave gaps: integers and ids are dense.
+    pub(crate) fn missing_after(self, key: &str) -> Option<String> {
+        match self {
+            KeyKind::Urls => Some(format!("{key}-draft")),
+            KeyKind::Integers | KeyKind::Ids => None,
         }
     }
 
@@ -286,7 +320,10 @@ mod tests {
 }
 
 /// The build controls: key kind, size and order, and the build in flight.
-/// A finished build looks up a key at random, so there is a path to see.
+/// Any change builds the tree anew, so the controls always say what is
+/// shown, and they wait while a build runs: at ten million entries, two
+/// trees don't fit. A finished build looks up a key at random, so there is
+/// a path to see.
 #[component]
 pub(crate) fn WorkloadPicker(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> Element {
     let mut workload =
@@ -304,74 +341,76 @@ pub(crate) fn WorkloadPicker(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -
             let start = web_time::Instant::now();
             let built = workload.build(move |done| progress.set(Some(done))).await;
             took.set(Some(start.elapsed().as_secs_f64()));
-            tracer.run_random(&built);
+            tracer.run_scenario(&built, Scenario::Random);
             tree.set(Some(built));
             progress.set(None);
         });
     });
     use_hook(move || build.call(*workload.peek()));
+    let mut choose = move |chosen: Workload| {
+        if chosen != *workload.peek() && progress.peek().is_none() {
+            workload.set(chosen);
+            build.call(chosen);
+        }
+    };
 
     let current = workload();
     let building = progress();
     rsx! {
-        div { class: "flex flex-wrap items-center gap-2",
-            select {
-                class: "select",
-                "aria-label": "Key type",
-                onchange: move |evt| {
-                    let kind = KeyKind::ALL
-                        .into_iter()
-                        .find(|kind| kind.label() == evt.value())
-                        .unwrap_or(KeyKind::Integers);
-                    workload.set(Workload::new(kind, current.count(), current.order()));
-                },
+        div { class: "workload",
+            fieldset { class: "segmented",
+                legend { class: "sr-only", "Key type" }
                 for kind in KeyKind::ALL {
-                    option { value: kind.label(), selected: kind == current.kind(), {kind.label()} }
+                    label {
+                        class: "segment",
+                        title: kind.shows(),
+                        input {
+                            class: "sr-only",
+                            r#type: "radio",
+                            name: "key-kind",
+                            checked: kind == current.kind(),
+                            disabled: building.is_some(),
+                            onchange: move |_| choose(Workload::new(kind, current.count(), current.order())),
+                        }
+                        span { {kind.label()} }
+                    }
                 }
             }
             select {
                 class: "select",
                 "aria-label": "Entries",
+                disabled: building.is_some(),
                 onchange: move |evt| {
                     let count = evt.value().parse().unwrap_or(current.count());
-                    workload.set(Workload::new(current.kind(), count, current.order()));
+                    choose(Workload::new(current.kind(), count, current.order()));
                 },
                 for count in Workload::COUNTS.into_iter().filter(|&count| count <= current.kind().max_count()) {
-                    option { value: "{count}", selected: count == current.count(), "{Group(count)} entries" }
+                    option { value: "{count}", selected: count == current.count(), "{Group(count)} keys" }
                 }
             }
             select {
                 class: "select",
                 "aria-label": "Insert order",
+                disabled: building.is_some(),
                 onchange: move |evt| {
                     let order = InsertOrder::ALL
                         .into_iter()
                         .find(|order| order.label() == evt.value())
                         .unwrap_or(InsertOrder::Random);
-                    workload.set(Workload::new(current.kind(), current.count(), order));
+                    choose(Workload::new(current.kind(), current.count(), order));
                 },
                 for order in InsertOrder::ALL {
                     option { value: order.label(), selected: order == current.order(), {order.label()} }
                 }
             }
-            button {
-                class: "button-primary",
-                disabled: building.is_some(),
-                onclick: move |_| build.call(current),
-                "Build"
-            }
-            if let Some(done) = building {
-                span { class: "data flex items-center gap-2 text-[12px] text-[var(--graphite)]",
-                    span { class: "fill-track w-24",
-                        span { class: "fill-bar", style: "width:{done * 100.0}%;" }
+            span { class: "build-status data", role: "status",
+                if let Some(done) = building {
+                    span { class: "fill-track wide", "aria-hidden": "true",
+                        span { class: "fill-bar", style: "transform:scaleX({done});" }
                     }
-                    "building"
-                }
-            } else if let Some(seconds) = took() {
-                span {
-                    class: "data text-[12px] text-[var(--muted)]",
-                    title: "The inserts, then one read of every node",
-                    "built in {seconds:.1} s"
+                    "building {done * 100.0:.0}%"
+                } else if let Some(seconds) = took() {
+                    span { title: "The inserts, then one read of every node", "built in {seconds:.1} s" }
                 }
             }
         }

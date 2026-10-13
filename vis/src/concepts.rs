@@ -1,0 +1,144 @@
+//! The ideas a lookup in bbtree rests on, in plain words for a reader who
+//! knows B-trees but not bbtree, and the term that names one where a panel
+//! uses it: pointing at the term defines it and lights up what it names.
+
+use std::rc::Rc;
+
+use dioxus::prelude::*;
+
+use crate::spotlight::Spotlight;
+
+/// Where the design notes live, for the decision behind each idea.
+const DECISIONS: &str = "https://github.com/XiangpengHao/bbtree/blob/main/doc/03-decisions.md";
+
+/// One idea of bbtree's, named where the panels use it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Concept {
+    InlineKey,
+    Tie,
+    FencePrefix,
+    SearchPrefix,
+    Separator,
+    Head,
+    LengthTag,
+    Child,
+    Page,
+    CacheLine,
+    Wasm32,
+}
+
+impl Concept {
+    /// The idea's name, as the definition's title.
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Concept::InlineKey => "Inline keys",
+            Concept::Tie => "Tied keys",
+            Concept::FencePrefix => "Fence prefix",
+            Concept::SearchPrefix => "Search prefix",
+            Concept::Separator => "Separator",
+            Concept::Head => "Head",
+            Concept::LengthTag => "Length tags",
+            Concept::Child => "Children",
+            Concept::Page => "Page",
+            Concept::CacheLine => "Cache lines",
+            Concept::Wasm32 => "wasm32 layouts",
+        }
+    }
+
+    /// The idea, for someone who knows B-trees.
+    pub(crate) fn definition(self) -> &'static str {
+        match self {
+            Concept::InlineKey => {
+                "A short summary of each key: its first few bytes past the node's prefix, 2 for integers and ids, 8 for strings. A node keeps them side by side, so one vector compare checks the key against all of them at once instead of a binary search over full keys."
+            }
+            Concept::Tie => {
+                "Keys whose inline key equals the searched key's. Only they can equal it, so only they are searched with full key compares; every other key is already placed by its summary."
+            }
+            Concept::FencePrefix => {
+                "Every key of a node lies between the two separators that bound it in its ancestors, its fences, so it starts with the bytes they share. The node records how many, and its inline keys start after them: deeper nodes summarize the bytes that still differ."
+            }
+            Concept::SearchPrefix => {
+                "An internal node of string keys whose keys all share more than their fences do keeps that longer prefix too, and its search skips it."
+            }
+            Concept::Separator => {
+                "A key in an internal node that divides two children. bbtree moves a key up rather than copying it, so every key is stored exactly once: a separator's value stays below, as the head of the leaf to its right."
+            }
+            Concept::Head => {
+                "Every leaf but the leftmost holds one extra value: the value of the separator just left of it. A lookup that finds its key as a separator goes on down to that leaf to read it."
+            }
+            Concept::LengthTag => {
+                "String leaves keep each key's length in 2 bytes of spare padding. When several inline keys tie, matching lengths narrow the candidates before any key is read from the heap."
+            }
+            Concept::Child => {
+                "An internal node's child pointers. Child i holds the keys between key i − 1 and key i."
+            }
+            Concept::Page => {
+                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. Whatever no array covers is padding."
+            }
+            Concept::CacheLine => {
+                "The processor fetches memory 64 bytes at a time. A lookup is fast when it needs few lines of each node it passes through."
+            }
+            Concept::Wasm32 => {
+                "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for length tags. Leaves of fixed-size keys and values are the same."
+            }
+        }
+    }
+
+    /// The design decision behind the idea, as `doc/03-decisions.md` numbers
+    /// it.
+    pub(crate) fn decision(self) -> Option<&'static str> {
+        match self {
+            Concept::InlineKey => Some("D18"),
+            Concept::Tie => Some("D18"),
+            Concept::FencePrefix => Some("D26"),
+            Concept::SearchPrefix => Some("D33"),
+            Concept::Separator | Concept::Head => Some("D17"),
+            Concept::LengthTag => Some("D36"),
+            Concept::Page => Some("D15"),
+            Concept::Child => Some("D32"),
+            Concept::CacheLine | Concept::Wasm32 => None,
+        }
+    }
+
+    /// The design notes, where the decision is.
+    pub(crate) fn decisions_link() -> &'static str {
+        DECISIONS
+    }
+}
+
+/// A term in running text: pointing at it or focusing it shows its
+/// definition, and lights up in the panels what it names.
+#[component]
+pub(crate) fn Term(concept: Concept, spotlight: Spotlight, children: Element) -> Element {
+    let mut mounted: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+    let mut spotlight = spotlight;
+    rsx! {
+        button {
+            class: "term",
+            r#type: "button",
+            "aria-describedby": "hint",
+            onmounted: move |evt| mounted.set(Some(evt.data())),
+            onmouseenter: move |evt| {
+                let point = evt.client_coordinates();
+                spotlight.point_at_concept(concept, (point.x, point.y));
+            },
+            onmousemove: move |evt| {
+                let point = evt.client_coordinates();
+                spotlight.move_hint((point.x, point.y));
+            },
+            onmouseleave: move |_| spotlight.clear(),
+            onfocus: move |_| {
+                if let Some(element) = mounted.peek().clone() {
+                    spawn(async move {
+                        if let Ok(rect) = element.get_client_rect().await {
+                            let anchor = (rect.min_x() + rect.width() / 2.0, rect.min_y());
+                            spotlight.point_at_concept(concept, anchor);
+                        }
+                    });
+                }
+            },
+            onblur: move |_| spotlight.clear(),
+            {children}
+        }
+    }
+}

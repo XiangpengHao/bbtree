@@ -1,8 +1,9 @@
-//! The command line: suite runs with filters; `verify-data` and `fetch`,
-//! which manage the datasets; and `measure`, the internal command that the
-//! suite runner starts each child process with.
+//! The command line: suite runs with filters; `compare`, which reports on
+//! two runs' CSVs; `verify-data` and `fetch`, which manage the datasets; and
+//! `measure`, the internal command that the suite runner starts each child
+//! process with.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::datasets::DataDirectory;
 use crate::keys::KeyKind;
@@ -48,6 +49,7 @@ pub(crate) enum Invocation {
     /// `fetch`: installs the datasets and verifies them.
     FetchData,
     RunSuites(SuiteRequest),
+    CompareRuns(ComparisonRequest),
     MeasureCell(CellRequest),
 }
 
@@ -57,6 +59,9 @@ impl Invocation {
             None | Some("-h" | "--help" | "help") => Ok(Self::Help),
             Some("verify-data") => Self::without_arguments(arguments, Self::VerifyData),
             Some("fetch") => Self::without_arguments(arguments, Self::FetchData),
+            Some(ComparisonRequest::COMMAND) => {
+                ComparisonRequest::parse(&arguments[1..]).map(Self::CompareRuns)
+            }
             Some(CellRequest::COMMAND) => {
                 CellRequest::parse(&arguments[1..]).map(Self::MeasureCell)
             }
@@ -81,11 +86,16 @@ runs in a fresh process, once per repetition.
 
 usage: bbtree-bench <suite>... [filters] [options]
        bbtree-bench-memory <suite>... [filters] [options]
+       bbtree-bench compare --head CSV [--base CSV]
        bbtree-bench verify-data
        bbtree-bench fetch
 
 The memory binary reports the memory held by the maps that build operations
 make, instead of time.
+
+compare prints a markdown report of a timing run's CSV: bbtree against std's
+BTreeMap, time and perf counts per operation, and with --base, bbtree's change
+from that run. CI posts it on pull requests (.github/workflows/perf.yml).
 
 suites: {suites}, or all
 
@@ -109,8 +119,9 @@ options:
   --reps N   repetitions per cell (default 1; more for cells shown to be
              noisy)
   --quick    10× smaller sizes and operation counts, for CI and development
-  --perf     count cycles, instructions, branch misses, L1d misses and DRAM
-             fills of the timed regions with `perf stat`
+  --perf     count cycles, instructions, branches, branch misses, L1d misses
+             and cache lines from memory, of the timed regions on the main
+             thread, with `perf stat`
   --list     print the selected cells and exit
   --out DIR  where to write the CSV and the summary (default: bench/results)",
             suites = Suite::all_names(),
@@ -310,6 +321,41 @@ impl SuiteRequest {
 
     pub(crate) fn command_line(&self) -> &str {
         &self.command_line
+    }
+}
+
+/// `bbtree-bench compare --head CSV [--base CSV]`.
+pub(crate) struct ComparisonRequest {
+    head: PathBuf,
+    base: Option<PathBuf>,
+}
+
+impl ComparisonRequest {
+    const COMMAND: &str = "compare";
+
+    fn parse(arguments: &[String]) -> Result<Self, String> {
+        let (mut head, mut base) = (None, None);
+        let mut cursor = ArgumentCursor::new(arguments);
+        while let Some(argument) = cursor.next_argument() {
+            let run = match argument {
+                "--head" => &mut head,
+                "--base" => &mut base,
+                _ => return Err(format!("{} takes --head and --base", Self::COMMAND)),
+            };
+            *run = Some(PathBuf::from(cursor.value_of(argument)?));
+        }
+        Ok(Self {
+            head: head.ok_or_else(|| format!("{} needs --head", Self::COMMAND))?,
+            base,
+        })
+    }
+
+    pub(crate) fn head(&self) -> &Path {
+        &self.head
+    }
+
+    pub(crate) fn base(&self) -> Option<&Path> {
+        self.base.as_deref()
     }
 }
 
