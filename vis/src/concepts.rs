@@ -8,9 +8,6 @@ use dioxus::prelude::*;
 
 use crate::spotlight::Spotlight;
 
-/// Where the design notes live, for the decision behind each idea.
-const DECISIONS: &str = "https://github.com/XiangpengHao/bbtree/blob/main/doc/03-decisions.md";
-
 /// One idea of bbtree's, named where the panels use it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Concept {
@@ -49,7 +46,7 @@ impl Concept {
     pub(crate) fn definition(self) -> &'static str {
         match self {
             Concept::InlineKey => {
-                "A short summary of each key: its first few bytes past the node's prefix, 2 for integers and ids, 8 for strings. A node keeps them side by side, so one vector compare checks the key against all of them at once instead of a binary search over full keys."
+                "A short summary of each key: its next few bytes past the node's prefix, as many as the Fences line says. Summaries sort as their keys do, so the search compares the key's own summary with all of the node's and counts how many are smaller: that count is where the key goes. Only keys whose summary is equal, the ties, need a full compare. On x86-64 the count is a few vector compares over the whole array, where a B-tree would binary search full keys."
             }
             Concept::Tie => {
                 "Keys whose inline key equals the searched key's. Only they can equal it, so only they are searched with full key compares; every other key is already placed by its summary."
@@ -79,7 +76,7 @@ impl Concept {
                 "The processor fetches memory 64 bytes at a time. A lookup is fast when it needs few lines of each node it passes through."
             }
             Concept::Wasm32 => {
-                "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for length tags. Leaves of fixed-size keys and values are the same."
+                "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for length tags. Leaves of fixed-size keys and values are the same. Without vector compares, it counts the smaller inline keys by a binary search over them instead, to the same count; the cache lines drawn are those of the x86-64 count."
             }
         }
     }
@@ -98,11 +95,6 @@ impl Concept {
             Concept::Child => Some("D32"),
             Concept::CacheLine | Concept::Wasm32 => None,
         }
-    }
-
-    /// The design notes, where the decision is.
-    pub(crate) fn decisions_link() -> &'static str {
-        DECISIONS
     }
 }
 

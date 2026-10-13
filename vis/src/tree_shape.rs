@@ -36,7 +36,6 @@ impl NodeAt {
 /// Every level of a tree, the leaves first.
 pub(crate) struct TreeShape {
     levels: Vec<Level>,
-    entries: usize,
     leaf_page_size: usize,
     internal_page_size: usize,
 }
@@ -56,14 +55,10 @@ pub(crate) struct Level {
 impl TreeShape {
     /// Reads every node of `tree` once, top down a level at a time: the
     /// children of node `i` follow those of node `i - 1`, so each level comes
-    /// out in key order. `entries` is the map's length.
-    pub(crate) fn of<K, V, S: InlineKeyStrategy<K>>(
-        tree: &TreeView<'_, K, V, S>,
-        entries: usize,
-    ) -> Self {
+    /// out in key order.
+    pub(crate) fn of<K, V, S: InlineKeyStrategy<K>>(tree: &TreeView<'_, K, V, S>) -> Self {
         let mut shape = Self {
             levels: Vec::new(),
-            entries,
             leaf_page_size: 0,
             internal_page_size: 0,
         };
@@ -109,10 +104,6 @@ impl TreeShape {
 
     pub(crate) fn level(&self, level: usize) -> &Level {
         &self.levels[level]
-    }
-
-    pub(crate) fn entries(&self) -> usize {
-        self.entries
     }
 
     pub(crate) fn leaf_count(&self) -> usize {
@@ -252,7 +243,7 @@ mod tests {
     #[test]
     fn levels_hold_every_node_once_under_its_parent() {
         let map = map_of(100_000);
-        let shape = TreeShape::of(&map.inspect(), map.len());
+        let shape = TreeShape::of(&map.inspect());
         let height = shape.height().unwrap();
         assert!(height >= 2);
         assert_eq!(shape.level(height).node_count(), 1);
@@ -289,7 +280,7 @@ mod tests {
     fn paths_lead_back_to_the_node() {
         let map = map_of(50_000);
         let tree = map.inspect();
-        let shape = TreeShape::of(&tree, map.len());
+        let shape = TreeShape::of(&tree);
         let leaves = shape.level(0);
         for index in [0, leaves.node_count() / 3, leaves.node_count() - 1] {
             let mut node = tree.root().unwrap();
@@ -304,7 +295,7 @@ mod tests {
     #[test]
     fn neighbors_stay_on_their_level() {
         let map = map_of(20_000);
-        let shape = TreeShape::of(&map.inspect(), map.len());
+        let shape = TreeShape::of(&map.inspect());
         let last = shape.leaf_count() - 1;
         assert_eq!(shape.neighbor(NodeAt::new(0, 0), -1), None);
         assert_eq!(

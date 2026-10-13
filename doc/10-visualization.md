@@ -61,6 +61,14 @@ From the original note:
   so nothing scrolls at 1440×900. A guide under the path (`guide.rs`) reads
   the page step by step, from the lookup on screen, with numbered marks
   pinned to the parts it names.
+- **Fences first, the guide gone, links to share (2026-10-12, fifth
+  pass).** The guide took half the path's column to say what the inspector
+  could show in place, so it went: the path has the column. The inspector
+  shows the reason for each node's prefix, its fences, byte by byte beside
+  its first and last keys and the key looked up, with the prefix and the
+  inline key's bytes marked; its search shrank to a line a step, the full
+  sentence a click away. A lookup inspects the root, where it starts. The
+  address holds the page's state, so a copied link opens on the same view.
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -69,9 +77,13 @@ The viewer computes nothing that bbtree computes: no offsets, capacities,
 prefix lengths, fill limits, or which child a key belongs to. Every such
 number comes from bbtree's own code, through a read-only view. What the
 viewer derives from those numbers, positions on screen and aggregate colors,
-is drawing, not semantics. It shows a shared prefix only for keys that are
-their bytes (byte strings and arrays); for integers it shows the inline keys
-bbtree stores, not an encoding of its own.
+is drawing, not semantics. A key's bytes are bbtree's own encoding,
+`InlineKey::inline_key_at`, read a window at a time. A node's fences are
+the one thing it finds itself, since bbtree stores none (05-fence-key.md):
+the separators beside the way down, read as `PathMut::bounds` reads them. A
+test checks both against bbtree at nodes of every level: each node's prefix
+is what its fences share, and its inline keys are those bytes past it
+(`fences.rs`).
 
 ## The `inspect` feature: a view, not exposed fields
 
@@ -142,19 +154,23 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   separator (found in the root, its value a leaf's head), a key past the
   last one (the right border, no fence prefixes), and for URLs a missing
   key between two (where an insert would go). Keys: `/` to type, `R`
-  random, `[` `]` the leaves beside, `↑` `↓` along the path
-  (`shortcuts.rs`).
+  random, `[` `]` the leaves beside, `↑` `↓` along the path, `←` `→`
+  back and forward through the lookups (`shortcuts.rs`).
 - **The toolbar**: the search, as the current key and its outcome
   (`trace.rs`); the tree's build controls (`workload.rs`); both open
-  panels (`popover.rs`).
+  panels (`popover.rs`); and the repository's GitHub mark. A credit line
+  sits under the path.
 - **The headline** (`path_summary.rs`): where the lookup ended, how many
   nodes and cache lines it read, and a replay; the path's legend sits in
   the path's corner.
-- **The guide** (`guide.rs`), under the path, open at first: start here,
-  the path, reading a card, one step per node of the lookup, reading the
-  page, and lookups worth seeing. Each step's words come from the lookup on
-  screen, it pins numbered marks to the parts it names, measured in the
-  page, and it shows the node it talks about in the inspector.
+- **The link** (`shared_link.rs`): the address holds the tree's settings,
+  the key, the inspected node's level and the tab, as
+  `?keys=u64&n=1000000&build=random&key=851191&level=3&view=page`. The page
+  starts from it and keeps it in step. Each lookup and each new tree is a
+  history entry, numbered in `history.state`; another node or tab only
+  rewrites the entry. `←` `→` and the browser's back and forward step
+  through the entries, rebuilding the tree where it differs, and `←` stops
+  at the page's first entry rather than leave it.
 - **The path** (`path_tree.rs`): one card per node from the root down, each
   hanging under the edge its parent took, with a bold ink connector. A card
   shows:
@@ -171,18 +187,31 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   looks up that node's first key. A separator's way to its value is dashed.
 
   Every lookup plays its way down, a level every 260 ms: all the inline
-  keys of a ruler flash at once, as the search compares them all; the tied
-  ones mark; the result and the notch drop in; the edge to the next card
-  draws. Between lookups the cards glide to their new places.
-- **The inspector** (`node_inspector.rs`), for the card you pick, the leaf
-  by default, right of the path: the search as steps, then a tab for the
-  page and one for the slots:
-  - What the search did, as numbered steps drawn from the trace: skip the
-    shared bytes (fence prefix, D26; search prefix, D33), compare every
-    inline key at once (D18), search the tied keys, and the outcome: the
-    edge taken with the keys either side, the slot found, a separator's way
-    to its head (D17), or the slot an insert would take. Pointing at a step
-    lights up what it read in the page and the rulers.
+  keys of a ruler flash at once, as the search compares them all, and
+  settle dark where smaller than the searched key's inline key, pale where
+  larger: the search counts the smaller ones, and the count is where the
+  key goes (D18). The tied ones mark; the result and the notch drop in;
+  the edge to the next card draws. Between lookups the cards glide to
+  their new places.
+- **The inspector** (`node_inspector.rs`), for the card you pick, the root
+  after each lookup, right of the path: a header line with its place, keys,
+  page size and address; its fences, its search, then a tab for the page
+  and one for the slots:
+  - Its fences (`fences.rs`): the low and high fence, the node's first and
+    last keys and the key looked up, in key order, a column per byte (hex,
+    or characters for URLs), so the shared columns line up. Brackets mark
+    the prefix, a search prefix, and the inline key's bytes; a missing
+    fence names the border it is missing on. The heading gives the prefix,
+    search prefix and inline key widths. Pointing at a fence lights its separator in the ancestor's card;
+    clicking it inspects that ancestor.
+  - What the search did, a line a step, each opening to a sentence: skip the
+    shared bytes (fence prefix, D26; search prefix, D33), count the inline
+    keys smaller than the key's and those equal to it (D18): the first count
+    places the key, and only the equal ones, if any, are searched in full;
+    and the outcome: the edge taken with the keys either side, the slot
+    found, a separator's way to its head (D17), or the slot an insert would
+    take. Pointing at a step lights up what it read in the page and the
+    rulers.
   - The page as 16 rows of 64-byte cache lines (`memory_map.rs`), rows
     numbered 0 to 15 and bytes across. Every
     slot sits where the layout puts it, empty slots are faint, and the slots

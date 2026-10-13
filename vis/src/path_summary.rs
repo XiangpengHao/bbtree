@@ -57,12 +57,12 @@ pub(crate) fn PathLegend(spotlight: Spotlight) -> Element {
     rsx! {
         div { class: "path-legend", "aria-label": "What the path's marks mean",
             span { class: "legend-item",
-                span { class: "ruler-swatch slot-key" }
-                "key"
+                span { class: "ruler-swatch slot-smaller" }
+                "smaller key"
             }
             span { class: "legend-item",
-                span { class: "ruler-swatch slot-room" }
-                "empty slot"
+                span { class: "ruler-swatch slot-larger" }
+                "larger key"
             }
             span { class: "legend-item",
                 span { class: "ruler-swatch slot-tied" }
@@ -71,6 +71,10 @@ pub(crate) fn PathLegend(spotlight: Spotlight) -> Element {
             span { class: "legend-item",
                 span { class: "ruler-swatch slot-found" }
                 "found"
+            }
+            span { class: "legend-item",
+                span { class: "ruler-swatch slot-room" }
+                "empty slot"
             }
             span { class: "legend-item",
                 span { class: "notch-swatch" }

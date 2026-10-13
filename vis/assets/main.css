@@ -37,8 +37,14 @@
   --slot-tags: #4a505a;
   /* A held key in a ruler, 3:1 against an empty slot. */
   --slot-filled: #7f8999;
+  /* A ruler's keys after the compare: smaller than the searched key's
+   * inline key, dark; larger, pale. */
+  --slot-smaller: #4c5462;
+  --slot-larger: #bcc3cd;
   /* The inline keys' hue, softened: a ruler's flash as they are compared. */
   --compare: #f7a47f;
+  /* An inline key's bytes in the fence strip. */
+  --compare-soft: #fde3d6;
 
   --font-display: "Martian Mono", ui-monospace, monospace;
   --font-ui: "IBM Plex Sans", system-ui, sans-serif;
@@ -206,6 +212,10 @@
     stroke-linejoin: round;
     flex: none;
   }
+  .icon.filled {
+    fill: currentColor;
+    stroke: none;
+  }
   .link {
     font: 500 12px var(--font-data);
     color: var(--link);
@@ -275,18 +285,22 @@
     gap: 6px;
     margin-left: auto;
   }
-  .toolbar-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 12px;
-    color: var(--link);
-    text-decoration: none;
-    padding: 0 6px;
+  .toolbar-icon-link {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    color: var(--graphite);
+    transition: color 120ms, background-color 120ms;
   }
-  .toolbar-link:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
+  .toolbar-icon-link:hover {
+    color: var(--ink);
+    background: var(--well);
+  }
+  .toolbar-icon-link .icon {
+    width: 20px;
+    height: 20px;
   }
   .toolbar-pill {
     display: inline-flex;
@@ -566,8 +580,25 @@
     color: var(--graphite);
   }
 
-  /* The workspace: the path and its guide on the left, the inspected node
-   * on the right. */
+  /* The credit, under the path */
+  .credit {
+    margin: 0;
+    padding: 6px 20px 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .credit a {
+    color: var(--graphite);
+    text-decoration: underline;
+    text-decoration-color: var(--rule-strong);
+    text-underline-offset: 3px;
+  }
+  .credit a:hover {
+    color: var(--ink);
+    text-decoration-color: currentColor;
+  }
+
+  /* The workspace: the path on the left, the inspected node on the right. */
   .workspace {
     display: flex;
     flex-direction: column;
@@ -783,6 +814,12 @@
   .slot-key {
     background: var(--slot-filled);
   }
+  .slot-smaller {
+    background: var(--slot-smaller);
+  }
+  .slot-larger {
+    background: var(--slot-larger);
+  }
   .slot-room {
     background: var(--well);
   }
@@ -889,7 +926,7 @@
   .inspector-title {
     display: flex;
     align-items: baseline;
-    gap: 10px;
+    gap: 2px 10px;
     flex-wrap: wrap;
   }
   .inspector-title h2 {
@@ -898,10 +935,6 @@
   }
   .inspector-note {
     margin: 0;
-  }
-  .path-steps {
-    display: flex;
-    gap: 4px;
   }
   .tabs {
     display: flex;
@@ -952,72 +985,181 @@
     border-color: var(--rule-strong);
     color: var(--ink);
   }
+  /* A section of the inspector: its heading, with its numbers beside. */
+  .panel-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin: 0 0 4px;
+    font: 600 13px var(--font-ui);
+  }
+  .panel-heading-note {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--graphite);
+  }
+
+  /* The fences, a column per byte */
+  .fence-scroll {
+    overflow-x: auto;
+    margin: 0 -22px;
+    padding: 0 22px 2px;
+  }
+  .fence-strip {
+    display: grid;
+    grid-template-columns: 68px repeat(var(--columns), var(--cell)) minmax(0, 1fr);
+    align-items: center;
+    row-gap: 1px;
+    width: max-content;
+    min-width: 100%;
+    font: 12px/16px var(--font-data);
+  }
+  .strip-label {
+    grid-column: 1;
+    font: 12px var(--font-ui);
+    color: var(--graphite);
+    white-space: nowrap;
+  }
+  button.strip-fence {
+    justify-self: start;
+    padding: 0;
+    background: none;
+    border: 0;
+    color: var(--ink);
+    text-decoration: underline dotted var(--muted);
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+  button.strip-fence:hover {
+    text-decoration-color: var(--ink);
+  }
+  .strip-label.looked-up {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .strip-bracket {
+    grid-row: 1;
+    align-self: end;
+    margin: 0 1px 1px;
+    border-bottom: 2px solid var(--rule-strong);
+    font: 11px/14px var(--font-ui);
+    color: var(--graphite);
+    white-space: nowrap;
+    overflow: visible;
+  }
+  .bracket-window {
+    border-bottom-color: var(--slot-inline);
+    color: var(--ink);
+  }
+  .bracket-search-prefix {
+    border-bottom-style: dashed;
+  }
+  .byte {
+    text-align: center;
+    color: var(--ink);
+    transition: background-color 160ms;
+  }
+  .byte.in-prefix {
+    background: var(--well);
+    color: var(--muted);
+  }
+  .byte.in-search-prefix {
+    background: var(--well);
+    color: var(--graphite);
+  }
+  .byte.in-window {
+    background: var(--compare-soft);
+  }
+  .byte.in-window.looked-up {
+    background: var(--compare);
+    font-weight: 500;
+  }
+  .lit-prefix .byte.in-prefix,
+  .lit-search-prefix .byte.in-search-prefix,
+  .lit-window .byte.in-window {
+    background: var(--marker);
+    color: var(--ink);
+  }
+  .strip-none {
+    font: 12px var(--font-ui);
+    color: var(--muted);
+  }
+  .strip-text {
+    padding-left: 10px;
+    font-size: 12px;
+    color: var(--graphite);
+    white-space: nowrap;
+  }
+
+  /* The search, a line a step */
   .search-steps {
     list-style: none;
     margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
   }
   .search-step {
-    display: grid;
-    grid-template-columns: 22px minmax(0, 1fr);
-    gap: 10px;
-    padding: 7px 10px 8px 8px;
-    margin: 0 -10px 0 -8px;
-    border-radius: 8px;
+    margin: 0 -8px;
+    border-radius: 6px;
     transition: background-color 140ms;
     animation: step-in 360ms var(--ease-out) both;
     animation-delay: calc(var(--step) * 70ms);
   }
-  .search-step:hover {
+  .search-step:hover,
+  .search-step.open {
     background: var(--marker-wash);
+  }
+  .step-row {
+    display: grid;
+    grid-template-columns: 18px auto minmax(0, 1fr) 16px;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 4px 8px;
+    background: none;
+    border: 0;
+    border-radius: 6px;
+    text-align: left;
+    color: var(--ink);
+    cursor: pointer;
   }
   .step-number {
     display: grid;
     place-items: center;
-    width: 20px;
-    height: 20px;
-    margin-top: 1px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
     background: var(--ink);
     color: var(--panel);
-    font: 600 11px var(--font-data);
-  }
-  .step-text p {
-    margin: 0;
+    font: 600 10px var(--font-data);
   }
   .step-title {
-    font-size: 13px;
-    font-weight: 600;
-    line-height: 22px;
+    font: 600 13px var(--font-ui);
+    white-space: nowrap;
+  }
+  .step-fact {
+    font-size: 12px;
+    color: var(--graphite);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .step-disclose {
+    color: var(--muted);
+    transition: transform 200ms var(--ease-out);
+  }
+  .search-step.open .step-disclose {
+    transform: rotate(180deg);
   }
   .step-body {
-    font-size: 14px;
+    margin: 0;
+    padding: 0 10px 8px 34px;
+    font-size: 13px;
     line-height: 1.55;
     max-width: 68ch;
     overflow-wrap: anywhere;
-  }
-  .facts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px 22px;
-    margin: 0;
-    padding-top: 12px;
-    border-top: 1px solid var(--rule);
-  }
-  .facts dt {
-    font-size: 11px;
-    color: var(--muted);
-  }
-  .facts dd {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 2px 0 0;
-    font: 13px var(--font-data);
-    font-variant-numeric: tabular-nums;
+    animation: fade-in 160ms ease-out both;
   }
 
   /* The page, one cache line per row */
@@ -1319,136 +1461,6 @@
     transform: translateX(calc((var(--row) - 1.5) * 28px));
   }
 
-  /* The guide, under the path */
-  .guide-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin: 4px 20px 16px;
-    padding: 14px 18px 12px;
-    background: var(--panel);
-    border: 1px solid var(--rule-strong);
-    border-radius: 10px;
-    box-shadow: 0 4px 16px rgba(21, 23, 28, 0.06);
-  }
-  .guide-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin: -4px -8px -4px 0;
-  }
-  .guide-count {
-    font-size: 11px;
-    color: var(--muted);
-    letter-spacing: 0.02em;
-  }
-  .guide-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-height: 0;
-    overflow-y: auto;
-    animation: step-in 260ms var(--ease-out) both;
-  }
-  .guide-title {
-    margin: 0;
-    font: 600 15px var(--font-ui);
-  }
-  .guide-lead {
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.55;
-    max-width: 66ch;
-  }
-  .guide-pins {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 6px 20px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--graphite);
-  }
-  .guide-pins li {
-    display: grid;
-    grid-template-columns: 20px minmax(0, 1fr);
-    gap: 8px;
-  }
-  .guide-num,
-  .guide-badge {
-    display: grid;
-    place-items: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--marker);
-    color: var(--ink);
-    box-shadow: inset 0 0 0 1.5px var(--ink);
-    font: 600 11px var(--font-data);
-  }
-  .guide-num {
-    margin-top: 1px;
-  }
-  .guide-scenarios {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 4px 16px;
-    margin: 0 10px;
-  }
-  .guide-nav {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding-top: 10px;
-    border-top: 1px solid var(--rule);
-  }
-  .guide-dots {
-    display: flex;
-    gap: 5px;
-  }
-  .guide-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--rule-strong);
-    transition: background-color 200ms, transform 200ms var(--ease-out);
-  }
-  .guide-dot.done {
-    background: var(--graphite);
-  }
-  .guide-dot.current {
-    background: var(--ink);
-    transform: scale(1.4);
-  }
-  /* The guide's marks over the page */
-  .guide-marks {
-    position: absolute;
-    inset: 0;
-    z-index: 35;
-    overflow: hidden;
-    pointer-events: none;
-  }
-  .guide-ring,
-  .guide-badge {
-    position: absolute;
-    left: 0;
-    top: 0;
-    transition: transform 380ms var(--ease-out);
-  }
-  .guide-ring {
-    border-radius: 12px;
-    box-shadow: 0 0 0 2px var(--marker-strong), 0 0 0 6px rgba(255, 226, 74, 0.35);
-  }
-  .guide-badge {
-    animation: badge-in 320ms var(--ease-out) both;
-    animation-delay: calc(var(--order) * 60ms);
-    box-shadow: inset 0 0 0 1.5px var(--ink), 0 2px 6px rgba(21, 23, 28, 0.25);
-  }
-
   /* Wide screens: an instrument in one view, each panel scrolls itself. */
   @media (min-width: 1024px) {
     html,
@@ -1469,12 +1481,8 @@
       min-height: 0;
     }
     .path-tree {
-      flex: none;
-      height: max(var(--least), min(var(--wanted), 62%));
-    }
-    .guide-panel {
       flex: 1 1 auto;
-      min-height: 150px;
+      min-height: var(--least);
     }
     .inspector {
       min-height: 0;
@@ -1482,7 +1490,8 @@
       border-left: 1px solid var(--rule);
       overflow: hidden;
     }
-    .search-steps {
+    .fence-section,
+    .search-section {
       flex: none;
     }
     .tab-panel {
@@ -1500,8 +1509,15 @@
     }
   }
 
-  /* Narrow screens: one column that scrolls as a page. */
+  /* Narrow screens: one column that scrolls as a page, the credit last. */
   @media (max-width: 1023.98px) {
+    .path-column {
+      display: contents;
+    }
+    .credit {
+      order: 1;
+      padding: 16px;
+    }
     .path-tree {
       height: var(--wanted);
     }
@@ -1509,9 +1525,6 @@
       max-height: 70vh;
       overflow: auto;
       margin: 0 -22px;
-    }
-    .guide-pins {
-      grid-template-columns: minmax(0, 1fr);
     }
   }
   @media (max-width: 640px) {
@@ -1529,12 +1542,8 @@
       min-width: 0;
     }
     .tree-summary,
-    .toolbar-link,
     .key-hint {
       display: none;
-    }
-    .guide-panel {
-      margin: 4px 12px 12px;
     }
     .inspector {
       padding: 14px 16px 0;
@@ -1542,6 +1551,10 @@
     .tabs {
       margin: 2px -16px 0;
       padding: 0 16px;
+    }
+    .fence-scroll {
+      margin: 0 -16px;
+      padding: 0 16px 2px;
     }
     .tab-note {
       display: none;
@@ -1563,8 +1576,9 @@
   }
 
   /* The way down: at each level every inline key flashes at once as the
-   * search compares them, the tied keys mark, the result and the edge drop
-   * in, and the edge to the next level draws. */
+   * search compares them and settles into smaller or larger, the tied keys
+   * mark, the result and the edge drop in, and the edge to the next level
+   * draws. */
   .ruler-marks .compared {
     animation: compare-flash 440ms ease-out both;
     animation-delay: calc(var(--row) * var(--level-ms));
@@ -1593,10 +1607,10 @@
   }
 }
 
+/* Ends on the slot's own colour, smaller or larger. */
 @keyframes compare-flash {
   0% { background-color: var(--slot-filled); }
   25% { background-color: var(--compare); }
-  100% { background-color: var(--slot-filled); }
 }
 /* A tied or found slot reads as any other key until its level's turn. */
 @keyframes mark-in {
@@ -1637,10 +1651,6 @@
   from { opacity: 0; transform: translateY(-4px) scale(0.98); }
   to { opacity: 1; transform: none; }
 }
-@keyframes badge-in {
-  from { opacity: 0; scale: 0.4; }
-  to { opacity: 1; scale: 1; }
-}
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -1675,14 +1685,8 @@
   .skeleton-card {
     animation: none;
   }
-  .popover,
-  .guide-badge,
-  .guide-body {
+  .popover {
     animation-name: fade-in;
-  }
-  .guide-ring,
-  .guide-badge {
-    transition: none;
   }
   .hint.above,
   .hint.above.shown {

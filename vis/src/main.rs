@@ -5,7 +5,7 @@
 
 mod concepts;
 mod count_text;
-mod guide;
+mod fences;
 mod icons;
 mod inspected_tree;
 mod memory_map;
@@ -14,6 +14,7 @@ mod path_summary;
 mod path_tree;
 mod popover;
 mod scenarios;
+mod shared_link;
 mod shortcuts;
 mod slot_table;
 mod spotlight;
@@ -25,21 +26,22 @@ mod workload;
 use dioxus::prelude::*;
 use web_time::{SystemTime, UNIX_EPOCH};
 
-use crate::concepts::Concept;
-use crate::guide::{Guide, GuideMarks, GuidePanel};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::{InspectorTab, NodeInspector};
 use crate::path_summary::PathSummary;
 use crate::path_tree::PathTree;
+use crate::shared_link::SharedLink;
 use crate::shortcuts::Shortcuts;
 use crate::spotlight::{HintLayer, Spotlight};
 use crate::trace::{LookupMenu, Trace, Tracer};
 use crate::tree_shape::NodeAt;
 use crate::tree_summary::TreeSummary;
-use crate::workload::WorkloadMenu;
+use crate::workload::{Builder, Workload, WorkloadMenu};
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+const REPOSITORY: &str = "https://github.com/XiangpengHao/bbtree";
+const AUTHOR_PAGE: &str = "https://xiangpeng.systems";
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const FONTS: &str = "https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Martian+Mono:wdth,wght@112.5,500;112.5,600&display=swap";
 
@@ -60,19 +62,23 @@ fn App() -> Element {
     });
     let replay = use_signal(|| 0u64);
     let tracer = Tracer::new(trace, inspected, error, seed, replay);
+    let builder = Builder::new(
+        tree,
+        use_signal(Workload::first),
+        use_signal(|| None),
+        use_signal(|| None),
+    );
     let spotlight = Spotlight::new(
         use_signal(|| None),
         use_signal(|| None),
         use_signal(|| None),
     );
-    let mut guide = Guide::new(use_signal(|| 0), use_signal(|| true));
     let search_open = use_signal(|| false);
     let tab = use_signal(|| InspectorTab::Page);
     let loaded = tree.read().clone();
     let current = tracer.trace();
     let at = tracer.inspected();
     let replayed = tracer.replay_count();
-    let guiding = guide.is_open();
     rsx! {
         document::Link { rel: "preconnect", href: "https://fonts.googleapis.com" }
         document::Link { rel: "stylesheet", href: FONTS }
@@ -84,25 +90,19 @@ fn App() -> Element {
                 if let Some(loaded) = loaded.clone() {
                     LookupMenu { tree: loaded, tracer, open: search_open }
                 }
-                WorkloadMenu { tree, tracer }
+                WorkloadMenu { builder, tracer }
                 if let Some(loaded) = loaded.clone() {
                     TreeSummary { tree: loaded, spotlight }
                 }
                 div { class: "toolbar-end",
-                    if !guiding {
-                        button {
-                            class: "button button-quiet",
-                            onclick: move |_| guide.start(),
-                            "Guide"
-                        }
-                    }
                     a {
-                        class: "toolbar-link",
-                        href: Concept::decisions_link(),
+                        class: "toolbar-icon-link",
+                        href: REPOSITORY,
                         target: "_blank",
                         rel: "noopener",
-                        "Design notes"
-                        IconGlyph { icon: Icon::Right }
+                        title: "bbtree on GitHub",
+                        "aria-label": "bbtree on GitHub",
+                        IconGlyph { icon: Icon::GitHub }
                     }
                 }
             }
@@ -118,8 +118,9 @@ fn App() -> Element {
                             tracer,
                             spotlight,
                         }
-                        if guiding {
-                            GuidePanel { tree: loaded.clone(), trace: current.clone(), guide, tracer, tab }
+                        footer { class: "credit",
+                            "Created with care by "
+                            a { href: AUTHOR_PAGE, target: "_blank", rel: "noopener", "Xiangpeng Hao" }
                         }
                     }
                     if let Some(at) = at {
@@ -135,16 +136,6 @@ fn App() -> Element {
                         }
                     }
                 }
-                if guiding {
-                    GuideMarks {
-                        tree: loaded,
-                        trace: current,
-                        guide,
-                        replay: replayed,
-                        inspected: at,
-                        tab: tab(),
-                    }
-                }
             } else if loaded.is_some() {
                 p { class: "empty-state", "Look up a key to see the path bbtree takes to it." }
             } else {
@@ -158,7 +149,8 @@ fn App() -> Element {
                 }
             }
             HintLayer { spotlight }
-            Shortcuts { tree, tracer, search_open, guide }
+            Shortcuts { tree, tracer, search_open }
+            SharedLink { builder, tracer, tab }
         }
     }
 }

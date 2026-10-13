@@ -21,3 +21,9 @@ Since the hash is over the inline key, the K itself doesn't require Hash trait. 
 
 - [-] When we insert to sorted array, we need to shift the keys, which is a memmov, is it? and I think it has to first copy the data to a temporary buffer, and then copy back, because the move is interleaving.
 BUT if we move data in the reverse order, we can avoid this buffer. 
+
+- [ ] We should specialize the root node. It's a special type in addition to internal and leaf nodes.
+Reason is that for small tree, root node should be smaller than 1KB. So for root node, we start with 128 bytes, and each time double the size until 1KB, then we do the normal split.
+This should make our memory usage more efficient for small tree.
+Root node has no parents, so its prefix lenght is determined by the min and max keys of the node.
+In fact, since we never truncate the prefix in storage, I think we can always make the fence key to be the min/max keys of the current node, which means the inline keys are maintained once a new key is inserted.

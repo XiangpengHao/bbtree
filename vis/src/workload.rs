@@ -9,7 +9,7 @@ use crate::count_text::Group;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::{InspectedMap, LoadedTree, VisKey};
 use crate::popover::Popover;
-use crate::scenarios::Scenario;
+use crate::shared_link::LinkedLookup;
 use crate::trace::Tracer;
 
 /// The kinds of key on offer, each picked for what bbtree does with it.
@@ -33,6 +33,25 @@ impl KeyKind {
             KeyKind::Urls => "URLs",
             KeyKind::Ids => "16-byte ids",
         }
+    }
+
+    /// The kind's name in a link.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            KeyKind::Integers => "u64",
+            KeyKind::Urls => "urls",
+            KeyKind::Ids => "ids",
+        }
+    }
+
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.slug() == slug)
+    }
+
+    /// Whether the kind's keys read as text, a byte a character, rather
+    /// than as hex.
+    pub(crate) fn is_text(self) -> bool {
+        self == KeyKind::Urls
     }
 
     /// What the kind shows of bbtree, for its hint.
@@ -142,6 +161,19 @@ impl InsertOrder {
         }
     }
 
+    /// The order's name in a link.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            InsertOrder::Random => "random",
+            InsertOrder::Ascending => "ascending",
+            InsertOrder::Collected => "collect",
+        }
+    }
+
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|order| order.slug() == slug)
+    }
+
     /// What the order does to the tree.
     pub(crate) fn shows(self) -> &'static str {
         match self {
@@ -179,6 +211,11 @@ impl Workload {
             count: count.min(kind.max_count()),
             order,
         }
+    }
+
+    /// The build the page starts with.
+    pub(crate) fn first() -> Self {
+        Self::new(KeyKind::Integers, 1_000_000, InsertOrder::Random)
     }
 
     pub(crate) fn kind(&self) -> KeyKind {
@@ -336,20 +373,65 @@ mod tests {
     }
 }
 
-/// The tree being shown, as a toolbar button that opens its build
-/// controls: key kind, size and order. Any change builds the tree anew, so
-/// the controls always say what is shown, and they wait while a build
-/// runs: at ten million entries, two trees don't fit. A finished build
-/// looks up a key at random, so there is a path to see.
-#[component]
-pub(crate) fn WorkloadMenu(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> Element {
-    let mut workload =
-        use_signal(|| Workload::new(KeyKind::Integers, 1_000_000, InsertOrder::Random));
-    let progress = use_signal(|| None::<f64>);
-    let took = use_signal(|| None::<f64>);
-    let mut open = use_signal(|| false);
-    let build = use_callback(move |workload: Workload| {
-        let (mut tree, mut tracer, mut progress, mut took) = (tree, tracer, progress, took);
+/// What builds the tree: the workload shown, the build under way, and the
+/// tree it built. Owned by the app, handed to what starts builds.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Builder {
+    tree: Signal<Option<LoadedTree>>,
+    workload: Signal<Workload>,
+    progress: Signal<Option<f64>>,
+    took: Signal<Option<f64>>,
+}
+
+impl Builder {
+    pub(crate) fn new(
+        tree: Signal<Option<LoadedTree>>,
+        workload: Signal<Workload>,
+        progress: Signal<Option<f64>>,
+        took: Signal<Option<f64>>,
+    ) -> Self {
+        Self {
+            tree,
+            workload,
+            progress,
+            took,
+        }
+    }
+
+    pub(crate) fn workload(&self) -> Workload {
+        *self.workload.read()
+    }
+
+    /// Whether a built tree is shown.
+    pub(crate) fn is_built(&self) -> bool {
+        self.tree.read().is_some()
+    }
+
+    /// The built tree, if one is shown.
+    pub(crate) fn tree(&self) -> Option<LoadedTree> {
+        self.tree.peek().clone()
+    }
+
+    /// The share of the build done, while one runs.
+    fn progress(&self) -> Option<f64> {
+        *self.progress.read()
+    }
+
+    /// How long the last build took, in seconds.
+    fn took(&self) -> Option<f64> {
+        *self.took.read()
+    }
+
+    /// Builds the tree of `workload` anew, unless a build is under way, and
+    /// then looks up the key `linked` names, or one at random.
+    pub(crate) fn build(&self, workload: Workload, linked: Option<LinkedLookup>, tracer: Tracer) {
+        if self.progress.peek().is_some() {
+            return;
+        }
+        let (mut tree, mut shown, mut progress, mut took) =
+            (self.tree, self.workload, self.progress, self.took);
+        let mut tracer = tracer;
+        shown.set(workload);
         spawn(async move {
             // Drop the old tree first: at ten million entries, two don't fit.
             tracer.clear();
@@ -359,21 +441,28 @@ pub(crate) fn WorkloadMenu(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> 
             let start = web_time::Instant::now();
             let built = workload.build(move |done| progress.set(Some(done))).await;
             took.set(Some(start.elapsed().as_secs_f64()));
-            tracer.run_scenario(&built, Scenario::Random);
+            tracer.start(&built, linked.as_ref());
             tree.set(Some(built));
             progress.set(None);
         });
-    });
-    use_hook(move || build.call(*workload.peek()));
-    let mut choose = move |chosen: Workload| {
-        if chosen != *workload.peek() && progress.peek().is_none() {
-            workload.set(chosen);
-            build.call(chosen);
+    }
+}
+
+/// The tree being shown, as a toolbar button that opens its build
+/// controls: key kind, size and order. Any change builds the tree anew, so
+/// the controls always say what is shown, and they wait while a build
+/// runs: at ten million entries, two trees don't fit. A finished build
+/// looks up a key at random, so there is a path to see.
+#[component]
+pub(crate) fn WorkloadMenu(builder: Builder, tracer: Tracer) -> Element {
+    let mut open = use_signal(|| false);
+    let choose = move |chosen: Workload| {
+        if chosen != *builder.workload.peek() {
+            builder.build(chosen, None, tracer);
         }
     };
-
-    let current = workload();
-    let building = progress();
+    let current = builder.workload();
+    let building = builder.progress();
     rsx! {
         div { class: "menu workload-menu",
             button {
@@ -454,7 +543,7 @@ pub(crate) fn WorkloadMenu(tree: Signal<Option<LoadedTree>>, tracer: Tracer) -> 
                 p { class: "popover-footnote data", role: "status",
                     if let Some(done) = building {
                         "building… {done * 100.0:.0}%"
-                    } else if let Some(seconds) = took() {
+                    } else if let Some(seconds) = builder.took() {
                         "built in {seconds:.1} s, then read once, node by node"
                     }
                 }

@@ -3,8 +3,9 @@
 //! other children beside it as gauges of how full they are.
 //!
 //! Every lookup plays its way down: at each node all the inline keys light
-//! up at once, as the search compares them, the tied ones stay outlined,
-//! the result drops in, and the edge to the next node draws. Between
+//! up at once, as the search compares them, then settle dark where they are
+//! smaller than the key's and pale where larger; the tied ones stay
+//! outlined, the result drops in, and the edge to the next node draws. Between
 //! lookups the cards glide to their new places. Point at a ruler's slot to
 //! see its key and click it to look it up; click a card to inspect it, a
 //! gauge to look up its first key.
@@ -80,8 +81,8 @@ impl PathLayout {
     /// Room kept beside a card for the count of siblings that don't fit.
     const BESIDE: f64 = 56.0;
     const CARD_HEIGHT: f64 = 70.0;
-    /// From one row's top to the next, when there is room.
-    const ROW_HEIGHT: f64 = 96.0;
+    /// From one row's top to the next, at most, when there is room.
+    const ROW_HEIGHT: f64 = 124.0;
     /// Above each card in a narrow panel, for its level's name.
     const LABEL_HEIGHT: f64 = 22.0;
     const RULER_TOP: f64 = 28.0;
@@ -144,11 +145,18 @@ impl PathLayout {
             narrow,
             height: 12.0 + rows * row_height,
         };
+        // A wide panel taller than the path centers it.
+        let above = if narrow {
+            0.0
+        } else {
+            ((height - layout.height) / 2.0).max(0.0)
+        };
+        layout.height += above;
         let mut toward_value = false;
         for (row, step) in steps.iter().enumerate() {
             let at = step.at();
             let level = shape.level(at.level());
-            let top = 10.0 + row as f64 * row_height;
+            let top = above + 10.0 + row as f64 * row_height;
             let y = if narrow {
                 top + Self::LABEL_HEIGHT
             } else {
@@ -456,7 +464,7 @@ fn Gauge(
 }
 
 /// One node on the path: its fill, its prefix, and its slots as a ruler,
-/// the ones the search compared marked.
+/// each key marked by how its inline key compared with the searched key's.
 #[component]
 fn PathCard(
     tree: LoadedTree,
@@ -579,7 +587,7 @@ fn PathCard(
                     evt.stop_propagation();
                     if let Some(slot) = slot_under(evt.element_coordinates().x) {
                         let (shared, rest) = pick_tree.key_text_split(at, slot);
-                        tracer.run(&pick_tree, &format!("{shared}{rest}"));
+                        tracer.run_in(&pick_tree, &format!("{shared}{rest}"), at);
                     }
                 },
                 div { class: "ruler-marks", key: "{replay}",
@@ -623,12 +631,15 @@ fn PathCard(
 enum SlotMark {
     /// Where the lookup ended.
     Found,
-    /// A key whose inline key tied with the searched key's.
+    /// A key whose inline key equals the searched key's.
     Tied,
-    /// A key the compare of inline keys placed, if it ran.
-    Key {
-        compared: bool,
-    },
+    /// A key whose inline key the compare found smaller than the searched
+    /// key's: counted, these place the key.
+    Smaller,
+    /// A key whose inline key the compare found larger.
+    Larger,
+    /// A key of a node the lookup compared no inline keys in.
+    Key,
     Empty,
 }
 
@@ -644,24 +655,30 @@ impl SlotMark {
             SlotMark::Found
         } else if tied.contains(&slot) {
             SlotMark::Tied
-        } else if slot < len {
-            SlotMark::Key { compared }
-        } else {
+        } else if slot >= len {
             SlotMark::Empty
+        } else if !compared {
+            SlotMark::Key
+        } else if slot < tied.start {
+            SlotMark::Smaller
+        } else {
+            SlotMark::Larger
         }
     }
 
-    fn class(self, pointed: bool) -> &'static str {
-        match (self, pointed) {
-            (SlotMark::Found, false) => "slot slot-found",
-            (SlotMark::Found, true) => "slot slot-found slot-pointed",
-            (SlotMark::Tied, false) => "slot slot-tied",
-            (SlotMark::Tied, true) => "slot slot-tied slot-pointed",
-            (SlotMark::Key { compared: true }, false) => "slot slot-key compared",
-            (SlotMark::Key { compared: true }, true) => "slot slot-key compared slot-pointed",
-            (SlotMark::Key { compared: false }, false) => "slot slot-key",
-            (SlotMark::Key { compared: false }, true) => "slot slot-key slot-pointed",
-            (SlotMark::Empty, _) => "slot slot-room",
+    fn class(self, pointed: bool) -> String {
+        let mark = match self {
+            SlotMark::Found => "slot-found",
+            SlotMark::Tied => "slot-tied",
+            SlotMark::Smaller => "slot-smaller compared",
+            SlotMark::Larger => "slot-larger compared",
+            SlotMark::Key => "slot-key",
+            SlotMark::Empty => return "slot slot-room".to_string(),
+        };
+        if pointed {
+            format!("slot {mark} slot-pointed")
+        } else {
+            format!("slot {mark}")
         }
     }
 }

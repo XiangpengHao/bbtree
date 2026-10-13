@@ -5,15 +5,16 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use bbtree::inspect::{NodeView, PageMap};
-use bbtree::{Auto, BBTreeMap};
+use bbtree::{Auto, BBTreeMap, InlineKey};
 
+use crate::fences::{Fence, KeyBytes, NodeFences};
 use crate::node_inspector::{KeyRow, NodeDetail};
 use crate::trace::{Trace, TraceStep};
 use crate::tree_shape::{NodeAt, TreeShape};
 use crate::workload::KeyKind;
 
 /// How the panels read and show one type of key.
-pub(crate) trait VisKey: Ord + 'static {
+pub(crate) trait VisKey: Ord + InlineKey + 'static {
     /// The key as text, as the lookup bar takes it back.
     fn text(&self) -> String;
 
@@ -27,6 +28,27 @@ pub(crate) trait VisKey: Ord + 'static {
     /// shared by every key of the node, which skips them. Other keys come
     /// back whole, in the second part.
     fn text_split_at(&self, prefix_len: usize) -> (String, String);
+
+    /// How many bytes the key's encoding has, past which its windows read
+    /// zeros.
+    fn encoded_len(&self) -> usize;
+
+    /// The key's bytes as bbtree orders and windows it: its `InlineKey`
+    /// encoding, read a window at a time, as bbtree reads it.
+    fn encoding(&self) -> Vec<u8> {
+        let len = self.encoded_len();
+        let mut bytes: Vec<u8> = (0..len)
+            .step_by(8)
+            .flat_map(|offset| self.inline_key_at(offset).to_be_bytes())
+            .collect();
+        bytes.truncate(len);
+        bytes
+    }
+
+    /// The key as the fence strip draws it.
+    fn key_bytes(&self) -> KeyBytes {
+        KeyBytes::new(self.text(), self.encoding())
+    }
 }
 
 impl VisKey for u64 {
@@ -40,6 +62,10 @@ impl VisKey for u64 {
 
     fn text_split_at(&self, _: usize) -> (String, String) {
         (String::new(), self.text())
+    }
+
+    fn encoded_len(&self) -> usize {
+        size_of::<u64>()
     }
 }
 
@@ -59,6 +85,10 @@ impl VisKey for String {
             String::from_utf8_lossy(&bytes[..split]).into_owned(),
             String::from_utf8_lossy(&bytes[split..]).into_owned(),
         )
+    }
+
+    fn encoded_len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -88,6 +118,10 @@ impl VisKey for [u8; 16] {
         let text = self.text();
         let split = 2 * prefix_len.min(self.len());
         (text[..split].to_string(), text[split..].to_string())
+    }
+
+    fn encoded_len(&self) -> usize {
+        self.len()
     }
 }
 
@@ -128,7 +162,7 @@ pub(crate) struct InspectedMap<K> {
 
 impl<K: VisKey> InspectedMap<K> {
     pub(crate) fn new(map: BBTreeMap<K, u64>, kind: KeyKind) -> Self {
-        let shape = TreeShape::of(&map.inspect(), map.len());
+        let shape = TreeShape::of(&map.inspect());
         Self { map, shape, kind }
     }
 
@@ -142,6 +176,43 @@ impl<K: VisKey> InspectedMap<K> {
                 .expect("a path leads through internal nodes");
         }
         node
+    }
+
+    /// The fences of the node at `at`: the keys just left and just right of
+    /// the way down to it, in the nearest ancestors that have one (bbtree's
+    /// `PathMut::bounds`, `doc/05-fence-key.md`); with its own first and
+    /// last keys.
+    fn fences(&self, at: NodeAt) -> NodeFences {
+        let tree = self.map.inspect();
+        let (Some(mut node), Some(mut node_at)) = (tree.root(), self.shape.root()) else {
+            return NodeFences::default();
+        };
+        let mut way_down = Vec::new();
+        for edge in self.shape.path_to(at) {
+            way_down.push((node, node_at, edge));
+            node = node
+                .child(edge)
+                .expect("a path leads through internal nodes");
+            node_at = self.shape.child(node_at, edge);
+        }
+        let fence = |ancestor: NodeView<'_, K, u64, Auto>, owner: NodeAt, slot: usize| {
+            Fence::new(ancestor.key(slot).key_bytes(), owner, slot)
+        };
+        let (mut low, mut high) = (None, None);
+        for &(ancestor, owner, edge) in way_down.iter().rev() {
+            if low.is_none() && edge > 0 {
+                low = Some(fence(ancestor, owner, edge - 1));
+            }
+            if high.is_none() && edge < ancestor.len() {
+                high = Some(fence(ancestor, owner, edge));
+            }
+            if low.is_some() && high.is_some() {
+                break;
+            }
+        }
+        let first = (!node.is_empty()).then(|| node.key(0).key_bytes());
+        let last = (!node.is_empty()).then(|| node.key(node.len() - 1).key_bytes());
+        NodeFences::new(low, high, first, last)
     }
 
     /// An inline key as the node keeps it: its first `width` bytes, in
@@ -185,7 +256,7 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
                 }
             }
         }
-        Ok(Trace::new(key.text(), steps))
+        Ok(Trace::new(key.key_bytes(), steps))
     }
 
     fn key_text_split(&self, at: NodeAt, index: usize) -> (String, String) {
@@ -219,7 +290,14 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
             .filter_map(|edge| node.child(edge))
             .map(|child| child.len())
             .collect();
-        NodeDetail::read(at, &node, keys, child_lens, node.head().map(u64::to_string))
+        NodeDetail::read(
+            at,
+            &node,
+            keys,
+            child_lens,
+            node.head().map(u64::to_string),
+            self.fences(at),
+        )
     }
 
     fn first_key_under(&self, at: NodeAt) -> Option<String> {

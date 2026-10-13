@@ -182,7 +182,7 @@ pub(crate) fn SlotTable(
                             onmouseleave: move |_| spotlight.clear(),
                             td { class: "text-muted", "{index}" }
                             td { class: "cell-key",
-                                KeyButton { tree: tree.clone(), text: row.text(), shared: !row.shared.is_empty(), rest: row.rest.clone(), tracer }
+                                KeyButton { tree: tree.clone(), at, text: row.text(), shared: !row.shared.is_empty(), rest: row.rest.clone(), tracer }
                             }
                             if has_inline {
                                 td { class: "whitespace-nowrap text-graphite", {row.inline_key.clone().unwrap_or_default()} }
@@ -231,10 +231,11 @@ pub(crate) fn SlotTable(
     }
 }
 
-/// A key: click to look it up.
+/// A key of the node at `at`: click to look it up there.
 #[component]
 fn KeyButton(
     tree: LoadedTree,
+    at: NodeAt,
     text: String,
     shared: bool,
     rest: String,
@@ -246,7 +247,9 @@ fn KeyButton(
         button {
             class: "key-button",
             title: "Look up {text}",
-            onclick: move |_| tracer.run(&tree, &query),
+            onclick: move |_| {
+                tracer.run_in(&tree, &query, at);
+            },
             if shared {
                 span { class: "text-muted", "…" }
             }

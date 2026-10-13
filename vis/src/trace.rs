@@ -7,17 +7,19 @@ use std::ops::Range;
 use bbtree::inspect::TraceOutcome;
 use dioxus::prelude::*;
 
+use crate::fences::KeyBytes;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::PageMarks;
 use crate::popover::Popover;
 use crate::scenarios::Scenario;
+use crate::shared_link::LinkedLookup;
 use crate::tree_shape::{NodeAt, TreeShape};
 
 /// One lookup, from the root down.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Trace {
-    query: String,
+    query: KeyBytes,
     steps: Vec<TraceStep>,
 }
 
@@ -82,11 +84,16 @@ impl TraceStep {
 }
 
 impl Trace {
-    pub(crate) fn new(query: String, steps: Vec<TraceStep>) -> Self {
+    pub(crate) fn new(query: KeyBytes, steps: Vec<TraceStep>) -> Self {
         Self { query, steps }
     }
 
     pub(crate) fn query(&self) -> &str {
+        self.query.text()
+    }
+
+    /// The key looked up, with its bytes.
+    pub(crate) fn query_bytes(&self) -> &KeyBytes {
         &self.query
     }
 
@@ -196,17 +203,44 @@ impl Tracer {
         *self.replay.read()
     }
 
-    /// Looks up the key `query` names, and inspects the node it ends at.
-    pub(crate) fn run(&mut self, tree: &LoadedTree, query: &str) {
+    /// Looks up the key `query` names, and inspects the root, where the
+    /// lookup starts; says whether `query` named a key.
+    pub(crate) fn run(&mut self, tree: &LoadedTree, query: &str) -> bool {
         match tree.trace(query) {
             Ok(trace) => {
-                self.inspected.set(trace.steps().last().map(TraceStep::at));
+                self.inspected.set(trace.steps().first().map(TraceStep::at));
                 self.trace.set(Some(trace));
                 self.error.set(None);
                 self.replay();
+                true
             }
-            Err(error) => self.error.set(Some(error)),
+            Err(error) => {
+                self.error.set(Some(error));
+                false
+            }
         }
+    }
+
+    /// Looks up the key `query` names, picked in the node at `at`, which
+    /// holds it, and inspects that node.
+    pub(crate) fn run_in(&mut self, tree: &LoadedTree, query: &str, at: NodeAt) {
+        if self.run(tree, query) {
+            self.inspect(at);
+        }
+    }
+
+    /// Looks up the key a link names and inspects the node it names, or,
+    /// with no link or a key it can't read, a key at random.
+    pub(crate) fn start(&mut self, tree: &LoadedTree, linked: Option<&LinkedLookup>) {
+        if let Some(linked) = linked
+            && self.run(tree, linked.key())
+        {
+            if let Some(level) = linked.level() {
+                self.inspect_level(level);
+            }
+            return;
+        }
+        self.run_scenario(tree, Scenario::Random);
     }
 
     /// Looks up a key that shows `scenario`.
@@ -223,10 +257,12 @@ impl Tracer {
     }
 
     /// Looks up the first key under the node at `at`, so the lookup goes
-    /// through it.
+    /// through it, and inspects that node.
     pub(crate) fn run_into(&mut self, tree: &LoadedTree, at: NodeAt) {
-        if let Some(key) = tree.first_key_under(at) {
-            self.run(tree, &key);
+        if let Some(key) = tree.first_key_under(at)
+            && self.run(tree, &key)
+        {
+            self.inspect(at);
         }
     }
 
@@ -248,6 +284,19 @@ impl Tracer {
 
     pub(crate) fn inspect(&mut self, at: NodeAt) {
         self.inspected.set(Some(at));
+    }
+
+    /// Inspects the lookup's node at `level`, if it reached that level.
+    fn inspect_level(&mut self, level: usize) {
+        let at = self
+            .trace
+            .peek()
+            .as_ref()
+            .and_then(|trace| trace.steps().iter().find(|step| step.at.level() == level))
+            .map(TraceStep::at);
+        if at.is_some() {
+            self.inspected.set(at);
+        }
     }
 
     /// Inspects the node `delta` steps down the path from the inspected
@@ -444,7 +493,7 @@ pub(crate) fn LookupMenu(tree: LoadedTree, tracer: Tracer, open: Signal<bool>) -
                     " path · "
                     kbd { "←" }
                     kbd { "→" }
-                    " guide"
+                    " back, forward"
                 }
             }
         }

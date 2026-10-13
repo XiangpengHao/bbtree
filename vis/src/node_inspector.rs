@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::concepts::{Concept, Term};
 use crate::count_text::Group;
+use crate::fences::{FenceStrip, NodeFences};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::{MemoryMap, PageMarks};
@@ -35,6 +36,7 @@ pub(crate) struct NodeDetail {
     keys: Vec<KeyRow>,
     /// Each child's key count, for an internal node.
     child_lens: Vec<usize>,
+    fences: NodeFences,
 }
 
 /// One key, as the node keeps it.
@@ -61,6 +63,7 @@ impl NodeDetail {
         keys: Vec<KeyRow>,
         child_lens: Vec<usize>,
         head: Option<String>,
+        fences: NodeFences,
     ) -> Self {
         Self {
             at,
@@ -74,6 +77,7 @@ impl NodeDetail {
             head,
             keys,
             child_lens,
+            fences,
         }
     }
 
@@ -114,10 +118,19 @@ impl NodeDetail {
         self.child_lens.get(edge).copied().unwrap_or(0)
     }
 
+    /// How many leading bytes the node's fences share, and so its keys.
+    pub(crate) fn prefix_len(&self) -> usize {
+        self.prefix_len
+    }
+
     /// The bytes the node's search skips: its local prefix if it keeps one,
     /// else what its fences share.
-    fn skipped(&self) -> usize {
+    pub(crate) fn skipped(&self) -> usize {
         self.local_prefix_len.unwrap_or(self.prefix_len)
+    }
+
+    pub(crate) fn fences(&self) -> &NodeFences {
+        &self.fences
     }
 
     fn key_text(&self, index: usize) -> String {
@@ -206,7 +219,8 @@ enum SearchStep {
     /// Skip the bytes every key of the node shares: what its fences share,
     /// or a longer local prefix.
     SkipPrefix { bytes: usize, local: bool },
-    /// Compare the key's inline key with every one of the node's at once.
+    /// Compare the key's inline key with every one of the node's, counting
+    /// those smaller and those equal: the smaller ones place the key.
     CompareInlineKeys {
         window: String,
         width: usize,
@@ -224,7 +238,7 @@ impl SearchStep {
     fn title(&self) -> &'static str {
         match self {
             SearchStep::SkipPrefix { .. } => "Skip the shared bytes",
-            SearchStep::CompareInlineKeys { .. } => "Compare every inline key at once",
+            SearchStep::CompareInlineKeys { .. } => "Count the smaller inline keys",
             SearchStep::CompareFullKeys => "Binary search over full keys",
             SearchStep::SearchTies { tied } if tied.len() == 1 => "Check the one tied key",
             SearchStep::SearchTies { .. } => "Search the tied keys",
@@ -233,6 +247,35 @@ impl SearchStep {
             SearchStep::Outcome(TraceOutcome::Descend { .. }) => "Go down",
             SearchStep::Outcome(TraceOutcome::ToHead { .. }) => "Pass through",
             SearchStep::Outcome(TraceOutcome::Head) => "Read the head",
+        }
+    }
+
+    /// What the step came to, in a few words, beside its title.
+    fn fact(&self, detail: &NodeDetail) -> String {
+        match self {
+            SearchStep::SkipPrefix {
+                bytes,
+                local: false,
+            } => format!("{bytes} B the fences share"),
+            SearchStep::SkipPrefix { bytes, local: true } => format!("{bytes} B the keys share"),
+            SearchStep::CompareInlineKeys { window, tied, .. } => {
+                format!("{window}: {} smaller, {} equal", tied.start, tied.len())
+            }
+            SearchStep::CompareFullKeys => "no inline keys".to_string(),
+            SearchStep::SearchTies { tied } if tied.len() == 1 => format!("slot {}", tied.start),
+            SearchStep::SearchTies { tied } => format!("slots {}–{}", tied.start, tied.end - 1),
+            SearchStep::Outcome(TraceOutcome::Found { index }) if detail.is_leaf() => {
+                format!("slot {index}")
+            }
+            SearchStep::Outcome(TraceOutcome::Found { index }) => {
+                format!("separator, slot {index}")
+            }
+            SearchStep::Outcome(TraceOutcome::Absent { insert_at }) => {
+                format!("would go at slot {insert_at}")
+            }
+            SearchStep::Outcome(TraceOutcome::Descend { edge })
+            | SearchStep::Outcome(TraceOutcome::ToHead { edge }) => format!("child {edge}"),
+            SearchStep::Outcome(TraceOutcome::Head) => "its head is the value".to_string(),
         }
     }
 
@@ -269,6 +312,22 @@ pub(crate) enum InspectorTab {
     Slots,
 }
 
+impl InspectorTab {
+    const ALL: [InspectorTab; 2] = [InspectorTab::Page, InspectorTab::Slots];
+
+    /// The tab's name in a link.
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            InspectorTab::Page => "page",
+            InspectorTab::Slots => "slots",
+        }
+    }
+
+    pub(crate) fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.slug() == slug)
+    }
+}
+
 /// The inspected node, beside the path: its search as steps, then its page
 /// or its slots.
 #[component]
@@ -293,14 +352,6 @@ pub(crate) fn NodeInspector(
         .as_ref()
         .map(|step| detail.search_steps(step))
         .unwrap_or_default();
-    let place = trace.steps().iter().position(|step| step.at() == at);
-    let above = place
-        .and_then(|place| place.checked_sub(1))
-        .map(|place| trace.steps()[place].at());
-    let below = place
-        .and_then(|place| trace.steps().get(place + 1))
-        .map(TraceStep::at);
-    let lines = detail.page.size().div_ceil(64);
     let kind = tree.key_kind();
     let shown = tab();
     let mut tab = tab;
@@ -308,7 +359,9 @@ pub(crate) fn NodeInspector(
     let tree_for_pick = tree.clone();
     let detail_for_pick = detail.clone();
     let on_pick = move |part: NodePart| match part {
-        NodePart::Entry(index) => tracer.run(&tree_for_pick, &detail_for_pick.key_text(index)),
+        NodePart::Entry(index) => {
+            tracer.run_in(&tree_for_pick, &detail_for_pick.key_text(index), at);
+        }
         NodePart::Child(edge) => {
             tracer.run_into(&tree_for_pick, tree_for_pick.shape().child(at, edge))
         }
@@ -325,49 +378,36 @@ pub(crate) fn NodeInspector(
                     span { class: "data text-small text-graphite",
                         " · {detail.len} of {detail.capacity} keys"
                     }
-                }
-                nav { class: "path-steps", "aria-label": "Along the path",
-                    button {
-                        class: "icon-button",
-                        disabled: above.is_none(),
-                        title: "The node above on the path (↑)",
-                        "aria-label": "Inspect the node above on the path",
-                        onclick: move |_| {
-                            if let Some(above) = above {
-                                tracer.inspect(above);
-                            }
-                        },
-                        IconGlyph { icon: Icon::Up }
+                    span { class: "data text-small text-graphite",
+                        " · {Group(detail.page.size())} B "
+                        Term { concept: Concept::Page, spotlight, "page" }
                     }
-                    button {
-                        class: "icon-button",
-                        disabled: below.is_none(),
-                        title: "The node below on the path (↓)",
-                        "aria-label": "Inspect the node below on the path",
-                        onclick: move |_| {
-                            if let Some(below) = below {
-                                tracer.inspect(below);
-                            }
-                        },
-                        IconGlyph { icon: Icon::Down }
+                    span {
+                        class: "data text-small text-graphite",
+                        title: "The page's address, which tells this node apart",
+                        " · {detail.id}"
                     }
                 }
+            }
+            FenceStrip {
+                tree: tree.clone(),
+                detail: detail.clone(),
+                step: step.clone(),
+                looked_up: step.as_ref().map(|_| trace.query_bytes().clone()),
+                tracer,
+                spotlight,
             }
             if steps.is_empty() {
                 p { class: "inspector-note text-ui text-graphite",
                     "The lookup didn't pass through this node. Click one of its keys or children to look up a key that does."
                 }
             } else {
-                ol { class: "search-steps", key: "{replay}-{at.level()}-{at.index()}",
-                    for (number, search_step) in steps.into_iter().enumerate() {
-                        SearchStepItem {
-                            number: number + 1,
-                            search_step,
-                            detail: detail.clone(),
-                            kind,
-                            spotlight,
-                        }
-                    }
+                SearchSteps {
+                    key: "{replay}-{at.level()}-{at.index()}",
+                    steps,
+                    detail: detail.clone(),
+                    kind,
+                    spotlight,
                 }
             }
             div { class: "tabs", role: "tablist", "aria-label": "Views of the node",
@@ -397,40 +437,6 @@ pub(crate) fn NodeInspector(
                         spotlight,
                         on_pick,
                     }
-                    dl { class: "facts",
-                        div {
-                            dt {
-                                Term { concept: Concept::FencePrefix, spotlight, "fence prefix" }
-                            }
-                            dd { "{detail.prefix_len} B" }
-                        }
-                        if let Some(local) = detail.local_prefix_len {
-                            div {
-                                dt {
-                                    Term { concept: Concept::SearchPrefix, spotlight, "search prefix" }
-                                }
-                                dd { "{local} B" }
-                            }
-                        }
-                        div {
-                            dt {
-                                Term { concept: Concept::InlineKey, spotlight, "inline keys" }
-                            }
-                            dd {
-                                {detail.inline_key_width.map(|width| format!("{width} B each")).unwrap_or_else(|| "none".to_string())}
-                            }
-                        }
-                        div {
-                            dt {
-                                Term { concept: Concept::Page, spotlight, "page" }
-                            }
-                            dd { "{Group(detail.page.size())} B · {lines} lines" }
-                        }
-                        div {
-                            dt { "address" }
-                            dd { class: "text-graphite", {detail.id.clone()} }
-                        }
-                    }
                 }
             } else {
                 SlotTable {
@@ -446,29 +452,72 @@ pub(crate) fn NodeInspector(
     }
 }
 
-/// One step of the node's search, in words drawn from the trace; pointing
-/// at it lights up what it read.
+/// The node's search, a line a step; a step opens to say it in full.
+#[component]
+fn SearchSteps(
+    steps: Vec<SearchStep>,
+    detail: NodeDetail,
+    kind: KeyKind,
+    spotlight: Spotlight,
+) -> Element {
+    let mut opened = use_signal(|| None::<usize>);
+    rsx! {
+        section { class: "search-section", "aria-label": "The node's search",
+            h3 { class: "panel-heading", "Search" }
+            ol { class: "search-steps",
+                for (index, search_step) in steps.into_iter().enumerate() {
+                    SearchStepItem {
+                        number: index + 1,
+                        search_step,
+                        detail: detail.clone(),
+                        kind,
+                        open: opened() == Some(index),
+                        on_toggle: move |_| {
+                            let open = opened() == Some(index);
+                            opened.set(if open { None } else { Some(index) });
+                        },
+                        spotlight,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One step of the node's search: its title and what it came to, and,
+/// opened, the step in words drawn from the trace. Pointing at it lights
+/// up what it read.
 #[component]
 fn SearchStepItem(
     number: usize,
     search_step: SearchStep,
     detail: NodeDetail,
     kind: KeyKind,
+    open: bool,
+    on_toggle: EventHandler<()>,
     spotlight: Spotlight,
 ) -> Element {
     let at = detail.at();
     let hover_step = search_step.clone();
     let mut hover = spotlight;
     let mut leave = spotlight;
+    let fact = search_step.fact(&detail);
     rsx! {
         li {
-            class: "search-step",
+            class: if open { "search-step open" } else { "search-step" },
             style: "--step:{number};",
             onmouseenter: move |_| hover_step.light(at, &mut hover),
             onmouseleave: move |_| leave.clear(),
-            span { class: "step-number", "aria-hidden": "true", "{number}" }
-            div { class: "step-text",
-                p { class: "step-title", {search_step.title()} }
+            button {
+                class: "step-row",
+                "aria-expanded": if open { "true" } else { "false" },
+                onclick: move |_| on_toggle.call(()),
+                span { class: "step-number", "aria-hidden": "true", "{number}" }
+                span { class: "step-title", {search_step.title()} }
+                span { class: "step-fact data", {fact} }
+                span { class: "step-disclose", IconGlyph { icon: Icon::Disclose } }
+            }
+            if open {
                 p { class: "step-body",
                     match search_step {
                         SearchStep::SkipPrefix { bytes, local: false } => rsx! {
@@ -485,12 +534,12 @@ fn SearchStepItem(
                             " than its fences give."
                         },
                         SearchStep::CompareInlineKeys { window, width, tied } => rsx! {
-                            "Its next {width} bytes, "
+                            if detail.skipped() > 0 { "Its next {width} bytes, " } else { "Its first {width} bytes, " }
                             code { class: "bytes", {window} }
-                            ", are compared with all {detail.len()} "
+                            ", are compared with all {detail.len()} of the node's "
                             Term { concept: Concept::InlineKey, spotlight, "inline keys" }
-                            " at once. "
-                            {CompareOutcome(&tied).to_string()}
+                            ", counting how many are smaller and how many equal. "
+                            {CompareOutcome::new(&tied, detail.len()).to_string()}
                         },
                         SearchStep::CompareFullKeys => rsx! {
                             "This node keeps no inline keys, so its search compares full keys."
@@ -514,20 +563,61 @@ fn SearchStepItem(
     }
 }
 
-/// What a compare of inline keys left, in a sentence.
-struct CompareOutcome<'a>(&'a Range<usize>);
+/// What a compare of inline keys counted, in a sentence: the keys whose
+/// inline keys are smaller than the searched key's come first, so their
+/// count is where the key goes, and only the equal ones, the run `tied`,
+/// can be the key.
+pub(crate) struct CompareOutcome<'a> {
+    tied: &'a Range<usize>,
+    len: usize,
+}
+
+impl<'a> CompareOutcome<'a> {
+    /// The compare that left `tied` in a node of `len` keys.
+    pub(crate) fn new(tied: &'a Range<usize>, len: usize) -> Self {
+        Self { tied, len }
+    }
+
+    fn smaller(&self) -> String {
+        match self.tied.start {
+            0 => "None is smaller".to_string(),
+            1 => "1 is smaller".to_string(),
+            smaller => format!("{smaller} are smaller"),
+        }
+    }
+}
 
 impl std::fmt::Display for CompareOutcome<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tied = self.0;
+        let tied = self.tied;
+        let smaller = self.smaller();
         match tied.len() {
+            0 if tied.start == 0 => write!(
+                f,
+                "None is smaller or equal, so the key goes before slot 0, with no full key compared."
+            ),
+            0 if tied.start == self.len => write!(
+                f,
+                "All {} are smaller, so the key goes after the last slot, with no full key compared.",
+                self.len
+            ),
             0 => write!(
                 f,
-                "None equals it, so they alone place the key, before slot {}.",
+                "{smaller} and none is equal, so the key goes between slots {} and {}, with no full key compared.",
+                tied.start - 1,
                 tied.start
             ),
-            1 => write!(f, "Only slot {}'s equals it.", tied.start),
-            n => write!(f, "{n} equal it: slots {}–{}.", tied.start, tied.end - 1),
+            1 => write!(
+                f,
+                "{smaller} and only slot {}'s is equal, so only that key can be the one searched for.",
+                tied.start
+            ),
+            n => write!(
+                f,
+                "{smaller} and {n} are equal, slots {}–{}, so only those keys can be the one searched for.",
+                tied.start,
+                tied.end - 1
+            ),
         }
     }
 }
@@ -587,16 +677,24 @@ mod tests {
     #[test]
     fn compare_outcomes_read_as_sentences() {
         assert_eq!(
-            CompareOutcome(&(4..4)).to_string(),
-            "None equals it, so they alone place the key, before slot 4."
+            CompareOutcome::new(&(35..35), 70).to_string(),
+            "35 are smaller and none is equal, so the key goes between slots 34 and 35, with no full key compared."
         );
         assert_eq!(
-            CompareOutcome(&(7..8)).to_string(),
-            "Only slot 7's equals it."
+            CompareOutcome::new(&(0..0), 70).to_string(),
+            "None is smaller or equal, so the key goes before slot 0, with no full key compared."
         );
         assert_eq!(
-            CompareOutcome(&(0..9)).to_string(),
-            "9 equal it: slots 0–8."
+            CompareOutcome::new(&(70..70), 70).to_string(),
+            "All 70 are smaller, so the key goes after the last slot, with no full key compared."
+        );
+        assert_eq!(
+            CompareOutcome::new(&(7..8), 70).to_string(),
+            "7 are smaller and only slot 7's is equal, so only that key can be the one searched for."
+        );
+        assert_eq!(
+            CompareOutcome::new(&(0..9), 9).to_string(),
+            "None is smaller and 9 are equal, slots 0–8, so only those keys can be the one searched for."
         );
     }
 }
