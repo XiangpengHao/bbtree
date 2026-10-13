@@ -4,12 +4,12 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use bbtree::inspect::{NodeView, PageMap, TraceOutcome};
+use bbtree::inspect::{NodeView, PageMap};
 use bbtree::{Auto, BBTreeMap, InlineKey};
 
 use crate::fences::{Fence, KeyBytes, NodeFences};
 use crate::node_inspector::{KeyRow, NodeDetail};
-use crate::trace::{LocalPrefixCheck, Trace, TraceStep};
+use crate::trace::{Trace, TraceStep};
 use crate::tree_shape::{NodeAt, TreeShape};
 use crate::workload::KeyKind;
 
@@ -135,6 +135,10 @@ pub(crate) trait InspectedTree {
     /// `query` names no key of this map's type.
     fn trace(&self, query: &str) -> Result<Trace, String>;
 
+    /// How many leading bytes every key of the map shares, as the map
+    /// keeps them (D50): the prefix of the nodes along the tree's borders.
+    fn shared_prefix_len(&self) -> usize;
+
     /// Key `index` of the node at `at`, as text, split after the bytes the
     /// node's search skips, if the key is its bytes.
     fn key_text_split(&self, at: NodeAt, index: usize) -> (String, String);
@@ -237,29 +241,17 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
 
     fn trace(&self, query: &str) -> Result<Trace, String> {
         let key = K::parse(query).ok_or_else(|| self.kind.parse_error(query))?;
+        let view = self.map.inspect();
         let mut steps = Vec::new();
         if let Some(mut at) = self.shape.root() {
-            for step in self.map.inspect().trace(&key) {
+            for step in view.trace(&key) {
                 let width = step.node().inline_key_width();
                 let inline_key = Option::zip(step.inline_key(), width)
                     .map(|(word, width)| Self::inline_key_hex(word, width));
-                let searched = !matches!(
-                    step.outcome(),
-                    TraceOutcome::ToHead { .. } | TraceOutcome::Head
-                );
-                let local_prefix_check = (searched && step.node().local_prefix_len().is_some())
-                    .then(|| {
-                        if step.lacks_local_prefix() {
-                            LocalPrefixCheck::Lacks
-                        } else {
-                            LocalPrefixCheck::Has
-                        }
-                    });
                 let edge = step.edge_taken();
                 steps.push(TraceStep::new(
                     at,
                     step.outcome(),
-                    local_prefix_check,
                     inline_key,
                     step.tied(),
                     edge,
@@ -269,13 +261,17 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
                 }
             }
         }
-        Ok(Trace::new(key.key_bytes(), steps))
+        let placed = view.placed_by_shared_prefix(&key);
+        Ok(Trace::new(key.key_bytes(), steps, placed))
+    }
+
+    fn shared_prefix_len(&self) -> usize {
+        self.map.inspect().shared_prefix().len()
     }
 
     fn key_text_split(&self, at: NodeAt, index: usize) -> (String, String) {
         let node = self.node(at);
-        let skipped = node.local_prefix_len().unwrap_or(node.prefix_len());
-        node.key(index).text_split_at(skipped)
+        node.key(index).text_split_at(node.prefix_len())
     }
 
     fn page_map(&self, at: NodeAt) -> PageMap {
@@ -284,7 +280,7 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
 
     fn detail(&self, at: NodeAt) -> NodeDetail {
         let node = self.node(at);
-        let skipped = node.local_prefix_len().unwrap_or(node.prefix_len());
+        let skipped = node.prefix_len();
         let width = node.inline_key_width();
         let keys = (0..node.len())
             .map(|index| {

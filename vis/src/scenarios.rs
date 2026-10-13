@@ -13,8 +13,8 @@ pub(crate) enum Scenario {
     /// A key stored as a separator: found in an internal node, its value
     /// in the head of a leaf.
     Separator,
-    /// A key past the last one, down the tree's right border, where no
-    /// node has a fence prefix.
+    /// A key past the last one: placed by the shared prefix, or down the
+    /// tree's right border, where no node has a high fence.
     PastTheEnd,
     /// A key the map doesn't hold, between two it does.
     Missing,
@@ -48,7 +48,7 @@ impl Scenario {
                 "A key the root stores as a separator: the lookup finds it there, then goes down to the leaf whose head holds its value."
             }
             Scenario::PastTheEnd => {
-                "A key greater than every key: the lookup follows the right border, where nodes have no fence prefix. Internal nodes there keep the bytes their keys share as a search prefix; where the key lacks them, the node sends it to its last child at once."
+                "A key greater than every key. If it lacks the bytes every key shares, the lookup places it after them all and reads no node; otherwise it follows the right border, whose nodes have no high fence and skip those shared bytes."
             }
             Scenario::Missing => {
                 "A key between two keys of the map: the inline keys place it, and the leaf says where an insert would put it."

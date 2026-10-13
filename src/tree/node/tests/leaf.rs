@@ -12,7 +12,7 @@ use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInli
 use crate::tree::node::handle::{
     EdgeRoom, ForceResult, Immut, Insertion, Leaf, NodeMut, NodeRef, SearchResult, Split, Subtree,
 };
-use crate::tree::node::inline_keys::{InlinedKey, SearchKey};
+use crate::tree::node::inline_keys::{InlinedKey, SearchKey, Separator};
 use crate::tree::node::page::{NodePtr, TestPages};
 use crate::tree::test_support::{
     Bulky, CacheLineAligned, DropLedger, FromTracked, PageAligned, TestRng, TestTree, Tracked,
@@ -239,10 +239,12 @@ where
 }
 
 /// What one leaf should hold: the ids of its entries in order, and of its
-/// head, if any.
+/// head, if any, and of the head's key, where separator keys are heads
+/// (D49).
 struct LeafModel {
     entries: Vec<(usize, usize)>,
     head: Option<usize>,
+    head_key: Option<usize>,
 }
 
 impl LeafModel {
@@ -254,6 +256,7 @@ impl LeafModel {
     ) {
         assert_eq!(leaf.tracked_ids(), self.entries);
         assert_eq!(leaf.head_id(), self.head);
+        assert_eq!(leaf.head_key_id(), self.head_key);
         leaf.assert_inline_keys_match();
     }
 
@@ -266,11 +269,20 @@ impl LeafModel {
     ) {
         let right = split.right.borrow();
         let separator_value = right.head_id().expect("the right half has a head");
+        // The separator's key goes up, or where separator keys are heads,
+        // into the right half's head (D49).
+        let separator_key = match split.separator.key() {
+            Some(key) => key.id(),
+            None => right
+                .head_key_id()
+                .expect("the right half's head has a key"),
+        };
         let mut halves = split.left.reborrow().tracked_ids();
-        halves.push((split.separator.key().id(), separator_value));
+        halves.push((separator_key, separator_value));
         halves.extend(right.tracked_ids());
         assert_eq!(halves, self.entries);
         assert_eq!(split.left.reborrow().head_id(), self.head);
+        assert_eq!(split.left.reborrow().head_key_id(), self.head_key);
         assert!(!split.left.is_underfull());
         assert!(!right.is_underfull());
         assert_eq!(right.height(), 0);
@@ -292,6 +304,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
+        head_key: None,
     };
     let mut splits = 0;
 
@@ -370,27 +383,39 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 match (model.head, rng.below(3)) {
                     (Some(head_id), 0) => {
                         let head = leaf.head().expect("the model says there is a head");
-                        let (value, _) = head.remove();
+                        let (key, value, _) = head.remove();
                         assert_eq!(value.tracked_id(), head_id);
+                        assert_eq!(key.as_ref().map(Tracked::id), model.head_key);
                         model.head = None;
+                        model.head_key = None;
                     }
                     (Some(head_id), 1) => {
                         let head = leaf.head().expect("the model says there is a head");
                         match head.remove_with_first_key() {
-                            Some((value, key)) => {
-                                assert_eq!(value.tracked_id(), head_id);
+                            Some(succession) => {
+                                assert_eq!(succession.value.tracked_id(), head_id);
+                                let removed_key = succession.removed_key.as_ref().map(Tracked::id);
+                                assert_eq!(removed_key, model.head_key);
                                 let (first_key_id, first_value_id) = model.entries.remove(0);
-                                assert_eq!(key.key().id(), first_key_id);
+                                // The first key goes up, or where separator
+                                // keys are heads, becomes the head's (D49).
+                                match succession.successor.key() {
+                                    Some(key) => assert_eq!(key.id(), first_key_id),
+                                    None => model.head_key = Some(first_key_id),
+                                }
                                 model.head = Some(first_value_id);
                             }
                             None => assert!(model.entries.is_empty()),
                         }
                     }
-                    (old_head, _) => {
+                    (Some(_), _) => {}
+                    (None, _) => {
                         let value = V::from_tracked(ledger.track());
                         model.head = Some(value.tracked_id());
-                        let replaced = leaf.replace_head(value);
-                        assert_eq!(replaced.map(|value| value.tracked_id()), old_head);
+                        let key = NodePtr::<Tracked<'l>, V, S>::has_separator_keys_in_heads()
+                            .then(|| ledger.track());
+                        model.head_key = key.as_ref().map(Tracked::id);
+                        leaf.put_head(key, value);
                     }
                 }
             }
@@ -424,7 +449,7 @@ fn random_operations_match_a_model() {
 
 /// The parts of a root leaf that split, besides the leaf itself.
 struct SplitLeaf<K, V, S> {
-    separator: InlinedKey<K, S>,
+    separator: Separator<K, S>,
     right: Subtree<K, V, S, Leaf>,
     left_len: usize,
 }
@@ -500,11 +525,15 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
+        head_key: None,
     };
     if with_head {
         let value = V::from_tracked(ledger.track());
         model.head = Some(value.tracked_id());
-        assert!(leaf.borrow_mut().replace_head(value).is_none());
+        let key =
+            NodePtr::<Tracked<'l>, V, S>::has_separator_keys_in_heads().then(|| ledger.track());
+        model.head_key = key.as_ref().map(Tracked::id);
+        leaf.borrow_mut().put_head(key, value);
     }
     while let EdgeRoom::Fits(edge) = leaf.borrow_mut().last_edge().check_room() {
         let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));

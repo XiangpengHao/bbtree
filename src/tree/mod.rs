@@ -1,12 +1,15 @@
-//! The B+-tree under the map and the set: fixed-size, self-aligned 1 KB
-//! node pages, with keys and values in leaves and separator keys in internal
-//! nodes (`doc/03-decisions.md` D9, D11, D12, D13, D15, D17, D21, D29),
-//! behind typed, zero-overhead abstractions over all the `unsafe` code (D14).
+//! The B+-tree under the map and the set: fixed-size, self-aligned node
+//! pages, with keys and values in leaves, and separator keys in internal
+//! nodes, or with inline keys, in leaves too (`doc/03-decisions.md` D9, D11,
+//! D12, D13, D15, D17, D21, D29, D49), behind typed, zero-overhead
+//! abstractions over all the `unsafe` code (D14).
 //!
 //! The tree stores each key once (D17): values live only in leaves, and a
-//! separator key, moved up into an internal node, keeps its value in the
-//! leaf right of it, as that leaf's head. Nodes have no parent pointers:
-//! whatever goes back up keeps a path from the root instead (D11).
+//! separator keeps its value in the leaf right of it, as that leaf's head.
+//! Its key moves up into an internal node; with inline keys, it stays in the
+//! head beside its value, and the internal node keeps only its inline key
+//! (D49). Nodes have no parent pointers: whatever goes back up keeps a path
+//! from the root instead (D11).
 //!
 //! - [`node`] is one node, and nothing that follows an edge: its page and
 //!   the byte layout of each kind, the typed handles to it and the positions

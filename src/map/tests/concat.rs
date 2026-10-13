@@ -101,8 +101,8 @@ fn concat_joins_u64_trees_of_every_shape() {
     join_random_pieces::<u64>(31, trials, max_len);
 }
 
-/// String keys, with prefixes along their fences, and the local search
-/// prefixes of their internal nodes (D33), which every join refits.
+/// String keys, with prefixes along their fences, and shared prefixes
+/// (D50), which every join shrinks to what both trees share.
 #[test]
 fn concat_joins_string_trees_of_every_shape() {
     let (trials, max_len) = if cfg!(miri) {

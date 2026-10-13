@@ -6,10 +6,12 @@
 //! of the node itself, for its parent to check in turn; anything else ends
 //! the fixing. A root left without keys gives way to its only child.
 //!
-//! A separator's value is the head of the leftmost leaf right of it (D17).
-//! Removing the separator takes that head out, and the leaf's first key goes
-//! up to take the separator's place, with its value as the new head: values
-//! never leave their leaf.
+//! A separator's value is the head of the leftmost leaf right of it (D17),
+//! and where separator keys are heads, so is its key (D49). Removing the
+//! separator takes that head out, and the leaf's first key takes the
+//! separator's place, with its value as the new head: values never leave
+//! their leaf. The key goes up where internal nodes keep keys, and becomes
+//! the head's key where they don't, its window going up alone.
 //!
 //! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes
 //! it changes their parent's prefix. Once the entry is out and counted, the
@@ -24,8 +26,8 @@
 
 use core::borrow::Borrow;
 
-use super::node::handle::{Edge, Internal, Leaf, NodeMut, Subtree, TrailingSlots};
-use super::node::inline_keys::SearchKey;
+use super::node::handle::{Edge, Internal, Leaf, NodeMut, Rebalance, Subtree};
+use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::page::PageByKind;
 use super::path::{FirstEdge, MAX_HEIGHT, PathMut};
 use crate::inline_key::InlineKeyStrategy;
@@ -115,19 +117,22 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             // of it.
             self.set_index(separator_index + 1);
             self.descend_to_leaf::<FirstEdge>();
-            let (value, successor) = self
+            let succession = self
                 .leaf_mut()
                 .head()
                 .and_then(|head| head.remove_with_first_key())
                 .expect("the leaf right of a separator has a head and keys");
-            let mut successor = Some(successor);
-            let mut key = None;
+            let mut successor = Some(succession.successor);
+            let mut replaced = None;
             let changed = self.fix_up_the_path(separator_height, &mut release, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
-                key = Some(node.kv_at(separator_index).replace_key(successor));
+                replaced = Some(node.kv_at(separator_index).replace_separator(successor));
             });
-            let key = key.expect("the path goes up past the separator");
-            ((key, value), changed)
+            let replaced = replaced.expect("the path goes up past the separator");
+            let key = (succession.removed_key)
+                .or_else(|| replaced.into_inlined_key().map(InlinedKey::into_key))
+                .expect("a removed separator's key is in its head or its node");
+            ((key, succession.value), changed)
         };
         *length -= 1;
         self.fit_changed_fences(&changed);
@@ -285,7 +290,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'_, K, V, S, Internal>> {
     /// that a removal went through holds a key until it fixes its child,
     /// which is the only time it can lose one. If the children are of the
     /// other kind.
-    fn fix_underfull_child<ChildKind: TrailingSlots>(
+    fn fix_underfull_child<ChildKind: Rebalance>(
         self,
         release: &mut impl FnMut(PageByKind<K, V, S>),
     ) -> ChildFix {

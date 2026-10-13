@@ -9,10 +9,16 @@
 //! | keys | inline keys, leaf / internal | also stored | keys whose inline keys tie |
 //! |---|---|---|---|
 //! | without inline keys | none | nothing | `Ord` (D19) |
-//! | std integers | the impl's width in both | internal: a local prefix (D33) | `Ord` (D19) |
+//! | std integers | the impl's width in both | nothing | `Ord` (D19) |
 //! | every key under `WithInlineKey` | the impl's width in both | nothing | `Ord` (D19) |
-//! | std byte arrays | 2 / 2 (D32) | internal: children before keys (D39), a local prefix (D33) | bytes; a point lookup's one candidate all at once (D38) |
-//! | std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36); internal: a local prefix (D33) | bytes, past the tie |
+//! | std byte arrays | 2 / 2 (D32) | nothing | bytes; a point lookup's one candidate all at once (D38) |
+//! | std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36) | bytes, past the tie |
+//!
+//! Every row with inline keys keeps its separator keys in leaves, each the
+//! head of the leftmost leaf right of it, and its internal nodes keep only
+//! inline keys and children (D49): their searches compare inline keys, and
+//! read a separator's key, down in its leaf, only on a tie. Without inline
+//! keys, internal nodes keep their separator keys (D17).
 //!
 //! What sets the rows apart is what a tie costs. A key with an `InlineKey`
 //! impl orders by its `Ord`, which may be user code: the nodes call it only
@@ -21,9 +27,9 @@
 //! heap byte string holds them elsewhere, so a tie costs a read past the
 //! node: its leaves keep long inline keys and the keys' lengths to avoid
 //! one, and its internal nodes, which most searches pass through without
-//! ending at a key, keep short ones. Reading a std byte string's or a std
-//! integer's window calls no user code, so their nodes may read keys while
-//! keys move, as keeping a local prefix does.
+//! ending at a key, keep short ones. Reading a std byte string's window
+//! calls no user code, so its internal nodes may read a window's other
+//! bytes from the key while keys move (D43).
 //!
 //! Layouts (`layout.rs`), slots (`slots.rs`), searches (`handle.rs`) and
 //! prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`) read the plan; none of
@@ -41,7 +47,6 @@ use core::mem;
 
 use super::inline_keys::KeyInliner;
 use super::page::{ByteString, PageKind};
-use crate::inline_key::sealed::InlineKeySource;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
@@ -60,11 +65,6 @@ pub(in crate::tree) struct NodePlan<K> {
     /// Whether the node stores each key's length, whose 2-byte tags filter a
     /// point lookup's candidates (D36).
     length_tags: bool,
-    /// Whether the node may search past the bytes its fences share, when all
-    /// of its keys share more (D33).
-    local_prefix: bool,
-    /// Whether an internal node puts its children before its keys (D39).
-    children_first: bool,
     /// How a search runs over all of a node's keys when it has no inline key
     /// to compare with theirs: in nodes without inline keys, and for a lookup
     /// through a borrowed form the nodes can't encode (D19).
@@ -92,9 +92,7 @@ impl<K> NodePlan<K> {
             return Self::without_inline_keys();
         };
         match inliner {
-            KeyInliner::InlineKeyTrait { width, .. } => {
-                Self::with_inline_key_impl::<S, Kind>(inliner, width)
-            }
+            KeyInliner::InlineKeyTrait { width, .. } => Self::with_inline_key_impl(inliner, width),
             KeyInliner::ByteString(bytes) if bytes.holds_its_bytes() => {
                 Self::for_byte_arrays::<Kind>(inliner)
             }
@@ -111,8 +109,6 @@ impl<K> NodePlan<K> {
             inline_width: None,
             rehydrates_windows: false,
             length_tags: false,
-            local_prefix: false,
-            children_first: false,
             full_search: const { KeySearch::for_key::<K>() },
             tied_search: const { KeySearch::for_key::<K>() },
             whole_key_equality: false,
@@ -122,20 +118,12 @@ impl<K> NodePlan<K> {
     /// Keys with an `InlineKey` impl: std integers under `Auto`, and every
     /// key under `WithInlineKey` (D18, D31). Both kinds keep the impl's
     /// width, and keys whose inline keys tie compare with `Ord`, searched as
-    /// the key type picks. Internal nodes of std integers may keep a local
-    /// prefix (D33): dense integers share their high bytes.
+    /// the key type picks.
     #[inline(always)]
-    fn with_inline_key_impl<S: InlineKeyStrategy<K>, Kind: PageKind>(
-        inliner: KeyInliner<K>,
-        width: InlineWidth,
-    ) -> Self {
-        // Under `Auto`, only std integers have an impl: the crate's own,
-        // which may run while keys move (D26).
-        let std_integer = matches!(S::SOURCE, InlineKeySource::RecognizedStdTypes);
+    fn with_inline_key_impl(inliner: KeyInliner<K>, width: InlineWidth) -> Self {
         Self {
             inliner: Some(inliner),
             inline_width: Some(width),
-            local_prefix: std_integer && !Kind::IS_LEAF,
             ..Self::without_inline_keys()
         }
     }
@@ -143,9 +131,7 @@ impl<K> NodePlan<K> {
     /// Std byte arrays, `[u8; 16]`, `[u8; 20]` and `[u8; 32]`, which hold
     /// their bytes in the node: a tie costs a load from the node, so 2 bytes
     /// of each inline key do, which pack more of them per cache line (D32).
-    /// Internal nodes put their children right after the inline keys, which
-    /// leaves the keys within cache lines (D39), and may keep a local prefix
-    /// (D33). Keys whose inline keys tie compare by their bytes, and a point
+    /// Keys whose inline keys tie compare by their bytes, and a point
     /// lookup's one candidate by all of them at once, a length the compiler
     /// knows (D38).
     #[inline(always)]
@@ -153,8 +139,6 @@ impl<K> NodePlan<K> {
         Self {
             inliner: Some(inliner),
             inline_width: Some(InlineWidth::Two),
-            local_prefix: !Kind::IS_LEAF,
-            children_first: !Kind::IS_LEAF,
             tied_search: KeySearch::Binary,
             whole_key_equality: true,
             ..Self::without_inline_keys()
@@ -166,9 +150,8 @@ impl<K> NodePlan<K> {
     /// node. Leaves keep 8 bytes of each inline key, and each key's length
     /// (D36). Internal nodes, which most searches pass through without
     /// ending at a key, keep 4 bytes, and read a window's other 4 from its
-    /// key when they hand it out (D43); and when all of their keys share
-    /// more than their fences do, they search past it (D33). Keys whose
-    /// inline keys tie compare by their bytes past the tie.
+    /// key when they hand it out (D43). Keys whose inline keys tie compare
+    /// by their bytes past the tie.
     #[inline(always)]
     fn for_heap_byte_strings<Kind: PageKind>(inliner: KeyInliner<K>) -> Self {
         let leaf = Kind::IS_LEAF;
@@ -181,7 +164,6 @@ impl<K> NodePlan<K> {
             }),
             rehydrates_windows: !leaf,
             length_tags: leaf,
-            local_prefix: !leaf,
             tied_search: KeySearch::Binary,
             ..Self::without_inline_keys()
         }
@@ -225,30 +207,13 @@ impl<K> NodePlan<K> {
         })
     }
 
-    /// How the keys whose shared bytes a local search prefix skips get
-    /// their windows, if the node may keep one (D33): std byte strings and
-    /// std integers, whose windows are read without calling user code.
+    /// Whether each separator key is the head of the leftmost leaf right of
+    /// it, where its value is too, rather than a key of its internal node
+    /// (D49): for keys with inline keys, the same in both kinds. Internal
+    /// nodes then keep only inline keys and children.
     #[inline(always)]
-    pub(in crate::tree) fn local_prefix_inliner(self) -> Option<KeyInliner<K>> {
-        self.inliner.filter(|_| self.local_prefix)
-    }
-
-    /// How many bytes past the fences all keys must share for a local prefix
-    /// to be kept: as many as a window the node hands out keeps, so that the
-    /// first key's window at the fences stands for every key's (D43).
-    #[inline(always)]
-    pub(in crate::tree) fn local_prefix_min_extra(self) -> usize {
-        if self.rehydrates_windows {
-            mem::size_of::<crate::inline_key::InlineWord>()
-        } else {
-            self.inline_width.map_or(0, InlineWidth::bytes)
-        }
-    }
-
-    /// Whether an internal node puts its children before its keys (D39).
-    #[inline(always)]
-    pub(super) fn has_children_first(self) -> bool {
-        self.children_first
+    pub(in crate::tree) fn has_separator_keys_in_heads(self) -> bool {
+        self.inliner.is_some()
     }
 
     /// How a search runs over all of a node's keys when it has no inline key
@@ -344,8 +309,6 @@ mod tests {
         inline_width: Option<InlineWidth>,
         rehydrates_windows: bool,
         length_tags: bool,
-        local_prefix: bool,
-        children_first: bool,
         full_search: KeySearch,
         tied_search: KeySearch,
         whole_key_equality: bool,
@@ -358,8 +321,6 @@ mod tests {
                 inline_width: plan.inline_width(),
                 rehydrates_windows: plan.rehydrates_windows(),
                 length_tags: plan.has_length_tags(),
-                local_prefix: plan.local_prefix_inliner().is_some(),
-                children_first: plan.has_children_first(),
                 full_search: plan.full_search(),
                 tied_search: plan.tied_search(),
                 whole_key_equality: plan.has_whole_key_equality(),
@@ -372,8 +333,6 @@ mod tests {
                 inline_width: None,
                 rehydrates_windows: false,
                 length_tags: false,
-                local_prefix: false,
-                children_first: false,
                 full_search,
                 tied_search: full_search,
                 whole_key_equality: false,
@@ -410,14 +369,7 @@ mod tests {
             ..PlanRow::without_inline_keys(KeySearch::Branchless)
         };
         assert_eq!(PlanRow::of::<u64, Auto, Leaf>(), two_bytes);
-        // Std integers' own impl may run while keys move (D26).
-        assert_eq!(
-            PlanRow::of::<i128, Auto, Internal>(),
-            PlanRow {
-                local_prefix: true,
-                ..two_bytes
-            }
-        );
+        assert_eq!(PlanRow::of::<i128, Auto, Internal>(), two_bytes);
         assert_eq!(PlanRow::of::<u64, WithInlineKey, Internal>(), two_bytes);
 
         // A std byte string under `WithInlineKey` is a key like any other.
@@ -437,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn byte_arrays_keep_two_bytes_and_put_children_first() {
+    fn byte_arrays_keep_two_bytes() {
         for (leaf, internal, full_search) in [
             (
                 PlanRow::of::<[u8; 16], Auto, Leaf>(),
@@ -462,14 +414,7 @@ mod tests {
                 ..PlanRow::without_inline_keys(full_search)
             };
             assert_eq!(leaf, expected);
-            assert_eq!(
-                internal,
-                PlanRow {
-                    children_first: true,
-                    local_prefix: true,
-                    ..expected
-                }
-            );
+            assert_eq!(internal, expected);
         }
     }
 
@@ -493,7 +438,6 @@ mod tests {
                 PlanRow {
                     inline_width: Some(InlineWidth::Four),
                     rehydrates_windows: true,
-                    local_prefix: true,
                     ..base
                 }
             );

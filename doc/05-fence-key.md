@@ -4,9 +4,9 @@ Status: implemented (D26), in `tree/prefix.rs` and the node operations of
 `tree/node/handle.rs`; measured in "Measured". Builds on inline keys
 (04-inline-key.md). Applies to every key with inline keys: std byte strings,
 byte arrays and the 64- and 128-bit integers under `Auto`, and keys with an
-`InlineKey` impl under `WithInlineKey`, through their encoding. Where the
-fences share too little, internal nodes of std keys also keep a local search
-prefix (D33, "Local search prefixes").
+`InlineKey` impl under `WithInlineKey`, through their encoding. Where a
+fence is missing, on the root and the borders, the tree's shared prefix
+stands in (D50, "The shared prefix"), in `tree/node/shared_prefix.rs`.
 
 ## Problem
 
@@ -23,8 +23,8 @@ time (04-inline-key.md, section 5). Prefix stripping removes most of the cause.
 ## Idea: the separators are the fences
 
 Every node has two fences, `low` and `high`: the separators beside it in its
-ancestors, the nearest on each side. D17 keeps separators as real keys in
-internal nodes.
+ancestors, the nearest on each side. D17 keeps separators as real keys: in
+internal nodes, or with inline keys, as leaf heads (D49).
 
 - **`prefix_len = LCP(low, high)`, exactly.** Every key `k` with
   `low ≤ k < high` starts with `P = LCP(low, high)` and is at least `|P|`
@@ -45,8 +45,8 @@ internal nodes.
 - **Search:** a key we descended to is between the node's fences, so the search
   skips `prefix_len` bytes of it with no check.
 - The leftmost and rightmost spines have an infinite fence on one side, so
-  their prefix is 0; where their keys share more, a local search prefix
-  covers them (D33).
+  their prefix is what every key of the tree shares, which the tree keeps
+  and every search checks once, at the top (D50, "The shared prefix").
 
 ## Inline keys belong to a node
 
@@ -147,8 +147,7 @@ and what a panic in its last step leaves.
 
 An operation does its upkeep in two steps:
 
-- **During the change, no key is read.** A node with a local search prefix
-  first restores its fence windows (D33). A node whose prefix must shrink
+- **During the change, no key is read.** A node whose prefix must shrink
   shifts its windows: shrinking by `d` bytes, every window keeps its top
   `8 − d` bytes, moved down, under `d` bytes that every key of the node
   shares (`Window::moved_back_to`). A fence has them, and the parent's key
@@ -174,9 +173,10 @@ An operation does its upkeep in two steps:
 | merge | the merged node's widen | it takes the parent's prefix: both halves move back, filled from the separator, which comes down at its window | the merged node |
 | steal | the receiver's widen, the giver's narrow; their children's don't | the receiver takes the parent's prefix, filled from the separator, which comes down at its window; the key going up moves back the same way | both |
 | removal of separator `s`, replaced by its successor `s'` (D17) | the right border of the subtree left of `s` (upper fence `s` → `s'`) and the left border of the subtree right of it (lower fence `s` → `s'`) | before any change, the first border's nodes shrink to `min(own, LCP(s, s'))`, reading keys; then `s'` moves back to `s`'s node's prefix, filled from `s` | the second border's nodes |
-| `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes prefix 0, from the root down, each filled from its parent's key beside the path | once both maps are counted, the nodes beside each border |
+| `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes the root's prefix, the shared prefix, from the root down, each filled from its parent's key beside the path; both trees keep the shared bytes | once both maps are counted, the nodes beside each border |
 | builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the nodes a new leaf closes, from the leaf up, once it hangs after them; after `finish`, the nodes beside the right border |
-| root push / pop, clone | none | a new root has prefix 0; a copy copies prefixes | — |
+| root push / pop, clone | none | a new root has the shared prefix; a copy copies prefixes and the shared bytes | — |
+| insert of a key that shares less, join | the borders' missing ones: the shared bytes shrink | every border node moves back to the new length, filled from the shared bytes' window there | — |
 
 - **Why the first border of a removed separator shrinks first.** Its
   fences widen, so its prefixes must shrink before `s'` replaces `s`, and
@@ -194,42 +194,42 @@ An operation does its upkeep in two steps:
   `high` the key right of it at the nearest where it isn't the last
   (`PathMut::bounds`). Only fitting reads them. A plain search reads no
   fence.
-- **A node on a border keeps prefix 0 through a panic.** A search for a key
-  past the first or last goes down a border and reads windows there, so no
-  fit may give a border node a prefix, even for a moment that a panicking
-  `InlineKey` could make last: the builder fits a full rightmost node only
-  once the next leaf hangs after it, off the border.
+- **A node on a border keeps the shared prefix through a panic.** A search
+  for a key past the first or last that has the shared bytes goes down a
+  border and reads windows there, so no fit may give a border node a longer
+  prefix, even for a moment that a panicking `InlineKey` could make last:
+  the builder fits a full rightmost node only once the next leaf hangs after
+  it, off the border.
 - **An internal node grows at most to its children's prefixes,** which reads
   their headers: a prefix that fits its fences never passes them, but a panic
   during an earlier fit may have left one of theirs short.
 
-## Local search prefixes (D33)
+## The shared prefix (D50)
 
-Fences give a node nothing where they share too little for its windows to
-tell its keys apart: on the root and the borders, which lack a fence, and
-where keys cluster inside wide fences (dense integers, UUIDv7-like arrays,
-paths behind a shared prefix). Every window there ties, and the search
-compares whole keys.
+A node on a border has one fence, the root none: fences give them nothing,
+yet their keys often share many bytes (dense integers, UUIDv7-like arrays,
+paths behind a common head). Every window there ties, and searches compare
+whole keys.
 
-- **Kept** by an internal node of std heap strings, byte arrays or
-  integers, whose windows the nodes read without user code, when all its
-  windows tie at its fence prefix and its keys share at least a window's
-  bytes more: what its first and last keys share (by their bytes for byte
-  strings and arrays, by their encoding for integers), beside `prefix_len`
-  in the header.
-  Its windows are at that length.
-- **Search:** a query first checks, against the node's first key, that it
-  has the bytes the keys share up to the local prefix; one without them goes
-  to the first or last edge. Heap strings check from the fence prefix, 32
-  bytes at a time; fixed-width keys from byte 0, a window at a time.
-- **Upkeep:** the fence prefix stays the node's prefix for children, moved
-  and exported windows. Before keys move, the node restores its fence
-  windows; afterwards it rebuilds the local ones
-  (`NodeMut::refresh_local_prefix`).
-- **Leaves keep none.** The fence prefix lets a leaf confirm a hit from its
-  window and length; a local one would need the key's bytes, a heap read
-  for strings. A min/max prefix in every node instead of fences was
-  measured and rejected for that reason (06-cost-model.md).
+- **Kept** by the tree, beside its root: the leading bytes of the encoding
+  every key shares, up to 64, by their bytes for byte strings and by their
+  encoding otherwise (`SharedPrefix`). The root and the border nodes take
+  its length as their prefix, so `prefix_len` is what a node's fences
+  share, a missing fence counting as the shared bytes.
+- **Search:** a query is checked against the bytes once, before the root;
+  one without them sorts before or after every key, and reads no node.
+  Every query that goes down has them, so every node skips its prefix
+  unchecked, as with fences. Heap strings check 32 bytes at a time;
+  fixed-width keys a window at a time.
+- **Upkeep:** an insert covers its key first: an empty tree starts from the
+  key's bytes; a key that shares fewer shrinks them, and every border node
+  moves back to the new length, filled from their window there, reading no
+  key. Removals leave them, so they are what every key shares, not
+  exactly what the keys share. A cut gives both trees the bytes; a join
+  shrinks both to what they share with the separator; the builder checks
+  each key it appends.
+- **Leaves need nothing more:** a border leaf skips the shared bytes like
+  any other prefix, and confirms a hit from its window and length.
 
 ## Measured
 
@@ -401,9 +401,8 @@ Every set ties 0% at 4 bytes.
   - the count goes through the node's kind, so its trip count, the kind's
     capacity, is a constant;
   - within a run of tied inline keys, keys with their own impl search as
-    D19 picks: the root has fence prefix 0, and dense integers below 2^48
-    all tie on their first 2 bytes there, unless it keeps a local prefix
-    (D33).
+    D19 picks: with 2-byte inline keys, dense integers tie wherever a
+    node's keys share more than its prefix.
 - **The count's code depended on the capacity.** LLVM vectorizes
   `filter().count()` well for some slot counts and not others. A `u64 →
   [u64; 4]` leaf has 23 slots: LLVM compared 16 in a vector, then took its

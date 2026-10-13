@@ -57,9 +57,9 @@ internal  | header | k0 k1 … k_n | e0 e1 … e_n+1     |
   merging move trailing slots the same way in both kinds.
 - An insert is one shift of the keys after the position and one of the
   trailing slots; a split is one copy of each half.
-- With inline keys, leaves pair keys with values (D29), internal nodes keep
-  keys and edges apart (D32), and fixed arrays put edges first (D39); the
-  layouts are in `tree/node/layout.rs`.
+- With inline keys, leaves pair keys with values (D29), a head with its
+  separator's key (D49), and internal nodes keep no keys, only inline keys
+  and edges (D49); the layouts are in `tree/node/layout.rs`.
 
 **D10. Not taken from bf-tree:** slotted layout, stored fence keys,
 mini-pages. (2026-10-07)
@@ -112,6 +112,11 @@ and it is aligned to max(1 KB, align of K, align of its trailing slots).
   2 KB, 3 KB, … leaves (D21). u64→u64 without inline keys: leaf 63,
   internal 63.
 - A one-entry map costs 1 KB (std: 192 B for a one-entry u64→u64 map).
+- Internal nodes with inline keys keep no keys (D49) and are 512 B,
+  aligned to 512 B: 49, 41 and 31 children at 2-, 4- and 8-byte inline
+  keys, as many as 1 KiB held with keys or more, and a search scans every
+  inline key slot (06, lesson 1). In 1 KiB they held 100, 84 and 63, and
+  10M `hash32` hits ran 232 ns against 160.
 
 **D16. Leaves and internal nodes stay sorted.** (2026-10-07)
 Unsorted leaf storage, fully unsorted or as a sorted prefix plus an unsorted
@@ -138,20 +143,21 @@ tail, was prototyped and rejected.
 
 **D17. B+-tree: values live only in leaves; separators are moved, not copied.** (2026-10-07)
 
-- Internal nodes hold keys and edges only. **Separator keys are stored
-  physically in internal nodes**, which are the hot part of the tree: an
-  internal-node search compares against keys inline in that node and never
-  follows a pointer into a leaf.
-- Leaves hold keys and values (D9), plus one key-less **head** value: every
-  leaf except the leftmost stores the value of the separator key just to its
-  left in key order. That key lives in an internal node: the lowest common
-  ancestor of the two leaves.
+- Internal nodes hold separators and edges only. Without inline keys, **the
+  separator keys are stored physically in internal nodes**, which are the
+  hot part of the tree: an internal-node search compares against keys in
+  that node. With inline keys, they are leaf heads (D49).
+- Leaves hold keys and values (D9), plus one **head**: every leaf except the
+  leftmost stores the value of the separator key just to its left in key
+  order. That key lives in an internal node, the lowest common ancestor of
+  the two leaves, or with inline keys, in the head beside its value (D49).
 - A tree with L leaves has exactly L − 1 separators, one per boundary between
   neighbouring leaves, so every leaf but the leftmost has exactly one head.
 - **No `K: Clone`.** Each key is stored exactly once, as in std. When a leaf
-  splits, the right half's smallest key moves up as the separator and its
-  value stays behind as the right leaf's head; a merge moves the key back down
-  next to its value. Values never leave leaves.
+  splits, the right half's smallest key becomes the separator and its value
+  stays behind as the right leaf's head; the key moves up, or with inline
+  keys stays in the head (D49); a merge brings both back together as an
+  entry. Values never leave leaves.
 - **Lookup always ends at a leaf.** A match on an internal separator continues
   down the leftmost path of its right subtree to that leaf's head.
 - Why: values only in leaves, as intended from the start (00-init: database
@@ -161,8 +167,9 @@ tail, was prototyped and rejected.
   separator hits doesn't matter.
 - Alternative considered: keep every key physically in its leaf and let
   internal nodes point at it. Rejected because moves inside leaves (shifts,
-  splits, steals) would invalidate those pointers; the structural relation
-  above needs no pointer maintenance.
+  splits, steals) would invalidate those pointers. D49 keeps the keys in
+  leaves without pointers: a separator's key is its head's, which the tree's
+  shape finds.
 
 **D18. Inline keys: a defaulted strategy parameter that recognizes std types.** (2026-10-07)
 Design in 04-inline-key.md.
@@ -398,8 +405,9 @@ Design in 04-inline-key.md.
 Design and measurements in 05-fence-key.md.
 
 - **What a node stores:** `prefix_len`, exactly what its fences (the
-  separators beside it in its ancestors) share, 0 along the tree's borders,
-  and its keys' windows past it as their inline keys. No fence key is stored
+  separators beside it in its ancestors) share, along the tree's borders
+  what every key shares (D50), and its keys' windows past it as their
+  inline keys. No fence key is stored
   (D10).
 - **For every key with inline keys:** the trait gives windows of an encoding
   (D18), so newtypes get it as std byte strings do.
@@ -412,8 +420,8 @@ Design and measurements in 05-fence-key.md.
   is no gate and no growth rule, and rebalanced nodes keep their prefixes.
   Against prefixes grown only where inline keys tie, that costs 4–23% on
   inserts, gets and removals of keys that rarely share prefixes.
-- **Where the fences share too little** for a node's windows to tell its
-  keys apart, an internal node keeps a local search prefix (D33).
+- **Where a fence is missing,** on the root and the borders, the tree's
+  shared prefix stands in for it (D50).
 - **Measured:** 24–34% faster at 1M on keys with shared prefixes (paths,
   addresses), 9–12% on Wikipedia titles' inserts and gets; on random strings,
   inserts about 25%, gets 5–10% and removals 21–23% slower than without
@@ -464,9 +472,9 @@ Design and measurements in 05-fence-key.md.
 **D29. Leaves with inline keys pair each key with its value.** (2026-10-09)
 
 - **Layout** (`layout.rs`): with inline keys, a leaf's keys and values are
-  `(key, value)` entries after the inline keys, the head alone in an entry
-  before entry 0, its key's place unused. Internal nodes keep keys and
-  edges apart (D32).
+  `(key, value)` entries after the inline keys, the head in an entry before
+  entry 0, its key's place the separator's key (D49). Internal nodes keep no
+  keys (D49).
 - **Why:** a search runs over the inline keys, and in a leaf it then reads
   the key it ends at, which brings its value along.
 - **Cost:** an entry pads its key to its value's alignment, and the extra
@@ -538,10 +546,9 @@ Design and measurements in 05-fence-key.md.
   | 1k `insert_random` / `remove_random` | 16.3 / 46.1 | 14.5 / 43.2 |
   | bytes per entry, map / set | 23.4 / 11.8 | 26.5 / 14.9 |
 
-  Dense keys (`u64-seq`, 0 to N) tie on the root and the tree's borders,
-  which have no fence prefix (D26): their inline keys there are the
-  integers' top bytes, all zero for small ones. Those nodes keep a local
-  prefix (D33).
+  Dense keys (`u64-seq`, 0 to N) share their top bytes, all zero for
+  small ones: the tree keeps them, and the root and the borders skip them
+  (D50), where they have no fences (D26).
 - **Cost:** 2 bytes more per entry, 3 at the leaves' fill: 13% more for
   `u64` → `u64`, 26% for a `u64` set. A node holds 55 `u64` keys
   instead of 63.
@@ -549,12 +556,12 @@ Design and measurements in 05-fence-key.md.
 **D32. Internal nodes split keys from children.** (2026-10-10)
 The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 
-- **Internal nodes keep keys and child pointers in separate arrays.**
-  Leaves with inline keys still pair each key with its value (D29). An
-  internal search ends at a child pointer and rarely reads a full key, so
-  child pointers should share cache lines with each other, not with keys.
-  A leaf search reads the key it ends at and then its value, so pairing
-  still pays there.
+- **Internal nodes keep keys and child pointers in separate arrays,** where
+  they keep keys at all: with inline keys they keep none (D49). Leaves with
+  inline keys still pair each key with its value (D29). An internal search
+  ends at a child pointer and rarely reads a full key, so child pointers
+  should share cache lines with each other, not with keys. A leaf search
+  reads the key it ends at and then its value, so pairing still pays there.
 - **Nodes stay aligned to 1 KiB (D15).** Tried 64 bytes: it only saves
   memory under glibc's malloc. mimalloc puts 1 KiB blocks on 1 KiB
   boundaries either way, and an A/B showed the same instructions and RSS,
@@ -585,7 +592,7 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   with no software population count. AVX-512 and POPCNT targets are
   unchanged.
 
-**D33. Cheaper fitting inserts, a local search prefix, cached range runs.** (2026-10-10)
+**D33. Cheaper fitting inserts and cached range runs.** (2026-10-10)
 
 - **A fitting insert has its own short path.** Allocation and split
   propagation move to an outlined function with its own stack frame
@@ -594,35 +601,6 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   the empty tail move. Replacing a value borrows it in place instead of
   copying the path. 10M ordered `u64` insert: 36.0 → 34.0 ns; random
   insert unchanged.
-- **An internal node keeps a local search prefix where its fences don't
-  help.**
-  - **Keys:** std heap byte strings, std byte arrays and std integers,
-    whose windows the nodes read without calling user code.
-  - **When:** all of the node's windows tie at its fence prefix
-    (05-fence-key.md), and its keys share at least a window's bytes more:
-    the root and the tree's borders, which lack fences, and dense keys.
-    The local prefix goes in 2 spare header bytes; the fence prefix stays
-    the node's prefix for everything structural.
-  - **Search:** a query first checks, against the node's first key, that
-    it has the bytes the keys share up to the local prefix; if not, it goes
-    to the first or last child. Heap strings check from the fence prefix,
-    32 bytes at a time; fixed-width keys from byte 0, a window at a time,
-    a loop the key's size bounds. Every internal node search reads the
-    local prefix's header field; nothing else changes for a node without
-    one.
-  - **Leaves keep none:** a leaf's fence prefix lets a hit be confirmed
-    from its window and length; a local one would need the key's bytes, a
-    heap read for strings.
-  - **Mutation:** the fence prefix itself never changes, so child prefixes
-    and moved windows still use it. Before keys move, the node restores its
-    ordinary windows; afterwards it rebuilds the local ones. Windows handed
-    out by split, merge and clone are always the ordinary ones.
-  - **Measured** (10M, pinned): dense `u64` hits 130.9 → 119.8 ns, inserts
-    148.1 → 140.7; 1M paths hits 354.9 → 345.3; UUIDv7-like `[u8; 16]`
-    lookups 366 → 270 instructions, and 1k of them 27.7 → 7.5 ns. Random
-    `u64` and JSON unchanged; `hash32` hits 173.3 → 180.3, inserts 183.9
-    → 192.0, the header check (+28 instructions a lookup).
-  - **Rejected:** a min/max prefix in every node instead of fences (06).
 - **A range iterator caches a checked leaf interval.** Repeated
   `next`/`next_back` step inside it; switching direction, crossing a leaf
   or folding first syncs the path; it costs `Range`/`RangeMut` 40 bytes.
@@ -658,8 +636,11 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 
 - **What:** for recognized heap byte strings, a leaf stores each key's
   length mod 65,536 in 2 bytes, only where existing padding holds the whole
-  tag array before both the head value and the first key. Capacity and
-  allocation size don't change. `KeySlots` moves tags with their keys.
+  tag array before the head's key (D49). Where the head's key took the
+  padding's end, as in `String` → `u64`, the leaf gives up an entry to keep
+  them (24 → 23); where tags never fit, as in `String` → `String`, it has
+  none. Allocation size doesn't change. `KeySlots` moves tags with their
+  keys.
 - **Search:** tags are read only when the 8-byte summaries leave more than
   one candidate. No tag matches: absent. One: compare that full key. Two:
   compare the upper key, then the lower only if the query sorts below it.
@@ -706,21 +687,6 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 - **Measured** at 10M `hash32`: hits 271.4 → 245.6 ns (instructions
   527 → 431); misses 193.0 → 195.6 ns.
 
-**D39. Fixed-array internal nodes put children before keys.** (2026-10-10)
-
-- **What:** for `Auto`'s 16-, 20- and 32-byte arrays, an internal node's
-  child array comes right after the summaries, then the full keys. Page
-  size and capacity don't change; a layout that would lose capacity keeps
-  the old order.
-- **Why:** with 32-byte keys, every key now sits inside one cache line
-  (half crossed one before), and summaries plus children take one line
-  fewer.
-- **Not for heap strings:** their local prefix check (D33) reads the first
-  key right after the summaries. Custom strategies keep their layout.
-- **Measured** at 10M `hash32`: hits 240.9 → 225.1 ns, misses
-  190.2 → 168.4, inserts 206.2 → 188.1. Same instructions; fewer L1 and
-  DRAM misses.
-
 **D40. Baseline x86-64 packs 33–64 two-byte summaries into one mask word.** (2026-10-10)
 
 - **What:** without POPCNT or AVX-512, nodes with 33–64 two-byte summaries
@@ -742,9 +708,9 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   - The thin `NodeRef::search` adapter, which only re-attaches the
     caller's node and height to the found index, is `#[inline(always)]`.
     The search body is inlined for fixed-width keys and left to LLVM for
-    heap strings (`NodePlan::inlines_node_search`, D33).
-  - Local-prefix guards (D33) on heap strings compare 32 bytes at a time,
-    inline.
+    heap strings (`NodePlan::inlines_node_search`).
+  - The shared-prefix check (D50) on heap strings compares 32 bytes at a
+    time, inline.
   - Native 8-byte leaf summaries use an equality mask.
 - **Why:** with the `Option`, an outlined helper re-tested for null and
   kept a generic `memcmp` fallback. Without forced inlining, every internal
@@ -779,9 +745,9 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 - **What:** under `Auto`, heap byte strings keep 8-byte summaries in
   leaves and use 4-byte ones in internal nodes. Internal capacity rises
   25 → 28 for `String` and 31 → 36 for `&str`/`Box<str>`; pages stay
-  1 KiB. Before a key moves from an internal node into a leaf, its full
-  8-byte window is recomputed from the key. Custom strategies and fixed
-  arrays keep their width.
+  1 KiB. A window an internal node hands out, which may go into a leaf, is
+  read again from its key, the head below (D49), for all 8 bytes. Custom
+  strategies and fixed arrays keep their width.
 - **Why:** about 94% of lookups pass through an internal node without
   ending there, so the extra ties from 4 bytes cost little (JSON: +0.02
   heap reads per hit), while the summaries shrink from 4 cache lines to 2.
@@ -817,9 +783,10 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   test per insert while unset. For random keys it can only be set at a
   new maximum: about 17 times over 10M inserts. No counters, no tuned
   thresholds.
-- **Cost:** the map is 32 bytes instead of 24 (std's is 24). JSON random
-  insert +2.3% in one run; other random inserts within ±0.5%. Descending
-  and middle-ordered runs get no shortcut.
+- **Cost:** a word in the map (std's is 24 bytes; bbtree's 40, with
+  D50's shared prefix). JSON random insert +2.3% in one run; other random
+  inserts within ±0.5%. Descending and middle-ordered runs get no
+  shortcut.
 - **Measured,** 10M ordered inserts: `u64` 31.1 → 5.3 ns (std 39.5), JSON
   121.7 → 45.3 (std 198.9), paths 185.9 → 63.1 (std 256.0).
 
@@ -857,8 +824,8 @@ Design and measurements in 07-node-plan.md.
 
 - **What:** `NodePlan::of::<S, Kind>()` (`tree/node/node_plan.rs`) decides, per
   key type and node kind, everything the nodes specialize on: summary width,
-  length tags, local prefix, children first, rehydrated windows, full and
-  tied searches, whole-key equality. One constructor per row of the table,
+  length tags, rehydrated windows, full and tied searches,
+  whole-key equality, and whether separator keys are heads (D49). One constructor per row of the table,
   each with its reason. Layouts, slots, searches and prefix upkeep read it;
   none asks what the key type is. Per-key arrays (inline keys, length tags)
   are `KeyColumns`, which every key move moves alike.
@@ -896,6 +863,95 @@ Design and measurements in 07-node-plan.md.
   panicking one need not leave a valid map; the tests that still check one
   (`map/tests/drops.rs`, `map/tests/inline_key.rs`) go when a change
   breaks them.
+
+**D49. With inline keys, separator keys are leaf heads, and internal nodes keep no keys.** (2026-10-13)
+Design, census and measurements in 11-separator-key.md.
+
+- **What:** in a map whose keys have inline keys, each separator's key is
+  the head of the leftmost leaf right of it, beside its value (D17), in
+  entry 0's key place (D29). Internal nodes keep only inline keys and
+  edges, in 512 B pages (D15). A search compares inline keys, and on a tie
+  reads a separator's key by walking down its right edge and first edges to
+  that head. Without inline keys, internal nodes keep their keys (D17).
+- **Why:** inline keys decide most internal searches (0.06–0.26 ties per
+  lookup on integers, `hash32` and JSON), so internal nodes held keys that
+  lookups rarely read. Without them, they hold as many children in half
+  the bytes.
+- **Moves:** a head's key moves with its value in splits, moves between
+  siblings, merges and removals; internal nodes move only windows and
+  edges, and no key moves between levels. `SeparatorSlots` holds an
+  internal node's separators, keys or windows; `SeparatorKeys` lends their
+  keys, in place or walked to.
+- **Measured** against the tree before, 10M (paths 1M), ns per operation,
+  one run each:
+
+  | cell | before | after |
+  |---|--:|--:|
+  | `u64` hit / miss | 128 / 90 | 124 / 94 |
+  | `u64` dense hit / miss | 158 / 88 | 148 / 98 |
+  | `hash32` hit / miss | 181 / 135 | 160 / 145 |
+  | JSON hit / miss | 311 / 249 | 276 / 179 |
+  | paths hit / miss | 371 / 252 | 426 / 312 |
+  | `u64`, `hash32`, JSON random insert | 146, 193, 289 | 136, 171, 241 |
+  | `u64` random remove, `range64` | 249, 652 | 249, 630 |
+
+- **Pitfall:** the tie search over walked keys doesn't inline; called on
+  every search, even with nothing tied, it made `u64` lookups run 135 more
+  instructions, and JSON's 77 once the internal search inlined into `get`
+  (D50). A search whose inline keys leave no candidate returns before the
+  call, in its caller.
+- **Open:** ties walk: `u64` and `hash32` misses, and paths, which tie
+  about once per lookup.
+
+**D50. The tree keeps what every key shares; border nodes take it as their prefix.** (2026-10-13)
+Design in 05-fence-key.md, "The shared prefix".
+
+- **What:** beside its root, a tree keeps the leading bytes of the
+  encoding every key shares (D18), up to 64 (`SharedPrefix`,
+  `tree/node/shared_prefix.rs`): one pointer, null while nothing is shared.
+  The root and the nodes along the borders, which lack a fence, take its
+  length as their prefix, where they had 0 (D26). Every key with inline
+  keys gets it, `InlineKey` impls included.
+- **Search:** a lookup, an entry, a range bound or an insert checks the
+  query against those bytes once, before the root. A query without them
+  sorts before or after every key and reads no node: a lookup misses, a
+  range or an entry starts at the first or last leaf edge. Below, every
+  node skips its prefix unchecked.
+- **Upkeep, reading no key:** an insert whose key shares less shrinks the
+  bytes first, and the border nodes with them, by D26's window shift; an
+  empty tree starts from its first key's. Removals leave them: the rest
+  share at least as much, so the prefix is correct, not exact. A cut gives
+  both trees the bytes; a join shrinks both to what they share with the
+  separator; a build checks each key as it appends; a clone copies them.
+- **Why not per-node local prefixes,** which internal nodes of std keys
+  kept where fences share too little, checking each query against their
+  first key: that read a key on every search of such a node, a walk to a
+  leaf head with D49, cost every internal search a header field, and made
+  every key move restore and rebuild windows. One check at the top
+  establishes the same for the root and the borders, where fences are
+  missing, and the internal search, without the per-node check, is small
+  enough for LLVM to inline into `get`.
+- **Cost:** the map is 40 bytes, 8 more. Each insert checks its key
+  against the bytes, inline: a null test when nothing is shared; starting
+  and shrinking are out of line. The insert's append shortcut (D45) checks
+  after it clears its hint, so no user code runs with the hint set.
+- **Measured** against D49, 10M, one run each; instructions per operation
+  repeat exactly between runs, times vary by about 10 ns (the same binary
+  ran `u64` random inserts in 146 and 135 ns):
+
+  | cell | instructions, D49 → D50 | ns, D49 → D50 |
+  |---|--:|--:|
+  | `u64` hit / miss | 239 / 214 → 240 / 215 | 124 / 94 → 129 / 94 |
+  | `u64` dense hit / miss | 340 / 316 → 294 / 270 | 148 / 98 → 138 / 96 |
+  | `hash32` hit / miss | 366 / 336 → 264 / 232 | 160 / 145 → 153 / 108 |
+  | JSON hit / miss | 462 / 425 → 385 / 347 | 276 / 179 → 270 / 174 |
+  | paths hit / miss | 764 / 697 → 641 / 575 | 547 / 418 → 495 / 405 |
+  | paths 1M hit / miss | 935 / 867 → 642 / 575 | 426 / 312 → 375 / 325 |
+  | `u64`, `hash32`, JSON random insert | 348, 427, 610 → 347, 394, 603 | 136, 171, 241 → 145, 167, 238 |
+  | `u64` random remove, `range64` | 657, 1598 → 651, 1605 | 249, 630 → 249, 613 |
+
+  Not measured again: UUIDv7-like `[u8; 16]` at 1k, 27.7 → 7.5 ns with
+  local prefixes, whose root's local prefix was what every key shares.
 
 ## Navigation
 

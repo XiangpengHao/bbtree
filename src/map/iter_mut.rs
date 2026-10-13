@@ -366,7 +366,10 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             return RangeMut::default();
         };
         RangeMut {
-            walk: RangeWalk::new(root.borrow_valmut(), range.start_bound(), range.end_bound()),
+            walk: {
+                let (root, shared) = root.borrow_valmut_and_shared_prefix();
+                RangeWalk::new(root, shared, range.start_bound(), range.end_bound())
+            },
         }
     }
 }

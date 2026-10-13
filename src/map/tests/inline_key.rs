@@ -32,7 +32,7 @@ fn ten_digits(number: usize) -> String {
 }
 
 /// A built-in stored key can be borrowed through an unknown query type.
-/// Its full ordering must remain available even in locally prefixed nodes.
+/// Its full ordering must remain available in every node.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn auto_strings_accept_an_unrecognized_borrowed_query() {
@@ -710,8 +710,8 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
 /// An `InlineKey` that panics while `retain`, `extract_if` or `append`
 /// builds a tree of the entries it keeps loses at most the entries it was
 /// placing: the map counts only those it holds, every value is dropped once,
-/// none leaked, and the tree's borders keep prefix 0, so that a key past the
-/// last goes in last. The panic lands on every call in turn: computing an
+/// none leaked, and the tree's borders keep its shared prefix (D50), so that
+/// a key past the last goes in last. The panic lands on every call in turn: computing an
 /// entry's inline key, fitting the prefix of a node a new leaf closes,
 /// fitting the border when the walk or the merge finishes, joining back the
 /// entries past a bounded range, and putting back what a dropped

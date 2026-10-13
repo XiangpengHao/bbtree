@@ -8,9 +8,9 @@ use std::vec::Vec;
 use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::node::handle::{
     EdgeRoom, ForceResult, Immut, Insertion, Internal, Kv, Leaf, LeafOrInternal, NodeMut, NodeRef,
-    Split, StealError, Subtree, TrailingSlots,
+    Rebalance, Split, StealError, Subtree,
 };
-use crate::tree::node::inline_keys::InlinedKey;
+use crate::tree::node::inline_keys::{InlinedKey, Separator};
 use crate::tree::node::page::{NodePtr, TestPages};
 use crate::tree::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 
@@ -29,18 +29,22 @@ fn named_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     (leaf, name)
 }
 
-/// A named leaf for the right of a separator, with a head to hold the
-/// separator's value (D17). Returns the leaf, its name, and the id of its
-/// head.
+/// A named leaf for the right of separator `key`, with a head to hold the
+/// separator's value (D17), and its key where separator keys are heads
+/// (D49). Returns the leaf, its name, the id of its head, and the separator,
+/// as its parent takes it.
 fn child_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     pages: &TestPages<K, Tracked<'l>, S>,
     ledger: &'l DropLedger,
-) -> (Subtree<K, Tracked<'l>, S>, usize, usize) {
+    key: K,
+) -> (Subtree<K, Tracked<'l>, S>, usize, usize, Separator<K, S>) {
     let (mut leaf, name) = named_leaf(pages, ledger);
     let head = ledger.track();
     let head_id = head.id();
-    assert!(leaf.borrow_mut().replace_head(head).is_none());
-    (leaf.forget_type(), name, head_id)
+    let separator = leaf
+        .borrow_mut()
+        .put_separator_head(InlinedKey::new(key, 0), head);
+    (leaf.forget_type(), name, head_id, separator)
 }
 
 /// The names of the leaf children of an internal node, in order.
@@ -93,24 +97,25 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
                 let index = rng.below(len + 1);
                 let edge = internal_root(&mut tree).edge_at(index);
                 if let EdgeRoom::Fits(edge) = edge.check_room() {
-                    let (child, name, head_id) = child_leaf(&pages, ledger);
                     let key = K::from_tracked(ledger.track());
-                    separators.insert(index, (key.tracked_id(), head_id));
+                    let key_id = key.tracked_id();
+                    let (child, name, head_id, separator) = child_leaf(&pages, ledger, key);
+                    separators.insert(index, (key_id, head_id));
                     children.insert(index + 1, name);
-                    assert_eq!(
-                        edge.insert_fit(InlinedKey::new(key, 0), child).index(),
-                        index
-                    );
+                    assert_eq!(edge.insert_fit(separator, child).index(), index);
                 }
             }
             4 | 5 if len > 0 => {
                 let index = rng.below(len);
-                let (key, child) = internal_root(&mut tree)
+                let (separator, child) = internal_root(&mut tree)
                     .kv_at(index)
                     .remove_with_right_child();
                 let head_id = child.borrow().leftmost_head_id();
                 assert_eq!(
-                    (key.tracked_id(), head_id.expect("the child has a head")),
+                    (
+                        child.borrow().separator_key_id(&separator),
+                        head_id.expect("the child has a head")
+                    ),
                     separators.remove(index)
                 );
                 assert_eq!(child.height(), 0);
@@ -119,7 +124,7 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
                 };
                 let name = child_leaf.keys()[0].tracked_id();
                 assert_eq!(name, children.remove(index + 1));
-                drop(key);
+                drop(separator);
                 child.destroy(|page| pages.release(page));
             }
             6 if len > 0 => {
@@ -210,15 +215,17 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     let mut separators = Vec::new();
     let mut children = std::vec![first_name];
     while let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() {
-        let (child, name, head_id) = child_leaf(&pages, ledger);
         let key = K::from_tracked(ledger.track());
-        separators.push((key.tracked_id(), head_id));
+        let key_id = key.tracked_id();
+        let (child, name, head_id, separator) = child_leaf(&pages, ledger, key);
+        separators.push((key_id, head_id));
         children.push(name);
-        edge.insert_fit(InlinedKey::new(key, 0), child);
+        edge.insert_fit(separator, child);
     }
-    let (child, name, head_id) = child_leaf(&pages, ledger);
     let key = K::from_tracked(ledger.track());
-    separators.insert(position, (key.tracked_id(), head_id));
+    let key_id = key.tracked_id();
+    let (child, name, head_id, separator) = child_leaf(&pages, ledger, key);
+    separators.insert(position, (key_id, head_id));
     children.insert(position + 1, name);
 
     let edge = internal_root(&mut tree).edge_at(position);
@@ -227,14 +234,15 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
         separator,
         right,
         ..
-    }) = edge.insert(InlinedKey::new(key, 0), child, || pages.fresh())
+    }) = edge.insert(separator, child, || pages.fresh())
     else {
         panic!("a full node splits");
     };
-    let separator_value = right.borrow().first_edge().descend().leftmost_head_id();
+    let below_separator = right.borrow().first_edge().descend();
+    let separator_value = below_separator.leftmost_head_id();
     let mut halves = left.reborrow().tracked_ids();
     halves.push((
-        separator.key().tracked_id(),
+        below_separator.separator_key_id(&separator),
         separator_value.expect("the right half's leftmost leaf has a head"),
     ));
     halves.extend(right.borrow().tracked_ids());
@@ -279,14 +287,13 @@ fn insert_rejects_a_child_of_the_wrong_height() {
     let ledger = DropLedger::new();
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
     let (mut tree, first_name) = root_above_one_leaf(&pages, &ledger);
-    let (mut too_tall, _, _) = child_leaf(&pages, &ledger);
+    let (mut too_tall, _, _, separator) = child_leaf(&pages, &ledger, ledger.track());
     too_tall.push_internal_level(pages.fresh());
 
     let EdgeRoom::Fits(edge) = internal_root(&mut tree).first_edge().check_room() else {
         panic!("a root without keys has room");
     };
-    let key = InlinedKey::new(ledger.track(), 0);
-    let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(key, too_tall)));
+    let rejected = catch_unwind(AssertUnwindSafe(|| edge.insert_fit(separator, too_tall)));
     assert!(rejected.is_err());
     let root = tree.borrow();
     let ForceResult::Internal(root) = root.force() else {
@@ -310,7 +317,8 @@ fn balancing_refuses_a_headless_right_leaf() {
     let EdgeRoom::Fits(edge) = internal_root(&mut tree).last_edge().check_room() else {
         panic!("a root without keys has room");
     };
-    edge.insert_fit(InlinedKey::new(ledger.track(), 0), headless.forget_type());
+    let key = InlinedKey::new(ledger.track(), 0);
+    edge.insert_fit(Separator::with_key(key), headless.forget_type());
     let separator = internal_root(&mut tree).kv_at(0);
     let context = catch_unwind(AssertUnwindSafe(|| {
         separator.into_balancing_context::<Leaf>()
@@ -321,7 +329,7 @@ fn balancing_refuses_a_headless_right_leaf() {
     else {
         panic!("the root's children are leaves");
     };
-    headless.replace_head(ledger.track());
+    headless.put_head(None, ledger.track());
     tree.destroy(|page| pages.release(page));
     pages.assert_all_released();
     ledger.assert_all_dropped_once();
@@ -559,12 +567,13 @@ fn steals_and_merges_of_internal_nodes() {
             break;
         }
         let left = context.into_left_child();
-        let (key, grandchild) = left.kv_at(0).remove_with_right_child();
+        let (separator, grandchild) = left.kv_at(0).remove_with_right_child();
         let value_id = grandchild.borrow().leftmost_head_id();
-        let mut removed = std::vec![(key.tracked_id(), value_id.expect("a head"))];
+        let key_id = grandchild.borrow().separator_key_id(&separator);
+        let mut removed = std::vec![(key_id, value_id.expect("a head"))];
         removed.extend(grandchild.borrow().subtree_tracked_ids());
         model.retain(|entry| !removed.contains(entry));
-        drop(key);
+        drop(separator);
         grandchild.destroy(|page| pages.release(page));
     }
     let context = internal_root(tree.root_mut())
@@ -682,7 +691,7 @@ enum Balanced {
 /// A random balancing step between the children of kind `ChildKind`
 /// around `kv`: a merge, half the times they fit, or else a steal either
 /// way, which may be refused.
-fn balance_randomly<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>(
+fn balance_randomly<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>, ChildKind: Rebalance>(
     kv: Kv<NodeMut<'_, K, Tracked<'l>, S, Internal>>,
     rng: &TestRng,
     pages: &TestPages<K, Tracked<'l>, S>,

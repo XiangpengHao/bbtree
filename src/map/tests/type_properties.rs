@@ -305,13 +305,13 @@ fn iterator_sizes() {
 
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-fn four_words_with_an_insertion_hint() {
-    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 32);
+fn five_words_with_an_insertion_hint_and_a_shared_prefix() {
+    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 40);
     assert_eq!(
         size_of::<BBTreeMap<u64, u64>>(),
-        size_of::<BTreeMap<u64, u64>>() + size_of::<usize>()
+        size_of::<BTreeMap<u64, u64>>() + 2 * size_of::<usize>()
     );
-    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 32);
+    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 40);
 }
 
 #[test]

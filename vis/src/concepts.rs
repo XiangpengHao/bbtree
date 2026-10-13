@@ -14,7 +14,7 @@ pub(crate) enum Concept {
     InlineKey,
     Tie,
     FencePrefix,
-    SearchPrefix,
+    SharedPrefix,
     Separator,
     Head,
     LengthTag,
@@ -31,7 +31,7 @@ impl Concept {
             Concept::InlineKey => "Inline keys",
             Concept::Tie => "Tied keys",
             Concept::FencePrefix => "Fence prefix",
-            Concept::SearchPrefix => "Search prefix",
+            Concept::SharedPrefix => "Shared prefix",
             Concept::Separator => "Separator",
             Concept::Head => "Head",
             Concept::LengthTag => "Length tags",
@@ -54,8 +54,8 @@ impl Concept {
             Concept::FencePrefix => {
                 "Every key of a node lies between the two separators that bound it in its ancestors, its fences, so it starts with the bytes they share. The node records how many, and its inline keys start after them: deeper nodes summarize the bytes that still differ."
             }
-            Concept::SearchPrefix => {
-                "An internal node whose keys all share more bytes than its fences do, as at the root and along the tree's borders, where a fence is missing, keeps that longer prefix too. Its search checks the key against the node's first key there: a key with those bytes skips them, a key without them goes before or after all the node's keys at once."
+            Concept::SharedPrefix => {
+                "The bytes every key of the map shares, up to 64, which the map keeps beside its root. Nodes along the tree's borders, where a fence is missing, take them as their prefix, as the root does. A lookup checks the key against them once, before the root: a key without them sorts before or after every key, and reads no node."
             }
             Concept::Separator => {
                 "A key in an internal node that divides two children. bbtree moves a key up rather than copying it, so every key is stored exactly once: a separator's value stays below, as the head of the leaf to its right."
@@ -88,7 +88,7 @@ impl Concept {
             Concept::InlineKey => Some("D18"),
             Concept::Tie => Some("D18"),
             Concept::FencePrefix => Some("D26"),
-            Concept::SearchPrefix => Some("D33"),
+            Concept::SharedPrefix => Some("D50"),
             Concept::Separator | Concept::Head => Some("D17"),
             Concept::LengthTag => Some("D36"),
             Concept::Page => Some("D15"),

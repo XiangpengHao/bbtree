@@ -9,9 +9,10 @@
 //! node below as its first child. The new nodes make a tree as tall as the
 //! old one, with the keys from the key on.
 //!
-//! The nodes on the path become the borders of the two trees, where every
-//! prefix is 0 (05-fence-key.md): before the cut, their prefixes go back to
-//! 0, from the root down, reading no key.
+//! The nodes on the path become the borders of the two trees, whose prefix
+//! is what every key of the tree shares (D50): before the cut, their
+//! prefixes go back to the root's, from the root down, reading no key. Both
+//! trees keep what the tree's keys shared; their keys share at least that.
 //!
 //! Along the cut, nodes on both sides may hold fewer keys than their
 //! minimum, down to none. Fixing the left tree's right border and the right
@@ -45,7 +46,7 @@ use core::borrow::Borrow;
 
 use super::node::handle::{
     BalancingContext, ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeMut, NodeRef,
-    Subtree, TrailingSlots,
+    Rebalance, Subtree,
 };
 use super::node::inline_keys::SearchKey;
 use super::node::page::{FreshPage, PageByKind};
@@ -72,6 +73,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         path.search_to_edge(&SearchKey::new(key), side);
         path.clear_prefixes();
         let mut upper = path.cut();
+        // Every key of both parts shares what the tree's keys did (D50).
+        *upper.shared_prefix_mut() = self.shared_prefix().clone();
         let release = &mut PageByKind::deallocate;
         self.fix_border::<LastEdge>(release);
         upper.fix_border::<FirstEdge>(release);
@@ -173,7 +176,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
+impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: Rebalance>
     BalancingContext<'a, K, V, S, ChildKind>
 {
     /// Brings the child on the `End` side, the right one for

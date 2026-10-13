@@ -19,37 +19,31 @@ use crate::inline_key::{Auto, InlineWidth, InlineWord};
 /// internal  | header | k0 k1 … k_n | e0 e1 … e_n+1     |
 ///
 /// with inline keys:
-/// leaf      | header | w0 … w_n | (_ head) (k0 v0) (k1 v1) … (k_n v_n)   |
-/// internal  | header | w0 … w_n | k0 k1 … k_n | e0 e1 … e_n+1          |
+/// leaf      | header | w0 … w_n | (hk head) (k0 v0) (k1 v1) … (k_n v_n) |
+/// internal  | header | w0 … w_n | e0 e1 … e_n+1                         |
 ///           0        inline_keys_offset
-///
-/// with children first:
-/// internal  | header | w0 … w_n | e0 e1 … e_n+1 | k0 k1 … k_n          |
 /// ```
 ///
-/// - Every layout has a header at offset 0, keys, and one more trailing
-///   slot than keys: a leaf's head and values, or an
-///   internal node's edges. Trailing slot 0 is the head, or edge 0, and slot
-///   `i + 1` goes with key `i`, the one left of it: value `i`, or the edge
-///   right of key `i`. A common formula sizes each baseline layout from
-///   slot sizes, alignment and inline keys, before the optional reorder.
+/// - Every layout has a header at offset 0, and one more trailing slot than
+///   keys: a leaf's head and values, or an internal node's edges. Trailing
+///   slot 0 is the head, or edge 0, and slot `i + 1` goes with key `i`, the
+///   one left of it: value `i`, or the edge right of key `i`. A common
+///   formula sizes each layout from slot sizes, alignment and inline keys.
 /// - Without inline keys, the header is a [`NodeHeader`]; the keys are an
 ///   array of their own, from `keys_offset`, at the same offset in both
 ///   kinds, and the trailing slots an array right after the keys' capacity.
 /// - With inline keys, the header is an [`InlineKeyNodeHeader`], an array of
 ///   `capacity` inline keys of the kind's width follows it, from offset 8 at
-///   every width. Leaves pair their keys and values: entry 0 holds the head
-///   alone, its key's place unused, and entry `i + 1` key `i` and value `i`,
-///   each a `#[repr(C)]` pair. A leaf search reads the dense inline keys
-///   first, then the key it ends at, whose value is in the same entry (D29).
+///   every width. Leaves pair their keys and values: entry 0 holds the head,
+///   the value of the separator left of the leaf and that separator's key
+///   (`hk`, D49), and entry `i + 1` key `i` and value `i`, each a
+///   `#[repr(C)]` pair. A leaf search reads the dense inline keys first,
+///   then the key it ends at, whose value is in the same entry (D29).
 ///   Power-of-two entries no larger than a cache line start at a multiple
-///   of their size, so each pair stays within one cache line.
-///   Internal nodes keep keys and edges in separate arrays: most searches
-///   read only an edge after the inline keys, so unrelated keys need not
-///   occupy the edge's cache line. A node whose plan puts its children
-///   first (D39) puts the edges before the keys when the same capacity
-///   fits: early edges share the summaries' last cache line, and 16- and
-///   32-byte keys become cache-line-contained.
+///   of their size, so each pair stays within one cache line. Internal
+///   nodes keep no keys, only inline keys and edges: a search reads an edge
+///   after the inline keys, and a separator's key, a head below, only on a
+///   tie (D49).
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
 ///   own sizes, or the entries' with inline keys.
@@ -73,10 +67,11 @@ pub(in crate::tree) struct KeyArea {
     /// Where `capacity` inline keys start, right after the header, in a
     /// layout with inline keys.
     pub(in crate::tree) inline_keys_offset: Option<usize>,
-    /// Where key 0 is.
+    /// Where key 0 is; in an internal node with inline keys, which keeps
+    /// no keys (D49), where they would start, which nothing reads.
     pub(in crate::tree) keys_offset: usize,
     /// Bytes from one key to the next: a key's size, or with inline keys an
-    /// entry's (D29).
+    /// entry's (D29); 0 in an internal node that keeps no keys.
     pub(in crate::tree) key_stride: usize,
 }
 
@@ -98,10 +93,13 @@ pub(in crate::tree) struct LeafLayout {
     pub(in crate::tree) head_offset: usize,
     /// Bytes from the head to value 0, and from one value to the next.
     pub(in crate::tree) value_stride: usize,
-    /// Where a dense array of `u16` length tags fits, when the unused space
-    /// before the head holds one per key, for a leaf whose plan keeps them
-    /// (D36). Reserving it changes no offset or capacity.
+    /// Where a dense array of `u16` length tags is, for a leaf whose plan
+    /// keeps them, if they fit in the padding before its head and first key
+    /// (D36); see [`NodeLayout::leaf_layout`].
     pub(in crate::tree) length_tags_offset: Option<usize>,
+    /// Where the head's key is, in entry 0 before the head, in a leaf with
+    /// inline keys: the key of the separator left of the leaf (D49).
+    pub(in crate::tree) head_key_offset: Option<usize>,
 }
 
 /// The layout of an internal node's page.
@@ -113,6 +111,15 @@ pub(in crate::tree) struct InternalLayout {
     pub(in crate::tree) edges_offset: usize,
     /// Bytes from one edge to the next.
     pub(in crate::tree) edge_stride: usize,
+}
+
+impl InternalLayout {
+    /// Whether the node keeps its separator keys: only without inline keys.
+    /// With them, each separator's key is the head of the leftmost leaf right
+    /// of it, and the node keeps only inline keys and edges (D49).
+    pub(in crate::tree) const fn keeps_keys(self) -> bool {
+        self.keys.inline_keys_offset.is_none()
+    }
 }
 
 /// What a node holds after each of its keys, and once more: a leaf's values
@@ -145,6 +152,12 @@ impl<K, V> NodeLayout<K, V> {
     /// or more (D15).
     const BASE_NODE_SIZE: usize = 1024;
 
+    /// Every internal node with inline keys, which keeps no keys (D49), is a
+    /// multiple of this size, and aligned to it: as many children as 1 KiB
+    /// holds with keys, or more, in half the bytes, whose inline keys a
+    /// search scans whole (06, lesson 1).
+    const KEYLESS_NODE_SIZE: usize = 512;
+
     /// Entries up to this size start at a multiple of it, so that none
     /// crosses a cache line (D34).
     const CACHE_LINE_SIZE: usize = 64;
@@ -176,14 +189,25 @@ impl<K, V> NodeLayout<K, V> {
         pair_with_key: false,
     };
 
-    pub(in crate::tree) const PLAIN_LEAF: LeafLayout = Self::leaf_layout(None);
+    pub(in crate::tree) const PLAIN_LEAF: LeafLayout = Self::leaf_layout(None, false);
 
-    pub(super) const TWO_BYTE_INLINE_LEAF: LeafLayout = Self::leaf_layout(Some(InlineWidth::Two));
+    pub(super) const TWO_BYTE_INLINE_LEAF: LeafLayout =
+        Self::leaf_layout(Some(InlineWidth::Two), false);
 
-    pub(super) const FOUR_BYTE_INLINE_LEAF: LeafLayout = Self::leaf_layout(Some(InlineWidth::Four));
+    pub(super) const FOUR_BYTE_INLINE_LEAF: LeafLayout =
+        Self::leaf_layout(Some(InlineWidth::Four), false);
 
     pub(super) const EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Eight));
+        Self::leaf_layout(Some(InlineWidth::Eight), false);
+
+    pub(super) const TWO_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
+        Self::leaf_layout(Some(InlineWidth::Two), true);
+
+    pub(super) const FOUR_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
+        Self::leaf_layout(Some(InlineWidth::Four), true);
+
+    pub(super) const EIGHT_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
+        Self::leaf_layout(Some(InlineWidth::Eight), true);
 
     pub(in crate::tree) const PLAIN_INTERNAL: InternalLayout = Self::internal_layout(None);
 
@@ -196,63 +220,67 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
         Self::internal_layout(Some(InlineWidth::Eight));
 
-    const PLAIN_CHILDREN_FIRST_INTERNAL: InternalLayout =
-        Self::children_first_internal_layout(None);
-
-    const TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
-        Self::children_first_internal_layout(Some(InlineWidth::Two));
-
-    const FOUR_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
-        Self::children_first_internal_layout(Some(InlineWidth::Four));
-
-    const EIGHT_BYTE_INLINE_CHILDREN_FIRST_INTERNAL: InternalLayout =
-        Self::children_first_internal_layout(Some(InlineWidth::Eight));
-
     /// The leaf layout without inline keys, or with inline keys of
-    /// `inline_width`: one of the four constants, which `inline_width` picks
+    /// `inline_width`, with room for length tags if `length_tags` and there
+    /// is room (D36): one of the seven constants, which the node plan picks
     /// after monomorphization.
-    pub(super) fn leaf(inline_width: Option<InlineWidth>) -> LeafLayout {
-        match inline_width {
-            None => Self::PLAIN_LEAF,
-            Some(InlineWidth::Two) => Self::TWO_BYTE_INLINE_LEAF,
-            Some(InlineWidth::Four) => Self::FOUR_BYTE_INLINE_LEAF,
-            Some(InlineWidth::Eight) => Self::EIGHT_BYTE_INLINE_LEAF,
+    pub(super) fn leaf(inline_width: Option<InlineWidth>, length_tags: bool) -> LeafLayout {
+        match (inline_width, length_tags) {
+            (None, _) => Self::PLAIN_LEAF,
+            (Some(InlineWidth::Two), false) => Self::TWO_BYTE_INLINE_LEAF,
+            (Some(InlineWidth::Four), false) => Self::FOUR_BYTE_INLINE_LEAF,
+            (Some(InlineWidth::Eight), false) => Self::EIGHT_BYTE_INLINE_LEAF,
+            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_TAGGED_LEAF,
+            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_TAGGED_LEAF,
+            (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_TAGGED_LEAF,
         }
     }
 
     /// The internal layout without inline keys, or with inline keys of
-    /// `inline_width`, with its children before its keys if
-    /// `children_first`: one of the eight constants, which the node plan
-    /// picks after monomorphization.
-    pub(super) fn internal(
-        inline_width: Option<InlineWidth>,
-        children_first: bool,
-    ) -> InternalLayout {
-        match (inline_width, children_first) {
-            (None, false) => Self::PLAIN_INTERNAL,
-            (Some(InlineWidth::Two), false) => Self::TWO_BYTE_INLINE_INTERNAL,
-            (Some(InlineWidth::Four), false) => Self::FOUR_BYTE_INLINE_INTERNAL,
-            (Some(InlineWidth::Eight), false) => Self::EIGHT_BYTE_INLINE_INTERNAL,
-            (None, true) => Self::PLAIN_CHILDREN_FIRST_INTERNAL,
-            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
-            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
-            (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
+    /// `inline_width`, which keeps no keys (D49): one of the four constants,
+    /// which the node plan picks after monomorphization.
+    pub(super) fn internal(inline_width: Option<InlineWidth>) -> InternalLayout {
+        match inline_width {
+            None => Self::PLAIN_INTERNAL,
+            Some(InlineWidth::Two) => Self::TWO_BYTE_INLINE_INTERNAL,
+            Some(InlineWidth::Four) => Self::FOUR_BYTE_INLINE_INTERNAL,
+            Some(InlineWidth::Eight) => Self::EIGHT_BYTE_INLINE_INTERNAL,
         }
     }
 
     /// Leaves are sized by their keys and values, and the head (D17).
-    const fn leaf_layout(inline_width: Option<InlineWidth>) -> LeafLayout {
-        let layout = Self::kind_layout(Self::inline_key_size(inline_width), Self::VALUE);
-        let summaries_end =
-            Self::keys_start(Self::inline_key_size(inline_width), layout.keys.capacity);
-        let tags_start = summaries_end.next_multiple_of(align_of::<u16>());
+    ///
+    /// With `length_tags`, a leaf keeps a tag per key where the tags fit in
+    /// the padding before its entries, as many leaves' do (D36). Where they
+    /// fit only where the head's key now is (D49), between the padding and
+    /// the head's value, the leaf gives up an entry to keep them, its
+    /// capacity sized with the tags beside the inline keys; anywhere else,
+    /// it keeps none.
+    const fn leaf_layout(inline_width: Option<InlineWidth>, length_tags: bool) -> LeafLayout {
+        let inline_key_size = Self::inline_key_size(inline_width);
+        let layout = Self::kind_layout(inline_key_size, 0, Self::VALUE, true);
+        if inline_key_size == 0 || !length_tags {
+            return Self::leaf_of(layout, None);
+        }
+        let tags_start = Self::columns_end(inline_key_size, layout.keys.capacity);
         let tags_end = tags_start + layout.keys.capacity * size_of::<u16>();
-        let length_tags_offset = if inline_width.is_some()
-            && tags_end <= layout.trailing_offset
-            && tags_end <= layout.keys.keys_offset
-        {
-            // Paired leaves keep no key in the dummy entry before the head.
-            Some(tags_start)
+        if tags_end <= Self::entries_offset(layout) {
+            Self::leaf_of(layout, Some(tags_start))
+        } else if tags_end <= layout.trailing_offset && tags_end <= layout.keys.keys_offset {
+            let tagged = Self::kind_layout(inline_key_size, size_of::<u16>(), Self::VALUE, true);
+            Self::leaf_of(
+                tagged,
+                Some(Self::columns_end(inline_key_size, tagged.keys.capacity)),
+            )
+        } else {
+            Self::leaf_of(layout, None)
+        }
+    }
+
+    /// A leaf of `layout`, with its length tags at `length_tags_offset`.
+    const fn leaf_of(layout: KindLayout, length_tags_offset: Option<usize>) -> LeafLayout {
+        let head_key_offset = if layout.keys.inline_keys_offset.is_some() {
+            Some(Self::entries_offset(layout))
         } else {
             None
         };
@@ -262,15 +290,24 @@ impl<K, V> NodeLayout<K, V> {
             head_offset: layout.trailing_offset,
             value_stride: layout.trailing_stride,
             length_tags_offset,
+            head_key_offset,
         }
+    }
+
+    /// Where entry 0 is in a leaf of paired entries: its key's place, which
+    /// the head's key takes (D49), then the head.
+    const fn entries_offset(layout: KindLayout) -> usize {
+        layout.trailing_offset - Self::entry_trailing_offset(Self::VALUE)
     }
 
     // Internal nodes depend on `K` and the edge, a pointer, alone: nothing
     // below uses `V`.
 
-    /// Internal nodes are sized by their keys and one more edge.
+    /// Internal nodes are sized by their keys, if they keep them, and one
+    /// more edge: with inline keys, they keep none (D49).
     const fn internal_layout(inline_width: Option<InlineWidth>) -> InternalLayout {
-        let layout = Self::kind_layout(Self::inline_key_size(inline_width), Self::EDGE);
+        let inline_key_size = Self::inline_key_size(inline_width);
+        let layout = Self::kind_layout(inline_key_size, 0, Self::EDGE, inline_key_size == 0);
         InternalLayout {
             page: layout.page,
             keys: layout.keys,
@@ -279,47 +316,23 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
-    /// The internal layout with inline keys of `inline_width`, or none, with
-    /// its edges right after the inline keys and its keys after them (D39):
-    /// the arrays reordered, with the same allocation size and capacity.
-    /// Alignment can make this order larger for some key shapes, so the
-    /// keys stay first whenever the capacity would no longer fit.
-    const fn children_first_internal_layout(inline_width: Option<InlineWidth>) -> InternalLayout {
-        let layout = Self::internal_layout(inline_width);
-        let capacity = layout.keys.capacity;
-        let summaries_end = Self::keys_start(Self::inline_key_size(inline_width), capacity);
-        let edges_offset = summaries_end.next_multiple_of(Self::EDGE.align);
-        let edges_end = edges_offset + (capacity + 1) * Self::EDGE.size;
-        let keys_offset = edges_end.next_multiple_of(align_of::<K>());
-        if keys_offset + capacity * size_of::<K>() > layout.page.size() {
-            return layout;
-        }
-
-        // The baseline established alignment, capacity, and stride bounds.
-        // Only the arrays' origins change; check their new order here.
-        assert!(summaries_end <= edges_offset);
-        assert!(edges_offset.is_multiple_of(Self::EDGE.align));
-        assert!(edges_end <= keys_offset);
-        assert!(keys_offset.is_multiple_of(align_of::<K>()));
-        InternalLayout {
-            keys: KeyArea {
-                keys_offset,
-                ..layout.keys
-            },
-            edges_offset,
-            ..layout
-        }
-    }
-
     /// The layout of a kind whose trailing slot is `trailing`, with inline
-    /// keys of `inline_key_size` bytes, none if 0: the smallest node that
-    /// holds `MIN_CAPACITY` keys, and as many keys as fit in it.
-    const fn kind_layout(inline_key_size: usize, trailing: TrailingSlot) -> KindLayout {
-        let align = Self::node_align(trailing.align);
-        let size = Self::bytes_needed(inline_key_size, trailing, Self::MIN_CAPACITY)
+    /// keys of `inline_key_size` bytes, none if 0, and `tag_size` more bytes
+    /// per key beside them, of length tags; with its keys if `keeps_keys`:
+    /// the smallest node that holds `MIN_CAPACITY` keys, and as many keys as
+    /// fit in it.
+    const fn kind_layout(
+        inline_key_size: usize,
+        tag_size: usize,
+        trailing: TrailingSlot,
+        keeps_keys: bool,
+    ) -> KindLayout {
+        let column_size = inline_key_size + tag_size;
+        let align = Self::node_align(trailing.align, keeps_keys);
+        let size = Self::bytes_needed(column_size, trailing, keeps_keys, Self::MIN_CAPACITY)
             .next_multiple_of(align);
-        let capacity = Self::capacity_in(size, inline_key_size, trailing);
-        let keys_start = Self::keys_start(inline_key_size, capacity);
+        let capacity = Self::capacity_in(size, inline_key_size, column_size, trailing, keeps_keys);
+        let keys_start = Self::columns_end(column_size, capacity);
         let (keys_offset, key_stride, trailing_offset, trailing_stride) =
             if trailing.paired(inline_key_size) {
                 let entry_size = Self::entry_size(trailing);
@@ -339,11 +352,19 @@ impl<K, V> NodeLayout<K, V> {
                     entries_offset + Self::entry_trailing_offset(trailing),
                     entry_size,
                 )
-            } else {
+            } else if keeps_keys {
                 let keys_offset = keys_start.next_multiple_of(align_of::<K>());
                 let trailing_offset =
                     (keys_offset + capacity * size_of::<K>()).next_multiple_of(trailing.align);
                 (keys_offset, size_of::<K>(), trailing_offset, trailing.size)
+            } else {
+                // No keys (D49): the trailing slots follow the inline keys.
+                (
+                    keys_start,
+                    0,
+                    keys_start.next_multiple_of(trailing.align),
+                    trailing.size,
+                )
             };
         let layout = KindLayout {
             page: Self::page_layout(size, align),
@@ -360,18 +381,24 @@ impl<K, V> NodeLayout<K, V> {
             trailing_offset,
             trailing_stride,
         };
-        Self::assert_invariants(layout, inline_key_size, trailing);
+        Self::assert_invariants(layout, inline_key_size, column_size, trailing, keeps_keys);
         layout
     }
 
     /// What every layout needs: whole 1 KiB steps, a capacity in bounds, the
-    /// header, inline keys, keys and trailing slots in place, in that
-    /// order, aligned, in the page and clear of each other.
-    const fn assert_invariants(layout: KindLayout, inline_key_size: usize, trailing: TrailingSlot) {
+    /// header, inline keys and length tags, keys and trailing slots in
+    /// place, in that order, aligned, in the page and clear of each other.
+    const fn assert_invariants(
+        layout: KindLayout,
+        inline_key_size: usize,
+        column_size: usize,
+        trailing: TrailingSlot,
+        keeps_keys: bool,
+    ) {
         let (page, keys) = (layout.page, layout.keys);
         let (size, align, capacity) = (page.size(), page.align(), keys.capacity);
         assert!(align.is_power_of_two());
-        assert!(size.is_multiple_of(Self::BASE_NODE_SIZE));
+        assert!(size.is_multiple_of(Self::node_size_step(keeps_keys)));
         assert!(size.is_multiple_of(align));
 
         assert!(capacity >= Self::MIN_CAPACITY);
@@ -380,7 +407,7 @@ impl<K, V> NodeLayout<K, V> {
 
         // The header is aligned and never overlaps what follows it.
         assert!(align.is_multiple_of(align_of::<NodeHeader>()));
-        let keys_start = Self::keys_start(inline_key_size, capacity);
+        let keys_start = Self::columns_end(column_size, capacity);
         match keys.inline_keys_offset {
             None => assert!(keys_start == size_of::<NodeHeader>()),
             Some(inline_keys_offset) => {
@@ -391,27 +418,32 @@ impl<K, V> NodeLayout<K, V> {
                 assert!(inline_keys_offset.is_multiple_of(align_of::<InlineWord>()));
                 assert!(inline_key_size <= size_of::<InlineWord>());
                 assert!(capacity * inline_key_size <= KeyArea::MAX_INLINE_KEYS_SIZE);
-                assert!(inline_keys_offset + capacity * inline_key_size == keys_start);
+                assert!(inline_keys_offset + capacity * column_size == keys_start);
             }
         }
 
         // Every key and trailing slot is aligned, as the node and the steps
         // between them are.
         let (key_stride, trailing_stride) = (keys.key_stride, layout.trailing_stride);
-        assert!(align.is_multiple_of(align_of::<K>()));
         assert!(align.is_multiple_of(trailing.align));
-        assert!(keys.keys_offset.is_multiple_of(align_of::<K>()));
-        assert!(key_stride >= size_of::<K>() && key_stride.is_multiple_of(align_of::<K>()));
         assert!(layout.trailing_offset.is_multiple_of(trailing.align));
         assert!(trailing_stride >= trailing.size && trailing_stride.is_multiple_of(trailing.align));
+        if keeps_keys {
+            assert!(align.is_multiple_of(align_of::<K>()));
+            assert!(keys.keys_offset.is_multiple_of(align_of::<K>()));
+            assert!(key_stride >= size_of::<K>() && key_stride.is_multiple_of(align_of::<K>()));
+        } else {
+            assert!(key_stride == 0 && keys.inline_keys_offset.is_some());
+        }
 
         // The last key's stride, and the last trailing slot, end in the page.
         assert!(keys.keys_offset + capacity * key_stride <= size);
         assert!(layout.trailing_offset + capacity * trailing_stride + trailing.size <= size);
 
         if trailing.paired(inline_key_size) {
-            // Entries after the inline keys: trailing slot 0 alone in entry
-            // 0, then key `i` and trailing slot `i + 1` in entry `i + 1`, the
+            // Entries after the inline keys: trailing slot 0 in entry 0,
+            // after its key's place, which a leaf's head key takes (D49),
+            // then key `i` and trailing slot `i + 1` in entry `i + 1`, the
             // key first, the slot after it.
             let slot_offset = Self::entry_trailing_offset(trailing);
             let entries_offset = layout.trailing_offset - slot_offset;
@@ -423,11 +455,15 @@ impl<K, V> NodeLayout<K, V> {
             if key_stride.is_power_of_two() && key_stride <= Self::CACHE_LINE_SIZE {
                 assert!(keys.keys_offset.is_multiple_of(key_stride));
             }
-        } else {
+        } else if keeps_keys {
             // The keys, then the trailing slots, each an array of its own.
             assert!(key_stride == size_of::<K>() && trailing_stride == trailing.size);
             assert!(keys_start <= keys.keys_offset);
             assert!(keys.keys_offset + capacity * size_of::<K>() <= layout.trailing_offset);
+        } else {
+            // No keys: the trailing slots after the inline keys.
+            assert!(trailing_stride == trailing.size);
+            assert!(keys_start <= layout.trailing_offset);
         }
     }
 
@@ -446,12 +482,23 @@ impl<K, V> NodeLayout<K, V> {
         if a < b { a } else { b }
     }
 
-    /// A node is aligned to 1 KiB (D15), and to its keys and trailing slots.
-    const fn node_align(trailing_slot_align: usize) -> usize {
+    /// A node is aligned to 1 KiB (D15), and to its keys, if it keeps them,
+    /// and trailing slots.
+    const fn node_align(trailing_slot_align: usize, keeps_keys: bool) -> usize {
+        let key_align = if keeps_keys { align_of::<K>() } else { 1 };
         Self::max(
-            Self::BASE_NODE_SIZE,
-            Self::max(align_of::<K>(), trailing_slot_align),
+            Self::node_size_step(keeps_keys),
+            Self::max(key_align, trailing_slot_align),
         )
+    }
+
+    /// Every node is a multiple of this size, and aligned to it.
+    const fn node_size_step(keeps_keys: bool) -> usize {
+        if keeps_keys {
+            Self::BASE_NODE_SIZE
+        } else {
+            Self::KEYLESS_NODE_SIZE
+        }
     }
 
     /// The bytes of each inline key that a node with inline keys of
@@ -464,10 +511,11 @@ impl<K, V> NodeLayout<K, V> {
     }
 
     /// Where the keys, or the entries, could start, before rounding up to
-    /// their alignment: after the header, and the inline keys if any.
-    const fn keys_start(inline_key_size: usize, capacity: usize) -> usize {
-        if inline_key_size > 0 {
-            Self::INLINE_KEYS_OFFSET + capacity * inline_key_size
+    /// their alignment: after the header, and the arrays beside the keys if
+    /// any, of `column_size` bytes per key: the inline keys, and length tags.
+    const fn columns_end(column_size: usize, capacity: usize) -> usize {
+        if column_size > 0 {
+            Self::INLINE_KEYS_OFFSET + capacity * column_size
         } else {
             size_of::<NodeHeader>()
         }
@@ -491,22 +539,26 @@ impl<K, V> NodeLayout<K, V> {
     }
 
     /// The minimum bytes a node of `capacity` keys needs, before using tail
-    /// slack to align whole pairs: the header, inline keys if any, keys,
-    /// and one more trailing slot than keys; with inline keys, paired in
-    /// leaf entries, the first entry's key unused.
+    /// slack to align whole pairs: the header, the arrays beside the keys,
+    /// of `column_size` bytes per key, its keys if `keeps_keys`, and one more
+    /// trailing slot than keys; with inline keys, paired in leaf entries, the
+    /// first entry's key the head's (D49).
     const fn bytes_needed(
-        inline_key_size: usize,
+        column_size: usize,
         trailing: TrailingSlot,
+        keeps_keys: bool,
         capacity: usize,
     ) -> usize {
-        let keys_start = Self::keys_start(inline_key_size, capacity);
-        if trailing.paired(inline_key_size) {
+        let keys_start = Self::columns_end(column_size, capacity);
+        if trailing.paired(column_size) {
             keys_start.next_multiple_of(Self::entry_align(trailing))
                 + (capacity + 1) * Self::entry_size(trailing)
-        } else {
+        } else if keeps_keys {
             (keys_start.next_multiple_of(align_of::<K>()) + capacity * size_of::<K>())
                 .next_multiple_of(trailing.align)
                 + (capacity + 1) * trailing.size
+        } else {
+            keys_start.next_multiple_of(trailing.align) + (capacity + 1) * trailing.size
         }
     }
 
@@ -524,23 +576,27 @@ impl<K, V> NodeLayout<K, V> {
     const fn capacity_in(
         node_size: usize,
         inline_key_size: usize,
+        column_size: usize,
         trailing: TrailingSlot,
+        keeps_keys: bool,
     ) -> usize {
         let max_capacity = Self::max_capacity(inline_key_size);
-        // An upper bound: every key takes at least its inline key, and its
-        // key and trailing slot, or its entry. Keys that take no room fit up
-        // to the cap.
-        let size_per_key = inline_key_size
-            + if trailing.paired(inline_key_size) {
+        // An upper bound: every key takes at least its columns, and its key,
+        // if kept, and trailing slot, or its entry. Keys that take no room
+        // fit up to the cap.
+        let size_per_key = column_size
+            + if trailing.paired(column_size) {
                 Self::entry_size(trailing)
-            } else {
+            } else if keeps_keys {
                 size_of::<K>() + trailing.size
+            } else {
+                trailing.size
             };
         let mut capacity = match node_size.checked_div(size_per_key) {
             Some(bound) => Self::min(max_capacity, bound),
             None => max_capacity,
         };
-        while Self::bytes_needed(inline_key_size, trailing, capacity) > node_size {
+        while Self::bytes_needed(column_size, trailing, keeps_keys, capacity) > node_size {
             capacity -= 1;
         }
         capacity
@@ -559,18 +615,21 @@ mod tests {
     //!   keys, rounded up to their alignment: a node needs
     //!   `keys_offset + n·size_of K`, so rounded, plus `(n + 1)·slot`;
     //! - with inline keys, the header is 6 bytes and the inline keys start
-    //!   at 8; internal keys follow at `8 + w·n`, aligned, with edges after
-    //!   them as above. Leaf entries start at that same offset, rounded up
+    //!   at 8; an internal node keeps no keys (D49), its edges at `8 + w·n`,
+    //!   rounded up to 8, and its keys' offset that unrounded end, with a
+    //!   stride of 0, in a 512-byte page: 31, 41 or 49 keys at 8, 4 or 2
+    //!   bytes. Leaf entries start at the end of the inline keys, rounded up
     //!   to their alignment, the
     //!   larger of the key's and the slot's: an entry is the key, then the
     //!   slot aligned to its alignment, rounded up to the entry's alignment,
     //!   and a node needs `n + 1` of them, entry 0 holding trailing slot 0
-    //!   after its unused key, so key 0 is in entry 1. Power-of-two entry
+    //!   after the head's key (D49), so key 0 is in entry 1. Power-of-two entry
     //!   sizes at most 64 also align the start to the entry size, consuming
     //!   tail slack without changing the page size or capacity;
     //! - the node size is what 12 keys need, rounded up to the node's
     //!   alignment and 1 KiB. Alignment is max(64, align_of K, align_of V)
-    //!   for a leaf and max(64, align_of K, 8) for an internal node;
+    //!   for a leaf and max(64, align_of K, 8) for an internal node, without
+    //!   `align_of K` for one that keeps no keys;
     //! - the capacity is the largest `n` that fits, at most 1023, and with
     //!   inline keys at most `1024 / w`.
 
@@ -605,6 +664,18 @@ mod tests {
             }
         }
 
+        /// A 512-byte, 512-byte-aligned internal node that keeps no keys
+        /// (D49).
+        fn keyless(capacity: usize, keys_offset: usize, trailing_offset: usize) -> Self {
+            Self {
+                size: 512,
+                align: 512,
+                capacity,
+                keys_offset,
+                trailing_offset,
+            }
+        }
+
         /// Checks one kind's layout, with its trailing slots at
         /// `trailing.0`, `trailing.1` bytes apart, against these numbers and
         /// `strides`, the keys' and the trailing slots'.
@@ -625,8 +696,8 @@ mod tests {
             assert_eq!(trailing.0, self.trailing_offset);
             assert_eq!((keys.key_stride, trailing.1), strides);
             assert_eq!(keys.inline_keys_offset, inline_keys.then_some(8));
-            assert!(page.size().is_multiple_of(1024));
-            assert!(page.align() >= 1024);
+            assert!(page.size().is_multiple_of(512));
+            assert!(page.align() >= 512);
         }
 
         fn assert_leaf(&self, layout: LeafLayout, strides: (usize, usize), inline_keys: bool) {
@@ -681,27 +752,33 @@ mod tests {
                 false,
             );
             assert_eq!(
-                NodeLayout::<K, V>::leaf(None),
+                NodeLayout::<K, V>::leaf(None, false),
                 NodeLayout::<K, V>::PLAIN_LEAF
             );
             assert_eq!(
-                NodeLayout::<K, V>::internal(None, false),
+                NodeLayout::<K, V>::leaf(None, true),
+                NodeLayout::<K, V>::PLAIN_LEAF
+            );
+            assert_eq!(
+                NodeLayout::<K, V>::internal(None),
                 NodeLayout::<K, V>::PLAIN_INTERNAL
             );
+            assert!(NodeLayout::<K, V>::PLAIN_INTERNAL.keeps_keys());
         }
 
-        /// Checks the layouts with inline keys of `width`.
+        /// Checks the layouts with inline keys of `width`: an internal node
+        /// keeps no keys (D49), so its keys' stride is 0.
         fn assert_inline<K, V>(&self, width: InlineWidth) {
-            self.leaf.assert_leaf(
-                NodeLayout::<K, V>::leaf(Some(width)),
-                strides::<K, V>(true),
-                true,
+            let leaf = NodeLayout::<K, V>::leaf(Some(width), false);
+            self.leaf.assert_leaf(leaf, strides::<K, V>(true), true);
+            assert_eq!(
+                leaf.head_key_offset,
+                Some(leaf.keys.keys_offset - leaf.keys.key_stride)
             );
-            self.internal.assert_internal(
-                NodeLayout::<K, V>::internal(Some(width), false),
-                strides::<K, Edge>(false),
-                true,
-            );
+            let internal = NodeLayout::<K, V>::internal(Some(width));
+            self.internal
+                .assert_internal(internal, (0, size_of::<Edge>()), true);
+            assert!(!internal.keeps_keys());
         }
     }
 
@@ -742,31 +819,30 @@ mod tests {
             // 8 + 24·8 = 200, rounded to 224 for cache-line-contained
             // pairs; the head is 24 bytes into entry 0, key 0 at 256.
             leaf: ExpectedNode::one_page(24, 256, 248),
-            // 8 + 8n + 24n + 8(n + 1) ≤ 1024: n = 25. Keys start
-            // at 208, then edges at 208 + 25·24 = 808.
-            internal: ExpectedNode::one_page(25, 208, 808),
+            // 8 + 8n + 8(n + 1) ≤ 512: n = 31; edges at 8 + 31·8 = 256.
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<String, u64>(InlineWidth::Eight);
     }
 
     /// Auto heap-byte internals keep four bytes, independently of their
-    /// unchanged eight-byte leaf summaries and the value type.
+    /// unchanged eight-byte leaf summaries and the value type, and no keys
+    /// (D49): `(8 + 4n → 8) + 8(n + 1) ≤ 512`, n = 41, edges at 176.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn auto_heap_byte_internal_nodes_keep_four_bytes() {
-        ExpectedNode::one_page(28, 120, 792).assert_internal(
+        ExpectedNode::keyless(41, 172, 176).assert_internal(
             NodePtr::<String, u64, Auto>::internal_layout(),
-            (24, 8),
+            (0, 8),
             true,
         );
         assert_eq!(
             NodePtr::<String, u64, Auto>::internal_layout(),
             NodePtr::<String, String, Auto>::internal_layout(),
         );
-        ExpectedNode::one_page(36, 152, 728).assert_internal(
+        assert_eq!(
             NodePtr::<&str, u64, Auto>::internal_layout(),
-            (16, 8),
-            true,
+            NodePtr::<String, u64, Auto>::internal_layout(),
         );
         assert_eq!(
             NodePtr::<String, u64, WithInlineKey>::internal_layout(),
@@ -780,7 +856,7 @@ mod tests {
     fn byte_vec_to_u64_with_inline_keys() {
         ExpectedLayout {
             leaf: ExpectedNode::one_page(24, 256, 248),
-            internal: ExpectedNode::one_page(25, 208, 808),
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<Vec<u8>, u64>(InlineWidth::Eight);
     }
@@ -795,7 +871,7 @@ mod tests {
             // 192.
             leaf: ExpectedNode::one_page(17, 192, 168),
             // As for `String` → `u64`.
-            internal: ExpectedNode::one_page(25, 208, 808),
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<String, String>(InlineWidth::Eight);
     }
@@ -809,107 +885,64 @@ mod tests {
             // n = 20; entries at 8 + 20·8 = 168, the head at 200, key 0 at
             // 208.
             leaf: ExpectedNode::one_page(20, 208, 200),
-            // 8 + 8n + 32n + 8(n + 1) ≤ 1024: n = 21.
-            internal: ExpectedNode::one_page(21, 176, 848),
+            // As for `String` → `u64`: no keys.
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<[u8; 32], u64>(InlineWidth::Eight);
     }
 
+    /// `Auto`'s byte arrays keep two bytes of each inline key, and no keys,
+    /// in internal nodes: `(8 + 2n → 8) + 8(n + 1) ≤ 512`, n = 49, edges
+    /// at 112, whatever the array's length.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn recognized_arrays_move_edges_without_changing_capacity() {
-        struct ArrayLayout;
-
-        impl ArrayLayout {
-            fn check<const N: usize>(capacity: usize, keys_offset: usize, edges_offset: usize) {
-                let original = NodeLayout::<[u8; N], u64>::TWO_BYTE_INLINE_INTERNAL;
-                let reordered = NodePtr::<[u8; N], u64, Auto>::internal_layout();
-                ExpectedNode::one_page(capacity, keys_offset, edges_offset).assert_internal(
-                    reordered,
-                    (N, 8),
-                    true,
-                );
-                assert_eq!(reordered.page, original.page);
-                assert_eq!(reordered.keys.capacity, original.keys.capacity);
-                assert_eq!(reordered.keys.key_stride, original.keys.key_stride);
-                assert!(8 + 2 * capacity <= edges_offset);
-                assert!(edges_offset + 8 * (capacity + 1) <= keys_offset);
-                assert!(keys_offset + N * capacity <= reordered.page.size());
-                if N.is_power_of_two() {
-                    for index in 0..capacity {
-                        assert!((keys_offset + index * N) % 64 + N <= 64);
-                    }
-                }
-                // The same Rust array under an explicit strategy keeps
-                // that strategy's original eight-byte-summary layout.
-                assert_eq!(
-                    NodePtr::<[u8; N], u64, WithInlineKey>::internal_layout(),
-                    NodeLayout::<[u8; N], u64>::EIGHT_BYTE_INLINE_INTERNAL
-                );
-            }
+    fn recognized_arrays_keep_no_keys_in_internal_nodes() {
+        fn check<const N: usize>() {
+            let internal = NodePtr::<[u8; N], u64, Auto>::internal_layout();
+            assert_eq!(
+                internal,
+                NodeLayout::<[u8; N], u64>::TWO_BYTE_INLINE_INTERNAL
+            );
+            ExpectedNode::keyless(49, 106, 112).assert_internal(internal, (0, 8), true);
+            // The same Rust array under an explicit strategy keeps that
+            // strategy's eight-byte inline keys.
+            assert_eq!(
+                NodePtr::<[u8; N], u64, WithInlineKey>::internal_layout(),
+                NodeLayout::<[u8; N], u64>::EIGHT_BYTE_INLINE_INTERNAL
+            );
         }
-
-        ArrayLayout::check::<16>(38, 400, 88);
-        ArrayLayout::check::<20>(33, 352, 80);
-        ArrayLayout::check::<32>(24, 256, 56);
-        assert_eq!(
-            NodePtr::<String, u64, Auto>::internal_layout(),
-            NodeLayout::<String, u64>::FOUR_BYTE_INLINE_INTERNAL
-        );
-        assert_eq!(
-            NodePtr::<u64, u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_INTERNAL
-        );
+        check::<16>();
+        check::<20>();
+        check::<32>();
     }
 
+    /// Length tags (D36) fit in the padding before a `String` → `u64`
+    /// leaf's entries only where its head's key now is (D49): it gives up an
+    /// entry to keep them, sized with 8 + 2 bytes beside each key:
+    /// `(8 + 10n → 8) + 32(n + 1) ≤ 1024`, n = 23; tags at 8 + 23·8 = 192,
+    /// entries at 238 rounded to 256, the head at 280, key 0 at 288. Leaves
+    /// that had no room for tags still have none, and gain no entry.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn edge_first_layout_falls_back_when_alignment_would_lose_capacity() {
-        // Six-byte keys fit 63 entries exactly in the original order.
-        // Putting the aligned edges first would need 1026 bytes. This key
-        // type is not selected by Auto, but exercises the layout's fallback
-        // independently of today's recognized array sizes.
-        let original = NodeLayout::<[u8; 6], u64>::TWO_BYTE_INLINE_INTERNAL;
-        assert_eq!(original.keys.capacity, 63);
-        assert_eq!(original.edges_offset + 64 * 8, original.page.size());
+    fn length_tags_give_up_an_entry_for_the_head_key() {
+        let tagged = NodePtr::<String, u64, Auto>::leaf_layout();
         assert_eq!(
-            NodeLayout::<[u8; 6], u64>::TWO_BYTE_INLINE_CHILDREN_FIRST_INTERNAL,
-            original
+            tagged,
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_TAGGED_LEAF
         );
-    }
-
-    /// Putting the children first only moves the arrays: at every width, and
-    /// without inline keys, the page, capacity and inline keys stay those of
-    /// the layout with the keys first.
-    #[test]
-    fn children_first_keeps_page_and_capacity_at_every_width() {
-        fn check<K>() {
-            let widths = [
-                None,
-                Some(InlineWidth::Two),
-                Some(InlineWidth::Four),
-                Some(InlineWidth::Eight),
-            ];
-            for width in widths {
-                let keys_first = NodeLayout::<K, u64>::internal(width, false);
-                let children_first = NodeLayout::<K, u64>::internal(width, true);
-                assert_eq!(children_first.page, keys_first.page);
-                assert_eq!(children_first.keys.capacity, keys_first.keys.capacity);
-                assert_eq!(children_first.keys.key_stride, keys_first.keys.key_stride);
-                assert_eq!(
-                    children_first.keys.inline_keys_offset,
-                    keys_first.keys.inline_keys_offset
-                );
-                if children_first != keys_first {
-                    assert!(children_first.edges_offset < children_first.keys.keys_offset);
-                }
-            }
+        ExpectedNode::one_page(23, 288, 280).assert_leaf(tagged, (32, 32), true);
+        assert_eq!(tagged.length_tags_offset, Some(192));
+        assert_eq!(tagged.head_key_offset, Some(256));
+        for untagged in [
+            NodePtr::<String, String, Auto>::leaf_layout(),
+            NodePtr::<String, (), Auto>::leaf_layout(),
+        ] {
+            assert_eq!(untagged.length_tags_offset, None);
         }
-        check::<u64>();
-        check::<[u8; 6]>();
-        check::<[u8; 32]>();
-        check::<String>();
-        check::<()>();
+        assert_eq!(
+            NodePtr::<String, String, Auto>::leaf_layout(),
+            NodeLayout::<String, String>::EIGHT_BYTE_INLINE_LEAF
+        );
     }
 
     /// Over-aligned keys pad each entry to their alignment.
@@ -928,9 +961,8 @@ mod tests {
         };
         ExpectedLayout {
             leaf: expected(),
-            // Separate arrays avoid padding each edge to 64 bytes:
-            // (8 + 8·12 → 64) + 12·64 + 13·8 = 1000.
-            internal: ExpectedNode::one_page(12, 128, 896),
+            // No keys: the edges after the inline keys, 1 KiB aligned.
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<CacheLineAligned, u64>(InlineWidth::Eight);
     }
@@ -945,9 +977,8 @@ mod tests {
             // 1024: 9n ≤ 1015, n = 112; entries at 8 + 896 = 904, the head
             // and key 0 at 905.
             leaf: ExpectedNode::one_page(112, 905, 905),
-            // (8 + 8n + n → 8) + 8(n + 1) ≤ 1024: n = 59.
-            // Keys start at 480, edges at 539 rounded up to 544.
-            internal: ExpectedNode::one_page(59, 480, 544),
+            // As for `String` → `u64`: no keys.
+            internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<u8, ()>(InlineWidth::Eight);
     }
@@ -962,8 +993,8 @@ mod tests {
             // entries at 120 rounded to 128 so complete pairs stay within
             // cache lines; the head is at 136, key 0 at 144.
             leaf: ExpectedNode::one_page(55, 144, 136),
-            // (8 + 2n → 8) + 8n + 8(n + 1) ≤ 1024: n = 56.
-            internal: ExpectedNode::one_page(56, 120, 568),
+            // (8 + 2n → 8) + 8(n + 1) ≤ 512: n = 49, edges at 106 → 112.
+            internal: ExpectedNode::keyless(49, 106, 112),
         }
         .assert_inline::<u64, u64>(InlineWidth::Two);
     }
@@ -996,8 +1027,8 @@ mod tests {
             // at n = 28, 1040 at 29; entries at 64, the head at 80, key 0 at
             // 96.
             leaf: ExpectedNode::one_page(28, 96, 80),
-            // (8 + 2n → 16) + 16n + 8(n + 1) ≤ 1024: n = 38.
-            internal: ExpectedNode::one_page(38, 96, 704),
+            // As for `u64` → `u64`: no keys.
+            internal: ExpectedNode::keyless(49, 106, 112),
         }
         .assert_inline::<u128, u64>(InlineWidth::Two);
     }
@@ -1011,7 +1042,7 @@ mod tests {
             // 1032 at 101; entries at 208, the head and key 0 at 216.
             leaf: ExpectedNode::one_page(100, 216, 216),
             // As for `u64` → `u64`.
-            internal: ExpectedNode::one_page(56, 120, 568),
+            internal: ExpectedNode::keyless(49, 106, 112),
         }
         .assert_inline::<i64, ()>(InlineWidth::Two);
     }
@@ -1024,8 +1055,8 @@ mod tests {
             // n = 84; entries at 8 + 336 = 344, the head at 348, key 0 at
             // 352.
             leaf: ExpectedNode::one_page(84, 352, 348),
-            // (8 + 4n + 4n → 8) + 8(n + 1) ≤ 1024: n = 63.
-            internal: ExpectedNode::one_page(63, 260, 512),
+            // (8 + 4n → 8) + 8(n + 1) ≤ 512: n = 41, edges at 172 → 176.
+            internal: ExpectedNode::keyless(41, 172, 176),
         }
         .assert_inline::<u32, u32>(InlineWidth::Four);
     }
@@ -1050,15 +1081,8 @@ mod tests {
                 keys_offset: 2048,
                 trailing_offset: 2048,
             },
-            // Zero-sized keys start at 2048, edges at the same offset.
-            // The 4 KB node has room for 256 edges, so 255 keys.
-            internal: ExpectedNode {
-                size: 2 * 2048,
-                align: 2048,
-                capacity: 255,
-                keys_offset: 2048,
-                trailing_offset: 2048,
-            },
+            // No keys, so no key alignment: as for `u64` → `u64`.
+            internal: ExpectedNode::keyless(49, 106, 112),
         }
         .assert_inline::<ZeroSizedPastOneKb, ()>(InlineWidth::Two);
     }

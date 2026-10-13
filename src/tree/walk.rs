@@ -80,6 +80,7 @@ use super::node::handle::{
 };
 use super::node::inline_keys::SearchKey;
 use super::node::page::PageByKind;
+use super::node::shared_prefix::SharedPrefix;
 use super::path::{FirstEdge, KeySide, LastEdge, NodeEnd, Path};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -106,7 +107,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for Immut<'a
         match position {
             EntryPosition::InLeaf(kv) => kv.into_key_value(),
             EntryPosition::InLeafRun(entry) => entry.into_key_value(),
-            EntryPosition::Separator(key, value) => (key.into_key(), value.into_value()),
+            EntryPosition::Separator(separator, head) => head.into_separator_entry(separator),
         }
     }
 }
@@ -121,7 +122,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for ValMut<'
             match position {
                 EntryPosition::InLeaf(kv) => kv.into_key_value_mut(),
                 EntryPosition::InLeafRun(entry) => entry.into_key_value_mut(),
-                EntryPosition::Separator(key, value) => (key.into_key(), value.into_value_mut()),
+                EntryPosition::Separator(separator, head) => {
+                    head.into_separator_entry_mut(separator)
+                }
             }
         }
     }
@@ -138,7 +141,7 @@ impl<K, V, S: InlineKeyStrategy<K>> WalkBorrow<K, V, S> for Dying<K, V> {
             match position {
                 EntryPosition::InLeaf(kv) => kv.take_key_value(),
                 EntryPosition::InLeafRun(entry) => entry.take_key_value(),
-                EntryPosition::Separator(key, head) => (key.take_key(), head.take_value()),
+                EntryPosition::Separator(separator, head) => head.take_separator_entry(separator),
             }
         }
     }
@@ -187,18 +190,20 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     }
 
     /// Starts at the position just before or just after `key` in the tree
-    /// under `root`; see [`Path::search_to_edge`].
+    /// under `root`, whose keys share `shared` (D50); see
+    /// [`Path::search_to_edge`].
     fn start_beside_key<Q>(
         &mut self,
         root: Root<B, K, V, S>,
         key: &SearchKey<'_, K, S, Q>,
         side: KeySide,
+        shared: &SharedPrefix,
     ) where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         self.path.attach(root);
-        self.path.search_to_edge(key, side);
+        self.path.search_to_edge(key, side, shared);
     }
 
     /// Starts at the `End` of the tree under `root`: its first position,
@@ -803,14 +808,20 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
         run: None,
     };
 
-    /// A walk over the entries of the tree under `root` within the bounds,
-    /// with std's panics for bounds out of order (D1).
+    /// A walk over the entries of the tree under `root`, whose keys share
+    /// `shared` (D50), within the bounds, with std's panics for bounds out of
+    /// order (D1).
     ///
     /// # Panics
     ///
     /// If `start > end`, if `start == end` and both are excluded, or if `Ord`
     /// is so inconsistent that the start is found after the end.
-    pub(crate) fn new<Q>(root: Root<B, K, V, S>, start: Bound<&Q>, end: Bound<&Q>) -> Self
+    pub(crate) fn new<Q>(
+        root: Root<B, K, V, S>,
+        shared: &SharedPrefix,
+        start: Bound<&Q>,
+        end: Bound<&Q>,
+    ) -> Self
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -835,22 +846,22 @@ impl<B: WalkBorrow<K, V, S>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S
         match start {
             Bound::Included(key) => {
                 ends.front
-                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before, shared);
             }
             Bound::Excluded(key) => {
                 ends.front
-                    .start_beside_key(root, &SearchKey::new(key), KeySide::After);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::After, shared);
             }
             Bound::Unbounded => {}
         }
         match end {
             Bound::Included(key) => {
                 ends.back
-                    .start_beside_key(root, &SearchKey::new(key), KeySide::After);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::After, shared);
             }
             Bound::Excluded(key) => {
                 ends.back
-                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before);
+                    .start_beside_key(root, &SearchKey::new(key), KeySide::Before, shared);
             }
             Bound::Unbounded => {}
         }

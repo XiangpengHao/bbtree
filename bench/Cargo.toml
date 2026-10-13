@@ -23,6 +23,9 @@ tikv-jemallocator = { version = "0.7", optional = true }
 [features]
 # Time with jemalloc instead of mimalloc, the default.
 jemalloc = ["dep:tikv-jemallocator"]
+# The separator census (`bbtree-separator-census`), which reads the map's
+# nodes through bbtree's `inspect` views; the timing binaries never enable it.
+inspect = ["bbtree/inspect"]
 
 # Times with plain mimalloc.
 [[bin]]
@@ -35,6 +38,13 @@ path = "src/bin/bbtree-bench.rs"
 [[bin]]
 name = "bbtree-bench-memory"
 path = "src/bin/bbtree-bench-memory.rs"
+
+# Counts separators and the ties lookups meet in internal nodes, untimed
+# (`doc/11-separator-key.md`).
+[[bin]]
+name = "bbtree-separator-census"
+path = "src/bin/bbtree-separator-census.rs"
+required-features = ["inspect"]
 
 [profile.release]
 # One codegen unit and full LTO, so that inlining doesn't depend on how the

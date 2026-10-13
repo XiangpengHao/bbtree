@@ -14,6 +14,7 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::node::handle::{ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, Subtree};
+use super::node::inline_keys::Separator;
 use super::node::page::TestPages;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 
@@ -285,6 +286,14 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
     pub(super) fn head_id(self) -> Option<usize> {
         self.head().map(|head| head.into_value().tracked_id())
     }
+
+    /// The id of the head's key, if the leaf has a head and separator keys
+    /// are heads (D49).
+    pub(super) fn head_key_id(self) -> Option<usize> {
+        self.head()
+            .and_then(|head| head.into_key_and_value().0)
+            .map(K::tracked_id)
+    }
 }
 
 impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
@@ -317,10 +326,25 @@ impl<'a, 'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>>
     /// The id of the head of the subtree's leftmost leaf, if it has one: the
     /// value of the separator just left of the subtree (D17).
     pub(super) fn leftmost_head_id(self) -> Option<usize> {
+        self.leftmost_leaf().head_id()
+    }
+
+    /// The id of the key of the separator just left of the subtree, given
+    /// `separator`, as it came out of its node: its own, where internal
+    /// nodes keep keys, or the subtree's leftmost leaf's head's (D49).
+    pub(super) fn separator_key_id(self, separator: &Separator<K, S>) -> usize {
+        match separator.key() {
+            Some(key) => key.tracked_id(),
+            None => (self.leftmost_leaf().head_key_id())
+                .expect("the leaf right of a separator has a head with its key"),
+        }
+    }
+
+    fn leftmost_leaf(self) -> NodeRef<Immut<'a>, K, V, S, Leaf> {
         let mut node = self;
         loop {
             match node.force() {
-                ForceResult::Leaf(leaf) => return leaf.head_id(),
+                ForceResult::Leaf(leaf) => return leaf,
                 ForceResult::Internal(internal) => node = internal.first_edge().descend(),
             }
         }

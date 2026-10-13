@@ -6,10 +6,11 @@ Measured in "Verification".
 
 ## Problem
 
-By D46 the nodes specialized on the key type in five ways: summary width
-(D31, D32, D43), length tags (D36), local search prefixes (D33), children
-before keys (D39) and whole-key equality for one candidate (D38). Each was
-spelled where it was used, as a stand-in for type identity:
+By D46 the nodes specialized on the key type in four ways: summary width
+(D31, D32, D43), length tags (D36), per-node search prefixes (since
+replaced by the tree's shared prefix, D50) and whole-key equality for one
+candidate (D38). Each was spelled where it was
+used, as a stand-in for type identity:
 
 - "fixed byte array" was `ByteString && width() == Two`, in `layout.rs` and
   `inline_keys.rs`; "heap byte string" was `ByteString && width() == Eight`,
@@ -31,18 +32,18 @@ whether a value *is* its bytes (`holds_its_bytes`, arrays) or points to them.
 
 **2. Plan: what each node kind stores and how it searches** (`NodePlan`,
 `node_plan.rs`). `NodePlan::of::<S, Kind>()` maps the encoding and the kind
-to named answers: summary width, length tags, local prefix, children first,
-whether exported windows are read again from keys (D43), the full and tied
+to named answers: summary width, length tags, whether separator keys are
+leaf heads (D49), whether exported windows are read again from keys (D43), the full and tied
 searches (D19), whole-key equality (D38). One constructor per row, each
 documented with its reason:
 
 | keys | inline keys, leaf / internal | also stored | search over tied inline keys |
 |---|---|---|---|
 | without inline keys | none | nothing | as the key type picks (D19) |
-| std integers | the impl's width in both | internal: a local prefix (D33) | as the key type picks (D19) |
+| std integers | the impl's width in both | nothing | as the key type picks (D19) |
 | every key under `WithInlineKey` | the impl's width in both | nothing | as the key type picks (D19) |
-| std byte arrays | 2 / 2 (D32) | internal: children before keys (D39), a local prefix (D33) | binary; one candidate compares whole (D38) |
-| std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36); internal: a local prefix (D33) | binary |
+| std byte arrays | 2 / 2 (D32) | nothing | binary; one candidate compares whole (D38) |
+| std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36) | binary |
 
 The rows differ in what a tie costs: a load from the node (arrays), a read
 past the node (heap strings), or user code, which the nodes call only while
@@ -57,8 +58,8 @@ field of `KeyColumns`, a cell of `KeyCells` and a plan field; splits, merges
 and steals don't change.
 
 Layouts are a total function of the plan's answers:
-`NodeLayout::internal(width, children_first)` picks one of eight constants,
-so any row may put its children first without touching `layout.rs`.
+`NodeLayout::leaf(width, length_tags)` picks one of seven constants, and
+`NodeLayout::internal(width)` one of four, so no row touches `layout.rs`.
 
 ### Zero overhead, and how to keep it
 
@@ -124,9 +125,9 @@ measured, then removed:
 - 1M lookups of `String`-newtype paths behind a 64-byte shared prefix took
   311 ns with `WithKeyBytes` and 315 ns with `WithInlineKey`, run to run
   noise, and `WithKeyBytes` ran more instructions.
-- What makes std heap strings fast on paths is length tags, local prefixes
-  and 4-byte internal summaries. All three read keys while keys move, which
-  user code can't do safely. What was left, comparing bytes past a tie
+- What makes std heap strings fast on paths is length tags and 4-byte
+  internal summaries. Both read keys while keys move, which user code
+  can't do safely. What was left, comparing bytes past a tie
   instead of `memcmp` from the start, saves nothing.
 - A public trait is permanent API for no measured gain.
 

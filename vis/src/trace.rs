@@ -2,6 +2,7 @@
 //! (`TreeView::trace`), kept as plain data for the panels; what starts one;
 //! and the bar to start one from.
 
+use std::cmp::Ordering;
 use std::ops::Range;
 
 use bbtree::inspect::TraceOutcome;
@@ -21,6 +22,9 @@ use crate::tree_shape::{NodeAt, TreeShape};
 pub(crate) struct Trace {
     query: KeyBytes,
     steps: Vec<TraceStep>,
+    /// Where the key sorts against every key of the map, if it lacks what
+    /// they all share (D50): the lookup then reads no node.
+    placed_by_shared_prefix: Option<Ordering>,
 }
 
 /// What a lookup did at one node.
@@ -28,9 +32,6 @@ pub(crate) struct Trace {
 pub(crate) struct TraceStep {
     at: NodeAt,
     outcome: TraceOutcome,
-    /// What the search found when it checked the key against the node's
-    /// first key, if the node keeps a local search prefix and was searched.
-    local_prefix_check: Option<LocalPrefixCheck>,
     /// The searched key's inline key at the node's prefix, in hex, as many
     /// bytes as the node keeps.
     inline_key: Option<String>,
@@ -44,7 +45,6 @@ impl TraceStep {
     pub(crate) fn new(
         at: NodeAt,
         outcome: TraceOutcome,
-        local_prefix_check: Option<LocalPrefixCheck>,
         inline_key: Option<String>,
         tied: Option<Range<usize>>,
         edge_taken: Option<usize>,
@@ -52,7 +52,6 @@ impl TraceStep {
         Self {
             at,
             outcome,
-            local_prefix_check,
             inline_key,
             tied,
             edge_taken,
@@ -65,10 +64,6 @@ impl TraceStep {
 
     pub(crate) fn outcome(&self) -> TraceOutcome {
         self.outcome
-    }
-
-    pub(crate) fn local_prefix_check(&self) -> Option<LocalPrefixCheck> {
-        self.local_prefix_check
     }
 
     pub(crate) fn inline_key(&self) -> Option<&str> {
@@ -92,21 +87,17 @@ impl TraceStep {
     }
 }
 
-/// How a key fared against the local search prefix (D33) of a node that
-/// keeps one: every key of the node shares more bytes than its fences do,
-/// and the search first checks the key's against its first key's.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum LocalPrefixCheck {
-    /// The key has those bytes too: the search skips them.
-    Has,
-    /// The key differs within them, or ends inside them: it goes before or
-    /// after all the node's keys, with no inline key compared.
-    Lacks,
-}
-
 impl Trace {
-    pub(crate) fn new(query: KeyBytes, steps: Vec<TraceStep>) -> Self {
-        Self { query, steps }
+    pub(crate) fn new(
+        query: KeyBytes,
+        steps: Vec<TraceStep>,
+        placed_by_shared_prefix: Option<Ordering>,
+    ) -> Self {
+        Self {
+            query,
+            steps,
+            placed_by_shared_prefix,
+        }
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -138,6 +129,9 @@ impl Trace {
 
     /// Where the lookup ended, in a few words.
     pub(crate) fn outcome_brief(&self, shape: &TreeShape) -> String {
+        if self.placed_by_shared_prefix.is_some() {
+            return "not in the map".to_string();
+        }
         let Some(last) = self.steps.last() else {
             return "the map is empty".to_string();
         };
@@ -154,6 +148,16 @@ impl Trace {
 
     /// Where the lookup ended, in a sentence.
     pub(crate) fn outcome_text(&self, shape: &TreeShape) -> String {
+        if let Some(order) = self.placed_by_shared_prefix {
+            let side = if order == Ordering::Less {
+                "before"
+            } else {
+                "after"
+            };
+            return format!(
+                "Not in the map: it lacks the bytes every key shares, so it sorts {side} them all, and the lookup read no node."
+            );
+        }
         let Some(last) = self.steps.last() else {
             return "The map is empty.".to_string();
         };

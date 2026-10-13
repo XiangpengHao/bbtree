@@ -1,8 +1,7 @@
 //! A node's page as the processor fetches it: one row per 64-byte cache
 //! line, every slot where the layout puts it, and what a lookup read, in the
-//! order it read it: the header (with the first key, where a local search
-//! prefix is checked), every inline key at once, the tied keys, then the
-//! result.
+//! order it read it: the header, every inline key at once, the tied keys,
+//! then the result.
 
 use std::ops::Range;
 
@@ -30,9 +29,6 @@ pub(crate) struct PageMarks {
     /// Whether the node was searched, which reads its length: a node on the
     /// way to a separator's value is only passed through.
     searched: bool,
-    /// Whether the search checked the key against the first key, over the
-    /// node's local search prefix (D33).
-    checked_local_prefix: bool,
     /// Whether the search read the inline keys: all of them, as one count
     /// over the capacity does on x86-64 (D18).
     read_inline_keys: bool,
@@ -59,8 +55,6 @@ enum Certainty {
 /// When in a node's search a read happens, in order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum ReadPhase {
-    /// The header, and the first key where a local search prefix is
-    /// checked against it.
     Header,
     InlineKeys,
     Ties,
@@ -76,7 +70,6 @@ impl PageMarks {
                 step.outcome(),
                 TraceOutcome::ToHead { .. } | TraceOutcome::Head
             ),
-            checked_local_prefix: step.local_prefix_check().is_some(),
             read_inline_keys: step.inline_key().is_some(),
             tied: step.tied().unwrap_or(0..0),
             found: step.found(),
@@ -105,7 +98,7 @@ impl PageMarks {
             }
             SlotContents::Values => self.leaf && self.found == Some(slot),
             SlotContents::Edges => self.edge == Some(slot),
-            SlotContents::Head => self.head,
+            SlotContents::HeadKey | SlotContents::Head => self.head,
             SlotContents::Header => false,
         }
     }
@@ -131,9 +124,6 @@ impl PageMarks {
             SlotContents::Header if self.searched => certain(ReadPhase::Header),
             SlotContents::InlineKeys if self.read_inline_keys => certain(ReadPhase::InlineKeys),
             _ if !used => None,
-            SlotContents::Keys if slot == 0 && self.checked_local_prefix => {
-                certain(ReadPhase::Header)
-            }
             _ if self.is_result(contents, slot) => certain(ReadPhase::Result),
             SlotContents::Keys if self.tied.contains(&slot) => match self.tied.len() {
                 1 => certain(ReadPhase::Ties),
@@ -168,7 +158,7 @@ impl SlotLook for SlotContents {
             SlotContents::Header => "slot-header",
             SlotContents::InlineKeys => "slot-inline",
             SlotContents::LengthTags => "slot-tags",
-            SlotContents::Keys => "slot-keys",
+            SlotContents::Keys | SlotContents::HeadKey => "slot-keys",
             SlotContents::Head | SlotContents::Values | SlotContents::Edges => "slot-trailing",
         }
     }
@@ -179,6 +169,7 @@ impl SlotLook for SlotContents {
             SlotContents::InlineKeys => "inline key",
             SlotContents::LengthTags => "length tag",
             SlotContents::Keys => "key",
+            SlotContents::HeadKey => "head key",
             SlotContents::Head => "head",
             SlotContents::Values => "value",
             SlotContents::Edges => "child",
@@ -190,7 +181,7 @@ impl SlotLook for SlotContents {
             SlotContents::Header => "header",
             SlotContents::InlineKeys => "inline keys",
             SlotContents::LengthTags => "length tags",
-            SlotContents::Keys => "keys",
+            SlotContents::Keys | SlotContents::HeadKey => "keys",
             SlotContents::Head | SlotContents::Values => "values",
             SlotContents::Edges => "children",
         }
@@ -202,7 +193,9 @@ impl SlotLook for SlotContents {
             SlotContents::InlineKeys => Some(Concept::InlineKey),
             SlotContents::LengthTags => Some(Concept::LengthTag),
             SlotContents::Keys => None,
-            SlotContents::Head | SlotContents::Values => Some(Concept::Head),
+            SlotContents::HeadKey | SlotContents::Head | SlotContents::Values => {
+                Some(Concept::Head)
+            }
             SlotContents::Edges => Some(Concept::Child),
         }
     }
@@ -215,7 +208,7 @@ impl SlotLook for SlotContents {
             | SlotContents::Keys
             | SlotContents::Values => Some(NodePart::Entry(slot)),
             SlotContents::Edges => Some(NodePart::Child(slot)),
-            SlotContents::Head => Some(NodePart::Head),
+            SlotContents::HeadKey | SlotContents::Head => Some(NodePart::Head),
         }
     }
 
@@ -228,8 +221,10 @@ impl SlotLook for SlotContents {
                         SlotContents::Keys | SlotContents::InlineKeys | SlotContents::LengthTags
                     )
             }
-            Concept::FencePrefix | Concept::SearchPrefix => self == SlotContents::Header,
-            Concept::Separator => self == SlotContents::Keys && !marks.leaf,
+            Concept::FencePrefix | Concept::SharedPrefix => self == SlotContents::Header,
+            Concept::Separator => {
+                (self == SlotContents::Keys && !marks.leaf) || self == SlotContents::HeadKey
+            }
             Concept::Page | Concept::CacheLine | Concept::Wasm32 => true,
             concept => self.concept() == Some(concept),
         }
@@ -586,14 +581,10 @@ mod tests {
     use bbtree::BBTreeMap;
 
     use super::*;
-    use crate::inspected_tree::{InspectedMap, InspectedTree};
-    use crate::trace::LocalPrefixCheck;
-    use crate::workload::KeyKind;
 
     fn marks(tied: Range<usize>, found: Option<usize>) -> PageMarks {
         PageMarks {
             searched: true,
-            checked_local_prefix: false,
             read_inline_keys: true,
             tied,
             found,
@@ -658,26 +649,6 @@ mod tests {
                     .read
                     .is_some_and(|(certainty, _)| certainty == Certainty::Certain))
         );
-    }
-
-    /// A node with a local search prefix reads its first key to check the
-    /// key against it; a key that lacks the prefix reads no inline keys.
-    #[test]
-    fn a_local_prefix_check_reads_the_first_key() {
-        let map: BBTreeMap<u64, u64> = (0..50_000).map(|key| (key * 3 % 50_000, key)).collect();
-        let tree = InspectedMap::new(map, KeyKind::Integers);
-        let trace = tree.trace(&u64::MAX.to_string()).unwrap();
-        let step = &trace.steps()[0];
-        assert_eq!(step.local_prefix_check(), Some(LocalPrefixCheck::Lacks));
-        let drawing = MapDrawing::of(&tree.page_map(step.at()), &PageMarks::of_step(step, false));
-        let read = |contents, slot| {
-            drawing.pieces.iter().any(|piece| {
-                piece.contents == contents && piece.slot == slot && piece.read.is_some()
-            })
-        };
-        assert!(read(SlotContents::Keys, 0));
-        assert!(!read(SlotContents::Keys, 1));
-        assert!(!read(SlotContents::InlineKeys, 0));
     }
 
     #[test]

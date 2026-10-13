@@ -94,11 +94,12 @@ because a dependent crate opts into a feature and needs no `RUSTFLAGS`. It
 adds API only, no dependencies (D2), and promises no stability. Its module
 also compiles in tests, so `cargo test` runs its checks without the feature.
 
-- **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`.
+- **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
+  and whose `shared_prefix()` is the bytes every key shares (D50).
 - **`NodeView`** wraps a `NodeRef<Immut, LeafOrInternal>` and answers through
   the existing handle methods:
   - id (the page address), height, `len`, capacity, `min_len`;
-  - `prefix_len`, `local_prefix_len` (D33);
+  - `prefix_len`;
   - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `length_tag(i)`
     (D36);
   - for a leaf, `value(i)` and `head()` (D17); for an internal node,
@@ -125,24 +126,23 @@ internal node and `search_point` in the leaf, on the same `SearchKey`. Each
 - the node;
 - the outcome: down edge `e`, found at slot `i`, or absent (would go in at
   slot `i`);
-- whether the key lacks the node's local search prefix (D33), from the
-  node's own `search_prefix_len`: the node then put it at its first or
-  last edge after checking it against its first key, comparing no inline
-  keys, and the step has none;
-- otherwise the key's inline key at the node's prefix, from the node's own
+- the key's inline key at the node's prefix, from the node's own
   `inline_target`;
 - the slots whose inline keys tie with it, from the node's own `equal_run`:
   the only keys compared in full.
+
+A key that lacks the bytes every key shares (D50) has no steps, as `get`
+reads no node for it; `placed_by_shared_prefix` says whether it sorts
+before or after every key.
 
 A key found in an internal node is a separator (D17). The trace then follows
 `into_value_head` down to the leaf whose head holds the value, and in debug
 builds asserts that it reaches the very value `into_value_head` returns.
 
-The node code changes only in visibility: `inline_target`,
-`search_prefix_len` and `NodeInlineKeys::equal_run` are
-`pub(in crate::tree)`. A test traces every key of two maps, `u64` and
-`String`, and some absent keys, against `get`, with keys that lack a local
-prefix on either side.
+The node code changes only in visibility: `inline_target` and
+`NodeInlineKeys::equal_run` are `pub(in crate::tree)`. A test traces every
+key of two maps, `u64` and `String`, and some absent keys, against `get`,
+with keys that lack the shared prefix on either side.
 
 ## The visualizer (`vis/`)
 
@@ -206,14 +206,14 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   - Its fences (`fences.rs`): the low and high fence, the node's first and
     last keys and the key looked up, in key order, a column per byte (hex,
     or characters for URLs), so the shared columns line up. Brackets mark
-    the prefix, a search prefix, and the inline key's bytes; a missing
-    fence names the border it is missing on. The heading gives the prefix,
-    search prefix and inline key widths. Pointing at a fence lights its separator in the ancestor's card;
-    clicking it inspects that ancestor.
+    the prefix and the inline key's bytes; a missing fence names the
+    border it is missing on, where the prefix is what every key shares.
+    The heading gives the prefix and inline key widths. Pointing at a fence
+    lights its separator in the ancestor's card; clicking it inspects that
+    ancestor.
   - What the search did, a line a step, each opening to a sentence: skip the
-    shared bytes (fence prefix, D26; search prefix, D33, once the key is
-    checked against the node's first key, or else go before or after all
-    the node's keys at once), count the inline
+    shared bytes (fence prefix, D26; on a border, what every key shares,
+    checked once before the root, D50), count the inline
     keys smaller than the key's and those equal to it (D18): the first count
     places the key, and only the equal ones, if any, are searched in full;
     and the outcome: the edge taken with the keys either side, the slot
@@ -225,8 +225,7 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     slot sits where the layout puts it, empty slots are faint, and the slots
     the lookup read are marked: tied keys outlined, the result filled. Each
     cache line the lookup surely reads gets a dot, in the order it reads
-    them, replayed with each lookup: the header's, with the first key's
-    where a search prefix is checked, all the inline keys'
+    them, replayed with each lookup: the header's, all the inline keys'
     (the count over the capacity reads them all on x86-64), a lone tied
     key's, and the result's. The search among two or more tied keys is a
     binary search (`search_run`), whose probes the trace doesn't record, so
@@ -258,24 +257,22 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 
 ### What it shows
 
-- **u64, 1M random inserts:** every key's 5 high bytes are zeros. The root
-  has no fences, so it keeps them as a search prefix (D33) and its 2-byte
-  inline keys start after them; below it, fence prefixes run from 5 to 7
-  bytes. In a leaf, one inline key matches, and the lookup reads 3 of 16
-  cache lines.
-- **A key past the end of the tree** follows the right border, where every
-  fence prefix is 0. Each internal node there keeps a search prefix the
-  key lacks, so it goes to the last child once the node's first key is
-  read. The leaf keeps none: its inline keys are all `00 00`. `u64::MAX`
-  ties with none of them, but a key just past the last, as each ascending
-  insert is, ties with all, and the search among them may read most of
-  the page.
-- **String URLs:** the root keeps a 25-byte search prefix
+- **u64, 1M random inserts:** every key's 5 high bytes are zeros. The tree
+  keeps them as its shared prefix (D50), the prefix of the root and the
+  borders, whose 2-byte inline keys start after them; below the root,
+  fence prefixes run from 5 to 7 bytes. In a leaf, one inline key matches,
+  and the lookup reads 3 of 16 cache lines.
+- **A key past the end of the tree** that lacks the shared bytes, as
+  `u64::MAX` does, reads no node: the check before the root places it after
+  every key. One just past the last key has them, and follows the right
+  border, whose nodes skip them.
+- **String URLs:** the tree keeps a 25-byte shared prefix
   (`https://shop.example.com/`); the levels below skip 35, 36 and 38 bytes,
   with 8-byte inline keys.
-- **`[u8; 16]` internal nodes** put children before keys (D39). At 1M ids,
-  the root keeps a 13-byte search prefix: `bbtree`, two zero bytes and the
-  index's 5 high zero bytes.
+- **`[u8; 16]` internal nodes** keep no keys, only inline keys and
+  children: each separator's key is a head below (D49). At 1M ids, the tree
+  keeps a 13-byte shared prefix: `bbtree`, two zero bytes and the index's 5
+  high zero bytes.
 
 ## Not done
 

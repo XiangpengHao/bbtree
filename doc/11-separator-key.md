@@ -1,9 +1,11 @@
 # 11 — Separator keys: internal nodes without keys
 
-Status: proposed (2026-10-13), not built. It would change D17 (separators
-kept in internal nodes, values in heads) and touches D26 (fences), D33
-(local prefixes), D36 (length tags) and D43. It applies to keys with inline
-keys; keys without them keep D17 (see "Open questions").
+Status: phase 1 built (2026-10-13), D49: with inline keys, separator keys
+are leaf heads, a tie walks down to one, and internal nodes, which keep no
+keys, are 512 B ("Phase 1, as built"). Exact separators are not built. It
+changed D9, D15, D17, D29, D32, D36 and D43, and made children before keys
+for byte arrays moot (06). The root and the borders skip what every key
+shares, which the tree keeps, reading no key (D50); ties are open.
 
 ## Problem
 
@@ -20,13 +22,34 @@ of an internal node:
 | `String` | 4 + 24 + 8 = 36 | 12 |
 | `[u8; 32]` | 2 + 32 + 8 = 42 | 10 |
 
-What this costs is cache residency, not memory. Internal nodes are a few
-percent of a tree's bytes, but every lookup crosses them, and saving a
-level saves no miss when that level is warm anyway (06, lessons 1 and 2). At 10M
-entries, `u64` internal nodes take about 6 MiB, which fits one 32 MiB L3,
-and `String` internal nodes about 30 MiB, which barely does (06).
-Without keys, the `String` and `[u8; 32]` internal levels would shrink to
-about a third and a quarter.
+Those bytes cost lookups less than their size suggests. Caches hold lines,
+not nodes: a lookup reads an internal node's inline keys and one edge, and
+key lines it never reads are never cached. The bytes lookups keep hot are
+about one inline key and one edge per separator, in either layout, and a
+tree has about as many separators as leaves. Counted from today's layouts,
+removing the keys changes the hot lines per separator by 10% or less:
+
+| key | hot lines per separator, today | without keys |
+|---|--:|--:|
+| `u64` | 10 / 56 = 0.18 | 0.16 |
+| `String` | 6 / 28 = 0.21 | 0.19 |
+| `[u8; 32]` | 4 / 24 = 0.17 | 0.16 |
+
+So lookups can gain only in these ways:
+
+- **Ties.** A tie today reads a key line, usually cold. Exact separators
+  (below) settle most ties without reading a key. The `hash32` gain of
+  children before keys (06) came from those reads.
+- **TLB reach.** The same hot lines sit in about a third (`String`) to a
+  quarter (`[u8; 32]`) of the pages.
+- **Prefetching.** An adjacent-line prefetch next to an inline-key or edge
+  line no longer brings in a key line nobody reads.
+- **Depth,** if pages stay 1 KiB. Probably a loss: the levels saved are
+  warm, and the search scans every slot (06, lessons 1 and 2).
+
+Leaves, where most of a lookup's DRAM fills land, don't change. Measured,
+JSON lookups read about 1.8 fewer lines from memory with phase 1 built, so
+at 10M the lower internal levels of `String` maps did miss in cache.
 
 The keys are there because of D17: a separator lives in an internal node
 and its value in a leaf's head. 06 adds that separators can't be truncated,
@@ -54,16 +77,14 @@ L2:  [banana's value], berry, blueberry
 - **Keys are still stored once, without `K: Clone`.** Every key, separators
   included, lives in a leaf beside its value, so `iter` and
   `get_key_value` return a leaf's `&K`.
-- **Leaves.** Paired leaves already keep a place for the head's key in
-  entry 0, unused (`(_ head)` in `layout.rs`, D29). In `u64 → u64` leaves
-  it is free (bytes 128–136), so capacity stays 55. In `String → u64`
-  leaves, the D36 length tags (bytes 200–248) extend into it (224–248), so
-  either the tags move or capacity drops from 24 to 23. Leaves without inline
-  keys need room for one more key.
-- **Internal nodes.** A header, inline keys and edges. At 1 KiB that is
-  about 100 separators for `u64`, `u128` and `[u8; 32]`, and 84 for
-  `String`, against 56, 38, 24 and 28 today. At 512 B it would be about 49,
-  49, 49 and 41: today's fanout or more, in half the bytes.
+- **Leaves.** Paired leaves kept a place for the head's key in entry 0,
+  unused (`(hk head)` in `layout.rs`, D29); the head's key takes it. In
+  `u64 → u64` leaves it was free (bytes 128–136), so capacity stays 55. In
+  `String → u64` leaves, the D36 length tags (bytes 200–248) extended into
+  it (224–248): the leaf gives up an entry to keep them, 24 → 23.
+- **Internal nodes.** A header, inline keys and edges, in 512 B pages:
+  49 separators at 2-byte inline keys (`u64`, `u128`, `[u8; 32]`), 41 at 4
+  (`String`), 31 at 8, against 56, 38, 24 and 28 in 1 KiB with keys.
 
 ## Reading a separator's key on a tie
 
@@ -84,6 +105,12 @@ the same path to find a separator's value; here the walk finds its key.
   `1 − 1/fanout` (94–97%) of internal nodes are parents of leaves.
 - **Several ties in one node** each need a key: about log₂ k walks for `k`
   tied separators, as the tied search is binary.
+- **Built as** `SeparatorKeys`, which lends an internal node's separator
+  keys, in place without inline keys, or walked to; searches and prefix
+  upkeep read keys through it, whatever the node kind. The tied search over
+  walked keys doesn't inline, so a search whose inline keys tie with none
+  returns before it: called on every search, it cost `u64` lookups 135
+  instructions.
 
 **Go right first.** Instead of walking to the key, a tied search can take
 the right child and keep searching normally. Every key on the right is at
@@ -113,8 +140,9 @@ keeps, and the inline key stops being "the first bytes of some key" and
 becomes the separator itself. Then a tie means `query ≥ s`: go right, and
 read no key.
 
-- **Exact.** In a node that skips `p` bytes before its windows (its fence
-  prefix, or its local prefix, D33), with `w`-byte inline keys, `s` is
+- **Exact.** In a node that skips `p` bytes before its windows (what its
+  fences share, or on the borders what every key shares, D50), with
+  `w`-byte inline keys, `s` is
   exact when `|s| ≤ p + w`. Keys of varying length also need `s`'s last
   byte nonzero, since zero padding would otherwise make "ap" and "ap\0"
   equal. This rule also covers keys under `WithInlineKey`, whose encoding
@@ -170,30 +198,30 @@ Separators move between levels:
   moment the separator is made. "Only a separator change moves a fence"
   still holds. The new separator change is a promoted separator replaced
   by a full key.
-- **Local prefixes (D33).** In a node with a local prefix, the search
-  checks the query against key 0, now in a leaf. That node is the root,
-  the tree's borders or a node of dense keys, on every lookup. The node
-  must store its local prefix's bytes, up to a cap, from the space the
-  keys free.
+- **The shared prefix (D50).** A per-node prefix check would read key 0,
+  a walk to a leaf here, on every search of the root and the borders.
+  Instead the tree keeps the bytes every key shares and checks a query
+  against them once, before the root; no search reads a key but on a tie.
 - **Window recomputation (D43).** Keys no longer move from internal nodes
-  to leaves. A separator that moves up still needs its window at the new
-  prefix: an exact one has its node's prefix bytes and its window, and a
-  full one's bytes are its key in the leaf.
-- **Heads (D17).** For keys with inline keys, heads and everything that
-  serves them go away: `has_head`, `EntryPosition::Separator`
-  (`tree/walk.rs`), `into_value_head`, the successor key that moves up on
-  removal (`tree/remove.rs`), and range iterators reading a head's key from
-  the path. Every entry is in a leaf.
+  to leaves. A window an internal node hands out is read again from its
+  separator's key, walked to; leaf operations that bring a separator's key
+  into the leaf use the parent's window, read so.
+- **Heads (D17).** Heads stay, and gain their separator's key: it moves
+  with the head's value in splits, moves between siblings, merges and
+  removals (`Rebalance` in `tree/node/handle.rs`), and walks, clones,
+  teardown and joins take it from the head. Keys without inline keys keep
+  D17 unchanged, so the code holds both kinds of separator
+  (`SeparatorSlots`).
 
 ## Not pursued
 
 - **Children before keys in every internal node**, the first step
-  considered. D39 already does this for byte arrays, and its gain came
+  considered. Byte arrays already did this (06), and its gain came
   from 32-byte keys no longer crossing a cache line. A `u64` node's
   inline keys end at byte 120, and in either order edge `i` sits in a line
   of its own except edge 0. `u128` keys are already within lines. Heap
-  strings would lose a line in nodes with a local prefix, which read key 0
-  right after the inline keys (why D39 excludes them). This change also
+  strings would have lost a line where a search read key 0 right after the
+  inline keys (why byte arrays alone had it). This change also
   removes the key array, so the order would not carry over.
 - **A stored pointer per separator.** 8 bytes, as much as a `u64` key, and
   an invariant that every structural operation keeps (split, merge,
@@ -207,9 +235,9 @@ Separators move between levels:
   only if many separators don't fit.
 - **Spending the freed bytes on fanout.** At 1 KiB, capacity nearly
   doubles or triples, but the search scans every slot, and the levels it
-  would save are warm (06; 2 KiB internal nodes were slower). 512 B
-  internal pages keep today's fanout. They change D15, so they are a
-  separate experiment.
+  saves are warm (06; 2 KiB internal nodes were slower). Measured: 10M
+  `hash32` hits 232 ns at 1 KiB against 160 at 512 B, `u64` 138 against
+  124, JSON 287 against 276. 512 B it is (D15).
 
 ## Measure first
 
@@ -220,33 +248,105 @@ Each of these runs at 10M on random `u64`, dense `u64`, JSON, paths and
    inline keys, with the choice rule, with and without choosing where to
    split. A count over a built tree, no timing.
 2. **Ties today:** full-key reads in internal nodes per lookup, per level,
-   separating ties from local-prefix checks (D33).
+   separating ties from per-node prefix checks.
 3. **Where DRAM fills land:** per hit, internal levels against the leaf,
-   from precise sampling.
+   from precise sampling, and dTLB misses per lookup.
 
-If (1) is high and (3) shows internal fills for `String` and `hash32`,
-the change should pay on lookups. If the internal levels are already
-L3-resident, it is a simplification, judged by the code it removes.
+What exact separators can save is (2), as cold lines per lookup, times
+the share of separators (1) finds exact. If that and (3)'s page walks are
+small, the change is a simplification, judged by the code it removes.
+
+### Census, 2026-10-13
+
+(1) and (2) at 10M entries, 1M hits and 1M misses, from
+`bbtree-separator-census` (bench crate, `inspect` feature): the bench's
+keys and insertion order, today's tree, its lookups traced through
+`TreeView::trace`. Not yet with choosing where to split; (3) not yet run.
+
+| keys | width | exact at height 1 | exact above | ties per hit | of which inexact |
+|---|--:|--:|--:|--:|--:|
+| `u64` | 2 | 72% | about 1% | 0.18 | 0.16 |
+| `u64`, dense | 2 | 95% | about 1% | 0.26 | 0.24 |
+| `hash32` | 2 | 75% | 0–65% | 0.20 | 0.14 |
+| JSON | 4 | 99.9% | 77–98% | 0.059 | 0.0003 |
+| paths | 4 | 0.1% | 0–5% | 1.07 | 1.07 |
+
+- At 4 bytes, every `u64`, dense `u64` and `hash32` separator but a few
+  is exact, at every height. At their 2 bytes, most ties stay inexact.
+- JSON ties are mostly hits that equal a separator (5.6% of hits at
+  height 1), all exact.
+- Paths tie at 97% of height-1 searches, with 1.9 separators each, and
+  even at 8 bytes 0.1% of their separators are exact: keeping the child's
+  prefix (`LCP(right min, high)`) makes them long. Misses look the same.
+- Only dense `u64` and paths checked a per-node prefix (since replaced by
+  D50), at the root (100%) and next level (50%).
+
+### Pricing ties, 2026-10-13
+
+Today's tree with 4-byte internal inline keys for std integers and byte
+arrays (leaves keep 2, and read a window from its key when it moves up),
+against the tree before, at 10M, one run each, `--perf`:
+
+| cell | ns | instructions | branch misses | L1d misses | lines from memory |
+|---|--:|--:|--:|--:|--:|
+| `u64` hit | 129.6 → 138.2 | 242 → 327 | 0.48 → 0.18 | 13.3 → 17.5 | 3.75 → 3.72 |
+| `u64` miss | 93.7 → 105.3 | 221 → 306 | 0.42 → 0.17 | 12.5 → 16.7 | 3.02 → 3.05 |
+| `hash32` hit | 192.1 → 183.9 | 270 → 280 | 0.43 → 0.14 | 13.5 → 15.4 | 5.88 → 5.92 |
+| `hash32` miss | 136.3 → 133.6 | 244 → 253 | 0.33 → 0.08 | 11.9 → 13.8 | 3.91 → 4.06 |
+
+- Ties cost branch misses, not memory: lines from memory don't move.
+  Removing them saves 0.25–0.3 mispredicts a lookup.
+- `hash32` hits gain 4%. `u64` loses: its internal searches scan 4 lines
+  of inline keys instead of 2, and run 85 more instructions (not traced).
+
+## Phase 1, as built
+
+Keys move to leaves, full separators only, a walk on ties, 512 B internal
+pages. Against the tree before, 10M (paths 1M, the bench's size for them),
+ns per operation, one run each, `--perf`:
+
+| cell | before | after | instructions | lines from memory |
+|---|--:|--:|--:|--:|
+| `u64` hit | 128 | 124 | 242 → 239 | 3.75 → 3.87 |
+| `u64` miss | 90 | 94 | 221 → 214 | 2.99 → 3.31 |
+| `u64` dense hit | 158 | 148 | 252 → 340 | 4.66 → 4.19 |
+| `u64` dense miss | 88 | 98 | 231 → 316 | 2.99 → 3.21 |
+| `hash32` hit | 181 | 160 | 270 → 366 | 5.57 → 4.64 |
+| `hash32` miss | 135 | 145 | 244 → 336 | 3.90 → 4.07 |
+| JSON hit | 311 | 276 | 514 → 462 | 8.29 → 7.62 |
+| JSON miss | 249 | 179 | 481 → 425 | 7.22 → 5.48 |
+| paths hit | 371 | 426 | 640 → 935 | 11.8 → 12.5 |
+| paths miss | 252 | 312 | 574 → 867 | 7.38 → 8.91 |
+| `u64` random insert | 146 | 136 | 352 → 348 | 7.52 → 7.38 |
+| `hash32` random insert | 193 | 171 | 451 → 427 | 10.9 → 10.2 |
+| JSON random insert | 289 | 241 | 618 → 610 | 12.2 → 11.1 |
+| `u64` random remove | 249 | 249 | 657 → 657 | 6.67 → 7.16 |
+| `u64` `range64` | 652 | 630 | 1603 → 1598 | 34.7 → 35.5 |
+
+- Inserts, hits on random keys and JSON gain; JSON misses most, −28%.
+- Misses on `u64`, dense `u64` and `hash32` lose 5–11%, and paths 15–24%:
+  dense `u64` and paths walked for their per-node prefix on every search
+  of the root, and ties walk, about once per path lookup. D50 removed the
+  prefix walks: against this table, dense `u64` 340 / 316 → 294 / 270
+  instructions, paths 935 / 867 → 642 / 575, 426 / 312 → 375 / 325 ns
+  (D50 has the rest).
 
 ## Plan
 
-1. The measurements above.
-2. Keys move to leaves: full separators only, a walk on ties, 1 KiB pages.
-   Routing is the same as today; only node contents and the cost of a tie
-   change.
-3. Exact separators, and choosing where to split.
-4. Go right first, or pointers in upper levels, if (2)'s tie counts call for
-   it.
-5. 512 B internal pages (D15).
+1. Done: the census and the pricing of ties.
+2. Done: keys move to leaves, a walk on ties, 512 B internal pages.
+3. Done (D50): the tree keeps the bytes every key shares, so no search
+   reads a key for a prefix.
+4. Ties: exact separators, choosing where to split, going right first, or
+   pointers in upper levels, by which the tie counts call for.
 
 ## Open questions
 
 - **Keys without inline keys** have nothing else to search an internal
   node by, so their internal nodes still hold keys, and D17 with its heads
-  stays for them. The crate keeps two kinds of separator unless every key
-  type gets an inline key. Small std integers, for example, would be their own exact
-  inline key.
-- **Length tags in `String` leaves:** where they go once the head's key
-  place is taken.
-- **How many local-prefix bytes** an internal node stores, and what a node
-  whose keys share more than that does.
+  stays for them: the crate keeps two kinds of separator unless every key
+  type gets an inline key. Small std integers, for example, would be their
+  own exact inline key.
+- **The shared prefix's cap,** 64 bytes (D50): keys that share more skip
+  only 64 on the borders, whose windows then tie. The bench's paths share
+  exactly 64.

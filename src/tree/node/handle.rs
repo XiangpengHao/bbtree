@@ -23,15 +23,15 @@
 //!    `len < capacity`, a [`FullEdge`] in a node with `len == capacity`, and a
 //!    [`Mergeable`] context fits both children and their separator in one node.
 //! 5. **Heads are flagged.** A leaf's head slot is initialized exactly when its
-//!    header says the leaf has a head; every operation that fills or empties
-//!    the slot updates the header with it (D17).
+//!    header says the leaf has a head, and so is its head key slot in a map
+//!    whose separator keys are heads; every operation that fills or empties
+//!    them updates the header with them (D17, D49).
 //! 6. **Inline keys follow keys.** In a node with inline keys (D18), inline
 //!    key `i` is key `i`'s window at the node's prefix length for every
-//!    `i < len` (05-fence-key.md). An internal node may instead keep
-//!    windows at a local search prefix (D33); queries validate the extra
-//!    bytes, and every key-changing primitive first restores fence windows
-//!    (`inline_keys.rs`). Exported key/bound windows always use the fences.
-//!    Every operation moves keys through
+//!    `i < len` (05-fence-key.md); an internal node's key `i` is its
+//!    separator `i`'s, the head key of the leftmost leaf right of it (D49),
+//!    which every operation that moves a head key keeps. Every operation
+//!    moves keys through
 //!    [`KeySlots`], which moves their inline keys with them; a key that
 //!    moves up into a node, or a node whose prefix length shrinks, gets its
 //!    window moved back with [`Window::moved_back_to`], and a node whose
@@ -61,15 +61,16 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::hint;
 use core::marker::PhantomData;
-use core::ops::Range;
+use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, SearchKey, Window};
+use super::inline_keys::{InlineSlot, InlineTarget, InlinedKey, SearchKey, Separator, Window};
 use super::length_tags::{LengthMatch, LengthTags};
 use super::node_plan::{KeySearch, NodePlan};
 use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
-pub(crate) use super::slots::NodeKeys;
-use super::slots::{InlineKeySlots, KeySlots, Slots};
+use super::shared_prefix::SharedPrefix;
+use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
+pub(crate) use super::slots::{KeyList, NodeKeys};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// Node kind: a leaf, at height 0.
@@ -94,155 +95,90 @@ impl NodeKind for Internal {}
 
 impl NodeKind for LeafOrInternal {}
 
-/// The slots that follow a node's keys, one more than it has keys, by its
-/// kind (`layout.rs`): a leaf's head and values, the head in slot 0 and value
-/// `i` in slot `i + 1` (D17), or an internal node's edges, edge `i` in slot
-/// `i` (D12). Either way slot `i + 1` goes with key `i`, the one left of
-/// it, so splitting, rebalancing and merging move the trailing slots the
-/// same way whatever the kind, and the kinds differ only in what slot 0
-/// holds: a head a leaf may lack, or an edge an internal node always has.
+/// How splits, merges and moves between siblings change the nodes of a kind.
+///
+/// Every node holds one more trailing slot than keys (`layout.rs`): a leaf's
+/// head and values, the head in slot 0 and value `i` in slot `i + 1` (D17),
+/// or an internal node's edges, edge `i` in slot `i` (D12). Either way slot
+/// `i + 1` goes with key `i`, the one left of it, so the operations move
+/// trailing slots alike; the kinds differ in what moves with them. A leaf
+/// moves keys with their values, and where separator keys are heads (D49),
+/// its head's key with its head. An internal node moves its separators,
+/// keys or windows, with its edges, and slot 0, an edge, is always there.
 ///
 /// # Safety
 ///
-/// The moves are those of [`Slots`] over the node's `capacity + 1` trailing
-/// slots, and `has_first_slot` says whether slot 0 is initialized, as
-/// invariants 1 and 5 say for a node of the kind.
-pub(crate) unsafe trait TrailingSlots: PageKind {
-    /// Moves trailing slots `start..start + count` of `node` into
-    /// `dest_start..dest_start + count` of `dest`; see [`Slots::move_run_to`].
-    ///
-    /// # Safety
-    ///
-    /// Both are allocated nodes of this kind, in different pages, and the
-    /// contract of [`Slots::move_run_to`] holds for their trailing slots.
-    unsafe fn move_run<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        start: usize,
-        count: usize,
-        dest: NodePtr<K, V, S>,
-        dest_start: usize,
-    );
-
-    /// Takes trailing slot `index` out of `node`, whose slots `0..len` are
-    /// in use, and inserts it into `dest`, whose slots `0..dest_len` are,
-    /// at `dest_index`; see [`Slots::remove`] and [`Slots::insert`].
-    ///
-    /// # Safety
-    ///
-    /// Both are allocated nodes of this kind, in different pages, and the
-    /// contracts of [`Slots::remove`] and [`Slots::insert`] hold for their
-    /// trailing slots.
-    unsafe fn move_slot<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        index: usize,
-        len: usize,
-        dest: NodePtr<K, V, S>,
-        dest_index: usize,
-        dest_len: usize,
-    );
-
-    /// Whether slot 0 of `node` is initialized.
+/// `has_first_slot` says whether slot 0 of a node of the kind is
+/// initialized, as invariants 1 and 5 say.
+pub(crate) unsafe trait Rebalance: PageKind {
+    /// Whether slot 0 of `node` is initialized: a leaf's head, which every
+    /// leaf right of a separator has (D17), or an internal node's first edge.
     ///
     /// # Safety
     ///
     /// `node` is an allocated node of this kind.
     unsafe fn has_first_slot<K, V, S: InlineKeyStrategy<K>>(node: NodePtr<K, V, S>) -> bool;
 
-    /// Records that slot 0 of `node` is initialized, which a leaf's header
-    /// flags (invariant 5).
+    /// Moves `left`'s entries right of `separator_index` into `right`, a
+    /// fresh node of this kind at `left`'s prefix length, and takes out
+    /// separator `separator_index`, for the parent; returns it. In a leaf,
+    /// the separator's value becomes `right`'s head, with its key where
+    /// separator keys are heads (D49).
     ///
     /// # Safety
     ///
-    /// `node` is an allocated node of this kind with exclusive access, and
-    /// its slot 0 is initialized.
-    unsafe fn set_has_first_slot<K, V, S: InlineKeyStrategy<K>>(node: NodePtr<K, V, S>);
-}
+    /// `separator_index < left.len()`, and `right` is a fresh node of this
+    /// kind of the same map, at `left`'s prefix length, reached by nothing
+    /// else.
+    unsafe fn split_off<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        separator_index: usize,
+        right: NodePtr<K, V, S>,
+    ) -> Separator<K, S>;
 
-// SAFETY: a leaf's trailing slots are its head and values, its head
-// initialized exactly when its header says so (invariant 5).
-unsafe impl TrailingSlots for Leaf {
-    unsafe fn move_run<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        start: usize,
-        count: usize,
-        dest: NodePtr<K, V, S>,
-        dest_start: usize,
-    ) {
-        // SAFETY: forwarded.
-        unsafe {
-            node.head_and_value_slots().move_run_to(
-                start,
-                count,
-                dest.head_and_value_slots(),
-                dest_start,
-            );
-        }
-    }
+    /// [`BalancingContext::steal_left`]'s move: the left child's last entry
+    /// to the right child's front, through the parent's separator. The
+    /// right child is at the parent's prefix length, `fill`'s, the
+    /// separator's window there, and every node's local search windows are
+    /// normalized.
+    ///
+    /// # Safety
+    ///
+    /// The left child has an entry, and the right child room for one.
+    unsafe fn rotate_right<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    );
 
-    unsafe fn move_slot<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        index: usize,
-        len: usize,
-        dest: NodePtr<K, V, S>,
-        dest_index: usize,
-        dest_len: usize,
-    ) {
-        // SAFETY: forwarded.
-        unsafe {
-            let value = node.head_and_value_slots().remove(index, len);
-            dest.head_and_value_slots()
-                .insert(dest_index, dest_len, value);
-        }
-    }
+    /// [`BalancingContext::steal_right`]'s move, mirrored: the right
+    /// child's first entry to the left child's end. The left child is at
+    /// `fill`'s prefix length.
+    ///
+    /// # Safety
+    ///
+    /// The right child has an entry, and the left child room for one.
+    unsafe fn rotate_left<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    );
 
-    unsafe fn has_first_slot<K, V, S: InlineKeyStrategy<K>>(node: NodePtr<K, V, S>) -> bool {
-        // SAFETY: forwarded.
-        unsafe { node.has_head() }
-    }
-
-    unsafe fn set_has_first_slot<K, V, S: InlineKeyStrategy<K>>(node: NodePtr<K, V, S>) {
-        // SAFETY: forwarded.
-        unsafe { node.set_has_head(true) }
-    }
-}
-
-// SAFETY: an internal node's trailing slots are its edges, of which edge 0
-// is always initialized (invariant 1).
-unsafe impl TrailingSlots for Internal {
-    unsafe fn move_run<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        start: usize,
-        count: usize,
-        dest: NodePtr<K, V, S>,
-        dest_start: usize,
-    ) {
-        // SAFETY: forwarded.
-        unsafe {
-            node.edge_slots()
-                .move_run_to(start, count, dest.edge_slots(), dest_start);
-        }
-    }
-
-    unsafe fn move_slot<K, V, S: InlineKeyStrategy<K>>(
-        node: NodePtr<K, V, S>,
-        index: usize,
-        len: usize,
-        dest: NodePtr<K, V, S>,
-        dest_index: usize,
-        dest_len: usize,
-    ) {
-        // SAFETY: forwarded.
-        unsafe {
-            let edge = node.edge_slots().remove(index, len);
-            dest.edge_slots().insert(dest_index, dest_len, edge);
-        }
-    }
-
-    unsafe fn has_first_slot<K, V, S: InlineKeyStrategy<K>>(_node: NodePtr<K, V, S>) -> bool {
-        true
-    }
-
-    unsafe fn set_has_first_slot<K, V, S: InlineKeyStrategy<K>>(_node: NodePtr<K, V, S>) {}
+    /// Moves `separator` to key slot `len` of `left`, and every key and
+    /// trailing slot of `right` after it, both nodes at `fill`'s prefix
+    /// length already: the core of [`NodeMut::absorb_unchecked`]. Between
+    /// leaves, `right`'s head, the separator's value, joins it as an entry,
+    /// with the head's key where separator keys are heads (D49), whose
+    /// window is `fill`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`NodeMut::absorb_unchecked`], once both nodes are at `fill`'s
+    /// prefix length.
+    unsafe fn append<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        fill: Window,
+        separator: Separator<K, S>,
+        right: &mut NodeMut<'_, K, V, S, Self>,
+    );
 }
 
 /// Borrow type of a [`NodeRef`]: shared access for `'a` to a node and its
@@ -501,7 +437,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// Length metadata, when present, is initialized to capacity. Its live
     /// prefix follows the keys through every `KeySlots` mutation.
     pub(in crate::tree) fn length_tags(&self) -> Option<&[u16]> {
-        let tags = self.key_slots().columns().length_tags()?;
+        let tags = self.columns().length_tags()?;
         // SAFETY: the live handle proves the node's kind and allocation;
         // every tag was initialized when allocated and can be read under
         // this shared reborrow (invariants 1 and 7).
@@ -536,17 +472,6 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         }
     }
 
-    /// An active search offset is separate from the conservative fence
-    /// prefix used by structural operations.
-    #[inline]
-    pub(in crate::tree) fn local_prefix_len(&self) -> Option<usize> {
-        Self::plan().local_prefix_inliner()?;
-        // SAFETY: this live node has inline keys, and its borrow prevents
-        // concurrent header mutation.
-        let prefix = unsafe { self.node.search_prefix_len() };
-        (prefix != 0).then_some(prefix)
-    }
-
     /// `key`'s inline key at this node's prefix length, if the node has
     /// inline keys and `key` one to compare with them (D18).
     ///
@@ -563,10 +488,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     where
         K: Borrow<Q>,
     {
-        self.inline_target_at(
-            key,
-            self.local_prefix_len().unwrap_or_else(|| self.prefix_len()),
-        )
+        self.inline_target_at(key, self.prefix_len())
     }
 
     /// [`Self::inline_target`], for a node whose windows are at
@@ -609,9 +531,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// consistent or not.
     ///
     /// If the node has inline keys and `key` has one to compare (D18), taken
-    /// at the node's prefix length, or at its local search prefix (D33) once
-    /// `key` has the bytes it adds, the search runs over them; otherwise over
-    /// the keys, as the node's plan says (D19).
+    /// at the node's prefix length, the search runs over them; otherwise over
+    /// the keys, as the node's plan says (D19). The key shares the node's
+    /// prefix: it lies between the node's fences, or within what every key
+    /// of the tree shares, which a search checks at the top (D50).
     /// After monomorphization, a map without inline keys has only the
     /// latter.
     #[inline(always)]
@@ -620,43 +543,24 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let prefix_len = self.search_prefix_len(key)?;
-        if let Some(target) = self.inline_target_at(key, prefix_len)
+        if let Some(target) = self.inline_target(key)
             && let Some(run) = self.inline_equal_run(target)
         {
+            // An internal node whose separator keys are heads (D49) reads a
+            // key only on a tie, and most of its searches have none: they go
+            // no further than the inline keys, nor into a call.
+            if !Kind::IS_LEAF && NodePtr::<K, V, S>::has_separator_keys_in_heads() && run.is_empty()
+            {
+                return Err(run.start);
+            }
             return self.search_run(run, key, target);
         }
         let keys = self.reborrow().keys();
         match Self::plan().full_search() {
             KeySearch::Branchless => Self::branchless_search_index(keys, key.key()),
             KeySearch::Binary => {
-                Self::binary_search_index(keys, |probe| key.key().cmp(probe.borrow()))
+                Self::binary_search_index(keys, |probe: &K| key.key().cmp(probe.borrow()))
             }
-        }
-    }
-
-    /// Where `key`'s search of this node compares windows: at the node's
-    /// fence prefix, or at its local search prefix (D33) once `key` has the
-    /// bytes the node's keys share up to it. `Err` with the first or last
-    /// edge for a key without them, as it sorts before or after them all.
-    #[inline(always)]
-    pub(in crate::tree) fn search_prefix_len<Q>(
-        &self,
-        key: &SearchKey<'_, K, S, Q>,
-    ) -> Result<usize, usize>
-    where
-        K: Borrow<Q>,
-        Q: ?Sized,
-    {
-        let Some(local) = self.local_prefix_len() else {
-            return Ok(self.prefix_len());
-        };
-        core::hint::cold_path();
-        let first = &self.reborrow().keys()[0];
-        match key.cmp_prefix(first, self.prefix_len(), local) {
-            Some(Ordering::Less) => Err(0),
-            Some(Ordering::Greater) => Err(self.len()),
-            Some(Ordering::Equal) | None => Ok(local),
         }
     }
 
@@ -687,7 +591,7 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// It runs as the node's plan says. Keys with their own `InlineKey` impl
     /// compare by `Ord`, and search as their type picks (D19): branchless
     /// for plain data such as integers, whose run is the whole node where
-    /// their kept bytes all tie, as at a node of prefix 0, the root's. Std
+    /// their kept bytes all tie. Std
     /// byte strings search it by binary search, comparing as
     /// [`SearchKey::cmp_tied`] does, a word at a time from past the bytes
     /// the run shares.
@@ -708,9 +612,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         let candidates = self.reborrow().keys().slice(run.clone());
         let found = match Self::plan().tied_search() {
             KeySearch::Branchless => Self::branchless_search_index(candidates, key.key()),
-            KeySearch::Binary => {
-                Self::binary_search_index(candidates, |stored| key.cmp_tied::<Kind>(target, stored))
-            }
+            KeySearch::Binary => Self::binary_search_index(candidates, |stored: &K| {
+                key.cmp_tied::<Kind>(target, stored)
+            }),
         };
         found
             .map(|index| run.start + index)
@@ -727,9 +631,9 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
     /// so `base < len` at the end. `Ok(base)` is then `< len`, and
     /// `Err(base)`/`Err(base + 1)` are `<= len`.
-    fn branchless_search_index<Q>(keys: NodeKeys<'_, K>, key: &Q) -> Result<usize, usize>
+    fn branchless_search_index<'k, Q>(keys: impl KeyList<'k, K>, key: &Q) -> Result<usize, usize>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + 'k,
         Q: Ord + ?Sized,
     {
         let mut size = keys.len();
@@ -761,10 +665,13 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// In bounds by construction, whatever `cmp_key` answers: the loop keeps
     /// `low <= high <= len` and probes only `mid` with `low <= mid < high`,
     /// so `Ok(mid)` is `< len` and `Err(low)` is `<= len`.
-    fn binary_search_index(
-        keys: NodeKeys<'_, K>,
+    fn binary_search_index<'k>(
+        keys: impl KeyList<'k, K>,
         cmp_key: impl Fn(&K) -> Ordering,
-    ) -> Result<usize, usize> {
+    ) -> Result<usize, usize>
+    where
+        K: 'k,
+    {
         let (mut low, mut high) = (0, keys.len());
         while low < high {
             let mid = low + (high - low) / 2;
@@ -799,9 +706,18 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
         self.len() < self.min_len()
     }
 
+    /// The node's keys and the columns beside them: only for a node that
+    /// keeps keys, a leaf, or an internal node without inline keys (D49).
     fn key_slots(&self) -> KeySlots<K, S, Kind> {
         // SAFETY: the node is allocated, and of kind `Kind` (invariant 1).
         unsafe { self.node.key_slots::<Kind>() }
+    }
+
+    /// The arrays beside the node's keys: its inline keys and length tags.
+    #[inline(always)]
+    fn columns(&self) -> KeyColumns {
+        // SAFETY: the node is allocated, and of kind `Kind` (invariant 1).
+        unsafe { self.node.key_columns::<Kind>() }
     }
 }
 
@@ -1130,6 +1046,22 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Lea
         unsafe { self.node.value_slots() }
     }
 
+    /// The head key slot, where the key of the separator left of the leaf
+    /// is, if it has a head, in a map whose separator keys are heads (D49).
+    ///
+    /// # Panics
+    ///
+    /// If separator keys aren't heads in this map.
+    fn head_key_slot(&self) -> NonNull<K> {
+        assert!(
+            NodePtr::<K, V, S>::has_separator_keys_in_heads(),
+            "separator keys are heads only with inline keys"
+        );
+        // SAFETY: the node is an allocated leaf (invariant 1), in a map whose
+        // separator keys are heads (checked just above).
+        unsafe { self.node.head_key_slot() }
+    }
+
     /// Slot 0 is the head, slot `i + 1` value `i`.
     fn head_and_value_slots(&self) -> Slots<V> {
         // SAFETY: the node is an allocated leaf (invariant 1).
@@ -1137,7 +1069,29 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Lea
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, Internal> {
+impl<'a, K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Internal> {
+    /// Separator `index`'s key where it is the head of the leftmost leaf
+    /// right of it (D49): down edge `index + 1`, then first edges, to that
+    /// leaf.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`, or if that leaf has no head, which never happens
+    /// in a tree built by the node operations.
+    fn separator_key_in_head(self, index: usize) -> &'a K {
+        let mut node = self.edge_at(index + 1).descend();
+        loop {
+            node = match node.force() {
+                ForceResult::Leaf(leaf) => {
+                    return (leaf.head())
+                        .expect("the leaf right of a separator has a head")
+                        .into_key();
+                }
+                ForceResult::Internal(internal) => internal.first_edge().descend(),
+            };
+        }
+    }
+
     /// The window of a key beside edge `index`, the one left of it if there
     /// is one: a bound of the child there, which shares the child's prefix,
     /// at this node's prefix length. `None` if the node has no keys.
@@ -1152,18 +1106,28 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'_>, K, V, S, Internal> {
         Some(self.key_window(beside))
     }
 
-    /// `key`, from the child at edge `index` (a separator from its split),
-    /// with its window moved back to this node's prefix length, filled from
+    /// `separator`, from the child at edge `index` (from its split), with
+    /// its window moved back to this node's prefix length, filled from
     /// [`Self::bound_window`]. A node without keys is a new root, whose
-    /// only child, the old root, has prefix 0, as it does.
-    fn window_from_child(self, index: usize, key: InlinedKey<K, S>) -> InlinedKey<K, S> {
+    /// only child, the old root, has the tree's shared prefix, as it does
+    /// (D50).
+    fn window_from_child(self, index: usize, separator: Separator<K, S>) -> Separator<K, S> {
         match self.bound_window(index) {
-            Some(fill) => key.moved_back_to(fill),
+            Some(fill) => separator.moved_back_to(fill),
             None => {
-                debug_assert_eq!(key.window().prefix_len(), self.prefix_len());
-                key
+                debug_assert_eq!(separator.window().prefix_len(), self.prefix_len());
+                separator
             }
         }
+    }
+}
+
+impl<BorrowType, K, V, S: InlineKeyStrategy<K>> NodeRef<BorrowType, K, V, S, Internal> {
+    /// The node's separators: keys, or windows where separator keys are
+    /// heads (D49).
+    fn separator_slots(&self) -> SeparatorSlots<K, S> {
+        // SAFETY: the node is an allocated internal node (invariant 1).
+        unsafe { self.node.separator_slots() }
     }
 }
 
@@ -1198,19 +1162,111 @@ impl<BorrowType, K, V, S> NodeRef<BorrowType, K, V, S, LeafOrInternal> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V, S, Kind> {
-    /// The keys `0..len`, in order.
-    pub(crate) fn keys(self) -> NodeKeys<'a, K> {
+impl<'a, K, V, S: InlineKeyStrategy<K>> NodeRef<Immut<'a>, K, V, S, Leaf> {
+    /// The leaf's keys `0..len`, in order.
+    pub(super) fn leaf_keys(self) -> NodeKeys<'a, K> {
         // SAFETY: keys `0..len` are initialized and unchanged for `'a`
         // (invariant 1), and the last key's stride ends within the page
         // (`layout.rs`).
         unsafe { NodeKeys::new(self.key_slots().keys(), self.len()) }
     }
+}
+
+/// An internal node's separator keys `0..len`, in order, lent for `'a`
+/// (D17): its own, in a map without inline keys, or each the head key of the
+/// leftmost leaf right of it, in a map with them (D49), which getting one
+/// walks down to.
+pub(crate) enum SeparatorKeys<'a, K, V, S> {
+    InNode(NodeKeys<'a, K>),
+    InHeads {
+        node: NodeRef<Immut<'a>, K, V, S, Internal>,
+        start: usize,
+        len: usize,
+    },
+}
+
+impl<K, V, S> Clone for SeparatorKeys<'_, K, V, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K, V, S> Copy for SeparatorKeys<'_, K, V, S> {}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> SeparatorKeys<'a, K, V, S> {
+    /// The separator keys of `node`, as its map keeps them.
+    #[inline(always)]
+    pub(super) fn of(node: NodeRef<Immut<'a>, K, V, S, Internal>) -> Self {
+        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            Self::InHeads {
+                node,
+                start: 0,
+                len: node.len(),
+            }
+        } else {
+            // SAFETY: keys `0..len` are initialized and unchanged for `'a`
+            // (invariant 1), and the last key's stride ends within the
+            // page (`layout.rs`).
+            Self::InNode(unsafe { NodeKeys::new(node.key_slots().keys(), node.len()) })
+        }
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> KeyList<'a, K> for SeparatorKeys<'a, K, V, S> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        match self {
+            Self::InNode(keys) => keys.len(),
+            Self::InHeads { len, .. } => len,
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn get_unchecked(self, index: usize) -> &'a K {
+        match self {
+            // SAFETY: forwarded.
+            Self::InNode(keys) => unsafe { keys.get_unchecked(index) },
+            Self::InHeads { node, start, .. } => node.separator_key_in_head(start + index),
+        }
+    }
+
+    fn slice(self, range: Range<usize>) -> Self {
+        match self {
+            Self::InNode(keys) => Self::InNode(keys.slice(range)),
+            Self::InHeads { node, start, len } => {
+                assert!(
+                    range.start <= range.end && range.end <= len,
+                    "keys out of bounds"
+                );
+                Self::InHeads {
+                    node,
+                    start: start + range.start,
+                    len: range.end - range.start,
+                }
+            }
+        }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Index<usize> for SeparatorKeys<'_, K, V, S> {
+    type Output = K;
+
+    fn index(&self, index: usize) -> &K {
+        self.get(index).expect("key index out of bounds")
+    }
+}
+
+impl<'a, K: 'a, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V, S, Kind> {
+    /// The keys `0..len`, in order: a leaf's, or an internal node's
+    /// separator keys, each found in its head where they are heads (D49).
+    pub(crate) fn keys(self) -> Kind::Keys<'a, K, V, S> {
+        Kind::keys_of(self)
+    }
 
     /// The node's inline keys, if it has them (D18): inline key `i` is key
     /// `i`'s, for `i < len`, and a search may read the slots past them.
     pub(in crate::tree) fn inline_keys(self) -> Option<NodeInlineKeys<'a>> {
-        let slots = self.key_slots().inline_keys()?;
+        let slots = self.columns().inline_keys()?;
         // SAFETY: the node's inline-key slots number its capacity, all are
         // initialized (invariant 6), and none changes for `'a` (invariant
         // 1); they grow up, so memory order is index order.
@@ -1218,26 +1274,27 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<Immut<'a>, K, V,
     }
 
     /// Key `index`'s window: its inline key at the node's prefix length, or
-    /// [`Window::NONE`] in a node without inline keys.
+    /// [`Window::NONE`] in a node without inline keys. A node whose plan
+    /// keeps fewer bytes of it than a leaf reads it from the key again
+    /// (D43): an internal node's, from its head (D49).
     ///
     /// # Panics
     ///
     /// If `index >= len`.
     fn key_window(self, index: usize) -> Window {
         assert!(index < self.len(), "key index out of bounds");
-        if self.local_prefix_len().is_some() {
-            let plan = Self::plan();
-            let inliner = plan.inliner().expect("local prefix");
-            let window = inliner.inline_key_at(&self.keys()[0], self.prefix_len());
-            // Every key shares the bytes a window the node hands out keeps;
-            // a narrow plan's raw windows have zeros after them.
-            let kept_bits = 8 * plan.local_prefix_min_extra() as u32;
-            let window = window & !InlineWord::MAX.checked_shr(kept_bits).unwrap_or(0);
-            return Window::new(self.prefix_len(), window);
-        }
-        // SAFETY: `index < len` and the node has no active local windows.
-        // The slots rehydrate narrow heap-byte windows before export.
-        unsafe { self.key_slots().window(index) }
+        let plan = Self::plan();
+        let Some(inline_keys) = self.inline_keys() else {
+            return Window::NONE;
+        };
+        let window = match plan.inliner() {
+            Some(inliner) if plan.rehydrates_windows() => {
+                let key = self.keys().get(index).expect("key index out of bounds");
+                inliner.inline_key_at(key, self.prefix_len())
+            }
+            _ => inline_keys.inline_key(index),
+        };
+        Window::new(self.prefix_len(), window)
     }
 }
 
@@ -1265,7 +1322,6 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
         // (invariant 1); the length and initialization requirements are
         // forwarded. Growing preserves the untouched inline-key padding.
         unsafe { self.node.set_len(len) }
-        self.refresh_local_prefix();
     }
 
     /// Sets the length; the inline-key slots a shorter length leaves get
@@ -1276,57 +1332,33 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
     ///
     /// `len` is at most the capacity, and keys `0..len` (with their inline
     /// keys, and in a leaf, values `0..len`; in an internal node, edges
-    /// `0..=len`) are initialized and valid at this call: refreshing an
-    /// internal node's local prefix may immediately read its live keys.
-    /// Any active local windows have been normalized before key mutation.
+    /// `0..=len`) are initialized and valid at this call.
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         let old_len = self.len();
         // SAFETY: `old_len <= capacity`, and this handle is exclusive.
-        unsafe { self.key_slots().columns().mark_vacant(len..old_len) };
+        unsafe { self.columns().mark_vacant(len..old_len) };
         // SAFETY: the node is allocated and this handle is exclusive
         // (invariant 1); `len <= capacity` is forwarded.
         unsafe { self.node.set_len(len) }
-        self.refresh_local_prefix();
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
-    /// Installs prepared local search windows, or conservative fence windows
-    /// when `prefix_len` is zero. No key or user callback is read here.
-    pub(super) fn set_local_windows(
-        &mut self,
-        prefix_len: usize,
-        windows: impl ExactSizeIterator<Item = InlineWord>,
-    ) {
-        assert_eq!(windows.len(), self.len());
-        let slots = self.key_slots().inline_keys().expect("local prefix");
-        // SAFETY: one plain-data word per initialized key, within capacity;
-        // this handle owns exclusive access to slots and the inline header.
-        unsafe {
-            for (index, window) in (0..self.len()).zip(windows) {
-                slots.write(index, window);
-            }
-            self.node.set_search_prefix_len(prefix_len);
-        }
-    }
-
     /// Moves the node's prefix length back to `fill`'s, and every inline key
     /// with it ([`Window::moved_back_to`]), given `fill`, the window there of
     /// a key whose encoding shares the node's prefix: one of the node's
-    /// fences, or one of its keys. An active local search prefix first
-    /// reads one key's window to restore fence windows; subsequent
-    /// shifts read no key and invoke no user code. Does nothing if the node's
+    /// fences, one of its keys, or what every key of the tree shares (D50).
+    /// Reads no key and invokes no user code. Does nothing if the node's
     /// prefix is no longer than `fill`'s, which includes every node without
     /// inline keys.
     pub(in crate::tree) fn move_prefix_back_to(&mut self, fill: Window) {
-        self.normalize_local_prefix();
         let prefix_len = self.prefix_len();
         if prefix_len <= fill.prefix_len() {
             return;
         }
         let len = self.len();
-        let Some(inline_keys) = self.key_slots().inline_keys() else {
+        let Some(inline_keys) = self.columns().inline_keys() else {
             return;
         };
         // SAFETY: inline keys `0..len` are initialized (invariants 1 and 6),
@@ -1357,7 +1389,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
     ) {
         let len = self.len();
         assert_eq!(inline_keys.len(), len, "one inline key per key");
-        let Some(slots) = self.key_slots().inline_keys() else {
+        let Some(slots) = self.columns().inline_keys() else {
             return;
         };
         // SAFETY: each slot written has an index below `len <= capacity`,
@@ -1369,7 +1401,6 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
             }
             self.node.set_prefix_len(prefix_len);
         }
-        self.refresh_local_prefix();
     }
 
     /// Gives a node with no keys `prefix_len`, which, with no inline keys to
@@ -1387,21 +1418,57 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeMut<'_, K, V, S, Kind> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Leaf> {
-    /// Makes `value` the leaf's head, and returns the old head if it had one.
-    /// Keeping heads where separators expect them is the caller's business.
-    pub(crate) fn replace_head(&mut self, value: V) -> Option<V> {
-        let head = self.head_and_value_slots();
-        // SAFETY: this handle is exclusive (invariant 1). Head slot 0 is
-        // initialized exactly when the header says so (invariant 5): then it
-        // is replaced, otherwise written and flagged.
+    /// Gives the leaf, which has no head, `value` as its head, the value of
+    /// the separator left of it, and `key`, that separator's key, where
+    /// separator keys are heads (D49); `key` is `None` where internal nodes
+    /// keep them. Keeping heads where separators expect them is the caller's
+    /// business.
+    ///
+    /// # Panics
+    ///
+    /// If the leaf has a head, or if `key` is not what this map keeps in
+    /// heads; the leaf is unchanged then.
+    pub(crate) fn put_head(&mut self, key: Option<K>, value: V) {
+        // SAFETY: the node is an allocated leaf (invariant 1).
+        assert!(!unsafe { self.node.has_head() }, "the leaf has a head");
+        assert_eq!(
+            key.is_some(),
+            NodePtr::<K, V, S>::has_separator_keys_in_heads(),
+            "a head's key goes where the map keeps separator keys"
+        );
+        // SAFETY: this handle is exclusive (invariant 1), and the leaf has no
+        // head (checked above), so its head slot, and its head key slot
+        // where separator keys are heads (also checked), hold nothing:
+        // written, then flagged (invariant 5).
         unsafe {
-            if self.node.has_head() {
-                Some(head.slot(0).replace(value))
-            } else {
-                head.slot(0).write(value);
-                self.node.set_has_head(true);
-                None
+            if let Some(key) = key {
+                self.head_key_slot().write(key);
             }
+            self.head_and_value_slots().slot(0).write(value);
+            self.node.set_has_head(true);
+        }
+    }
+
+    /// Gives the leaf, which has no head, the head of `separator`, the
+    /// separator just left of it: `value`, and where separator keys are
+    /// heads, the key (D49). Returns the separator as its internal node takes
+    /// it: the key where internal nodes keep keys, or its window.
+    ///
+    /// # Panics
+    ///
+    /// If the leaf has a head; it is unchanged then.
+    pub(crate) fn put_separator_head(
+        &mut self,
+        separator: InlinedKey<K, S>,
+        value: V,
+    ) -> Separator<K, S> {
+        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let (key, window) = separator.into_parts();
+            self.put_head(Some(key), value);
+            Separator::without_key(window)
+        } else {
+            self.put_head(None, value);
+            Separator::with_key(separator)
         }
     }
 }
@@ -1479,24 +1546,25 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, Internal> {
         let len = self.len();
         assert!(index <= len, "cutting a node past its last edge");
         self.assert_child_level(&first_child);
-        self.normalize_local_prefix();
         let count = len - index;
         let right = NodePtr::from_fresh_page(page);
-        // SAFETY: `index <= len`, so keys (with their inline keys)
-        // `index..len` and edges `index + 1..=len` are initialized; they move
-        // to keys `0..count` and edges `1..=count` of `right`, a fresh
+        // SAFETY: `index <= len`, so separators `index..len` and edges
+        // `index + 1..=len` are initialized; they move to separators
+        // `0..count` and edges `1..=count` of `right`, a fresh
         // internal node of the same map, so `false` says its kind, after
         // `first_child` as its edge 0, a subtree one level down (checked
         // above), which `right` owns from now on (invariant 2). This handle
         // is exclusive, and `right` is reached by nothing else yet.
-        // Afterwards this node holds keys `0..index` and edges `0..=index`.
-        // The keys keep their windows, at this node's prefix length, which
-        // `right` takes.
+        // Afterwards this node holds separators `0..index` and edges
+        // `0..=index`. The separators keep their windows, at this node's
+        // prefix length, which `right` takes. Where separator keys are heads
+        // (D49), each stays in the leaf right of it, below the edge that
+        // moves with it.
         unsafe {
             right.set_prefix_len(self.prefix_len());
             right.edge_slots().slot(0).write(first_child.node);
-            self.key_slots()
-                .move_run_to(index, count, right.key_slots::<Internal>(), 0);
+            self.separator_slots()
+                .move_run_to(index, count, right.separator_slots(), 0);
             self.edge_slots()
                 .move_run_to(index + 1, count, right.edge_slots(), 1);
             right.set_len(count);
@@ -1565,7 +1633,7 @@ impl<B: CopyableBorrow, K, V, S> Copy for LeafRun<B, K, V, S> {}
 
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> LeafRun<B, K, V, S> {
     fn uses_pointers() -> bool {
-        NodePtr::<K, V, S>::has_paired_entries::<Leaf>()
+        NodePtr::<K, V, S>::has_paired_leaf_entries()
             && NodePtr::<K, V, S>::leaf_layout().keys.key_stride != 0
     }
 
@@ -2016,21 +2084,28 @@ impl<BorrowType, K, V, S> Kv<NodeRef<BorrowType, K, V, S, LeafOrInternal>> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> Kv<NodeRef<Immut<'a>, K, V, S, Kind>> {
+impl<'a, K: 'a, V, S: InlineKeyStrategy<K>, Kind: PageKind> Kv<NodeRef<Immut<'a>, K, V, S, Kind>> {
+    /// The key: a leaf's, or a separator's, in its internal node or, where
+    /// separator keys are heads, in the leaf right of it (D49).
     pub(crate) fn into_key(self) -> &'a K {
-        // SAFETY: `index < len`, so key `index` is initialized, and it stays
-        // unchanged for `'a` (invariants 1 and 3).
-        unsafe { self.node.key_slots().keys().slot(self.index).as_ref() }
+        // SAFETY: `index < len` (invariant 3).
+        unsafe { self.node.keys().get_unchecked(self.index) }
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: PageKind>
+impl<'a, K: 'a, V, S: InlineKeyStrategy<K>, Kind: PageKind>
     Kv<NodeRef<ValMut<'a, K, V>, K, V, S, Kind>>
 {
+    /// The key, shared for `'a`; see the shared [`Kv::into_key`].
     pub(crate) fn into_key(self) -> &'a K {
-        // SAFETY: `index < len`, so key `index` is initialized, and it stays
-        // unchanged for `'a`, with no `&mut` to it (invariants 1 and 3).
-        unsafe { self.node.key_slots().keys().slot(self.index).as_ref() }
+        // SAFETY: the structure and keys of the subtree stay unchanged for
+        // `'a`, and nothing writes a key (`ValMut`): a shared handle may read
+        // them, as it does here, and only them, never a value, which may be
+        // lent out exclusively.
+        let node: NodeRef<Immut<'a>, K, V, S, Kind> =
+            unsafe { NodeRef::from_raw_parts(self.node.node, self.node.height) };
+        // SAFETY: `index < len` (invariant 3).
+        unsafe { node.keys().get_unchecked(self.index) }
     }
 }
 
@@ -2072,21 +2147,65 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind>
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> Kv<NodeMut<'_, K, V, S, Kind>> {
+impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'_, K, V, S, Leaf>> {
     /// Replaces the key and its inline key, returning the old key. Keeping
     /// the keys in order is the caller's business.
-    ///
-    /// The new key's window may be at a longer prefix length, if it comes
-    /// from a node below this key whose bounds it is, such as the leaf right
-    /// of a separator: it moves back to this node's, filled from the old
-    /// key's window.
     pub(crate) fn replace_key(&mut self, key: InlinedKey<K, S>) -> K {
-        self.node.normalize_local_prefix();
-        let key = key.moved_back_to(self.window());
         // SAFETY: `index < len`, so key `index` is initialized, with its
         // inline key, and this handle is exclusive.
-        let old = unsafe { self.node.key_slots().replace(self.index, key).into_key() };
-        self.node.refresh_local_prefix();
+        unsafe { self.node.key_slots().replace(self.index, key).into_key() }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'_, K, V, S, Internal>> {
+    /// Replaces the separator with `separator`, returning the old one, a
+    /// key where internal nodes keep keys, a window where they are heads
+    /// (D49). Keeping the keys in order, and heads where separators expect
+    /// them, is the caller's business.
+    ///
+    /// The new separator's window may be at a longer prefix length, if it
+    /// comes from a node below it whose bounds it is, such as the leaf right
+    /// of it: it moves back to this node's, filled from the window the node
+    /// hands out for the separator there now.
+    pub(crate) fn replace_separator(&mut self, separator: Separator<K, S>) -> Separator<K, S> {
+        let separator = separator.moved_back_to(self.window());
+        // SAFETY: `index < len`, so separator `index` is initialized, and
+        // this handle is exclusive.
+        unsafe { self.node.separator_slots().replace(self.index, separator) }
+    }
+
+    /// Replaces the separator's key and its inline key, returning the old
+    /// key: in its internal node, or where separator keys are heads, in the
+    /// leaf right of it (D49). Keeping the keys in order is the caller's
+    /// business.
+    pub(crate) fn replace_key(&mut self, key: InlinedKey<K, S>) -> K {
+        if !NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let old = self.replace_separator(Separator::with_key(key));
+            return (old.into_inlined_key())
+                .expect("a separator of a node that keeps keys is a key")
+                .into_key();
+        }
+        let (key, window) = key.into_parts();
+        let mut node = self.reborrow_mut().right_edge().descend();
+        let old = loop {
+            node = match node.force() {
+                ForceResult::Leaf(leaf) => {
+                    let head = leaf.head_key_slot();
+                    // SAFETY: the leaf right of a separator has a head,
+                    // whose key slot is initialized (invariant 5), and this
+                    // handle is exclusive.
+                    break unsafe {
+                        assert!(
+                            leaf.node.has_head(),
+                            "the leaf right of a separator has a head"
+                        );
+                        head.replace(key)
+                    };
+                }
+                ForceResult::Internal(internal) => internal.first_edge().descend(),
+            };
+        };
+        self.replace_separator(Separator::without_key(window));
         old
     }
 }
@@ -2147,7 +2266,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Leaf>> {
         // and value `index` share an entry, read out before the entries after
         // it shift down whole (D29). The edge has `index <= len - 1`.
         unsafe {
-            let (key, value) = if NodePtr::<K, V, S>::has_paired_entries::<Leaf>() {
+            let (key, value) = if NodePtr::<K, V, S>::has_paired_leaf_entries() {
                 let value = leaf.value_slots().slot(index).read();
                 let key = leaf.key_slots().remove_shifting_entries(index, len);
                 (key.into_key(), value)
@@ -2162,36 +2281,26 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Leaf>> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Internal>> {
-    /// Removes this separator and the edge to its right, shifting later keys
-    /// and edges left, and returns both: the edge as the subtree it led to,
-    /// whose leftmost leaf holds the separator's value as its head (D17).
-    pub(crate) fn remove_with_right_child(self) -> (K, Subtree<K, V, S>) {
+    /// Removes this separator and the edge to its right, shifting later
+    /// separators and edges left, and returns both: the edge as the subtree
+    /// it led to, whose leftmost leaf holds the separator's value as its
+    /// head (D17), and where separator keys are heads, its key (D49).
+    pub(crate) fn remove_with_right_child(self) -> (Separator<K, S>, Subtree<K, V, S>) {
         let Self {
             node: mut parent,
             index,
         } = self;
-        parent.normalize_local_prefix();
         let len = parent.len();
-        // SAFETY: `index < len`, so key `index` (with its inline key) and edge
-        // `index + 1` are initialized; afterwards keys `0..len - 1` and edges
-        // `0..len` are. Paired, they share an entry, read out before the
-        // entries after it shift down whole (D29). The edge was the root of a
-        // well-formed subtree one level down that the node owned, and the
-        // returned `Subtree` owns now (invariant 2).
+        // SAFETY: `index < len`, so separator `index` and edge `index + 1`
+        // are initialized; afterwards separators `0..len - 1` and edges
+        // `0..len` are. The edge was the root of a well-formed subtree one
+        // level down that the node owned, and the returned `Subtree` owns now
+        // (invariant 2).
         unsafe {
-            let (key, child) = if NodePtr::<K, V, S>::has_paired_entries::<Internal>() {
-                let child = parent.edge_slots().slot(index + 1).read();
-                let key = parent.key_slots().remove_shifting_entries(index, len);
-                (key.into_key(), child)
-            } else {
-                let key = parent.key_slots().remove(index, len);
-                (
-                    key.into_key(),
-                    parent.edge_slots().remove(index + 1, len + 1),
-                )
-            };
+            let separator = parent.separator_slots().remove(index, len);
+            let child = parent.edge_slots().remove(index + 1, len + 1);
             parent.set_len(len - 1);
-            (key, Subtree::from_raw_parts(child, parent.height - 1))
+            (separator, Subtree::from_raw_parts(child, parent.height - 1))
         }
     }
 
@@ -2204,7 +2313,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Kv<NodeMut<'a, K, V, S, Internal>> {
     /// If the children are of the other kind; or if they are leaves and the
     /// right one has no head to hold the separator's value, which never
     /// happens in a tree built by the node operations (D17).
-    pub(crate) fn into_balancing_context<ChildKind: TrailingSlots>(
+    pub(crate) fn into_balancing_context<ChildKind: Rebalance>(
         self,
     ) -> BalancingContext<'a, K, V, S, ChildKind> {
         let child_height = self.node.height - 1;
@@ -2247,6 +2356,42 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<Immut<'a>, K, V, S, Leaf>> 
         // unchanged for `'a` (invariant 1).
         unsafe { self.leaf.head_and_value_slots().slot(0).as_ref() }
     }
+
+    /// The head's key, the key of the separator left of the leaf, where
+    /// separator keys are heads (D49).
+    ///
+    /// # Panics
+    ///
+    /// If they aren't, in this map.
+    pub(crate) fn into_key(self) -> &'a K {
+        let slot = self.leaf.head_key_slot();
+        // SAFETY: separator keys are heads (checked by `head_key_slot`), so
+        // the head's key slot is initialized with the head (invariants 3 and
+        // 5) and stays unchanged for `'a` (invariant 1).
+        unsafe { slot.as_ref() }
+    }
+
+    /// The head's value, and its key where separator keys are heads (D49).
+    pub(crate) fn into_key_and_value(self) -> (Option<&'a K>, &'a V) {
+        let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
+            .then(|| Self { leaf: self.leaf }.into_key());
+        (key, self.into_value())
+    }
+
+    /// The entry of `separator`, whose value this head is: its key, in its
+    /// internal node or, where separator keys are heads, here (D49), and
+    /// this head.
+    pub(crate) fn into_separator_entry(
+        self,
+        separator: Kv<NodeRef<Immut<'a>, K, V, S, Internal>>,
+    ) -> (&'a K, &'a V) {
+        let key = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            Self { leaf: self.leaf }.into_key()
+        } else {
+            separator.into_key()
+        };
+        (key, self.into_value())
+    }
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<ValMut<'a, K, V>, K, V, S, Leaf>> {
@@ -2261,6 +2406,31 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeRef<ValMut<'a, K, V>, K, V, S, 
         // apart from every key and value, and the caller vouches that this
         // is its only reference.
         unsafe { self.leaf.head_and_value_slots().slot(0).as_mut() }
+    }
+
+    /// The entry of `separator`, whose value this head is: its key, shared,
+    /// in its internal node or, where separator keys are heads, here (D49),
+    /// and this head, exclusive for `'a`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::into_value_mut`].
+    pub(crate) unsafe fn into_separator_entry_mut(
+        self,
+        separator: Kv<NodeRef<ValMut<'a, K, V>, K, V, S, Internal>>,
+    ) -> (&'a K, &'a mut V) {
+        let key = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let slot = self.leaf.head_key_slot();
+            // SAFETY: separator keys are heads (checked by `head_key_slot`),
+            // so the head's key slot is initialized with the head
+            // (invariants 3 and 5); keys stay unchanged and shared for `'a`
+            // (`ValMut`), in slots apart from every value.
+            unsafe { slot.as_ref() }
+        } else {
+            separator.into_key()
+        };
+        // SAFETY: forwarded from the caller.
+        (key, unsafe { self.into_value_mut() })
     }
 }
 
@@ -2285,30 +2455,33 @@ impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Dying<K, V>, K, V, S, Leaf>> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Kv<NodeRef<Dying<K, V>, K, V, S, Internal>> {
-    /// Moves the separator key out of its slot; see
-    /// [`Kv::take_key_value`].
-    ///
-    /// # Safety
-    ///
-    /// As for [`Kv::take_key_value`].
-    pub(crate) unsafe fn take_key(self) -> K {
-        // SAFETY: as for `take_key_value`.
-        unsafe { self.node.key_slots().keys().slot(self.index).read() }
-    }
-}
-
 impl<K, V, S: InlineKeyStrategy<K>> Head<NodeRef<Dying<K, V>, K, V, S, Leaf>> {
-    /// Moves the head out of its slot, which the leaf's header still
-    /// flags; see [`Kv::take_key_value`].
+    /// Moves the entry of `separator`, whose value this head is, out of its
+    /// slots, which the nodes keep counting: its key, from its internal node
+    /// or, where separator keys are heads, from here (D49), and this head;
+    /// see [`Kv::take_key_value`].
     ///
     /// # Safety
     ///
-    /// As for [`Kv::take_key_value`].
-    pub(crate) unsafe fn take_value(self) -> V {
-        // SAFETY: the head is initialized unless moved out (invariants 3 and
-        // 5), which the caller vouches it is not, and only now.
-        unsafe { self.leaf.head_and_value_slots().slot(0).read() }
+    /// As for [`Kv::take_key_value`]: the separator's key and this head are
+    /// moved out only this once, and nothing reads their slots afterward.
+    pub(crate) unsafe fn take_separator_entry(
+        self,
+        separator: Kv<NodeRef<Dying<K, V>, K, V, S, Internal>>,
+    ) -> (K, V) {
+        // SAFETY: the separator, a key where internal nodes keep keys, and
+        // the head, with its key where separator keys are heads, are
+        // initialized unless moved out (invariants 1, 3 and 5), which the
+        // caller vouches they are not, and only now.
+        unsafe {
+            let key = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                self.leaf.head_key_slot().read()
+            } else {
+                let keys = separator.node.key_slots().keys();
+                keys.slot(separator.index).read()
+            };
+            (key, self.leaf.head_and_value_slots().slot(0).read())
+        }
     }
 }
 
@@ -2351,26 +2524,30 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeMut<'a, K, V, S, Leaf>> {
         unsafe { self.leaf.head_and_value_slots().slot(0).as_mut() }
     }
 
-    /// Takes the head out of the leaf, which then has none, and returns it
-    /// with the leaf.
-    pub(crate) fn remove(self) -> (V, NodeMut<'a, K, V, S, Leaf>) {
+    /// Takes the head out of the leaf, which then has none, and returns it,
+    /// with its key where separator keys are heads (D49), and the leaf.
+    pub(crate) fn remove(self) -> (Option<K>, V, NodeMut<'a, K, V, S, Leaf>) {
         let Self { leaf } = self;
-        // SAFETY: the head is initialized (invariants 3 and 5) and is read
-        // out, and the header then says the leaf has none; this handle is
-        // exclusive.
+        // SAFETY: the head is initialized, and so is its key where separator
+        // keys are heads (invariants 3 and 5); both are read out, and the
+        // header then says the leaf has none; this handle is exclusive.
         unsafe {
+            let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
+                .then(|| leaf.head_key_slot().read());
             let value = leaf.head_and_value_slots().slot(0).read();
             leaf.node.set_has_head(false);
-            (value, leaf)
+            (key, value, leaf)
         }
     }
 
-    /// Takes out the head and the first key, whose value becomes the new
-    /// head, and returns both; `None`, changing nothing, if the leaf has no
-    /// keys. This is how the leaf right of a separator being removed gives
-    /// up the separator's value, its head, and hands up the next key, with
-    /// its inline key, to take the separator's place (D17).
-    pub(crate) fn remove_with_first_key(self) -> Option<(V, InlinedKey<K, S>)> {
+    /// Takes out the head and the first key, whose value, and where
+    /// separator keys are heads, the key itself, become the new head (D49),
+    /// and returns what the separator being removed gives up and what takes
+    /// its place; `None`, changing nothing, if the leaf has no keys. This is
+    /// how the leaf right of a separator being removed gives up the
+    /// separator's value, its head, and hands up the next key, to take the
+    /// separator's place (D17).
+    pub(crate) fn remove_with_first_key(self) -> Option<HeadSuccession<K, V, S>> {
         let Self { mut leaf } = self;
         let len = leaf.len();
         if len == 0 {
@@ -2380,15 +2557,37 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Head<NodeMut<'a, K, V, S, Leaf>> {
         // and is read out, shifting keys `1..len` down. The head is
         // initialized (invariants 3 and 5), so head-and-value slots `0..=len`
         // are: slot 0, the head, is read out, and value 0 shifts into it, so
-        // the leaf still has a head. Keys and values `0..len - 1` stay
-        // initialized; this handle is exclusive.
+        // the leaf still has a head. Where separator keys are heads, so is
+        // the head's key slot, swapped for key 0. Keys and values
+        // `0..len - 1` stay initialized; this handle is exclusive.
         unsafe {
-            let key = leaf.key_slots().remove(0, len);
-            let head = leaf.head_and_value_slots().remove(0, len + 1);
+            let first_key = leaf.key_slots().remove(0, len);
+            let value = leaf.head_and_value_slots().remove(0, len + 1);
+            let (removed_key, successor) = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                let (first_key, window) = first_key.into_parts();
+                let removed_key = leaf.head_key_slot().replace(first_key);
+                (Some(removed_key), Separator::without_key(window))
+            } else {
+                (None, Separator::with_key(first_key))
+            };
             leaf.set_len(len - 1);
-            Some((head, key))
+            Some(HeadSuccession {
+                removed_key,
+                value,
+                successor,
+            })
         }
     }
+}
+
+/// What the leaf right of a separator being removed gives up and hands up
+/// (D17): the separator's value, its head, and where separator keys are
+/// heads, its key (D49); and the separator that takes its place, the leaf's
+/// first key, now its head's.
+pub(crate) struct HeadSuccession<K, V, S> {
+    pub(crate) removed_key: Option<K>,
+    pub(crate) value: V,
+    pub(crate) successor: Separator<K, S>,
 }
 
 /// An [`Edge`] in a node with room for one more entry: `len < capacity`.
@@ -2436,7 +2635,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Leaf>> 
         // `index` on shift up whole, and the new pair goes into the entry
         // that frees (D29).
         unsafe {
-            if NodePtr::<K, V, S>::has_paired_entries::<Leaf>() {
+            if NodePtr::<K, V, S>::has_paired_leaf_entries() {
                 leaf.key_slots().insert_shifting_entries(index, len, key);
                 leaf.value_slots().slot(index).write(value);
             } else {
@@ -2450,10 +2649,11 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Leaf>> 
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Internal>> {
-    /// Inserts separator `key`, with its inline key, at this edge with
-    /// `right_child` as the edge to its right, shifting later keys and edges
-    /// right, and returns its position. The separator's value is the head of
-    /// `right_child`'s leftmost leaf (D17).
+    /// Inserts `separator` at this edge with `right_child` as the edge to
+    /// its right, shifting later separators and edges right, and returns its
+    /// position. The separator's value is the head of `right_child`'s
+    /// leftmost leaf (D17), and where separator keys are heads, so is its
+    /// key (D49).
     ///
     /// # Panics
     ///
@@ -2461,12 +2661,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
     /// unchanged then.
     pub(crate) fn insert_fit(
         self,
-        key: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         right_child: Subtree<K, V, S>,
     ) -> Kv<NodeMut<'a, K, V, S, Internal>> {
         self.0.node.assert_child_level(&right_child);
         // SAFETY: checked just above.
-        unsafe { self.insert_fit_unchecked(key, right_child) }
+        unsafe { self.insert_fit_unchecked(separator, right_child) }
     }
 
     /// # Safety
@@ -2474,34 +2674,25 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
     /// `right_child` is exactly one level below this node.
     unsafe fn insert_fit_unchecked(
         self,
-        key: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         right_child: Subtree<K, V, S>,
     ) -> Kv<NodeMut<'a, K, V, S, Internal>> {
         let Edge {
             node: mut parent,
             index,
         } = self.0;
-        parent.normalize_local_prefix();
         let len = parent.len();
-        let key = parent.reborrow().window_from_child(index, key);
+        let separator = parent.reborrow().window_from_child(index, separator);
         // SAFETY: `index <= len < capacity` (invariants 3 and 4), so
-        // `index + 1 <= len + 1 < capacity + 1`; keys (with their inline keys)
-        // `0..len` and edges `0..=len` are initialized, and one more of each
-        // afterwards. The new edge is the root of a well-formed subtree one
-        // level down (the caller), owned by the `Subtree` given up here
-        // (invariant 2). Paired, the entries from key `index` and edge
-        // `index + 1` on shift up whole, and the new pair goes into the entry
-        // that frees (D29).
+        // `index + 1 <= len + 1 < capacity + 1`; separators `0..len` and
+        // edges `0..=len` are initialized, and one more of each afterwards.
+        // The new edge is the root of a well-formed subtree one level down
+        // (the caller), owned by the `Subtree` given up here (invariant 2).
         unsafe {
-            if NodePtr::<K, V, S>::has_paired_entries::<Internal>() {
-                parent.key_slots().insert_shifting_entries(index, len, key);
-                parent.edge_slots().slot(index + 1).write(right_child.node);
-            } else {
-                parent.key_slots().insert(index, len, key);
-                parent
-                    .edge_slots()
-                    .insert(index + 1, len + 1, right_child.node);
-            }
+            parent.separator_slots().insert(index, len, separator);
+            parent
+                .edge_slots()
+                .insert(index + 1, len + 1, right_child.node);
             parent.grow_len(len + 1);
             Kv::new_unchecked(parent, index)
         }
@@ -2509,14 +2700,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FittingEdge<NodeMut<'a, K, V, S, Interna
 }
 
 /// A full node split in two: the node keeps its lower entries as `left`,
-/// `separator` is the key for the parent, with the inline key it had, and
-/// `right` is a new node at the same height with the upper entries. The
+/// `separator` is the separator for the parent, with the inline key it had,
+/// and `right` is a new node at the same height with the upper entries. The
 /// separator's value is the head of `right`'s leftmost leaf: in a leaf
-/// split, of `right` itself (D17). `inserted` tells where the new entry
-/// went.
+/// split, of `right` itself (D17), and so is its key where separator keys
+/// are heads (D49). `inserted` tells where the new entry went.
 pub(crate) struct Split<'a, K, V, S, Kind> {
     pub(crate) left: NodeMut<'a, K, V, S, Kind>,
-    pub(crate) separator: InlinedKey<K, S>,
+    pub(crate) separator: Separator<K, S>,
     pub(crate) right: Subtree<K, V, S, Kind>,
     pub(crate) inserted: InsertionSide,
 }
@@ -2553,7 +2744,8 @@ impl InsertionSide {
 impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Leaf>> {
     /// Splits the full leaf and inserts `key`/`value` on the side where this
     /// edge ended up. The separator's value becomes the right leaf's head,
-    /// and the left leaf keeps its own head, if any (D17).
+    /// with its key where separator keys are heads (D49), and the left leaf
+    /// keeps its own head, if any (D17).
     pub(crate) fn split_and_insert(
         self,
         right_page: FreshPage<K, V, S, Leaf>,
@@ -2568,9 +2760,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Leaf>> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>> {
-    /// Splits the full internal node and inserts separator `key`, with
+    /// Splits the full internal node and inserts `separator`, with
     /// `right_child` as the edge to its right, on the side where this edge
-    /// ended up. Keys and edges move; no leaf changes.
+    /// ended up. Separators and edges move; no leaf changes.
     ///
     /// # Panics
     ///
@@ -2579,7 +2771,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>>
     pub(crate) fn split_and_insert(
         self,
         right_page: FreshPage<K, V, S, Internal>,
-        key: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         right_child: Subtree<K, V, S>,
     ) -> Split<'a, K, V, S, Internal> {
         self.0.node.assert_child_level(&right_child);
@@ -2588,13 +2780,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> FullEdge<NodeMut<'a, K, V, S, Internal>>
         // halves are at the original height, checked against `right_child`
         // above.
         unsafe {
-            split.fitting_edge().insert_fit_unchecked(key, right_child);
+            split
+                .fitting_edge()
+                .insert_fit_unchecked(separator, right_child);
         }
         split
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> FullEdge<NodeMut<'a, K, V, S, Kind>> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: Rebalance> FullEdge<NodeMut<'a, K, V, S, Kind>> {
     /// Leave room where entries are arriving. An insertion at either end
     /// leaves that side about one quarter full and the other side denser;
     /// an interior insertion divides the free space evenly. The active side
@@ -2619,52 +2813,28 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> FullEdge<NodeMut<'a
     /// tells where the new entry goes: left if this edge is left of the
     /// separator, right otherwise. Both sides have room.
     ///
-    /// The separator key moves up, with its inline key. In a leaf, its value
-    /// stays behind as the head of the right leaf (D17). The right half goes
-    /// into `right_page`, a page for the same kind of node as this one.
+    /// The separator goes up, as [`Rebalance::split_off`] takes it out. In a
+    /// leaf, its value stays behind as the head of the right leaf (D17), with
+    /// its key where separator keys are heads (D49). The right half goes into
+    /// `right_page`, a page for the same kind of node as this one.
     fn split_for_insert(self, right_page: FreshPage<K, V, S, Kind>) -> Split<'a, K, V, S, Kind> {
         let Edge {
             node: mut left,
             index,
         } = self.0;
-        left.normalize_local_prefix();
         let len = left.len();
         let separator_index = Self::separator_index(len, index, left.min_len());
         debug_assert!(separator_index < len);
-        let right_len = len - separator_index - 1;
         let right = NodePtr::from_fresh_page(right_page);
-        // SAFETY: `right` is a fresh node, reached by nothing else; it takes
-        // the prefix length of the keys and inline keys it is about to get.
-        unsafe { right.set_prefix_len(left.prefix_len()) };
         // SAFETY: `separator_index < len == capacity` (invariant 4 and the
-        // policy). Keys `separator_index + 1..len` are initialized and move,
-        // with their inline keys, to the start of `right`, a fresh page of the
-        // same kind and map (both are `Kind`, `K`, `V`, `S`). So do trailing
-        // slots `separator_index + 1..=len`, to slots `0..=right_len`: in a
-        // leaf, the values of keys `separator_index..len`, so that the
-        // separator's becomes the right leaf's head, which its header then
-        // flags (invariant 5); in an internal node, the edges right of the
-        // separator. Key `separator_index` is then the last initialized one
-        // on the left and is read out, with its inline key, leaving
-        // `separator_index` keys and `separator_index + 1` trailing slots
-        // there; the left node's slot 0 is untouched.
+        // policy), and `right` is a fresh node of the same kind and map,
+        // reached by nothing else, at `left`'s prefix length once set here.
         let separator = unsafe {
-            left.key_slots().move_run_to(
-                separator_index + 1,
-                right_len,
-                right.key_slots::<Kind>(),
-                0,
-            );
-            Kind::move_run(left.node, separator_index + 1, right_len + 1, right, 0);
-            Kind::set_has_first_slot(right);
-            right.set_len(right_len);
-            let separator = left.key_slots().read(separator_index);
-            left.set_len(separator_index);
-            separator
+            right.set_prefix_len(left.prefix_len());
+            Kind::split_off(&mut left, separator_index, right)
         };
         // SAFETY: `right` now holds a well-formed node of the same kind and
-        // height as `left`: its keys, inline keys, values and head, or keys,
-        // inline keys and edges, came from `left`.
+        // height as `left`, which `split_off` filled from it.
         let right = unsafe { Subtree::from_raw_parts(right, left.height) };
         let inserted = if index <= separator_index {
             InsertionSide::Left(index)
@@ -2746,10 +2916,15 @@ impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
 /// Every general exclusive borrow clears it before lending mutation access;
 /// only the owner's fitting append preserves it. It holds no key reference,
 /// cached length, or assertion about the behavior of `Ord`.
+///
+/// `shared_prefix` is what every key of the tree shares (D50), for a tree
+/// a map owns; nothing, for a part of one on its way between nodes. Searches
+/// trust it to route, never to stay in bounds.
 pub(crate) struct Subtree<K, V, S, Kind = LeafOrInternal> {
     node: NodePtr<K, V, S>,
     height: usize,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
+    shared_prefix: SharedPrefix,
     _marker: PhantomData<(K, V, Kind)>,
 }
 
@@ -2774,6 +2949,7 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
             node,
             height,
             rightmost_leaf: None,
+            shared_prefix: SharedPrefix::none(),
             _marker: PhantomData,
         }
     }
@@ -2784,7 +2960,21 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
 
     pub(crate) fn forget_type(self) -> Subtree<K, V, S> {
         // SAFETY: the same tree; `LeafOrInternal` fits any kind.
-        unsafe { Subtree::from_raw_parts(self.node, self.height) }
+        let mut tree = unsafe { Subtree::from_raw_parts(self.node, self.height) };
+        tree.shared_prefix = self.shared_prefix;
+        tree
+    }
+
+    /// What every key of the tree shares (D50).
+    pub(crate) fn shared_prefix(&self) -> &SharedPrefix {
+        &self.shared_prefix
+    }
+
+    /// What every key of the tree shares, to change: keeping every node
+    /// along the tree's borders at its length is the caller's business
+    /// (`tree/prefix.rs`).
+    pub(in crate::tree) fn shared_prefix_mut(&mut self) -> &mut SharedPrefix {
+        &mut self.shared_prefix
     }
 
     pub(crate) fn borrow(&self) -> NodeRef<Immut<'_>, K, V, S, Kind> {
@@ -2802,11 +2992,21 @@ impl<K, V, S, Kind: NodeKind> Subtree<K, V, S, Kind> {
 
     /// A handle for a walk that hands out values mutably (see [`ValMut`]).
     pub(crate) fn borrow_valmut(&mut self) -> NodeRef<ValMut<'_, K, V>, K, V, S, Kind> {
+        self.borrow_valmut_and_shared_prefix().0
+    }
+
+    /// [`Self::borrow_valmut`], and what every key of the tree shares, to
+    /// place a walk's bounds (D50).
+    pub(crate) fn borrow_valmut_and_shared_prefix(
+        &mut self,
+    ) -> (NodeRef<ValMut<'_, K, V>, K, V, S, Kind>, &SharedPrefix) {
         self.clear_insertion_hint();
         // SAFETY: the tree is well-formed (type invariant), and `&mut self`
         // gives exclusive access, which the handle and its copies only use
-        // as `ValMut` allows.
-        unsafe { NodeRef::from_raw_parts(self.node, self.height) }
+        // as `ValMut` allows; the shared prefix lent beside it is no part of
+        // the tree's nodes.
+        let root = unsafe { NodeRef::from_raw_parts(self.node, self.height) };
+        (root, &self.shared_prefix)
     }
 
     /// Ends the owner's permission to append directly before another
@@ -2852,9 +3052,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 
     /// Validates a fitting append to the remembered last leaf when `key`
-    /// is greater than its current last key. Clears an active hint before
-    /// comparison, and retains no borrow of `key`: the returned token can
-    /// consume it on insertion. Failure leaves ordinary search to the caller.
+    /// is greater than its current last key and has what every key shares
+    /// (D50). Clears an active hint before comparison, and retains no borrow
+    /// of `key`: the returned token can consume it on insertion. Failure
+    /// leaves ordinary search to the caller.
     #[inline]
     pub(crate) fn rightmost_append(&mut self, key: &K) -> Option<RightmostAppend<'_, K, V, S>>
     where
@@ -2875,6 +3076,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         if SearchKey::<K, S, K>::new(key).cmp_full(last.key()) != Ordering::Greater {
             return None;
         }
+        // A key that shares less goes the general way, which covers it.
+        let shared = &self.shared_prefix;
+        if shared.len_shared_with::<K, S>(key) < shared.len() {
+            return None;
+        }
         Some(RightmostAppend {
             edge,
             hint: &mut self.rightmost_leaf,
@@ -2892,8 +3098,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
         // SAFETY: the new root's page is allocated for an internal node. Its
         // edge 0 becomes the old root, a well-formed subtree one level down,
         // which the new root owns from now on (invariant 2); with no keys,
-        // that is its only edge, and it has no inline keys either.
-        unsafe { root.edge_slots().slot(0).write(self.node) };
+        // that is its only edge, and it has no inline keys either. On both
+        // borders, it takes the tree's shared prefix (D50), as the old root
+        // has.
+        unsafe {
+            root.set_prefix_len(self.shared_prefix.len());
+            root.edge_slots().slot(0).write(self.node);
+        }
         self.node = root;
         self.height += 1;
         // SAFETY: the tree is well-formed again, and `&mut self` gives the
@@ -2928,13 +3139,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
 
 /// A separator of an internal node and the two children around it, of kind
 /// `ChildKind`, ready to be merged or to move an entry from one child to the
-/// other. Every operation is the same for both kinds of children, through
-/// their trailing slots ([`TrailingSlots`]).
+/// other, as each kind does it ([`Rebalance`]).
 ///
 /// Invariant: `left_child` and `right_child` are the children at the edges
 /// left and right of `parent`, of kind `ChildKind`, and the right one's
 /// trailing slot 0 is initialized: for leaves, the head that holds the
-/// separator's value (D17).
+/// separator's value (D17), and where separator keys are heads, its key
+/// (D49).
 pub(crate) struct BalancingContext<'a, K, V, S, ChildKind> {
     parent: Kv<NodeMut<'a, K, V, S, Internal>>,
     left_child: NodeMut<'a, K, V, S, ChildKind>,
@@ -2954,7 +3165,7 @@ pub(crate) enum StealError {
     ReceiverFull,
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
+impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: Rebalance>
     BalancingContext<'a, K, V, S, ChildKind>
 {
     pub(crate) fn left_child_len(&self) -> usize {
@@ -2996,12 +3207,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
     /// Rotates one entry rightwards: the left child's last key goes up into
     /// the parent, and the parent's separator comes down to the front of the
     /// right child, each with its inline key; the left child's last trailing
-    /// slot becomes the right child's first.
+    /// slot becomes the right child's first ([`Rebalance::rotate_right`]).
     ///
     /// Between leaves, the value rotates through the right child's head: the
     /// left child's last value becomes the head, and the old head joins the
-    /// separator that came down (D17). Between internal children, the left
-    /// child's last edge becomes the right child's first.
+    /// separator that came down (D17); where separator keys are heads, the
+    /// keys rotate through the head with their values, and only windows
+    /// through the parent (D49). Between internal children, the left child's
+    /// last edge becomes the right child's first.
     ///
     /// The right child takes the parent's prefix length (05-fence-key.md),
     /// at which the separator's inline key is. After local search windows
@@ -3011,106 +3224,46 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
     /// prefixes to their new fences, which reads keys, is the caller's
     /// business, once its operation is done (`tree/prefix.rs`).
     pub(crate) fn steal_left(&mut self) -> Result<(), StealError> {
-        let left_len = self.left_child.len();
-        let right_len = self.right_child.len();
-        if left_len == 0 {
+        if self.left_child.len() == 0 {
             return Err(StealError::DonorEmpty);
         }
-        if right_len == self.right_child.capacity() {
+        if self.right_child.len() == self.right_child.capacity() {
             return Err(StealError::ReceiverFull);
         }
-        self.parent.node.normalize_local_prefix();
-        self.left_child.normalize_local_prefix();
-        self.right_child.normalize_local_prefix();
         let fill = self.parent.window();
         self.right_child.move_prefix_back_to(fill);
-        let parent = &mut self.parent;
-        // SAFETY: checked just above: the left child has key `left_len - 1`
-        // and trailing slot `left_len` (its value, or its last edge) to give,
-        // and the right child room for one more key and trailing slot. Both
-        // are of kind `ChildKind`, in the parent's map. The parent's
-        // separator is initialized (invariant 3). Keys move with their inline
-        // keys, all three nodes being of the same map (invariant 6). The
-        // right child's trailing slots `0..=right_len` are initialized (the
-        // context's invariant), so inserting at slot 0 shifts them up: between
-        // leaves, the old head becomes the value of the separator now at key
-        // 0, and the left child's last value the head, so the right child
-        // keeps one; between internal children, the moved edge stays one level
-        // below both (invariant 2). Each child keeps keys `0..len` and
-        // trailing slots `1..=len` initialized, and its slot 0 as it was.
-        unsafe {
-            let key = self.left_child.key_slots().remove(left_len - 1, left_len);
-            let separator = parent
-                .node
-                .key_slots()
-                .replace(parent.index, key.moved_back_to(fill));
-            self.right_child.key_slots().insert(0, right_len, separator);
-            ChildKind::move_slot(
-                self.left_child.node,
-                left_len,
-                left_len + 1,
-                self.right_child.node,
-                0,
-                right_len + 1,
-            );
-            self.left_child.set_len(left_len - 1);
-            self.right_child.set_len(right_len + 1);
-        }
-        self.parent.node.refresh_local_prefix();
+        // SAFETY: checked just above: the left child has an entry to give,
+        // and the right child room for one; the right child is at `fill`'s
+        // prefix length and every local window is normalized.
+        unsafe { ChildKind::rotate_right(self, fill) };
         Ok(())
     }
 
     /// Rotates one entry leftwards: the right child's first key goes up into
     /// the parent, and the parent's separator comes down to the end of the
     /// left child, each with its inline key; the right child's first
-    /// trailing slot becomes the left child's last. The left child takes the
-    /// parent's prefix length, as in [`Self::steal_left`].
+    /// trailing slot becomes the left child's last
+    /// ([`Rebalance::rotate_left`]). The left child takes the parent's
+    /// prefix length, as in [`Self::steal_left`].
     ///
     /// Between leaves, the value rotates through the right child's head: the
     /// old head joins the separator that came down, and the value of the key
-    /// that went up becomes the head (D17). Between internal children, the
-    /// right child's first edge becomes the left child's last.
+    /// that went up becomes the head (D17), with that key where separator
+    /// keys are heads (D49). Between internal children, the right child's
+    /// first edge becomes the left child's last.
     pub(crate) fn steal_right(&mut self) -> Result<(), StealError> {
-        let left_len = self.left_child.len();
-        let right_len = self.right_child.len();
-        if right_len == 0 {
+        if self.right_child.len() == 0 {
             return Err(StealError::DonorEmpty);
         }
-        if left_len == self.left_child.capacity() {
+        if self.left_child.len() == self.left_child.capacity() {
             return Err(StealError::ReceiverFull);
         }
-        self.parent.node.normalize_local_prefix();
-        self.left_child.normalize_local_prefix();
-        self.right_child.normalize_local_prefix();
         let fill = self.parent.window();
         self.left_child.move_prefix_back_to(fill);
-        let parent = &mut self.parent;
-        // SAFETY: as in `steal_left`, mirrored: the right child gives key 0
-        // and trailing slot 0 (its head, after which the value of the key
-        // that went up is its head; or its first edge), shifting the rest
-        // down, and the left child has room at key `left_len` and trailing
-        // slot `left_len + 1`. The left child's slot 0 is untouched.
-        unsafe {
-            let key = self.right_child.key_slots().remove(0, right_len);
-            let separator = parent
-                .node
-                .key_slots()
-                .replace(parent.index, key.moved_back_to(fill));
-            self.left_child
-                .key_slots()
-                .insert(left_len, left_len, separator);
-            ChildKind::move_slot(
-                self.right_child.node,
-                0,
-                right_len + 1,
-                self.left_child.node,
-                left_len + 1,
-                left_len + 1,
-            );
-            self.left_child.set_len(left_len + 1);
-            self.right_child.set_len(right_len - 1);
-        }
-        self.parent.node.refresh_local_prefix();
+        // SAFETY: checked just above: the right child has an entry to give,
+        // and the left child room for one; the left child is at `fill`'s
+        // prefix length and every local window is normalized.
+        unsafe { ChildKind::rotate_left(self, fill) };
         Ok(())
     }
 }
@@ -3122,9 +3275,7 @@ impl<'a, K, V, S, ChildKind> Mergeable<'a, K, V, S, ChildKind> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
-    Mergeable<'a, K, V, S, ChildKind>
-{
+impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: Rebalance> Mergeable<'a, K, V, S, ChildKind> {
     /// Moves the parent's separator and all of the right child into the left
     /// child, and removes the separator and the edge to the right child from
     /// the parent. Returns the parent's edge to the merged child, and the
@@ -3132,7 +3283,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
     ///
     /// Between leaves, the separator rejoins its value, the right child's
     /// head, as an ordinary entry, and the left child keeps its own head, if
-    /// any (D17). Keys move with their inline keys.
+    /// any (D17); where separator keys are heads, the head's key is the
+    /// separator's (D49). Keys move with their inline keys.
     ///
     /// The merged child takes the parent's prefix length (05-fence-key.md),
     /// at which the separator's inline key is. After local search windows
@@ -3151,14 +3303,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
             mut left_child,
             right_child,
         } = self.0;
-        parent.normalize_local_prefix();
         let parent_len = parent.len();
-        // SAFETY: `index < parent_len` (invariant 3). Key `index`, with its
-        // inline key, at the parent's prefix length, `fill`'s, and edge
-        // `index + 1`, the right child, come out; the parent keeps keys
+        // SAFETY: `index < parent_len` (invariant 3). Separator `index`, at
+        // the parent's prefix length, `fill`'s, and edge `index + 1`, the
+        // right child, come out; the parent keeps separators
         // `0..parent_len - 1` and edges `0..parent_len`.
         let separator = unsafe {
-            let separator = parent.key_slots().remove(index, parent_len);
+            let separator = parent.separator_slots().remove(index, parent_len);
             parent.edge_slots().remove(index + 1, parent_len + 1);
             parent.set_len(parent_len - 1);
             separator
@@ -3178,15 +3329,16 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, ChildKind: TrailingSlots>
 
 /// What [`NodeMut::absorb`] gives back when the node, the separator and the
 /// tree's root don't fit in one node: the separator and the tree.
-pub(crate) type Unabsorbed<K, V, S> = (InlinedKey<K, S>, Subtree<K, V, S>);
+pub(crate) type Unabsorbed<K, V, S> = (Separator<K, S>, Subtree<K, V, S>);
 
-impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> NodeMut<'a, K, V, S, Kind> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: Rebalance> NodeMut<'a, K, V, S, Kind> {
     /// Moves `separator`, and every key and trailing slot of `right` after
     /// it, to the end of this node, as a merge moves its parent's separator
     /// and right child into the left one, and returns `right`'s emptied
     /// page: for a node and the root of another tree, which share no
     /// parent, as when two trees join (`tree/join.rs`). For leaves, `right`'s
-    /// head is the separator's value, which rejoins it as an entry (D17).
+    /// head is the separator's value, which rejoins it as an entry (D17),
+    /// and where separator keys are heads, its key (D49).
     ///
     /// Both nodes take the separator's prefix length, as merged children
     /// take their parent's. If they don't fit in one node with the
@@ -3199,7 +3351,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> NodeMut<'a, K, V, S
     /// node's; nothing changes then.
     pub(crate) fn absorb(
         &mut self,
-        separator: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         right: Subtree<K, V, S>,
     ) -> Result<PageByKind<K, V, S>, Unabsorbed<K, V, S>> {
         assert_eq!(
@@ -3247,40 +3399,335 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, Kind: TrailingSlots> NodeMut<'a, K, V, S
     /// The node, `separator` and `right` fit in one node: `len + 1 +
     /// right.len() <= capacity`. `right` is another node of this kind and
     /// height, in a tree of the same map type, whose trailing slot 0 is
-    /// initialized (a leaf's head), and nothing reaches its page afterwards
-    /// but through the one returned. `separator`'s window is at `fill`'s
-    /// prefix length, at most either node's.
+    /// initialized (a leaf's head, with its key where separator keys are
+    /// heads), and nothing reaches its page afterwards but through the one
+    /// returned. `separator`'s window is at `fill`'s prefix length, at most
+    /// either node's; `fill` holds every byte a leaf keeps of the
+    /// separator's window (D43).
     unsafe fn absorb_unchecked(
         &mut self,
         fill: Window,
-        separator: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         mut right: NodeMut<'_, K, V, S, Kind>,
     ) -> PageByKind<K, V, S> {
         self.move_prefix_back_to(fill);
         right.move_prefix_back_to(fill);
-        let left_len = self.len();
-        let right_len = right.len();
-        let merged_len = left_len + 1 + right_len;
-        // SAFETY:
-        // - This node: `merged_len <= capacity` (the caller). The separator
-        //   goes into key slot `left_len`, and `right`'s keys `0..right_len`
-        //   into `left_len + 1..merged_len`, all with their inline keys at
-        //   this node's prefix length now (invariant 6). `right`'s trailing
-        //   slots `0..=right_len`, all initialized (the caller), go into this
-        //   node's `left_len + 1..=merged_len`: between leaves, its head
-        //   beside the separator as its value, and its values; between
-        //   internal nodes, its edges, from a distinct page and one level
-        //   below, like this node's own. This node's slot 0 is untouched.
-        // - `right`: of kind `Kind`, as its page is released; everything
-        //   moved out, and nothing reaches its page anymore (the caller).
+        // SAFETY: forwarded; both nodes are at `fill`'s prefix length now.
+        // `right`, of kind `Kind`, has had everything moved out, and nothing
+        // reaches its page anymore (the caller).
         unsafe {
-            self.key_slots().write(left_len, separator);
+            Kind::append(self, fill, separator, &mut right);
+            Kind::page_by_kind(right.node.into_fresh_page())
+        }
+    }
+}
+
+// SAFETY: a leaf's slot 0 is its head, initialized exactly when its header
+// says so (invariant 5).
+unsafe impl Rebalance for Leaf {
+    unsafe fn has_first_slot<K, V, S: InlineKeyStrategy<K>>(node: NodePtr<K, V, S>) -> bool {
+        // SAFETY: forwarded.
+        unsafe { node.has_head() }
+    }
+
+    unsafe fn split_off<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        separator_index: usize,
+        right: NodePtr<K, V, S>,
+    ) -> Separator<K, S> {
+        let len = left.len();
+        let right_len = len - separator_index - 1;
+        // SAFETY: `separator_index < len` (caller). Keys
+        // `separator_index + 1..len` are initialized and move, with their
+        // inline keys, to the start of `right`, a fresh leaf of the same map
+        // at the same prefix length (caller); so do head-and-value slots
+        // `separator_index + 1..=len`, the values of keys
+        // `separator_index..len`, to slots `0..=right_len`, so that the
+        // separator's value becomes the right leaf's head. Key
+        // `separator_index` is then the last initialized one on the left and
+        // is read out, with its inline key: where separator keys are heads,
+        // into the right leaf's head key slot (D49), so that the head is
+        // whole, which the header then flags (invariant 5). The left leaf
+        // keeps `separator_index` keys and values and its head.
+        unsafe {
+            left.key_slots().move_run_to(
+                separator_index + 1,
+                right_len,
+                right.key_slots::<Leaf>(),
+                0,
+            );
+            left.head_and_value_slots().move_run_to(
+                separator_index + 1,
+                right_len + 1,
+                right.head_and_value_slots(),
+                0,
+            );
+            let key = left.key_slots().read(separator_index);
+            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                let (key, window) = key.into_parts();
+                right.head_key_slot().write(key);
+                Separator::without_key(window)
+            } else {
+                Separator::with_key(key)
+            };
+            right.set_has_head(true);
+            right.set_len(right_len);
+            left.set_len(separator_index);
+            separator
+        }
+    }
+
+    unsafe fn rotate_right<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    ) {
+        let BalancingContext {
+            parent,
+            left_child: left,
+            right_child: right,
+        } = context;
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: the left leaf has key and value `left_len - 1` to give, and
+        // the right leaf room for one more (caller). Both are leaves of the
+        // parent's map, and the parent's separator is initialized (invariant
+        // 3). The right leaf's head-and-value slots `0..=right_len` are
+        // initialized (the context's invariant), so inserting at slot 0
+        // shifts them up: the old head becomes the value of the key now at
+        // key 0, and the left leaf's last value the head. The key going to
+        // key 0 is the old separator, at the right leaf's prefix length,
+        // `fill`'s (caller); where separator keys are heads (D49), it comes
+        // from the head key slot, which the left leaf's last key takes, and
+        // the parent keeps that key's window alone.
+        unsafe {
+            let key = left.key_slots().remove(left_len - 1, left_len);
+            let value = left.head_and_value_slots().remove(left_len, left_len + 1);
+            right.head_and_value_slots().insert(0, right_len + 1, value);
+            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                let (key, window) = key.into_parts();
+                let old_head_key = right.head_key_slot().replace(key);
+                parent.node.separator_slots().replace(
+                    parent.index,
+                    Separator::without_key(window.moved_back_to(fill)),
+                );
+                InlinedKey::from_parts(old_head_key, fill)
+            } else {
+                let old = parent
+                    .node
+                    .separator_slots()
+                    .replace(parent.index, Separator::with_key(key.moved_back_to(fill)));
+                old.into_inlined_key()
+                    .expect("a separator of a node that keeps keys is a key")
+            };
+            right.key_slots().insert(0, right_len, separator);
+            left.set_len(left_len - 1);
+            right.set_len(right_len + 1);
+        }
+    }
+
+    unsafe fn rotate_left<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    ) {
+        let BalancingContext {
+            parent,
+            left_child: left,
+            right_child: right,
+        } = context;
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: as in `rotate_right`, mirrored: the right leaf gives key 0
+        // and head-and-value slot 0 (its head, after which value 0 shifts
+        // into the head), and the left leaf has room at key `left_len` and
+        // head-and-value slot `left_len + 1`. The key going there is the old
+        // separator, at the left leaf's prefix length, `fill`'s; where
+        // separator keys are heads, from the right leaf's head key slot,
+        // which the right leaf's old key 0 takes.
+        unsafe {
+            let key = right.key_slots().remove(0, right_len);
+            let value = right.head_and_value_slots().remove(0, right_len + 1);
+            left.head_and_value_slots()
+                .insert(left_len + 1, left_len + 1, value);
+            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                let (key, window) = key.into_parts();
+                let old_head_key = right.head_key_slot().replace(key);
+                parent.node.separator_slots().replace(
+                    parent.index,
+                    Separator::without_key(window.moved_back_to(fill)),
+                );
+                InlinedKey::from_parts(old_head_key, fill)
+            } else {
+                let old = parent
+                    .node
+                    .separator_slots()
+                    .replace(parent.index, Separator::with_key(key.moved_back_to(fill)));
+                old.into_inlined_key()
+                    .expect("a separator of a node that keeps keys is a key")
+            };
+            left.key_slots().insert(left_len, left_len, separator);
+            left.set_len(left_len + 1);
+            right.set_len(right_len - 1);
+        }
+    }
+
+    unsafe fn append<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        fill: Window,
+        separator: Separator<K, S>,
+        right: &mut NodeMut<'_, K, V, S, Self>,
+    ) {
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
+        // separator goes into key slot `left_len`, at the leaves' prefix
+        // length, `fill`'s; where separator keys are heads (D49), it is the
+        // right leaf's head key, with `fill` as its window, every byte of it
+        // a leaf keeps (caller). `right`'s keys `0..right_len` go into
+        // `left_len + 1..`, and its head-and-value slots `0..=right_len`, all
+        // initialized (caller), into `left_len + 1..=left_len + 1 +
+        // right_len`: its head beside the separator as its value. `left`'s
+        // head is untouched.
+        unsafe {
+            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                InlinedKey::from_parts(right.head_key_slot().read(), fill)
+            } else {
+                separator
+                    .into_inlined_key()
+                    .expect("a separator into a node that keeps keys is a key")
+            };
+            left.key_slots().write(left_len, separator);
             right
                 .key_slots()
-                .move_run_to(0, right_len, self.key_slots(), left_len + 1);
-            Kind::move_run(right.node, 0, right_len + 1, self.node, left_len + 1);
-            self.set_len(merged_len);
-            Kind::page_by_kind(right.node.into_fresh_page())
+                .move_run_to(0, right_len, left.key_slots(), left_len + 1);
+            right.head_and_value_slots().move_run_to(
+                0,
+                right_len + 1,
+                left.head_and_value_slots(),
+                left_len + 1,
+            );
+            left.set_len(left_len + 1 + right_len);
+        }
+    }
+}
+
+// SAFETY: an internal node's slot 0 is its first edge, always initialized
+// (invariant 1).
+unsafe impl Rebalance for Internal {
+    unsafe fn has_first_slot<K, V, S: InlineKeyStrategy<K>>(_node: NodePtr<K, V, S>) -> bool {
+        true
+    }
+
+    unsafe fn split_off<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        separator_index: usize,
+        right: NodePtr<K, V, S>,
+    ) -> Separator<K, S> {
+        let len = left.len();
+        let right_len = len - separator_index - 1;
+        // SAFETY: `separator_index < len` (caller). Separators
+        // `separator_index + 1..len` and edges `separator_index + 1..=len`
+        // are initialized and move to the start of `right`, a fresh internal
+        // node of the same map at the same prefix length (caller), which
+        // owns the subtrees from now on (invariant 2). Separator
+        // `separator_index` is then the last initialized one on the left and
+        // is read out. Where separator keys are heads (D49), each stays in
+        // the leaf right of it, below the edge that moved with it.
+        unsafe {
+            left.separator_slots().move_run_to(
+                separator_index + 1,
+                right_len,
+                right.separator_slots(),
+                0,
+            );
+            left.edge_slots().move_run_to(
+                separator_index + 1,
+                right_len + 1,
+                right.edge_slots(),
+                0,
+            );
+            right.set_len(right_len);
+            let separator = left.separator_slots().read(separator_index);
+            left.set_len(separator_index);
+            separator
+        }
+    }
+
+    unsafe fn rotate_right<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    ) {
+        let BalancingContext {
+            parent,
+            left_child: left,
+            right_child: right,
+        } = context;
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: the left child has separator `left_len - 1` and edge
+        // `left_len` to give, and the right child room for one more
+        // (caller), all three of the same map. The parent's separator is
+        // initialized (invariant 3) and comes down to the right child's
+        // front, at its prefix length, `fill`'s; the left child's last edge
+        // becomes the right child's first, and stays one level below both
+        // (invariant 2). Where separator keys are heads (D49), each stays in
+        // the leaf right of it: the one going up has the moved edge's
+        // subtree right of it, and the one coming down the right child's
+        // old first.
+        unsafe {
+            let separator = left.separator_slots().remove(left_len - 1, left_len);
+            let old = (parent.node.separator_slots())
+                .replace(parent.index, separator.moved_back_to(fill));
+            right.separator_slots().insert(0, right_len, old);
+            let edge = left.edge_slots().remove(left_len, left_len + 1);
+            right.edge_slots().insert(0, right_len + 1, edge);
+            left.set_len(left_len - 1);
+            right.set_len(right_len + 1);
+        }
+    }
+
+    unsafe fn rotate_left<K, V, S: InlineKeyStrategy<K>>(
+        context: &mut BalancingContext<'_, K, V, S, Self>,
+        fill: Window,
+    ) {
+        let BalancingContext {
+            parent,
+            left_child: left,
+            right_child: right,
+        } = context;
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: as in `rotate_right`, mirrored: the right child gives
+        // separator 0 and edge 0, shifting the rest down, and the left child
+        // has room at separator `left_len` and edge `left_len + 1`.
+        unsafe {
+            let separator = right.separator_slots().remove(0, right_len);
+            let old = (parent.node.separator_slots())
+                .replace(parent.index, separator.moved_back_to(fill));
+            left.separator_slots().insert(left_len, left_len, old);
+            let edge = right.edge_slots().remove(0, right_len + 1);
+            left.edge_slots().insert(left_len + 1, left_len + 1, edge);
+            left.set_len(left_len + 1);
+            right.set_len(right_len - 1);
+        }
+    }
+
+    unsafe fn append<K, V, S: InlineKeyStrategy<K>>(
+        left: &mut NodeMut<'_, K, V, S, Self>,
+        _fill: Window,
+        separator: Separator<K, S>,
+        right: &mut NodeMut<'_, K, V, S, Self>,
+    ) {
+        let (left_len, right_len) = (left.len(), right.len());
+        // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
+        // separator goes into slot `left_len`, at the nodes' prefix length
+        // (caller), and `right`'s separators `0..right_len` and edges
+        // `0..=right_len`, all initialized, into `left_len + 1..` and
+        // `left_len + 1..=left_len + 1 + right_len`: edges from a distinct
+        // page and one level below, like this node's own (invariant 2).
+        unsafe {
+            left.separator_slots().write(left_len, separator);
+            right
+                .separator_slots()
+                .move_run_to(0, right_len, left.separator_slots(), left_len + 1);
+            right
+                .edge_slots()
+                .move_run_to(0, right_len + 1, left.edge_slots(), left_len + 1);
+            left.set_len(left_len + 1 + right_len);
         }
     }
 }

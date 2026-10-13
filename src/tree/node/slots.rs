@@ -2,14 +2,16 @@
 //! only code that moves keys, values and edges around (D9, D12, D14, D29).
 //! [`InlineKeySlots`] are a node's inline keys at its kind's width,
 //! [`KeyColumns`] every array a node keeps beside its keys, [`KeySlots`]
-//! moves a node's keys together with them (D18), and [`NodeKeys`] lends a
-//! node's keys in place.
+//! moves a node's keys together with them (D18), [`SeparatorSlots`] an
+//! internal node's separators, keys or windows (D49), and [`NodeKeys`]
+//! lends a node's keys in place, as a [`KeyList`].
 
 use core::marker::PhantomData;
 use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlineSlot, InlinedKey, Window};
+use super::handle::Internal;
+use super::inline_keys::{InlineSlot, InlinedKey, Separator, Window};
 use super::node_plan::NodePlan;
 use super::page::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
@@ -384,6 +386,56 @@ impl<K> Index<usize> for NodeKeys<'_, K> {
 
     fn index(&self, index: usize) -> &K {
         self.get(index).expect("key index out of bounds")
+    }
+}
+
+/// A node's keys `0..len`, in order, lent for `'a`, as a search and the
+/// prefix upkeep read them: a leaf's, in place ([`NodeKeys`]), or an
+/// internal node's separators, in place or each a head below (D49).
+pub(crate) trait KeyList<'a, K: 'a>: Copy {
+    fn len(self) -> usize;
+
+    /// Key `index`.
+    ///
+    /// # Safety
+    ///
+    /// `index < len`.
+    unsafe fn get_unchecked(self, index: usize) -> &'a K;
+
+    /// Keys `range` of these.
+    ///
+    /// # Panics
+    ///
+    /// If `range` is not within `0..len`.
+    fn slice(self, range: Range<usize>) -> Self;
+
+    /// Key `index`, or `None` if `index >= len`.
+    fn get(self, index: usize) -> Option<&'a K> {
+        // SAFETY: `index < len`.
+        (index < self.len()).then(|| unsafe { self.get_unchecked(index) })
+    }
+
+    fn iter(self) -> impl DoubleEndedIterator<Item = &'a K> + ExactSizeIterator {
+        // SAFETY: `index < len`.
+        (0..self.len()).map(move |index| unsafe { self.get_unchecked(index) })
+    }
+}
+
+impl<'a, K> KeyList<'a, K> for NodeKeys<'a, K> {
+    #[inline(always)]
+    fn len(self) -> usize {
+        Self::len(self)
+    }
+
+    #[inline(always)]
+    unsafe fn get_unchecked(self, index: usize) -> &'a K {
+        // SAFETY: forwarded.
+        unsafe { Self::get_unchecked(self, index) }
+    }
+
+    #[inline(always)]
+    fn slice(self, range: Range<usize>) -> Self {
+        Self::slice(self, range)
     }
 }
 
@@ -769,11 +821,6 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
         self.keys
     }
 
-    /// The columns beside the keys, to read or rewrite in place.
-    pub(super) fn columns(self) -> KeyColumns {
-        self.columns
-    }
-
     /// The inline-key slots alone, to read inline keys in place, if the node
     /// has them.
     pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
@@ -787,8 +834,8 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     ///
     /// # Safety
     ///
-    /// Key `index` and its inline key are initialized, `index < capacity`,
-    /// and any local search prefix has been normalized to the fences.
+    /// Key `index` and its inline key are initialized, and
+    /// `index < capacity`.
     pub(super) unsafe fn window(self, index: usize) -> Window {
         let Some(slots) = self.columns.inline_keys() else {
             return Window::NONE;
@@ -985,6 +1032,216 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
             self.keys.move_run_to(start, count, dest.keys, dest_start);
             self.columns
                 .move_run_to(start, count, dest.columns, dest_start);
+        }
+    }
+}
+
+/// An internal node's separators (D17), for a map with strategy `S`. Every
+/// operation mirrors the [`KeySlots`] operation of its name, on
+/// [`Separator`]s, with the same contract.
+///
+/// Invariant: the variant is the plan's: [`Self::Keys`] in a map without
+/// inline keys, [`Self::Windows`] in a map with them.
+pub(super) enum SeparatorSlots<K, S> {
+    /// The separator keys themselves, which the node keeps.
+    Keys(KeySlots<K, S, Internal>),
+    /// The separators' windows at the node's prefix length, in its inline
+    /// keys: each key is the head of the leftmost leaf right of it (D49).
+    Windows {
+        columns: KeyColumns,
+        prefix_len: usize,
+    },
+}
+
+impl<K, S> Clone for SeparatorSlots<K, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K, S> Copy for SeparatorSlots<K, S> {}
+
+/// Every method is `#[inline(always)]`, as [`KeyColumns`]' are: which
+/// variant a node's separators are is a constant of its map only where the
+/// method is inlined.
+impl<K, S: InlineKeyStrategy<K>> SeparatorSlots<K, S> {
+    /// Separator `index`'s window at the node's fence prefix, as kept:
+    /// [`Window::NONE`] in a node without inline keys.
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::window`].
+    #[inline(always)]
+    pub(super) unsafe fn window(self, index: usize) -> Window {
+        // SAFETY: forwarded; the inline keys have the separators' capacity.
+        unsafe {
+            match self {
+                Self::Keys(keys) => keys.window(index),
+                Self::Windows {
+                    columns,
+                    prefix_len,
+                } => {
+                    let inline_keys = columns.inline_keys().expect("windows of inline keys");
+                    Window::new(prefix_len, inline_keys.read(index))
+                }
+            }
+        }
+    }
+
+    /// What the columns hold for `window`, which must be at this node's
+    /// prefix length.
+    #[inline(always)]
+    fn cells_of(prefix_len: usize, window: Window) -> KeyCells {
+        debug_assert_eq!(
+            window.prefix_len(),
+            prefix_len,
+            "a separator at another prefix length"
+        );
+        KeyCells {
+            inline_key: window.inline_key(),
+            length_tag: None,
+        }
+    }
+
+    /// The key a separator going into a node that keeps keys is.
+    #[inline(always)]
+    fn key_of(separator: Separator<K, S>) -> InlinedKey<K, S> {
+        separator
+            .into_inlined_key()
+            .expect("a separator into a node that keeps keys is a key")
+    }
+
+    /// See [`KeySlots::read`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::read`].
+    #[inline(always)]
+    pub(super) unsafe fn read(self, index: usize) -> Separator<K, S> {
+        // SAFETY: forwarded.
+        unsafe {
+            match self {
+                Self::Keys(keys) => Separator::with_key(keys.read(index)),
+                Self::Windows { .. } => Separator::without_key(self.window(index)),
+            }
+        }
+    }
+
+    /// See [`KeySlots::write`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::write`].
+    #[inline(always)]
+    pub(super) unsafe fn write(self, index: usize, separator: Separator<K, S>) {
+        // SAFETY: forwarded.
+        unsafe {
+            match self {
+                Self::Keys(keys) => keys.write(index, Self::key_of(separator)),
+                Self::Windows {
+                    columns,
+                    prefix_len,
+                } => columns.write(index, Self::cells_of(prefix_len, separator.window())),
+            }
+        }
+    }
+
+    /// See [`KeySlots::replace`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::replace`].
+    #[inline(always)]
+    pub(super) unsafe fn replace(
+        self,
+        index: usize,
+        separator: Separator<K, S>,
+    ) -> Separator<K, S> {
+        // SAFETY: forwarded: slot `index` is read out, then written again.
+        unsafe {
+            let old = self.read(index);
+            self.write(index, separator);
+            old
+        }
+    }
+
+    /// See [`KeySlots::insert`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::insert`].
+    #[inline(always)]
+    pub(super) unsafe fn insert(self, index: usize, len: usize, separator: Separator<K, S>) {
+        // SAFETY: forwarded.
+        unsafe {
+            match self {
+                Self::Keys(keys) => keys.insert(index, len, Self::key_of(separator)),
+                Self::Windows {
+                    columns,
+                    prefix_len,
+                } => columns.insert(index, len, Self::cells_of(prefix_len, separator.window())),
+            }
+        }
+    }
+
+    /// See [`KeySlots::remove`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::remove`].
+    #[inline(always)]
+    pub(super) unsafe fn remove(self, index: usize, len: usize) -> Separator<K, S> {
+        // SAFETY: forwarded.
+        unsafe {
+            match self {
+                Self::Keys(keys) => Separator::with_key(keys.remove(index, len)),
+                Self::Windows { columns, .. } => {
+                    let window = self.window(index);
+                    columns.remove(index, len);
+                    Separator::without_key(window)
+                }
+            }
+        }
+    }
+
+    /// See [`KeySlots::move_run_to`]: `dest` is another internal node of the
+    /// same map, whose separators are of the same variant.
+    ///
+    /// # Safety
+    ///
+    /// As for [`KeySlots::move_run_to`].
+    #[inline(always)]
+    pub(super) unsafe fn move_run_to(
+        self,
+        start: usize,
+        count: usize,
+        dest: Self,
+        dest_start: usize,
+    ) {
+        // SAFETY: forwarded.
+        unsafe {
+            match (self, dest) {
+                (Self::Keys(keys), Self::Keys(dest)) => {
+                    keys.move_run_to(start, count, dest, dest_start);
+                }
+                (
+                    Self::Windows {
+                        columns,
+                        prefix_len,
+                    },
+                    Self::Windows {
+                        columns: dest,
+                        prefix_len: dest_prefix_len,
+                    },
+                ) => {
+                    debug_assert_eq!(
+                        prefix_len, dest_prefix_len,
+                        "a run moves between nodes of different prefix lengths"
+                    );
+                    columns.move_run_to(start, count, dest, dest_start);
+                }
+                _ => unreachable!("the separators of one map are of one variant"),
+            }
         }
     }
 }

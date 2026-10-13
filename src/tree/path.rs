@@ -42,12 +42,14 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
+use super::node::handle::KeyList;
 use super::node::handle::{
     CopyableBorrow, Dying, Edge, ForceResult, Immut, Internal, Kv, Leaf, LeafOrInternal, Mut,
     NodeKind, NodeMut, NodeRef, SearchResult, Subtree, ValMut,
 };
 use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::page::{FreshPage, NodePtr, PageByKind};
+use super::node::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
 
 /// The most levels above the leaves that a tree can have. A non-root
@@ -424,19 +426,37 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         }
     }
 
-    /// Goes down from the bottom node, searching each node on the way for
-    /// `key`, and returns whether it is there: the path ends at it then, in
-    /// whichever node holds it, or else at the leaf edge where it belongs.
+    /// Goes down from the bottom node, the root of a tree whose keys all
+    /// share `shared` (D50), searching each node on the way for `key`, and
+    /// returns whether it is there: the path ends at it then, in whichever
+    /// node holds it, or else at the leaf edge where it belongs. A key that
+    /// lacks what every key shares belongs at the tree's first or last edge,
+    /// which the path goes to without searching.
     ///
     /// The node and its height stay in registers on the way down; the path
     /// only takes stores, which nothing reads until it is done. Each level
     /// decides its node's kind once, first, and searches it as a node of
     /// that kind.
-    pub(crate) fn search<Q>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
+    pub(crate) fn search<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, shared: &SharedPrefix) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        match shared.place(key) {
+            Some(Ordering::Less) => {
+                self.set_index(0);
+                self.descend_to_leaf::<FirstEdge>();
+                return false;
+            }
+            Some(Ordering::Greater) => {
+                // SAFETY: the view is gone before the path changes.
+                let len = unsafe { self.view(self.height()) }.len();
+                self.set_index(len);
+                self.descend_to_leaf::<LastEdge>();
+                return false;
+            }
+            Some(Ordering::Equal) | None => {}
+        }
         let mut height = self.height();
         // SAFETY: the path only records where it goes while the view and the
         // handles below it live; the tree is unchanged.
@@ -473,12 +493,16 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// after `key`, or, if no entry has that key, where it would be. A
     /// separator stands between the end of the leaf left of it and the start
     /// of the leaf right of it (D17).
-    pub(crate) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
-    where
+    pub(crate) fn search_to_edge<Q>(
+        &mut self,
+        key: &SearchKey<'_, K, S, Q>,
+        side: KeySide,
+        shared: &SharedPrefix,
+    ) where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if !self.search(key) {
+        if !self.search(key, shared) {
             return;
         }
         let index = self.index();
@@ -596,6 +620,18 @@ pub(crate) struct PathMut<'a, K, V, S> {
 impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// A detached path in `tree`, for one of the methods that start it.
     #[inline(always)]
+    /// The tree the path goes down, shared.
+    pub(crate) fn tree(&self) -> &Subtree<K, V, S> {
+        self.tree
+    }
+
+    /// Makes what every key of the tree shares cover `key`, before the path
+    /// inserts it; see [`Subtree::cover_key`]. The path still leads where
+    /// it did: only the prefixes along the tree's borders change.
+    pub(crate) fn cover_key(&mut self, key: &K) {
+        self.tree.cover_key(key);
+    }
+
     pub(crate) fn new(tree: &'a mut Subtree<K, V, S>) -> Self {
         tree.clear_insertion_hint();
         Self {
@@ -648,7 +684,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         Q: Ord + ?Sized,
     {
         self.start_at_root();
-        self.path.search(key)
+        self.path.search(key, self.tree.shared_prefix())
     }
 
     /// Starts the path at the root and goes down to the leaf edge beside
@@ -659,7 +695,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         Q: Ord + ?Sized,
     {
         self.start_at_root();
-        self.path.search_to_edge(key, side);
+        self.path
+            .search_to_edge(key, side, self.tree.shared_prefix());
     }
 
     /// Starts the path at the root and goes down to the tree's first key;

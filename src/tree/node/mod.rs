@@ -11,10 +11,12 @@
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
 //! before its keys, and searches run over that array first
-//! (`inline_keys.rs`); each key then shares an entry with its value, or with
-//! the edge right of it, so that the key a search ends at brings them along
-//! (D29). Otherwise keys and values, or edges, are arrays of their own, and
-//! nothing else changes, at no cost.
+//! (`inline_keys.rs`); in a leaf, each key then shares an entry with its
+//! value, so that the key a search ends at brings it along (D29), and the
+//! head shares one with its separator's key. Internal nodes then keep no
+//! keys, only inline keys and edges: a separator's key is a head below,
+//! read on a tie (D49). Otherwise keys and values, or edges, are arrays of
+//! their own, and nothing else changes, at no cost.
 //!
 //! - [`page::FreshPage`] is an allocated page that holds nothing, typed by
 //!   the kind of node it is for: the only way to create a node, and what a
@@ -25,6 +27,8 @@
 //!   exclusive access to one node of it; [`handle::Edge`],
 //!   [`handle::Kv`] and [`handle::Head`] are positions in a node, and the
 //!   operations hang off them.
+//! - `shared_prefix.rs` is what every key of a tree shares, the prefix of
+//!   the nodes along its borders, which a search checks once (D50).
 //! - `inline_keys.rs` is what a node keeps beside its keys to search them;
 //!   `vector_count.rs` counts over a node's inline keys in explicit vectors,
 //!   and `length_tags.rs` filters byte-string keys by their lengths (D36).
@@ -35,6 +39,7 @@ pub(super) mod layout;
 mod length_tags;
 pub(super) mod node_plan;
 pub(crate) mod page;
+pub(crate) mod shared_prefix;
 mod slots;
 #[cfg(test)]
 mod tests;

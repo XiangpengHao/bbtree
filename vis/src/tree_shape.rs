@@ -185,10 +185,7 @@ impl Level {
             first_child,
             parent: vec![0; nodes.len()],
             len: nodes.iter().map(|node| node.len() as u16).collect(),
-            prefix_len: nodes
-                .iter()
-                .map(|node| node.local_prefix_len().unwrap_or(node.prefix_len()) as u16)
-                .collect(),
+            prefix_len: nodes.iter().map(|node| node.prefix_len() as u16).collect(),
         }
     }
 
@@ -215,8 +212,8 @@ impl Level {
         usize::from(self.len[node])
     }
 
-    /// The prefix the node's search skips: its local prefix if it keeps
-    /// one, else the one its fences share.
+    /// The prefix the node's search skips: what its fences share, or on the
+    /// tree's border, what every key shares (D50).
     pub(crate) fn prefix_len(&self, node: usize) -> usize {
         usize::from(self.prefix_len[node])
     }

@@ -60,6 +60,12 @@ pub(crate) struct NodeFences {
 }
 
 impl NodeFences {
+    /// Whether the node is on the tree's left or right border, where a
+    /// fence is missing.
+    pub(crate) fn lacks_a_fence(&self) -> bool {
+        self.low.is_none() || self.high.is_none()
+    }
+
     pub(crate) fn new(
         low: Option<Fence>,
         high: Option<Fence>,
@@ -121,10 +127,8 @@ impl StripRow {
 /// Which part of a key a byte is in, at a node.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ByteRegion {
-    /// Shared with the fences.
+    /// Shared with the fences, or on the tree's border, with every key.
     Prefix,
-    /// Shared by the node's own keys only: its search prefix.
-    SearchPrefix,
     /// The inline key's bytes.
     Window,
     Rest,
@@ -132,12 +136,10 @@ enum ByteRegion {
 
 impl ByteRegion {
     fn of(index: usize, detail: &NodeDetail) -> Self {
-        let skipped = detail.skipped();
-        if index < detail.prefix_len() {
+        let prefix = detail.prefix_len();
+        if index < prefix {
             ByteRegion::Prefix
-        } else if index < skipped {
-            ByteRegion::SearchPrefix
-        } else if index < skipped + detail.inline_key_width().unwrap_or(0) {
+        } else if index < prefix + detail.inline_key_width().unwrap_or(0) {
             ByteRegion::Window
         } else {
             ByteRegion::Rest
@@ -147,7 +149,6 @@ impl ByteRegion {
     fn class(self) -> &'static str {
         match self {
             ByteRegion::Prefix => "byte in-prefix",
-            ByteRegion::SearchPrefix => "byte in-search-prefix",
             ByteRegion::Window => "byte in-window",
             ByteRegion::Rest => "byte",
         }
@@ -192,22 +193,22 @@ pub(crate) fn FenceStrip(
     let columns = longest.min(if kind.is_text() { 48 } else { 16 });
     let lit = match spotlight.concept() {
         Some(Concept::FencePrefix) => " lit-prefix",
-        Some(Concept::SearchPrefix) => " lit-search-prefix",
+        Some(Concept::SharedPrefix) if fences.lacks_a_fence() => " lit-prefix",
         Some(Concept::InlineKey) => " lit-window",
         _ => "",
     };
     let cell = if kind.is_text() { "8px" } else { "21px" };
     let prefix = detail.prefix_len();
-    let skipped = detail.skipped();
     let width = detail.inline_key_width().unwrap_or(0);
+    let on_border = fences.lacks_a_fence();
     rsx! {
         section { class: "fence-section", "aria-label": "The node's fences and prefix",
             h3 { class: "panel-heading",
                 Term { concept: Concept::FencePrefix, spotlight, "Fences" }
                 span { class: "panel-heading-note data",
                     "prefix {prefix} B"
-                    if skipped > prefix {
-                        " · search prefix {skipped} B"
+                    if on_border {
+                        ", every key's"
                     }
                     if width > 0 {
                         " · inline keys {width} B"
@@ -227,17 +228,10 @@ pub(crate) fn FenceStrip(
                             "prefix"
                         }
                     }
-                    if skipped > prefix && prefix < columns {
-                        span {
-                            class: "strip-bracket bracket-search-prefix",
-                            style: "grid-column:{prefix + 2} / span {(skipped - prefix).min(columns - prefix)};",
-                            "search prefix"
-                        }
-                    }
-                    if width > 0 && skipped < columns {
+                    if width > 0 && prefix < columns {
                         span {
                             class: "strip-bracket bracket-window",
-                            style: "grid-column:{skipped + 2} / span {width.min(columns - skipped)};",
+                            style: "grid-column:{prefix + 2} / span {width.min(columns - prefix)};",
                             "inline key"
                         }
                     }
@@ -319,11 +313,15 @@ fn StripRowCells(
         },
     };
     let Some(key) = key_bytes else {
-        let border = if row == StripRow::LowFence {
-            "none: the tree's left border"
+        let side = if row == StripRow::LowFence {
+            "left"
         } else {
-            "none: the tree's right border"
+            "right"
         };
+        let shared = tree.shared_prefix_len();
+        let border = format!(
+            "none: the tree's {side} border, where the prefix is the {shared} B every key shares"
+        );
         return rsx! {
             {label}
             span { class: "strip-none", style: "grid-column:2 / span {columns.max(1)};", {border} }
@@ -374,8 +372,8 @@ mod tests {
     }
 
     /// At nodes across every level: the prefix bbtree keeps is what the
-    /// strip's fences share, 0 on a border, and the inline keys are the
-    /// bytes the strip marks as them.
+    /// strip's fences share, or on a border, what every key shares, and the
+    /// inline keys are the bytes the strip marks as them.
     fn check<K: VisKey>(map: BBTreeMap<K, u64>, kind: KeyKind) {
         let tree = InspectedMap::new(map, kind);
         let shape = tree.shape();
@@ -387,14 +385,14 @@ mod tests {
                 let fences = detail.fences();
                 let shared = match (&fences.low, &fences.high) {
                     (Some(low), Some(high)) => common_prefix(&low.key.bytes, &high.key.bytes),
-                    _ => 0,
+                    _ => tree.shared_prefix_len(),
                 };
                 assert_eq!(detail.prefix_len(), shared, "{at:?}");
                 let width = detail.inline_key_width().unwrap();
                 let first = fences.first.as_ref().unwrap();
                 assert_eq!(
                     detail.keys()[0].inline_key.as_deref(),
-                    Some(window_hex(&first.bytes, detail.skipped(), width).as_str()),
+                    Some(window_hex(&first.bytes, detail.prefix_len(), width).as_str()),
                     "{at:?}"
                 );
             }

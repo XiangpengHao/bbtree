@@ -1,8 +1,10 @@
 //! Per-node prefix stripping (`doc/05-fence-key.md`) at the map level: that
 //! nodes get prefixes however a tree is made, and keep them fitting their
-//! fences through every change. The invariant checker verifies that each
-//! prefix is what its node's fences share; these tests make sure it has long
-//! prefixes to verify, and fences that move far.
+//! fences, or along the borders the tree's shared prefix (D50), through
+//! every change. The invariant checker verifies that each prefix is what
+//! its node's fences share, and that every key has the shared prefix; these
+//! tests make sure it has long prefixes to verify, fences that move far, and
+//! shared prefixes that shrink.
 
 #![forbid(unsafe_code)]
 
@@ -27,20 +29,21 @@ fn key_count() -> usize {
     if cfg!(miri) { 300 } else { 20_000 }
 }
 
-/// Panics unless the map is valid and every node off its two borders,
-/// where prefixes are 0, skips at least the bytes all its keys share.
+/// Panics unless the map is valid and every node, along the borders too
+/// (D50), skips at least the bytes all its keys share.
 fn assert_prefixes_cover_shared_bytes<S: crate::InlineKeyStrategy<String>>(
     map: &BBTreeMap<String, usize, S>,
 ) {
     map.check_invariants();
+    assert!(map.inspect().shared_prefix().starts_with(SHARED.as_bytes()));
     let prefix_lens = map.node_prefix_lens();
     let short = prefix_lens
         .iter()
         .filter(|&&len| len < SHARED.len())
         .count();
-    let border_nodes = 2 * (map.height() + 1);
-    assert!(
-        short <= border_nodes,
+    assert_eq!(
+        short,
+        0,
         "{short} of {} nodes skip fewer than the {} shared bytes",
         prefix_lens.len(),
         SHARED.len()
@@ -99,7 +102,7 @@ fn opted_in_keys_get_prefixes() {
 }
 
 /// Integers get prefixes through their big-endian bytes: keys below 2^24
-/// share their first 5 bytes, and nodes off the borders skip them.
+/// share their first 5 bytes, and every node skips them.
 #[test]
 fn integer_keys_get_prefixes() {
     let rng = TestRng::new(84);
@@ -108,11 +111,12 @@ fn integer_keys_get_prefixes() {
         map.insert(rng.below(1 << 24) as u64, value);
     }
     map.check_invariants();
+    assert!(map.inspect().shared_prefix().len() >= 5);
     let prefix_lens = map.node_prefix_lens();
     let short = prefix_lens.iter().filter(|&&len| len < 5).count();
-    let border_nodes = 2 * (map.height() + 1);
-    assert!(
-        short <= border_nodes,
+    assert_eq!(
+        short,
+        0,
         "{short} of {} nodes skip fewer than 5 bytes",
         prefix_lens.len()
     );
@@ -187,12 +191,14 @@ fn cuts_refit_the_nodes_beside_their_borders() {
     }
 }
 
-/// A local prefix is not a fence: short and differently prefixed queries
-/// must still choose the correct edge. Separator replacement, cuts and
-/// rebuilding must preserve this distinction, including embedded zeros.
+/// Keys that share 96 bytes, of which the tree keeps 64 (D50): queries that
+/// end inside them or differ within them, before the 64th byte or past it,
+/// go before or after every key, or down the borders. Inserting them
+/// shrinks the shared prefix; removals, cuts and rebuilds keep it right,
+/// including for embedded zeros.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-fn local_prefix_queries_and_mutations_match_std() {
+fn queries_outside_the_shared_prefix_match_std() {
     use std::collections::BTreeMap;
     use std::ops::Bound::{Included, Unbounded};
 
@@ -260,8 +266,8 @@ fn local_prefix_queries_and_mutations_match_std() {
     actual.check_invariants();
     assert!(actual.iter().eq(expected.iter()));
 
-    // Distinct lengths can have identical zero-padded encodings. A local
-    // prefix is bounded by actual bytes, even when the fence prefix is not.
+    // Distinct lengths can have identical zero-padded encodings. The shared
+    // prefix is bounded by actual bytes, even when a fence prefix is not.
     let mut zeros = BBTreeMap::new();
     for length in 0..128 {
         zeros.insert(format!("a{}", "\0".repeat(length)), length);
@@ -275,9 +281,9 @@ fn local_prefix_queries_and_mutations_match_std() {
     }
 }
 
-/// A seven-byte shared prefix cannot activate the eight-byte local guard.
-/// Its narrow parent must still export bytes four through seven when a
-/// separator moves down or fills the window of a leaf whose fence shrinks.
+/// Keys that share seven bytes, a whole window but one byte: a narrow
+/// parent must still export bytes four through seven when a separator moves
+/// down or fills the window of a leaf whose fence shrinks.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn narrow_parent_windows_survive_demotion_and_fence_changes() {
@@ -322,10 +328,10 @@ fn narrow_parent_windows_survive_demotion_and_fence_changes() {
 }
 
 /// Fixed-width keys whose encodings all start with the same bytes: dense
-/// integers and byte arrays behind a shared head. Their roots and border
-/// nodes have no fence prefix, so their internal nodes keep local prefixes;
-/// lookups past either end, keys that differ inside the shared bytes, and
-/// every structural change must agree with std.
+/// integers and byte arrays behind a shared head, which the tree keeps as
+/// its shared prefix (D50), the prefix of its border nodes. Lookups past
+/// either end, keys that differ inside the shared bytes, inserts that
+/// shrink them, and every structural change must agree with std.
 fn dense_fixed_width_keys_match_std<K: Ord + Copy + core::fmt::Debug>(key: impl Fn(u64) -> K) {
     use std::collections::BTreeMap;
 
@@ -404,4 +410,87 @@ fn byte_arrays_behind_a_shared_head_match_std() {
         key[6..14].copy_from_slice(&index.to_be_bytes());
         key
     });
+}
+
+/// Keys that share less shrink the shared prefix, whichever way they go in:
+/// one by one, appended in order by a build, or joined from another tree;
+/// removals leave it. Every node along the borders follows it (D50).
+#[test]
+fn keys_that_share_less_shrink_the_shared_prefix() {
+    let shared_len = |map: &BBTreeMap<String, usize>| map.inspect().shared_prefix().len();
+    let mut map: BBTreeMap<String, usize> = (0..key_count())
+        .map(|number| (shared_prefix_key(number), number))
+        .collect();
+    let digits_shared = format!("{:08}", key_count() - 1)
+        .bytes()
+        .take_while(|&digit| digit == b'0')
+        .count();
+    assert_eq!(shared_len(&map), SHARED.len() + digits_shared);
+    // A key past the last, sharing fewer digits.
+    map.insert(format!("{SHARED}9"), 0);
+    map.check_invariants();
+    assert_eq!(shared_len(&map), SHARED.len());
+    // A key before the first, ending inside the shared bytes.
+    map.insert(String::from("shared/"), 0);
+    map.check_invariants();
+    assert_eq!(shared_len(&map), "shared/".len());
+    // Removals leave what the rest still share.
+    map.remove("shared/");
+    map.check_invariants();
+    assert_eq!(shared_len(&map), "shared/".len());
+    for number in 0..key_count() {
+        assert_eq!(map.get(&shared_prefix_key(number)), Some(&number));
+    }
+    assert_eq!(map.get("shared/"), None);
+    assert_eq!(map.get("a"), None);
+    assert_eq!(map.get("z"), None);
+
+    // A build whose keys share less as they go: clusters that differ in
+    // their last digit, then their first.
+    let built: BBTreeMap<String, usize> = (0..if cfg!(miri) { 4 } else { 40 })
+        .flat_map(|cluster| (0..100).map(move |number| clustered_key(cluster, number)))
+        .zip(0..)
+        .collect();
+    built.check_invariants();
+    // "000/" to "039/", or under Miri, to "003/".
+    assert_eq!(shared_len(&built), if cfg!(miri) { 2 } else { 1 });
+
+    // Joining trees that share different bytes keeps what both share.
+    let mut lower: BBTreeMap<String, usize> = (0..500)
+        .map(|number| (clustered_key(1, number), number))
+        .collect();
+    let mut upper: BBTreeMap<String, usize> = (0..500)
+        .map(|number| (clustered_key(2, number), number))
+        .collect();
+    lower.append(&mut upper);
+    lower.check_invariants();
+    assert_eq!(shared_len(&lower), 2);
+    let mut upper = lower.split_off(&clustered_key(1, 250));
+    lower.check_invariants();
+    upper.check_invariants();
+    assert_eq!((shared_len(&lower), shared_len(&upper)), (2, 2));
+    let mut empty = BBTreeMap::new();
+    upper.append(&mut empty);
+    upper.check_invariants();
+}
+
+/// Integers past the shared high bytes, either way, shrink them, as does a
+/// key whose encoding differs in its sign bit.
+#[test]
+fn integers_past_the_shared_bytes_shrink_them() {
+    let mut map: BBTreeMap<i64, usize> =
+        (0..key_count() as i64).map(|number| (number, 0)).collect();
+    let shared_len = |map: &BBTreeMap<i64, usize>| map.inspect().shared_prefix().len();
+    assert!(shared_len(&map) >= 5);
+    assert_eq!(map.get(&-1), None);
+    assert_eq!(map.get(&i64::MAX), None);
+    map.insert(1 << 40, 1);
+    map.check_invariants();
+    assert_eq!(shared_len(&map), 2);
+    map.insert(-1, 2);
+    map.check_invariants();
+    assert_eq!(shared_len(&map), 0);
+    assert_eq!(map.first_key_value(), Some((&-1, &2)));
+    assert_eq!(map.range(..0).count(), 1);
+    assert_eq!(map.range(1 << 39..).count(), 1);
 }

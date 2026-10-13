@@ -13,9 +13,10 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
     /// Drops every key and value in ascending key order, each key before its
     /// value, as std's `BTreeMap` does (D1), and hands every page to
     /// `release`, sorted by the kind of node it held. A separator's value is
-    /// its right leaf's head (D17), dropped right after the separator; a head
-    /// on the leftmost leaf, the value of a separator kept elsewhere, as a
-    /// split's right half has, goes first.
+    /// its right leaf's head (D17), dropped right after the separator's key;
+    /// a head on the leftmost leaf, the value of a separator kept elsewhere,
+    /// as a split's right half has, goes first, its key, where separator keys
+    /// are heads (D49), before it.
     ///
     /// The tree must be well-formed: every leaf right of a separator has a
     /// head (D17).
@@ -38,12 +39,17 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind> Subtree<K, V, S, Kind> {
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeMut<'_, K, V, S, LeafOrInternal> {
     /// Takes the head out of the leftmost leaf under this node, if it has
-    /// one.
-    fn take_leftmost_head(self) -> Option<V> {
+    /// one, with its key where separator keys are heads (D49).
+    fn take_leftmost_head(self) -> Option<(Option<K>, V)> {
         let mut node = self;
         loop {
             node = match node.force() {
-                ForceResult::Leaf(leaf) => return leaf.head().map(|head| head.remove().0),
+                ForceResult::Leaf(leaf) => {
+                    return leaf.head().map(|head| {
+                        let (key, value, _) = head.remove();
+                        (key, value)
+                    });
+                }
                 ForceResult::Internal(internal) => internal.first_edge().descend(),
             };
         }
@@ -147,9 +153,10 @@ mod tests {
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn destroy_drops_entries_in_ascending_order() {
         destroy_in_order::<Bulky<'_>, Auto>(&DropLedger::new(), 300);
-        // 25 entries in a leaf with inline keys: height 2 takes more. The
+        // 25 entries in a leaf with inline keys, and 63 children in an
+        // internal node, which keeps no keys (D49): height 2 takes more. The
         // tree is the same under Miri, so the native run checks its height.
-        destroy_in_order::<Tracked<'_>, WithInlineKey>(&DropLedger::new(), 800);
+        destroy_in_order::<Tracked<'_>, WithInlineKey>(&DropLedger::new(), 2000);
     }
 
     #[test]

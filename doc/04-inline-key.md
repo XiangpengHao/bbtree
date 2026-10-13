@@ -48,7 +48,8 @@ touching the heap**.
   (Q6).
 - **No node prefetch** (D46). Every hit on a key longer than its inline key,
   and every tie, reads a key line, which sits on the critical path; the
-  layouts put it where the search already reads (D29, D32, D39).
+  layouts put it where the search already reads (D29, D32), and internal
+  nodes keep only their separators' inline keys, the keys being heads (D49).
 - **Both leaves and internal nodes carry inline keys.** Every lookup searches
   both, and in both each probe would otherwise read the heap. Measured: both
   benefit (Q3).

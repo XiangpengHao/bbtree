@@ -1,27 +1,30 @@
 //! Copying an owned tree: [`Subtree::clone_tree`], node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
-//! `Ord` and no `InlineKey`: every inline key is copied (D18), and every
-//! node's prefix length (05-fence-key.md).
+//! `Ord` and no `InlineKey`: every inline key is copied (D18), every node's
+//! prefix length (05-fence-key.md), and what every key shares (D50).
 
 #![forbid(unsafe_code)]
 
 use super::node::handle::{
     EdgeRoom, ForceResult, Immut, LeafOrInternal, NodeKind, NodeRef, Subtree,
 };
-use super::node::inline_keys::InlinedKey;
-use super::node::page::{FreshPage, PageByKind};
+use super::node::inline_keys::{InlinedKey, Separator};
+use super::node::page::{FreshPage, NodePtr, PageByKind};
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// A copy of the tree, with every key and value cloned in key order,
-    /// each separator's value right after its key (D17), on pages from the
-    /// global allocator.
+    /// each separator's value right after its key (D17), its head's own
+    /// where separator keys are heads (D49), on pages from the global
+    /// allocator.
     ///
     /// If a `clone` panics, what was copied so far is dropped, and its pages
     /// released, before the panic goes on: nothing leaks, and the tree is
     /// unchanged.
     pub(crate) fn clone_tree(&self) -> Self {
-        Self::clone_subtree(self.borrow())
+        let mut copy = Self::clone_subtree(self.borrow());
+        *copy.shared_prefix_mut() = self.shared_prefix().clone();
+        copy
     }
 
     fn clone_subtree(node: NodeRef<Immut<'_>, K, V, S, LeafOrInternal>) -> Self {
@@ -30,7 +33,9 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                 let mut copy = PartialCopy::new(Subtree::new_leaf(FreshPage::allocate()));
                 let mut copy_leaf = copy.tree_mut().borrow_mut();
                 if let Some(head) = leaf.head() {
-                    copy_leaf.replace_head(head.into_value().clone());
+                    let (key, value) = head.into_key_and_value();
+                    let key = key.cloned();
+                    copy_leaf.put_head(key, value.clone());
                 }
                 copy_leaf.set_empty_prefix_len(leaf.prefix_len());
                 let mut edge = leaf.first_edge();
@@ -57,7 +62,14 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                 let mut edge = internal.first_edge();
                 while let Ok(separator) = edge.right_kv() {
                     let window = separator.window();
-                    let key = InlinedKey::from_parts(separator.into_key().clone(), window);
+                    // Where separator keys are heads (D49), the leaf copies
+                    // them, as it copies its head.
+                    let key = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                        Separator::without_key(window)
+                    } else {
+                        let key = separator.into_key().clone();
+                        Separator::with_key(InlinedKey::from_parts(key, window))
+                    };
                     let child = Self::clone_subtree(separator.right_edge().descend());
                     let EdgeRoom::Fits(copy_edge) =
                         copy_root.reborrow_mut().last_edge().check_room()

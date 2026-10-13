@@ -14,10 +14,12 @@
 //! side by side may: it takes keys over from the other, which, too full to
 //! share a node with it, can spare them. No merge happens, so no node above
 //! loses a key. Whichever way, the separator's value is the head of the
-//! right tree's first leaf, the leftmost leaf right of it (D17).
+//! right tree's first leaf, the leftmost leaf right of it (D17), and where
+//! separator keys are heads, so is its key (D49).
 //!
 //! Prefixes (05-fence-key.md): every node that changes is on the taller
-//! tree's border or was a root, with prefix 0, or beside them. The split
+//! tree's border or was a root, with what both trees' keys share as its
+//! prefix (D50), or beside them. The split
 //! halves and the sibling that gave keys over, beside the border, and the
 //! two spines below the separator, whose nodes gain it as a fence, fit their
 //! prefixes last, from the top down, reading keys, once the tree is whole.
@@ -27,9 +29,9 @@
 use core::mem;
 
 use super::node::handle::{
-    BalancingContext, ForceResult, Insertion, Internal, Leaf, Subtree, TrailingSlots,
+    BalancingContext, ForceResult, Insertion, Internal, Leaf, Rebalance, Subtree,
 };
-use super::node::inline_keys::InlinedKey;
+use super::node::inline_keys::{InlinedKey, Separator};
 use super::node::page::{FreshPage, PageByKind};
 use super::path::{FirstEdge, LastEdge, NodeEnd, Path, PathMut};
 use crate::inline_key::InlineKeyStrategy;
@@ -48,8 +50,9 @@ struct SeparatorPlace {
 
 impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// Joins this tree, the separator, its key `separator` with its window
-    /// at prefix 0 and its `value`, and `right`, whose keys ascend in that
-    /// order and which both have entries, into this tree. Compares no keys;
+    /// at the trees' shared prefix and its `value`, and `right`, whose keys
+    /// ascend in that order, which both have entries, and whose keys share
+    /// the same bytes as this tree's (D50), into this tree. Compares no keys;
     /// keys out of order make a tree whose searches give wrong answers, but
     /// that is memory-safe. Pages come from and go to the global allocator.
     ///
@@ -60,16 +63,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// this tree's owner.
     pub(crate) fn join(&mut self, separator: InlinedKey<K, S>, value: V, mut right: Self) {
         let mut node = right.borrow_mut();
-        loop {
+        let separator = loop {
             node = match node.force() {
-                ForceResult::Leaf(mut leaf) => {
-                    let old_head = leaf.replace_head(value);
-                    assert!(old_head.is_none(), "a first leaf has no head");
-                    break;
-                }
+                ForceResult::Leaf(mut leaf) => break leaf.put_separator_head(separator, value),
                 ForceResult::Internal(internal) => internal.first_edge().descend(),
             };
-        }
+        };
         if self.height() >= right.height() {
             self.join_at_border::<LastEdge>(separator, right);
         } else {
@@ -83,7 +82,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// entry for [`LastEdge`], before its first for [`FirstEdge`]. The
     /// separator's value is already the head of the leftmost leaf right of
     /// it (D17).
-    fn join_at_border<End: NodeEnd>(&mut self, separator: InlinedKey<K, S>, shorter: Self) {
+    fn join_at_border<End: NodeEnd>(&mut self, separator: Separator<K, S>, shorter: Self) {
         let place = {
             let mut path = PathMut::new(self);
             Self::descend_border::<End>(&mut path, shorter.height());
@@ -115,7 +114,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// or else hangs it right of the node, under the separator, one level up.
     fn absorb_or_hang_right(
         path: &mut PathMut<'_, K, V, S>,
-        separator: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         shorter: Self,
     ) -> SeparatorPlace {
         let height = path.height();
@@ -150,7 +149,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// hangs it right of `shorter`'s root, under the separator, one level up.
     fn absorb_or_hang_left(
         path: &mut PathMut<'_, K, V, S>,
-        separator: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         shorter: Self,
     ) -> SeparatorPlace {
         let height = path.height();
@@ -185,7 +184,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// under `separator`, in the node one level up: under a new root if the
     /// node is the root; splitting up the path while full, each split's
     /// right half hung right of its left half the same way.
-    fn hang_beside(path: &mut PathMut<'_, K, V, S>, separator: InlinedKey<K, S>, right: Self) {
+    fn hang_beside(path: &mut PathMut<'_, K, V, S>, separator: Separator<K, S>, right: Self) {
         let mut carried = (separator, right);
         loop {
             let (separator, right) = carried;
@@ -225,7 +224,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     }
 
     /// [`Self::stock_beside_separator`], for children of kind `ChildKind`.
-    fn stock_children<ChildKind: TrailingSlots>(
+    fn stock_children<ChildKind: Rebalance>(
         mut context: BalancingContext<'_, K, V, S, ChildKind>,
         height: usize,
         index: usize,
@@ -350,12 +349,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
                 return right.0.take();
             }
         }
-        let separator = InlinedKey::new(key, 0);
-        let right = right.0.take().expect("the right tree");
-        left.0
-            .as_mut()
-            .expect("the left tree")
-            .join(separator, value, right);
+        // Both trees' keys, and the separator, share what both trees' keys
+        // share with the separator (D50).
+        let shared_with_key = |tree: &DetachedTree<K, V, S>| {
+            let tree = tree.0.as_ref().expect("both trees");
+            tree.shared_prefix().len_shared_with::<K, S>(&key)
+        };
+        let shared_len = shared_with_key(&left).min(shared_with_key(&right));
+        let separator = InlinedKey::new(key, shared_len);
+        let mut right = right.0.take().expect("the right tree");
+        let left_tree = left.0.as_mut().expect("the left tree");
+        left_tree.shrink_shared_prefix_to(shared_len);
+        right.shrink_shared_prefix_to(shared_len);
+        left_tree.join(separator, value, right);
         left.0.take()
     }
 

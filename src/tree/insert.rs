@@ -3,11 +3,12 @@
 //! downward search finds the entry or vacant leaf edge. A fitting insertion
 //! needs no ancestors. If the leaf is full, a
 //! second search records its path (`path.rs`) for splitting. Going
-//! back up the path, each node takes its split child's separator key and
-//! right half, splitting in turn if it is full; a
-//! root that splits grows a new root above it. A separator's value stays in
-//! the right half, as the head of its leftmost leaf (D17), and its inline key
-//! goes up with it (D18), moved back to its new node's prefix length. Once
+//! back up the path, each node takes its split child's separator and right
+//! half, splitting in turn if it is full; a root that splits grows a new
+//! root above it. A separator's value stays in the right half, as the head
+//! of its leftmost leaf (D17), and so does its key where separator keys are
+//! heads (D49); its inline key goes up with it (D18), moved back to its new
+//! node's prefix length. Once
 //! the entry is in and counted, the halves of every split fit their prefixes
 //! to their new fences (`prefix.rs`).
 //!
@@ -20,7 +21,7 @@
 use core::mem;
 
 use super::node::handle::{Edge, EdgeRoom, Insertion, Internal, Leaf, NodeMut, Subtree};
-use super::node::inline_keys::{InlinedKey, SearchKey};
+use super::node::inline_keys::{InlinedKey, SearchKey, Separator};
 use super::node::page::FreshPage;
 use super::path::{MAX_HEIGHT, PathMut};
 use crate::inline_key::InlineKeyStrategy;
@@ -38,9 +39,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
     /// `new_internal_page`.
     ///
     /// Every `Ord` call happens while validating an append or searching,
-    /// and the key's inline key is computed next, before anything changes,
-    /// so a panicking `Ord` or
-    /// `InlineKey` there leaves the tree unchanged. After a split, the split
+    /// and every `InlineKey` call while validating an append, checking what
+    /// the key shares with every key (D50), searching, or computing its
+    /// inline key next, before anything changes but the shared prefix and
+    /// the border prefixes that follow it, so a panicking `Ord` or
+    /// `InlineKey` there leaves the tree with the same entries. After a split, the split
     /// nodes' prefixes fit their new fences, which calls `InlineKey` again,
     /// once the entry is in and counted (`prefix.rs`): a panic then
     /// leaves a valid tree that has it. The page sources are called on the way back up,
@@ -63,6 +66,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
             *length += 1;
             return None;
         }
+        self.cover_key(&key);
         match self
             .borrow_mut()
             .search_tree_for_insert(&SearchKey::new(&key))
@@ -134,6 +138,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         new_internal_page: impl FnMut() -> FreshPage<K, V, S, Internal>,
         length: &mut usize,
     ) {
+        self.cover_key(&key);
         let index = self.index();
         let leaf = self.leaf_mut();
         let prefix_len = leaf.prefix_len();
@@ -249,11 +254,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'a, K, V, S, Leaf>> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'a, K, V, S, Internal>> {
-    /// Inserts separator `key`, with its inline key, at this edge with
-    /// `right_child` as the edge to its right, splitting the node first if it
-    /// is full, with the right half in a page from `new_page`. This is how a
-    /// child's split lands in its parent; the separator's value is already in
-    /// `right_child`, as the head of its leftmost leaf (D17).
+    /// Inserts `separator` at this edge with `right_child` as the edge to its
+    /// right, splitting the node first if it is full, with the right half in
+    /// a page from `new_page`. This is how a child's split lands in its
+    /// parent; the separator's value is already in `right_child`, as the head
+    /// of its leftmost leaf (D17), and so is its key where separator keys are
+    /// heads (D49).
     ///
     /// # Panics
     ///
@@ -261,14 +267,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Edge<NodeMut<'a, K, V, S, Internal>> {
     /// unchanged then.
     pub(crate) fn insert(
         self,
-        key: InlinedKey<K, S>,
+        separator: Separator<K, S>,
         right_child: Subtree<K, V, S>,
         new_page: impl FnOnce() -> FreshPage<K, V, S, Internal>,
     ) -> Insertion<'a, K, V, S, Internal> {
         match self.check_room() {
-            EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(key, right_child)),
+            EdgeRoom::Fits(edge) => Insertion::Fit(edge.insert_fit(separator, right_child)),
             EdgeRoom::Full(edge) => {
-                Insertion::Split(edge.split_and_insert(new_page(), key, right_child))
+                Insertion::Split(edge.split_and_insert(new_page(), separator, right_child))
             }
         }
     }

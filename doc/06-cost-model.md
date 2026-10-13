@@ -172,7 +172,7 @@ main suite.
 | Short fitting-insert path | accepted | D33 |
 | Range construction without the extra copy | not adopted | |
 | SIMD scan of full `u64` leaf keys | rejected | |
-| Local search prefix where fences don't help | accepted | D33 |
+| Shared prefix where fences are missing | accepted | D50 |
 | Bulk compare of long suffixes | rejected | |
 | Cached range leaf run | accepted | D33 |
 | Aligned leaf pairs | accepted | D34 |
@@ -183,7 +183,7 @@ main suite.
 | Two length-tag candidates; zero/one handling | accepted | D36, D38 |
 | Redistribution before a split | deferred (model) | |
 | 4-byte string leaf summaries | rejected (model) | |
-| Children before keys for fixed arrays | accepted | D39 |
+| Children before keys for fixed arrays | accepted, moot since internal nodes keep no keys | D49 |
 | Equality-only leaf masks | native 8-byte only | D41 |
 | Portable packed 2-byte masks, 33–64 slots | accepted | D40 |
 | Grouped local-prefix guards | accepted with D41 | D41 |
@@ -241,10 +241,11 @@ directory, scans stop being linear, capacity drops (`u64` 55 → 53,
 moves (`u64` hit 131.5 → 129.6, JSON hit 348.7 → 353.5). Accepted for
 the traffic and the 48 bytes it frees for D36.
 
-**Children before keys for fixed arrays (D39).** `[u8; 32]` keys stop
+**Children before keys for fixed arrays.** `[u8; 32]` keys stop
 crossing cache lines and summaries plus children shrink by one line.
 `hash32` hits 240.9 → 225.1, misses 190.2 → 168.4, inserts 206.2 → 188.1,
-same instructions, fewer L1 and DRAM misses. Accepted.
+same instructions, fewer L1 and DRAM misses. Accepted; moot since internal
+nodes with inline keys keep no keys (D49).
 
 **Children before keys for `u128`.** Native random operations improve
 2–7%, but portable random hit and insert lose 1–2% and native dense misses
@@ -292,27 +293,37 @@ summaries to save one dependent load. Hits 131.3 → 360.7, misses 96.1 →
 315.7; DRAM fills 3.8 → 16.1 per lookup. Rejected: summaries are the
 better filter.
 
-**Local search prefix where fences don't help (D33).** A node whose
-windows all tie at its fence prefix searches its keys whole: on 1M paths,
-7.7 full-key comparisons a query, because the root has prefix 0. Dense
-integers tie the same way at the root and borders (every dense `u64`
-root), UUIDv7-like arrays wherever their timestamp is shared. Such a node
-keeps windows at what its keys share, checked once against its first key.
-Model: a node with one pays a key read it would make anyway; every other
-internal node, one header field and a branch, off the dependent chain.
-Measured: dense `u64` hits −8.5%, inserts −5%; 1M paths −2.7%; UUIDv7-like
-`[u8; 16]` 366 → 270 instructions at 10M, 27.7 → 7.5 ns at 1k. The check
-costs random keys 16–28 instructions a lookup: no time for `u64`, +4% for
-`hash32`, whose benchmark lookups also call their `get` out of line where
-the tree before inlined it. JSON has no such nodes and is unchanged.
-Accepted.
-Code generation decided most of the work. A call anywhere in the descent
-loop, even a cold one, kept the loop's state in stack slots (+30 to +100
-instructions). Comparing 64 shared path bytes a window at a time took 300
-more instructions than in 32-byte chunks. Node searches are forced inline
-for fixed-width keys (outlined, `hash32` lookups took 442 instructions
-instead of 271) and left to LLVM for heap strings (forced inline, the
-benchmark's `String` lookups took 449 instead of 433).
+**Shared prefix where fences are missing (D50).** A node whose windows
+all tie at its prefix searches its keys whole: on 1M paths, 7.7 full-key
+comparisons a query when the root had prefix 0. Dense integers tie the same
+way at the root and borders, UUIDv7-like arrays wherever their timestamp is
+shared. Two ways to skip those bytes:
+
+- **Per node,** a local prefix kept where the windows tie, checked against
+  the node's first key. Built and measured (2026-10-10): dense `u64` hits
+  −8.5%, inserts −5%; 1M paths −2.7%; UUIDv7-like `[u8; 16]` 366 → 270
+  instructions at 10M, 27.7 → 7.5 ns at 1k. Every internal search paid a
+  header field and a branch, 16–28 instructions a lookup on random keys;
+  every key move restored and rebuilt the windows; and once separator keys
+  became leaf heads (D49), each check walked to a leaf.
+- **Per tree,** the bytes every key shares, beside the root, which the root
+  and the borders, the nodes without a fence, take as their prefix. A
+  query is checked once, at the top, against bytes in one line next to the
+  root pointer; one without them reads no node. Model: one compare a
+  lookup, a null test where keys share nothing; a shrink touches the two
+  borders, O(log n) nodes, at most once per byte. Measured against D49:
+  dense `u64` lookups −46 instructions, 10M paths −123, random keys +1.
+
+Accepted per tree. Inside the tree, a node's keys fill the range between
+its fences, so the fences give it nearly all its keys share.
+Code generation decided most of the per-node work: a call anywhere in the
+descent loop, even a cold one, kept the loop's state in stack slots (+30
+to +100 instructions); comparing 64 shared path bytes a window at a time
+took 300 more instructions than in 32-byte chunks, which the per-tree check
+keeps. Node searches are forced inline for fixed-width keys (outlined,
+`hash32` lookups took 442 instructions instead of 271) and left to LLVM for
+heap strings (forced inline, the benchmark's `String` lookups took 449
+instead of 433).
 Carrying a parent's matched prefix down instead is unsound: it says
 nothing about an outer child's other side.
 
@@ -324,7 +335,8 @@ cost to the fence tree alone: a prefix the fences don't guarantee must be
 checked against a key at about two levels a lookup, and a leaf hit
 confirmed from the key's bytes; for strings both read heap lines (+1.3
 DRAM lines a lookup), and the bookkeeping adds about 120 instructions.
-Rejected; local prefixes go only where fences fail.
+Rejected; fences stay, and the tree's shared prefix covers where they are
+missing.
 
 **Bulk compare of long suffixes.** About 100 fewer instructions per path
 operation, but more branch misses: paths 1–2.5% slower, JSON 1–2% slower.

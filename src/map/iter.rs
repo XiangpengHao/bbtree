@@ -499,7 +499,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             return Range::default();
         };
         Range {
-            walk: RangeWalk::new(root.borrow(), range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(
+                root.borrow(),
+                root.shared_prefix(),
+                range.start_bound(),
+                range.end_bound(),
+            ),
         }
     }
 }

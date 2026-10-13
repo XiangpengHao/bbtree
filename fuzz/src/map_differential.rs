@@ -5,7 +5,7 @@
 //! Every map operation reaches the same node code: slots, splits, merges,
 //! moves between siblings, cuts, joins, bulk builds and walks. What sets key
 //! types apart is the node plan (`src/node/node_plan.rs`): which inline
-//! keys, length tags and local prefixes nodes keep, and how they search. So
+//! keys and length tags nodes keep, and how they search. So
 //! there is one target per row of the plan's table ([`MapTarget`]), each on
 //! two maps: one with nodes as wide as the key type gives, and one with
 //! narrow nodes, whose trees grow tall from short inputs ([`Fanout`]).
@@ -28,8 +28,7 @@ use crate::position_mask::PositionMask;
 pub enum MapTarget {
     /// Std heap byte strings (`Vec<u8>`): 8-byte inline keys in leaves and
     /// 4-byte ones in internal nodes, read again from keys when handed out
-    /// (D43), length tags in leaves (D36) and local prefixes in internal
-    /// nodes (D33). The most code of any row.
+    /// (D43), and length tags in leaves (D36). The most code of any row.
     HeapByteStrings,
     /// Std integers (`u64`): 2-byte inline keys past the bytes a node's keys
     /// share (D31); the most common keys with inline keys.
@@ -39,9 +38,8 @@ pub enum MapTarget {
     /// without calling the encoding while keys move (D26), and lookups by a
     /// borrowed form the nodes can't encode, by `Ord` alone (D19).
     UserInlineKeys,
-    /// Std byte arrays (`[u8; 16]`): 2-byte inline keys, children before
-    /// keys in internal nodes (D39), and a lookup's one candidate compared
-    /// whole (D38).
+    /// Std byte arrays (`[u8; 16]`): 2-byte inline keys, keyless internal
+    /// nodes (D49), and a lookup's one candidate compared whole (D38).
     ByteArrays,
     /// Keys without inline keys: `u32`, searched branchless (D19), and in
     /// the narrow map 64-byte arrays, whose trees reach three levels from a

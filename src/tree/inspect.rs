@@ -12,13 +12,14 @@
 
 use alloc::vec::Vec;
 use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::fmt;
 use core::mem::size_of;
 use core::ops::Range;
 use core::ptr;
 
 use super::node::handle::{
-    ForceResult, Immut, Internal, Leaf, LeafOrInternal, NodeRef, SearchResult,
+    ForceResult, Immut, Internal, KeyList, Leaf, LeafOrInternal, NodeRef, SearchResult, Subtree,
 };
 use super::node::inline_keys::SearchKey;
 use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodePtr, PageKind};
@@ -26,18 +27,29 @@ use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// A map's tree, read in place: see [`crate::BBTreeMap::inspect`].
 pub struct TreeView<'a, K, V, S> {
-    root: Option<NodeRef<Immut<'a>, K, V, S, LeafOrInternal>>,
+    tree: Option<&'a Subtree<K, V, S>>,
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
-    pub(crate) fn new(root: Option<NodeRef<Immut<'a>, K, V, S, LeafOrInternal>>) -> Self {
-        Self { root }
+    pub(crate) fn new(tree: Option<&'a Subtree<K, V, S>>) -> Self {
+        Self { tree }
     }
 
     /// The root node, or `None` if the map has never held an entry. A map
     /// whose entries were all removed may keep an empty root leaf.
     pub fn root(&self) -> Option<NodeView<'a, K, V, S>> {
-        self.root.map(|node| NodeView { node })
+        self.tree.map(|tree| NodeView {
+            node: tree.borrow(),
+        })
+    }
+
+    /// The leading bytes of the encoding of every key of the map, as many
+    /// as the map keeps (D50): the prefix of the nodes along the tree's
+    /// borders. Empty if the map has never held a key, or its keys have no
+    /// inline keys.
+    pub fn shared_prefix(&self) -> &'a [u8] {
+        self.tree
+            .map_or(&[], |tree| tree.shared_prefix().as_bytes())
     }
 }
 
@@ -49,6 +61,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// a head below (D17): the trace then goes on the way the value is read
     /// (`into_value_head`), down the separator's right edge and first edges,
     /// to the leaf that holds it.
+    ///
+    /// Empty if the map has no root, or the lookup reads no node: the key
+    /// lacks what every key of the map shares ([`Self::placed_by_shared_prefix`]).
     pub fn trace<Q>(&self, key: &Q) -> Vec<TraceStep<'a, K, V, S>>
     where
         K: Borrow<Q>,
@@ -56,9 +71,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     {
         let search = SearchKey::<K, S, Q>::new(key);
         let mut steps = Vec::new();
-        let Some(mut node) = self.root else {
+        let Some(tree) = self.tree else {
             return steps;
         };
+        if tree.shared_prefix().place(&search).is_some() {
+            return steps;
+        }
+        let mut node = tree.borrow();
         loop {
             match node.force() {
                 ForceResult::Leaf(leaf) => {
@@ -108,6 +127,19 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
             }
         }
     }
+
+    /// Where `key` sorts against every key of the map, if it lacks what
+    /// they all share (D50): before all of them, or after, which a lookup
+    /// decides with no node read. `None` if it has those bytes, or the map
+    /// keeps none.
+    pub fn placed_by_shared_prefix<Q>(&self, key: &Q) -> Option<Ordering>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let search = SearchKey::<K, S, Q>::new(key);
+        self.tree?.shared_prefix().place(&search)
+    }
 }
 
 /// One node of a lookup's way down ([`TreeView::trace`]): the node, what
@@ -115,15 +147,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
 pub struct TraceStep<'a, K, V, S> {
     node: NodeView<'a, K, V, S>,
     outcome: TraceOutcome,
-    lacks_local_prefix: bool,
     inline_key: Option<InlineWord>,
     tied: Option<Range<usize>>,
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     /// A node the lookup searched: with what its search compared the key's
-    /// inline key against, the node's own (D18), unless the key lacks the
-    /// node's local search prefix (D33), which then placed it alone.
+    /// inline key against, the node's own (D18).
     fn searched<Kind: PageKind, Q: ?Sized>(
         handle: &NodeRef<Immut<'a>, K, V, S, Kind>,
         node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
@@ -133,14 +163,12 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let lacks_local_prefix = handle.search_prefix_len(search).is_err();
-        let target = handle.inline_target(search).filter(|_| !lacks_local_prefix);
+        let target = handle.inline_target(search);
         let tied = Option::zip(target, handle.inline_keys())
             .map(|(target, inline_keys)| inline_keys.equal_run(target.inline_key()));
         Self {
             node: NodeView { node },
             outcome,
-            lacks_local_prefix,
             inline_key: target.map(|target| target.inline_key()),
             tied,
         }
@@ -151,7 +179,6 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         Self {
             node: NodeView { node },
             outcome,
-            lacks_local_prefix: false,
             inline_key: None,
             tied: None,
         }
@@ -165,17 +192,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         self.outcome
     }
 
-    /// Whether the node keeps a local search prefix (D33) that the searched
-    /// key lacks: the key differs from the node's first key within it, or
-    /// ends inside it, so the search put it before or after all the node's
-    /// keys from that check alone, comparing no inline keys.
-    pub fn lacks_local_prefix(&self) -> bool {
-        self.lacks_local_prefix
-    }
-
     /// The searched key's inline key at the node's prefix, as the node
-    /// compared it with its own; `None` if the node has no inline keys, was
-    /// not searched, or placed the key by its local prefix alone.
+    /// compared it with its own; `None` if the node has no inline keys, or
+    /// was not searched.
     pub fn inline_key(&self) -> Option<InlineWord> {
         self.inline_key
     }
@@ -282,13 +301,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
         self.node.prefix_len()
     }
 
-    /// The longer prefix the node's own keys share, which its searches skip
-    /// instead, if it keeps one (D33).
-    pub fn local_prefix_len(&self) -> Option<usize> {
-        with_node!(self, |node| node.local_prefix_len())
-    }
-
-    /// Key `index`.
+    /// Key `index`: of an internal node, separator `index`'s, which in
+    /// maps whose keys have inline keys is the head key of the leftmost leaf
+    /// right of it (D49).
     ///
     /// # Panics
     ///
@@ -331,6 +346,17 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     pub fn head(&self) -> Option<&'a V> {
         match self.node.force() {
             ForceResult::Leaf(leaf) => leaf.head().map(|head| head.into_value()),
+            ForceResult::Internal(_) => None,
+        }
+    }
+
+    /// The leaf's head's key, the key of the separator just left of it,
+    /// where separator keys are heads, in maps whose keys have inline keys
+    /// (D49): `None` otherwise, in the leftmost leaf, and in an internal
+    /// node.
+    pub fn head_key(&self) -> Option<&'a K> {
+        match self.node.force() {
+            ForceResult::Leaf(leaf) => leaf.head().and_then(|head| head.into_key_and_value().0),
             ForceResult::Internal(_) => None,
         }
     }
@@ -440,12 +466,22 @@ impl PageMap {
             capacity,
             used: len,
         });
+        let has_head = usize::from(leaf.head().is_some());
+        if let Some(offset) = layout.head_key_offset {
+            arrays.push(SlotArray::dense(
+                SlotContents::HeadKey,
+                offset,
+                size_of::<K>(),
+                1,
+                has_head,
+            ));
+        }
         arrays.push(SlotArray::dense(
             SlotContents::Head,
             layout.head_offset,
             size_of::<V>(),
             1,
-            usize::from(leaf.head().is_some()),
+            has_head,
         ));
         arrays.push(SlotArray {
             contents: SlotContents::Values,
@@ -468,14 +504,17 @@ impl PageMap {
         let len = internal.len();
         let capacity = layout.keys.capacity;
         let mut arrays = Self::header_and_inline_keys::<K, V, S, Internal>(len);
-        arrays.push(SlotArray {
-            contents: SlotContents::Keys,
-            offset: layout.keys.keys_offset,
-            stride: layout.keys.key_stride,
-            slot_size: size_of::<K>(),
-            capacity,
-            used: len,
-        });
+        // With inline keys, its separator keys are heads below (D49).
+        if layout.keeps_keys() {
+            arrays.push(SlotArray {
+                contents: SlotContents::Keys,
+                offset: layout.keys.keys_offset,
+                stride: layout.keys.key_stride,
+                slot_size: size_of::<K>(),
+                capacity,
+                used: len,
+            });
+        }
         arrays.push(SlotArray {
             contents: SlotContents::Edges,
             offset: layout.edges_offset,
@@ -600,6 +639,9 @@ pub enum SlotContents {
     /// Each key's length, of byte-string leaves (D36).
     LengthTags,
     Keys,
+    /// A leaf's head's key: the key of the separator just left of it, where
+    /// separator keys are heads, in maps whose keys have inline keys (D49).
+    HeadKey,
     /// A leaf's head: the value of the separator just left of it (D17).
     Head,
     Values,
@@ -801,28 +843,22 @@ mod tests {
     }
 
     /// Traces every key of `map` and some absent ones, checking each trace
-    /// against `get`. Returns how many steps a local prefix decided alone.
+    /// against `get`. Returns how many absent keys the shared prefix placed
+    /// alone (D50).
     fn check_traces<K: Ord + Debug, V, S: InlineKeyStrategy<K>>(
         map: &BBTreeMap<K, V, S>,
         absent: &[K],
     ) -> usize {
         let tree = map.inspect();
         let height = tree.root().unwrap().height();
-        let mut placed_by_local_prefix = 0;
-        let mut check_steps = |steps: &[TraceStep<'_, K, V, S>]| {
+        let mut placed_by_shared_prefix = 0;
+        let check_steps = |steps: &[TraceStep<'_, K, V, S>]| {
             for (depth, step) in steps.iter().enumerate() {
                 assert_eq!(step.node().height(), height - depth);
-                if step.lacks_local_prefix() {
-                    let node = step.node();
-                    assert!(node.local_prefix_len().is_some());
-                    assert_eq!(step.inline_key(), None);
-                    let edge = step.edge_taken().unwrap();
-                    assert!(edge == 0 || edge == node.len());
-                    placed_by_local_prefix += 1;
-                }
             }
         };
         for (key, value) in map.iter() {
+            assert_eq!(tree.placed_by_shared_prefix(key), None);
             let steps = tree.trace(key);
             check_steps(&steps);
             let last = steps.last().unwrap();
@@ -850,6 +886,15 @@ mod tests {
         for key in absent {
             assert!(map.get(key).is_none());
             let steps = tree.trace(key);
+            if let Some(order) = tree.placed_by_shared_prefix(key) {
+                assert!(steps.is_empty());
+                match order {
+                    Ordering::Less => assert!(key < map.first_key_value().unwrap().0),
+                    _ => assert!(key > map.last_key_value().unwrap().0),
+                }
+                placed_by_shared_prefix += 1;
+                continue;
+            }
             check_steps(&steps);
             let last = steps.last().unwrap();
             let TraceOutcome::Absent { insert_at } = last.outcome() else {
@@ -859,7 +904,7 @@ mod tests {
             assert!(insert_at == 0 || leaf.key(insert_at - 1) < key);
             assert!(insert_at == leaf.len() || key < leaf.key(insert_at));
         }
-        placed_by_local_prefix
+        placed_by_shared_prefix
     }
 
     #[test]
@@ -871,10 +916,10 @@ mod tests {
         }
         let absent: Vec<u64> = (0..200).map(|number| number * 2 + 1).collect();
         assert_eq!(check_traces(&integers, &absent), 0);
-        // Dense integers share their high bytes, which internal nodes along
-        // the right border keep as a local prefix (D33): a key past them
-        // all lacks it.
-        assert!(check_traces(&integers, &[u64::MAX]) > 0);
+        // Dense integers share their high bytes, which the map keeps (D50):
+        // a key past them all lacks them.
+        assert_eq!(tree_shared_len(&integers), 6);
+        assert_eq!(check_traces(&integers, &[u64::MAX]), 1);
 
         let mut strings = BBTreeMap::new();
         for number in shuffled(5_000, 5) {
@@ -884,9 +929,15 @@ mod tests {
             .map(|number| format!("https://example.com/{:06}", number * 2 + 1))
             .collect();
         assert_eq!(check_traces(&strings, &absent), 0);
+        // The greatest is "https://example.com/009998".
+        assert_eq!(tree_shared_len(&strings), "https://example.com/00".len());
         for outside in ["https://a", "https://example.com/~"] {
-            assert!(check_traces(&strings, &[String::from(outside)]) > 0);
+            assert_eq!(check_traces(&strings, &[String::from(outside)]), 1);
         }
+    }
+
+    fn tree_shared_len<K, V, S: InlineKeyStrategy<K>>(map: &BBTreeMap<K, V, S>) -> usize {
+        map.inspect().shared_prefix().len()
     }
 
     #[test]

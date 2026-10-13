@@ -12,7 +12,7 @@ use core::borrow::Borrow;
 
 use super::node::handle::{
     ForceResult, Head, Immut, InsertSearchResult, Internal, Kv, KvByKind, Leaf, LeafOrInternal,
-    Mut, NodeMut, NodeRef, SearchResult,
+    Mut, NodeMut, NodeRef, SearchResult, Subtree,
 };
 use super::node::inline_keys::SearchKey;
 use crate::inline_key::InlineKeyStrategy;
@@ -68,6 +68,36 @@ impl<B, K, V, S: InlineKeyStrategy<K>> NodeRef<B, K, V, S, LeafOrInternal> {
                 },
             }
         }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
+    /// The entry whose key equals `key`, if the tree holds one. A key that
+    /// lacks what every key of the tree shares (D50) is in none of its
+    /// nodes, and needs no search.
+    pub(crate) fn find<Q>(&self, key: &Q) -> Option<KvByKind<Immut<'_>, K, V, S>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let key = SearchKey::new(key);
+        if self.shared_prefix().place(&key).is_some() {
+            return None;
+        }
+        self.borrow().search_tree(&key)
+    }
+
+    /// [`Self::find`], with exclusive access to the entry found.
+    pub(crate) fn find_mut<Q>(&mut self, key: &Q) -> Option<KvByKind<Mut<'_, K, V>, K, V, S>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let key = SearchKey::new(key);
+        if self.shared_prefix().place(&key).is_some() {
+            return None;
+        }
+        self.borrow_mut().search_tree(&key)
     }
 }
 
@@ -142,7 +172,7 @@ mod tests {
         EdgeRoom, ForceResult, Immut, Internal, Kv, KvByKind, LeafOrInternal, NodeRef,
         SearchResult, Subtree,
     };
-    use crate::tree::node::inline_keys::{InlinedKey, SearchKey};
+    use crate::tree::node::inline_keys::{InlinedKey, SearchKey, Separator};
     use crate::tree::node::page::TestPages;
     use crate::tree::test_support::{DropLedger, TestRng, TestTree, Tracked};
 
@@ -269,7 +299,10 @@ mod tests {
             panic!("a new root has room");
         };
         let headless = Subtree::new_leaf(pages.fresh()).forget_type();
-        edge.insert_fit(InlinedKey::new(ledger.track(), 0), headless);
+        edge.insert_fit(
+            Separator::with_key(InlinedKey::new(ledger.track(), 0)),
+            headless,
+        );
         let ForceResult::Internal(root) = tree.borrow().force() else {
             panic!("the root is internal");
         };
@@ -282,7 +315,7 @@ mod tests {
         let ForceResult::Leaf(mut headless) = root.edge_at(1).descend().force() else {
             panic!("the root's children are leaves");
         };
-        headless.replace_head(ledger.track());
+        headless.put_head(None, ledger.track());
         tree.destroy(|page| pages.release(page));
         pages.assert_all_released();
         ledger.assert_all_dropped_once();

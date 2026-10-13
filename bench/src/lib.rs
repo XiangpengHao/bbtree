@@ -30,6 +30,8 @@ mod perf_counters;
 mod random;
 mod report;
 mod run_comparison;
+#[cfg(feature = "inspect")]
+pub mod separator_census;
 mod suite_runner;
 mod suites;
 mod values;

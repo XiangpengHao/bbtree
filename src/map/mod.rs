@@ -43,7 +43,6 @@ use crate::tree::build::TreeBuilder;
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
 use crate::tree::node::handle::Subtree;
-use crate::tree::node::inline_keys::SearchKey;
 use crate::tree::node::page::{FreshPage, PageByKind};
 use crate::tree::path::{FirstEdge, KeySide, LastEdge, Path};
 
@@ -230,8 +229,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         self.root
             .as_ref()?
-            .borrow()
-            .search_tree(&SearchKey::new(key))
+            .find(key)
             .map(|found| found.into_key_value())
     }
 
@@ -372,8 +370,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         self.root
             .as_mut()?
-            .borrow_mut()
-            .search_tree(&SearchKey::new(key))
+            .find_mut(key)
             .map(|found| found.into_value_mut())
     }
 
@@ -560,8 +557,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     }
 
     /// Panics unless no node's prefix length is shorter than its parent's
-    /// (D44), and every node along the tree's borders has prefix 0
-    /// (05-fence-key.md). Calls neither `Ord` nor any encoding: it holds even
+    /// (D44), and every node along the tree's borders has the tree's shared
+    /// prefix (D50). Calls neither `Ord` nor any encoding: it holds even
     /// for keys that panic or break their contracts.
     pub fn check_prefix_lens(&self) {
         if let Some(root) = &self.root {
@@ -576,7 +573,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// and page layouts, as the map stores them. For the visualizer (`vis/`);
     /// the `inspect` feature promises no stability.
     pub fn inspect(&self) -> TreeView<'_, K, V, S> {
-        TreeView::new(self.root.as_ref().map(|root| root.borrow()))
+        TreeView::new(self.root.as_ref())
     }
 }
 

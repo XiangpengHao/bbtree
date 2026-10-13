@@ -1051,9 +1051,6 @@
     border-bottom-color: var(--slot-inline);
     color: var(--ink);
   }
-  .bracket-search-prefix {
-    border-bottom-style: dashed;
-  }
   .byte {
     text-align: center;
     color: var(--ink);
@@ -1063,10 +1060,6 @@
     background: var(--well);
     color: var(--muted);
   }
-  .byte.in-search-prefix {
-    background: var(--well);
-    color: var(--graphite);
-  }
   .byte.in-window {
     background: var(--compare-soft);
   }
@@ -1075,7 +1068,6 @@
     font-weight: 500;
   }
   .lit-prefix .byte.in-prefix,
-  .lit-search-prefix .byte.in-search-prefix,
   .lit-window .byte.in-window {
     background: var(--marker);
     color: var(--ink);

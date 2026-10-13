@@ -9,10 +9,12 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 
-use super::handle::{ForceResult, Internal, Leaf, NodeKind};
+use super::handle::{ForceResult, Immut, Internal, Leaf, NodeKind, NodeRef, SeparatorKeys};
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
 use super::node_plan::NodePlan;
-use super::slots::{InlineKeySlots, KeyColumns, KeySlots, Slots};
+use super::slots::{
+    InlineKeySlots, KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots,
+};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 pub(super) use type_identity::{ByteString, SameType, StdInteger};
@@ -33,16 +35,34 @@ pub(super) use type_identity::{ByteString, SameType, StdInteger};
 pub(crate) unsafe trait PageKind: NodeKind + Sized {
     const IS_LEAF: bool;
 
+    /// The keys a node of this kind lends, in order: a leaf's own, or an
+    /// internal node's separator keys (D17, D49).
+    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>>: KeyList<'a, K>;
+
     /// `page`, sorted by its kind, this one.
     fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S>;
+
+    /// The keys of `node`.
+    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'a>, K, V, S, Self>,
+    ) -> Self::Keys<'a, K, V, S>;
 }
 
 // SAFETY: leaves are the nodes at height 0.
 unsafe impl PageKind for Leaf {
     const IS_LEAF: bool = true;
 
+    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>> = NodeKeys<'a, K>;
+
     fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
         ForceResult::Leaf(page)
+    }
+
+    #[inline(always)]
+    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'a>, K, V, S, Self>,
+    ) -> NodeKeys<'a, K> {
+        node.leaf_keys()
     }
 }
 
@@ -50,8 +70,17 @@ unsafe impl PageKind for Leaf {
 unsafe impl PageKind for Internal {
     const IS_LEAF: bool = false;
 
+    type Keys<'a, K: 'a, V, S: InlineKeyStrategy<K>> = SeparatorKeys<'a, K, V, S>;
+
     fn page_by_kind<K, V, S>(page: FreshPage<K, V, S, Self>) -> PageByKind<K, V, S> {
         ForceResult::Internal(page)
+    }
+
+    #[inline(always)]
+    fn keys_of<'a, K: 'a, V, S: InlineKeyStrategy<K>>(
+        node: NodeRef<Immut<'a>, K, V, S, Self>,
+    ) -> SeparatorKeys<'a, K, V, S> {
+        SeparatorKeys::of(node)
     }
 }
 
@@ -129,9 +158,10 @@ impl<K, V, S, Kind> FreshPage<K, V, S, Kind> {
 }
 
 /// Temporary allocation boundary, until the allocator trait (D8) replaces it:
-/// one global-allocator call per node page. Nodes keep a 1 KiB size floor
-/// but need only cache-line alignment, or larger alignment required by
-/// their key/value types. The smaller alignment permits tighter packing
+/// one global-allocator call per node page. Nodes keep a 1 KiB size floor,
+/// 512 bytes for internal nodes that keep no keys (D49), but need only
+/// cache-line alignment, or larger alignment required by their key/value
+/// types. The smaller alignment permits tighter packing
 /// in allocators that keep metadata beside each allocation.
 impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
     /// A page from the global allocator.
@@ -139,7 +169,7 @@ impl<K, V, S: InlineKeyStrategy<K>, Kind: PageKind> FreshPage<K, V, S, Kind> {
     /// Calls [`handle_alloc_error`] if the allocation fails.
     pub(crate) fn allocate() -> Self {
         let layout = Self::layout();
-        // SAFETY: `layout` has a non-zero size: nodes are at least 1 KB.
+        // SAFETY: `layout` has a non-zero size: nodes are at least 512 B.
         let page = unsafe { alloc(layout) };
         let Some(page) = NonNull::new(page) else {
             handle_alloc_error(layout)
@@ -192,8 +222,9 @@ impl<K, V, S> From<FreshPage<K, V, S, Internal>> for PageByKind<K, V, S> {
 pub(in crate::tree) struct NodeHeader {
     /// The number of keys.
     len: u16,
-    /// Whether a leaf holds a head value (D17); its head slot is initialized
-    /// exactly when this is set. Always `false` in an internal node.
+    /// Whether a leaf holds a head (D17); its head slot is initialized
+    /// exactly when this is set, and so is its head key slot in a map whose
+    /// separator keys are heads (D49). Always `false` in an internal node.
     has_head: bool,
 }
 
@@ -205,11 +236,10 @@ pub(in crate::tree) struct NodeHeader {
 pub(in crate::tree) struct InlineKeyNodeHeader {
     common: NodeHeader,
     /// How many leading bytes the node's fences share, and so every key in
-    /// it, which its inline keys skip (05-fence-key.md).
+    /// it, which its inline keys skip (05-fence-key.md); for a node on the
+    /// tree's border, which lacks a fence, what every key of the tree shares
+    /// (D50).
     prefix_len: u16,
-    /// Optional offset used only for searching this node's own keys. Zero
-    /// keeps fence windows; the field occupies the header's old padding.
-    search_prefix_len: u16,
 }
 
 impl InlineKeyNodeHeader {
@@ -293,7 +323,8 @@ impl<K, V, S> NodePtr<K, V, S> {
         usize::from(unsafe { (*self.header()).len })
     }
 
-    /// Whether a leaf's head slot is initialized (D17).
+    /// Whether a leaf's head slot, and head key slot where separator keys
+    /// are heads, are initialized (D17, D49).
     ///
     /// # Safety
     ///
@@ -308,8 +339,9 @@ impl<K, V, S> NodePtr<K, V, S> {
     /// # Safety
     ///
     /// The node is a leaf that has not been released, its handle has
-    /// exclusive access, and its head slot is initialized exactly if
-    /// `has_head` by the time the node is used again.
+    /// exclusive access, and its head slot, and head key slot where separator
+    /// keys are heads, are initialized exactly if `has_head` by the time the
+    /// node is used again.
     pub(super) unsafe fn set_has_head(self, has_head: bool) {
         // SAFETY: the header is in bounds and aligned; the caller has
         // exclusive access.
@@ -342,13 +374,21 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         Self::plan::<Leaf>().inline_width().is_some()
     }
 
+    /// Whether each separator key is the head of the leftmost leaf right of
+    /// it rather than a key of its internal node (D49): in a map whose keys
+    /// have inline keys.
+    #[inline(always)]
+    pub(in crate::tree) fn has_separator_keys_in_heads() -> bool {
+        Self::plan::<Internal>().has_separator_keys_in_heads()
+    }
+
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
-        NodeLayout::<K, V>::leaf(Self::inline_width::<Leaf>())
+        let plan = Self::plan::<Leaf>();
+        NodeLayout::<K, V>::leaf(plan.inline_width(), plan.has_length_tags())
     }
 
     pub(in crate::tree) fn internal_layout() -> InternalLayout {
-        let plan = Self::plan::<Internal>();
-        NodeLayout::<K, V>::internal(plan.inline_width(), plan.has_children_first())
+        NodeLayout::<K, V>::internal(Self::inline_width::<Internal>())
     }
 
     /// Where the keys and inline keys of a node of kind `Kind` sit.
@@ -365,12 +405,12 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         Self::key_area::<Kind>().capacity
     }
 
-    /// Whether a node of kind `Kind` pairs its keys with its trailing slots
-    /// in entries (D29, D32), which then move whole: in a leaf with inline
-    /// keys, unless the values take no room, which leaves the keys side by
-    /// side. Internal keys and edges use separate arrays.
-    pub(super) fn has_paired_entries<Kind: PageKind>() -> bool {
-        Self::key_area::<Kind>().key_stride != size_of::<K>()
+    /// Whether a leaf pairs its keys with its values in entries (D29), which
+    /// then move whole: with inline keys, unless the values take no room,
+    /// which leaves the keys side by side. Internal nodes never pair their
+    /// edges with keys (D32).
+    pub(super) fn has_paired_leaf_entries() -> bool {
+        Self::leaf_layout().keys.key_stride != size_of::<K>()
     }
 
     /// Turns a fresh page into an empty node of the page's kind: no keys
@@ -403,7 +443,6 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                     .write(InlineKeyNodeHeader {
                         common,
                         prefix_len: 0,
-                        search_prefix_len: 0,
                     });
             } else {
                 node.page.cast::<NodeHeader>().write(common);
@@ -430,26 +469,6 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         })
     }
 
-    /// Optional local search offset, zero when the windows use the fences.
-    ///
-    /// # Safety
-    /// The node is allocated, has inline keys, and its header is not being
-    /// written concurrently.
-    pub(super) unsafe fn search_prefix_len(self) -> usize {
-        let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
-        // SAFETY: the caller guarantees the initialized inline-key header.
-        usize::from(unsafe { (*header).search_prefix_len })
-    }
-
-    /// # Safety
-    /// The node is allocated, has inline keys, and is exclusively borrowed.
-    pub(super) unsafe fn set_search_prefix_len(self, prefix_len: usize) {
-        let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
-        let prefix_len = prefix_len.min(InlineKeyNodeHeader::MAX_PREFIX_LEN) as u16;
-        // SAFETY: the caller guarantees the initialized, exclusive header.
-        unsafe { (*header).search_prefix_len = prefix_len };
-    }
-
     /// Sets the `prefix_len` of a node with inline keys; does nothing to a
     /// node without. Keeping the inline keys at that prefix length is the
     /// caller's business: it decides answers, not memory safety.
@@ -464,10 +483,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
             let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
             // SAFETY: a node with inline keys starts with an aligned
             // `InlineKeyNodeHeader`; the caller has exclusive access.
-            unsafe {
-                (*header).prefix_len = prefix_len;
-                (*header).search_prefix_len = 0;
-            }
+            unsafe { (*header).prefix_len = prefix_len };
         }
     }
 
@@ -488,11 +504,15 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// slots from theirs (D18). Mutating operations normalize local search
     /// windows first, so `KeySlots` always moves conservative fence windows.
     ///
+    /// Only for a node that keeps keys: a leaf, or an internal node without
+    /// inline keys (D49).
+    ///
     /// # Safety
     ///
     /// The node has not been released, and is of kind `Kind`; nothing writes
     /// its header concurrently.
     pub(super) unsafe fn key_slots<Kind: PageKind>(self) -> KeySlots<K, S, Kind> {
+        debug_assert!(Kind::IS_LEAF || Self::internal_layout().keeps_keys());
         let area = Self::key_area::<Kind>();
         // SAFETY: forwarded.
         let prefix_len = unsafe { self.prefix_len() }.unwrap_or(0);
@@ -508,6 +528,29 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 area.key_stride,
             );
             KeySlots::new(keys, self.key_columns::<Kind>(), prefix_len)
+        }
+    }
+
+    /// An internal node's separators (D17): its keys, in a map without inline
+    /// keys, or their windows, in a map with them, whose separator keys are
+    /// heads (D49).
+    ///
+    /// # Safety
+    ///
+    /// The node is an internal node that has not been released; nothing
+    /// writes its header concurrently.
+    #[inline(always)]
+    pub(super) unsafe fn separator_slots(self) -> SeparatorSlots<K, S> {
+        // SAFETY: forwarded; the node is internal (caller).
+        unsafe {
+            if Self::has_separator_keys_in_heads() {
+                SeparatorSlots::Windows {
+                    columns: self.key_columns::<Internal>(),
+                    prefix_len: self.prefix_len().unwrap_or(0),
+                }
+            } else {
+                SeparatorSlots::Keys(self.key_slots::<Internal>())
+            }
         }
     }
 
@@ -544,6 +587,24 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 .map(|offset| Slots::new(self.page.byte_add(offset).cast(), area.capacity));
             KeyColumns::new(inline_keys, length_tags, area.capacity)
         }
+    }
+
+    /// A leaf's head key slot: the key's place of entry 0, before the head,
+    /// where the key of the separator left of the leaf is (D49).
+    ///
+    /// # Safety
+    ///
+    /// The node is a leaf that has not been released, in a map whose
+    /// separator keys are heads.
+    pub(super) unsafe fn head_key_slot(self) -> NonNull<K> {
+        let offset = Self::leaf_layout()
+            .head_key_offset
+            .expect("a leaf with inline keys has a head key slot");
+        // SAFETY: the page is a leaf's (caller), of this layout, whose entry
+        // 0 starts with a key's place, aligned for `K` and in the page, clear
+        // of every other array (layout invariants); the page is allocated
+        // (caller).
+        unsafe { self.page.byte_add(offset).cast() }
     }
 
     /// A leaf's value slots: `capacity` of them, value `i` beside key `i`
@@ -971,7 +1032,7 @@ mod test_pages {
             let page = match reusable {
                 Some(index) => released.remove(index).0,
                 None => {
-                    // SAFETY: `layout` has a non-zero size (at least 1 KB).
+                    // SAFETY: `layout` has a non-zero size (at least 512 B).
                     let raw = unsafe { alloc(layout) };
                     let page = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
                     self.allocated.borrow_mut().push((page, layout));
@@ -1117,7 +1178,8 @@ mod tests {
     /// kind: inside the page, aligned, after the header, and no slot over
     /// another, with a leaf's values its head-and-value slots past the head
     /// (D17), and without inline keys, the keys at the same offset in both
-    /// kinds.
+    /// kinds. With inline keys, an internal node keeps no keys, and a leaf's
+    /// head key slot is entry 0's key (D49).
     fn assert_slots_are_aligned_and_disjoint<K, V, S: InlineKeyStrategy<K>>() {
         let pages = TestPages::<K, V, S>::new();
         let leaf = NodePtr::from_fresh_page(pages.fresh::<Leaf>());
@@ -1127,14 +1189,21 @@ mod tests {
         let leaf_capacity = NodePtr::<K, V, S>::capacity::<Leaf>();
         let internal_capacity = NodePtr::<K, V, S>::capacity::<Internal>();
 
+        let keeps_keys = NodePtr::<K, V, S>::internal_layout().keeps_keys();
+        assert_eq!(
+            keeps_keys,
+            !NodePtr::<K, V, S>::has_separator_keys_in_heads()
+        );
         // SAFETY: both pages are allocated, and each is asked for the slots
-        // of its own kind; nothing is dereferenced.
-        let (leaf_keys, values, head_and_values, internal_keys, edges) = unsafe {
+        // of its own kind, the internal node for keys only if it keeps them;
+        // nothing is dereferenced.
+        let (leaf_keys, values, head_and_values, internal_keys, internal_columns, edges) = unsafe {
             (
                 leaf.key_slots::<Leaf>(),
                 SlotRange::of(leaf.value_slots(), leaf_capacity),
                 SlotRange::of(leaf.head_and_value_slots(), leaf_capacity + 1),
-                internal.key_slots::<Internal>(),
+                keeps_keys.then(|| internal.key_slots::<Internal>()),
+                internal.key_columns::<Internal>(),
                 SlotRange::of(internal.edge_slots(), internal_capacity + 1),
             )
         };
@@ -1143,15 +1212,26 @@ mod tests {
             NodePtr::<K, V, S>::inline_width::<Leaf>()
         );
         assert_eq!(
-            internal_keys.inline_keys().map(InlineKeySlots::width),
+            internal_columns.inline_keys().map(InlineKeySlots::width),
             NodePtr::<K, V, S>::inline_width::<Internal>()
         );
         let leaf_inline_keys =
             (leaf_keys.inline_keys()).map(|slots| SlotRange::of_inline_keys(slots, leaf_capacity));
-        let internal_inline_keys = (internal_keys.inline_keys())
+        let internal_inline_keys = (internal_columns.inline_keys())
             .map(|slots| SlotRange::of_inline_keys(slots, internal_capacity));
+        // SAFETY: as above; the leaf's head key slot only where separator
+        // keys are heads.
+        let head_key = NodePtr::<K, V, S>::has_separator_keys_in_heads().then(|| unsafe {
+            let slot = leaf.head_key_slot();
+            assert!(slot.addr().get().is_multiple_of(align_of::<K>()));
+            let start = slot.addr().get();
+            SlotRange(
+                start..start + size_of::<K>(),
+                std::vec![start..start + size_of::<K>()],
+            )
+        });
         let leaf_keys = SlotRange::of(leaf_keys.keys(), leaf_capacity);
-        let internal_keys = SlotRange::of(internal_keys.keys(), internal_capacity);
+        let internal_keys = internal_keys.map(|keys| SlotRange::of(keys.keys(), internal_capacity));
 
         // SAFETY: allocated nodes of the requested kind; only addresses
         // and the allocation-initialized tag slots are inspected.
@@ -1169,22 +1249,33 @@ mod tests {
                 tags.assert_disjoint(&leaf_keys);
                 tags.assert_disjoint(&head_and_values);
                 tags.assert_disjoint(leaf_inline_keys.as_ref().unwrap());
+                if let Some(head_key) = &head_key {
+                    tags.assert_disjoint(head_key);
+                }
             }
         }
 
         for slots in [&leaf_keys, &values, &head_and_values] {
             slots.assert_within(&leaf_page);
         }
-        for slots in [&internal_keys, &edges] {
-            slots.assert_within(&internal_page);
+        if let Some(head_key) = &head_key {
+            head_key.assert_within(&leaf_page);
+            head_key.assert_disjoint(&leaf_keys);
+            head_key.assert_disjoint(&head_and_values);
+            head_key.assert_disjoint(leaf_inline_keys.as_ref().unwrap());
+        }
+        edges.assert_within(&internal_page);
+        if let Some(internal_keys) = &internal_keys {
+            internal_keys.assert_within(&internal_page);
+            internal_keys.assert_disjoint(&edges);
         }
         let keys_offset = leaf_keys.0.start - leaf_page.start;
         assert!(size_of::<NodeHeader>() <= keys_offset);
         assert_eq!(values.1, head_and_values.1[1..]);
         leaf_keys.assert_disjoint(&head_and_values);
-        internal_keys.assert_disjoint(&edges);
         match (leaf_inline_keys, internal_inline_keys) {
             (None, None) => {
+                let internal_keys = internal_keys.expect("a node without inline keys keeps keys");
                 assert_eq!(internal_keys.0.start - internal_page.start, keys_offset);
             }
             (Some(leaf_inline_keys), Some(internal_inline_keys)) => {
@@ -1194,7 +1285,10 @@ mod tests {
                 assert_eq!(leaf_inline_keys.0.start - leaf_page.start, 8);
                 assert_eq!(internal_inline_keys.0.start - internal_page.start, 8);
                 assert!(leaf_inline_keys.0.end <= leaf_keys.0.start);
-                assert!(internal_inline_keys.0.end <= internal_keys.0.start);
+                assert!(
+                    internal_keys.is_none(),
+                    "a node with inline keys keeps no keys"
+                );
                 leaf_inline_keys.assert_disjoint(&head_and_values);
                 internal_inline_keys.assert_disjoint(&edges);
             }
@@ -1276,7 +1370,7 @@ mod tests {
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<String, u64, Auto>::leaf_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_LEAF
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_TAGGED_LEAF
         );
         assert_eq!(
             NodePtr::<Vec<u8>, u64, Auto>::internal_layout(),
@@ -1369,8 +1463,9 @@ mod tests {
     /// no other.
     #[test]
     fn released_pages_are_handed_out_for_their_layout_only() {
-        // Both kinds are 1 KB pages: a leaf's page can hold an internal node.
-        let pages = TestPages::<u64, u64>::new();
+        // Without inline keys, both kinds are 1 KB pages: a leaf's page can
+        // hold an internal node.
+        let pages = TestPages::<u32, u64>::new();
         pages.release(pages.fresh::<Leaf>());
         pages.release(pages.fresh::<Internal>());
         assert_eq!(pages.allocated_count(), 1);

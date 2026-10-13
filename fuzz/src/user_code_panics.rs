@@ -18,8 +18,9 @@
 //!   searches allow but `check_invariants` doesn't, so from then on the run
 //!   checks prefix lengths (`check_prefix_lens`) and answers only;
 //! - with any keys, no node's prefix is shorter than its parent's (D44),
-//!   the nodes along the tree's borders keep prefix 0, which searches past
-//!   the first or last key read, and the map's length is the number of
+//!   the nodes along the tree's borders keep the tree's shared prefix
+//!   (D50), which searches past the first or last key read, and the map's
+//!   length is the number of
 //!   entries it walks; and, with lying keys, no panic but the hostile ones:
 //!   std's map panics on an inconsistent `Ord` only in `range`, which this
 //!   target doesn't call.
