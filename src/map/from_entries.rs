@@ -5,7 +5,7 @@
 //! entries by key, stably, and keep only the last of each run of equal keys,
 //! key and value, dropping the others in order; then they build the tree
 //! from the sorted entries, into full nodes, comparing no more keys
-//! (`node/build.rs`).
+//! (`tree/build.rs`).
 //!
 //! Like `new` and `Default`, `collect` and `from` make maps of the default
 //! strategy only, as std's make maps of the global allocator only: with a
@@ -18,7 +18,7 @@ use core::iter::Peekable;
 
 use super::BBTreeMap;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::build::TreeBuilder;
+use crate::tree::build::TreeBuilder;
 
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
@@ -32,7 +32,7 @@ impl<K: Ord, V> BBTreeMap<K, V> {
 
 impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// A map of `entries`, whose keys ascend strictly, built into full nodes
-    /// comparing no keys (`node/build.rs`). Keys out of order make a map
+    /// comparing no keys (`tree/build.rs`). Keys out of order make a map
     /// whose searches give wrong answers, but that is memory-safe.
     pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
         let mut builder = TreeBuilder::new();

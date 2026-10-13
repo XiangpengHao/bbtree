@@ -1,7 +1,7 @@
 # 10 — Visualization: browsing the real tree in a browser
 
 Status (2026-10-11): the `inspect` feature with lookup traces
-(`node/inspect.rs`, `map/inspect.rs`), and the visualizer in `vis/`.
+(`tree/inspect.rs`, `map/mod.rs`), and the visualizer in `vis/`.
 Inserts and removals are still to come.
 
 ## Goals
@@ -58,7 +58,7 @@ bbtree stores, not an encoding of its own.
 ## The `inspect` feature: a view, not exposed fields
 
 No field becomes public. The precedent is `check_invariants`
-(`map/invariants.rs`), a `pub fn` behind `cfg(fuzzing)` that walks the whole
+(`tree/invariants.rs`), a `pub fn` behind `cfg(fuzzing)` that walks the whole
 tree through the node handles. `inspect` is a cargo feature instead of a cfg,
 because a dependent crate opts into a feature and needs no `RUSTFLAGS`. It
 adds API only, no dependencies (D2), and promises no stability. Its module
@@ -83,7 +83,7 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **Tests:** a walk through the views over `u64`, `String` and tuple keys
   sees every key once in order, `len()` entries, a head on every leaf but the
   leftmost, and pages whose used slots lie within them without overlapping.
-- **Code:** `node/inspect.rs` holds the views; it is safe code. The one
+- **Code:** `tree/inspect.rs` holds the views; it is safe code. The one
   addition elsewhere is `NodePtr::addr` in `page.rs`, for node ids.
 
 ## Lookup traces: `TreeView::trace`

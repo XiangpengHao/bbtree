@@ -3,7 +3,7 @@
 //! leaf's run of keys at a time, and [`MergeSides`], two of them merged.
 //!
 //! A cursor takes its set's keys from the walk a run at a time
-//! (`node/walk.rs`): all the keys left in a leaf, which the walk moves past
+//! (`tree/walk.rs`): all the keys left in a leaf, which the walk moves past
 //! at once, or a separator alone. Stepping through a run touches neither the
 //! walk nor its count. A merge's fold keeps both runs in locals, which live
 //! in registers, and touches each walk once per run; `next` keeps them in the
@@ -28,7 +28,7 @@ use core::ops::ControlFlow;
 
 use super::Iter;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::KeyRun;
+use crate::tree::node::handle::KeyRun;
 
 /// A set's elements in order, a leaf's run of keys at a time: the run being
 /// visited, and the walk past it.

@@ -320,7 +320,7 @@ not decided".
   only read the structure and keys; handing out a value as `&mut V` is
   unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
-  (range). That is the one `unsafe` in `node/walk.rs`.
+  (range). That is the one `unsafe` in `tree/walk.rs`.
 - **Owning iteration** (`DyingWalk`, for `IntoIter` and for dropping a
   tree, which is dropping one) takes the tree apart as it goes: each entry
   is moved out of its slot, nothing shifts and nothing rebalances, and an
@@ -356,7 +356,7 @@ not decided".
 
 **D24. Paths: a node pointer per level from the root, shared by every operation.** (2026-10-08)
 
-- **One type** (`node/path.rs`): the node at each height from the root
+- **One type** (`tree/path.rs`): the node at each height from the root
   down to a position in one of them, and the index taken at each, as a
   `u16`. It stands for a borrow of the whole tree: shared or value-mutating
   paths copy handles out, and an exclusive path (`PathMut`) lends one handle
@@ -409,7 +409,7 @@ not decided".
 
 **D25. Bulk changes: a builder of full nodes, fed by draining in order.** (2026-10-08)
 
-- **`TreeBuilder`** (`node/build.rs`) builds a tree from entries in
+- **`TreeBuilder`** (`tree/build.rs`) builds a tree from entries in
   ascending key order, comparing no keys: each node fills before the next
   starts beside it, and `finish` tops up the right border to the minimum
   (D22) from the full left siblings. The tree is well formed throughout but
@@ -427,10 +427,10 @@ not decided".
   position tracked through every merge and steal, which std's parent
   pointers give for free.
 - **`split_off` cuts the tree along the search path, as std's does**
-  (`map/split_off.rs`): from the leaf up, each node on the path keeps what
+  (`tree/cut.rs`): from the leaf up, each node on the path keeps what
   lies left of it, and what lies right goes into a new node, after the part
   cut off below; then both sides of the cut are brought back to the
-  minimum fill from the top down (`node/border.rs`, which the builder's
+  minimum fill from the top down (`tree/cut.rs`, which the builder's
   right border shares): each node on the border gets one key more than its
   minimum, by a merge with its sibling or keys moved over from it, so that
   a merge below leaves it at its minimum. A separator at the start of the
@@ -472,7 +472,7 @@ Design and measurements in 05-fence-key.md.
 Refines D20.
 
 - **Library:** the `prefetch` feature, on by default, gates the one
-  software prefetch, `prefetch_search_area` (`node/handle.rs`). Without it
+  software prefetch, `prefetch_search_area` (`tree/node/handle.rs`). Without it
   a search reads the node as it goes.
 - **Benchmarks:** `bench` depends on bbtree without default features, so a
   run times the code's own memory access unless built with
@@ -931,7 +931,7 @@ Supersedes D20 and D27.
 **D47. Node plans: every per-key-type choice in one place.** (2026-10-11)
 Design and measurements in 07-node-plan.md.
 
-- **What:** `NodePlan::of::<S, Kind>()` (`node/node_plan.rs`) decides, per
+- **What:** `NodePlan::of::<S, Kind>()` (`tree/node/node_plan.rs`) decides, per
   key type and node kind, everything the nodes specialize on: summary width,
   length tags, local prefix, children first, rehydrated windows, full and
   tied searches, whole-key equality. One constructor per row of the table,
@@ -996,7 +996,7 @@ requires the token: one check, no duplicates, nothing on the hot path.
   split/merge, off the hot path.
 - **Paths lend one mutable node at a time** (built with the tree layer).
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the slots,
-  handle and page modules of `node/` and the tree's path module.
+  handle and page modules of `tree/node/` and the tree's path module.
 
 **D44. A child's prefix is never shorter than its parent's, even with a lying encoding.** (2026-10-10)
 

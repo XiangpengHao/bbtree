@@ -2,7 +2,7 @@
 //! into one key's place in a map, as std's.
 //!
 //! An entry keeps the path its search found, from the root down to the key
-//! or to the leaf edge where it goes (`node/path.rs`): every `Ord` call
+//! or to the leaf edge where it goes (`tree/path.rs`): every `Ord` call
 //! happens in `entry`, as in std. Reading or changing an occupied entry goes
 //! straight to the node at the end of the path; removing it, or inserting
 //! into a vacant one, goes back up the path, comparing no keys. An insert
@@ -15,10 +15,10 @@ use core::fmt;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::Subtree;
-use crate::node::inline_keys::SearchKey;
-use crate::node::page::{FreshPage, PageByKind};
-use crate::node::path::PathMut;
+use crate::tree::node::handle::Subtree;
+use crate::tree::node::inline_keys::SearchKey;
+use crate::tree::node::page::{FreshPage, PageByKind};
+use crate::tree::path::PathMut;
 
 /// A view into a single entry in a map, which may either be vacant or
 /// occupied.

@@ -3,7 +3,7 @@
 //!
 //! It takes the entries of both maps by value, from the front (`IntoIter`),
 //! merges them in key order and builds the tree they make into full nodes
-//! (`node/build.rs`): in O(n + m), as std's.
+//! (`tree/build.rs`): in O(n + m), as std's.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +12,7 @@ use core::mem;
 
 use super::{BBTreeMap, IntoIter};
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::build::TreeBuilder;
+use crate::tree::build::TreeBuilder;
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Moves all elements from `other` into `self`, leaving `other` empty.

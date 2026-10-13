@@ -296,8 +296,8 @@ pub(crate) mod sealed {
     use super::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
 
     /// Where a strategy's inline keys come from. Plain data: the node code
-    /// resolves it for a key type (`node/inline_keys.rs`), and page layouts
-    /// depend on the answer.
+    /// resolves it for a key type (`tree/node/inline_keys.rs`), and page
+    /// layouts depend on the answer.
     pub enum InlineKeySource<K> {
         /// Std byte strings and integers, recognized by their type, have
         /// inline keys: windows of a byte string's bytes, and an integer's
@@ -334,7 +334,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{InlineKey, InlineWidth, InlineWord};
-    use crate::node::test_support::TestRng;
+    use crate::tree::test_support::TestRng;
 
     #[test]
     fn windows_big_endian_and_zero_padded() {

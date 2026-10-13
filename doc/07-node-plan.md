@@ -1,7 +1,7 @@
 # 07 — Node plans: every per-key-type choice in one place
 
-Status: implemented (2026-10-11), in `node/node_plan.rs`, the key columns of
-`node/slots.rs`, and the plan-driven layouts of `node/layout.rs`; D47.
+Status: implemented (2026-10-11), in `tree/node/node_plan.rs`, the key columns of
+`tree/node/slots.rs`, and the plan-driven layouts of `tree/node/layout.rs`; D47.
 Measured in "Verification".
 
 ## Problem

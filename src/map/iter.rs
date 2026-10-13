@@ -12,12 +12,8 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::{Immut, KeyRun};
-use crate::node::walk::{BorrowedWalk, RangeWalk};
-
-#[cfg(test)]
-#[path = "iterator_tests.rs"]
-mod tests;
+use crate::tree::node::handle::{Immut, KeyRun};
+use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
 ///

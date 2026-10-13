@@ -1,6 +1,6 @@
 //! Iterating over a map with mutable access to its values: [`IterMut`],
 //! [`ValuesMut`] and [`RangeMut`], each a walk from both ends that hands out
-//! every value at most once (`node/walk.rs`, D23). Keys stay shared.
+//! every value at most once (`tree/walk.rs`, D23). Keys stay shared.
 
 #![forbid(unsafe_code)]
 
@@ -11,8 +11,8 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::ValMut;
-use crate::node::walk::{BorrowedWalk, RangeWalk};
+use crate::tree::node::handle::ValMut;
+use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// A mutable iterator over the entries of a `BBTreeMap`, in key order.
 ///

@@ -11,12 +11,12 @@ extern crate std;
 
 mod inline_key;
 mod map;
+mod set;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the node tests use the rest of the node API")
+    expect(dead_code, reason = "the tree's tests use the rest of its API")
 )]
-mod node;
-mod set;
+mod tree;
 
 pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
 pub use map::BBTreeMap;
@@ -27,7 +27,7 @@ pub use set::BBTreeSet;
 /// which promises no stability.
 #[cfg(feature = "inspect")]
 pub mod inspect {
-    pub use crate::node::inspect::{
+    pub use crate::tree::inspect::{
         NodeId, NodeView, PageMap, SlotArray, SlotContents, TraceOutcome, TraceStep, TreeView,
     };
 }

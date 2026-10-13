@@ -1,7 +1,7 @@
 # 05 — Fence keys: per-node prefix stripping
 
-Status: implemented (2026-10-08), exact since 2026-10-09, in `node/prefix.rs`
-and the node operations of `node/handle.rs`; measured in "Measured". Builds on inline keys
+Status: implemented (2026-10-08), exact since 2026-10-09, in `tree/prefix.rs`
+and the node operations of `tree/node/handle.rs`; measured in "Measured". Builds on inline keys
 (04-inline-key.md). Applies to every key with inline keys: std byte strings
 and the 64- and 128-bit integers under `Auto`, and keys with an `InlineKey`
 impl under `WithInlineKey`, through their encoding.
@@ -52,7 +52,7 @@ An inline key is no longer a function of the key alone: it is the key's
 **window** at its node's `prefix_len`, the 8 bytes from there.
 
 - **Stored:** inline key `i` is key `i`'s window at the node's `prefix_len`
-  (`Window` in `node/inline_keys.rs`: an inline key with its prefix length).
+  (`Window` in `tree/node/inline_keys.rs`: an inline key with its prefix length).
 - **Search target:** the search key's window at each node's `prefix_len`,
   which sits in the header beside `len`. A std byte string being searched
   for is copied once per search into a 128-byte buffer, zero-padded
@@ -138,7 +138,7 @@ pub trait InlineKey: Ord {
   left and right borders, which have no fence on one side;
 - every inline key is its key's window at `prefix_len`.
 
-The test-only checker verifies both on every tree (`map/invariants.rs`).
+The test-only checker verifies both on every tree (`tree/invariants.rs`).
 Correctness needs less: any `prefix_len` up to `LCP(low, high)` gives right
 answers, only shorter windows. That is what an operation keeps in the middle,
 and what a panic in its last step leaves.
@@ -513,7 +513,7 @@ Every set ties 0% at 4 bytes.
    back on every move, and the upkeep in the table.
 3. **Done.** Invariant checks on every test tree, and map-level tests that
    nodes get long prefixes and keep them fitting when fences move across
-   clusters of keys (`map/prefix_tests.rs`).
+   clusters of keys (`map/tests/prefix.rs`).
 4. **Done.** Fitting after every change of fences.
 5. **Done.** Measured (see "Measured").
 6. **Done (2026-10-09).** Exact prefixes, replacing the first version's

@@ -1,7 +1,7 @@
 //! Iterating over a map by value: [`IntoIter`], [`IntoKeys`] and
 //! [`IntoValues`], which take the entries out in key order.
 //!
-//! The iterator takes the tree apart as it goes (`node/walk.rs`, D23): each
+//! The iterator takes the tree apart as it goes (`tree/walk.rs`, D23): each
 //! step moves an entry out of its slot, with nothing shifting and nothing
 //! rebalanced, and each node is freed once both ends are done with it.
 //! Dropping the iterator drops the entries left in ascending order, as
@@ -16,8 +16,8 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::page::PageByKind;
-use crate::node::walk::DyingWalk;
+use crate::tree::node::page::PageByKind;
+use crate::tree::walk::DyingWalk;
 
 /// An owning iterator over the entries of a `BBTreeMap`, sorted by key.
 ///
