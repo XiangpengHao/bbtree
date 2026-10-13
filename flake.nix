@@ -44,6 +44,9 @@
             pkgs.cargo-fuzz
             llvmPackages.llvm
             pkgs.cargo-binutils
+            # Exact instruction attribution (callgrind), on builds without
+            # AVX-512, which valgrind can't run.
+            pkgs.valgrind
             # The bench's `fetch` downloads its datasets with these, and
             # derives those it may not redistribute with
             # `bench/tools/bbtree_datasets.py`.
