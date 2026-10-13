@@ -46,6 +46,11 @@ jobs:
     # The longest run is a release's, 120 minutes; the rest is building and
     # saving.
     timeout-minutes: 180
+    env:
+      # The cargo-fuzz that install-action fetches is a musl build, which
+      # builds the targets for musl unless told otherwise, and AddressSanitizer
+      # refuses musl's statically linked libc.
+      FUZZ_TRIPLE: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
@@ -78,7 +83,7 @@ jobs:
       # With AddressSanitizer, cargo-fuzz's default, and the library's debug
       # assertions, its own cross-checks.
       - name: Build the targets
-        run: cargo fuzz build --debug-assertions
+        run: cargo fuzz build --debug-assertions --target "$FUZZ_TRIPLE"
 
       - name: Fuzz
         env:
@@ -105,7 +110,7 @@ jobs:
             echo "::group::$target, $seconds s"
             # A crash ends the target's run, not the others'. An input that
             # runs over a minute is reported as a hang.
-            if cargo fuzz run --debug-assertions "$target" -- \
+            if cargo fuzz run --debug-assertions --target "$FUZZ_TRIPLE" "$target" -- \
                 -max_total_time="$seconds" -fork="$(nproc)" -timeout=60; then
               result=clean
             else
