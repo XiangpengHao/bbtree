@@ -72,6 +72,7 @@ fn App() -> Element {
         use_signal(|| None),
         use_signal(|| None),
         use_signal(|| None),
+        use_signal(|| false),
     );
     let search_open = use_signal(|| false);
     let tab = use_signal(|| InspectorTab::Page);

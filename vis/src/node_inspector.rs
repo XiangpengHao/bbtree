@@ -16,7 +16,7 @@ use crate::inspected_tree::LoadedTree;
 use crate::memory_map::{MemoryMap, PageMarks};
 use crate::slot_table::SlotTable;
 use crate::spotlight::{NodePart, Spotlight};
-use crate::trace::{Trace, TraceStep, Tracer};
+use crate::trace::{LocalPrefixCheck, Trace, TraceStep, Tracer};
 use crate::tree_shape::NodeAt;
 use crate::workload::KeyKind;
 
@@ -187,7 +187,12 @@ impl NodeDetail {
             step.outcome(),
             TraceOutcome::ToHead { .. } | TraceOutcome::Head
         );
-        if searched {
+        if step.local_prefix_check() == Some(LocalPrefixCheck::Lacks) {
+            steps.push(SearchStep::LacksPrefix {
+                bytes: self.skipped(),
+                after: step.edge_taken() != Some(0),
+            });
+        } else if searched {
             if self.skipped() > 0 {
                 steps.push(SearchStep::SkipPrefix {
                     bytes: self.skipped(),
@@ -217,8 +222,11 @@ impl NodeDetail {
 #[derive(Clone, PartialEq, Debug)]
 enum SearchStep {
     /// Skip the bytes every key of the node shares: what its fences share,
-    /// or a longer local prefix.
+    /// or a longer local prefix, once the key has it too.
     SkipPrefix { bytes: usize, local: bool },
+    /// The key lacks the node's local prefix, so it goes before or after
+    /// all the node's keys at once.
+    LacksPrefix { bytes: usize, after: bool },
     /// Compare the key's inline key with every one of the node's, counting
     /// those smaller and those equal: the smaller ones place the key.
     CompareInlineKeys {
@@ -238,6 +246,7 @@ impl SearchStep {
     fn title(&self) -> &'static str {
         match self {
             SearchStep::SkipPrefix { .. } => "Skip the shared bytes",
+            SearchStep::LacksPrefix { .. } => "Lacks the shared bytes",
             SearchStep::CompareInlineKeys { .. } => "Count the smaller inline keys",
             SearchStep::CompareFullKeys => "Binary search over full keys",
             SearchStep::SearchTies { tied } if tied.len() == 1 => "Check the one tied key",
@@ -258,6 +267,12 @@ impl SearchStep {
                 local: false,
             } => format!("{bytes} B the fences share"),
             SearchStep::SkipPrefix { bytes, local: true } => format!("{bytes} B the keys share"),
+            SearchStep::LacksPrefix { after: false, .. } => {
+                format!("before all {} keys", detail.len())
+            }
+            SearchStep::LacksPrefix { after: true, .. } => {
+                format!("after all {} keys", detail.len())
+            }
             SearchStep::CompareInlineKeys { window, tied, .. } => {
                 format!("{window}: {} smaller, {} equal", tied.start, tied.len())
             }
@@ -282,7 +297,7 @@ impl SearchStep {
     /// What lights up while the reader points at this step.
     fn light(&self, at: NodeAt, spotlight: &mut Spotlight) {
         match self {
-            SearchStep::SkipPrefix { local: true, .. } => {
+            SearchStep::SkipPrefix { local: true, .. } | SearchStep::LacksPrefix { .. } => {
                 spotlight.light_concept(Some(Concept::SearchPrefix))
             }
             SearchStep::SkipPrefix { .. } => spotlight.light_concept(Some(Concept::FencePrefix)),
@@ -529,9 +544,16 @@ fn SearchStepItem(
                             }
                         },
                         SearchStep::SkipPrefix { bytes, local: true } => rsx! {
-                            "The key's first {bytes} bytes are skipped: every key here shares them, a longer "
+                            "Every key here shares its first {bytes} bytes, a longer "
                             Term { concept: Concept::SearchPrefix, spotlight, "search prefix" }
-                            " than its fences give."
+                            " than its fences give. Checked against the node's first key, the key has them too, so they are skipped."
+                        },
+                        SearchStep::LacksPrefix { bytes, after } => rsx! {
+                            "Every key here shares its first {bytes} bytes, a longer "
+                            Term { concept: Concept::SearchPrefix, spotlight, "search prefix" }
+                            " than its fences give. Checked against the node's first key, the key differs within them or ends inside them, so it goes "
+                            if after { "after" } else { "before" }
+                            " all of the node's keys, with no inline key compared."
                         },
                         SearchStep::CompareInlineKeys { window, width, tied } => rsx! {
                             if detail.skipped() > 0 { "Its next {width} bytes, " } else { "Its first {width} bytes, " }
@@ -672,7 +694,50 @@ fn OutcomeText(outcome: TraceOutcome, detail: NodeDetail, spotlight: Spotlight) 
 
 #[cfg(test)]
 mod tests {
+    use bbtree::BBTreeMap;
+
     use super::*;
+    use crate::inspected_tree::{InspectedMap, InspectedTree};
+
+    /// Dense integers share their high bytes, which internal nodes keep as
+    /// a local search prefix (D33): a key of the map has them and skips
+    /// them, a key past them all goes to each node's last child at once.
+    #[test]
+    fn steps_show_the_local_prefix_check() {
+        let map: BBTreeMap<u64, u64> = (0..50_000).map(|key| (key * 3 % 50_000, key)).collect();
+        let tree = InspectedMap::new(map, KeyKind::Integers);
+        let steps_of = |query: &str| -> Vec<Vec<SearchStep>> {
+            let trace = tree.trace(query).unwrap();
+            trace
+                .steps()
+                .iter()
+                .filter(|step| step.local_prefix_check().is_some())
+                .map(|step| tree.detail(step.at()).search_steps(step))
+                .collect()
+        };
+        let past_the_end = steps_of(&u64::MAX.to_string());
+        assert!(!past_the_end.is_empty());
+        for steps in past_the_end {
+            assert!(matches!(
+                steps[..],
+                [
+                    SearchStep::LacksPrefix { after: true, .. },
+                    SearchStep::Outcome(_)
+                ]
+            ));
+        }
+        let held = steps_of("31337");
+        assert!(!held.is_empty());
+        for steps in held {
+            assert!(matches!(
+                steps[..2],
+                [
+                    SearchStep::SkipPrefix { local: true, .. },
+                    SearchStep::CompareInlineKeys { .. }
+                ]
+            ));
+        }
+    }
 
     #[test]
     fn compare_outcomes_read_as_sentences() {

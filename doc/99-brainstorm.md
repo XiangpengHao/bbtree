@@ -27,3 +27,10 @@ Reason is that for small tree, root node should be smaller than 1KB. So for root
 This should make our memory usage more efficient for small tree.
 Root node has no parents, so its prefix lenght is determined by the min and max keys of the node.
 In fact, since we never truncate the prefix in storage, I think we can always make the fence key to be the min/max keys of the current node, which means the inline keys are maintained once a new key is inserted.
+
+
+- [ ] In node layout, should we put children/values first, then keys? looking at the vis, I realized that most of the keys are actually not used in the lookup, because the inline keys are very effective, but they still take up spaces.
+This probably means we should push the keys down to the leaf, and inner node should just hold a point to the leaf's key.
+Worked out in 11-separator-key.md.
+
+

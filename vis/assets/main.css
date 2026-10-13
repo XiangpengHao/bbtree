@@ -1394,20 +1394,20 @@
     opacity: 0;
     transition: opacity 120ms ease-out, transform 160ms var(--ease-out);
   }
+  /* Which side of the pointer it hangs on: `translate` is not animated, so
+   * a hint that changes sides does not travel across. */
   .hint.above {
-    transform: translate(-50%, calc(-100% - 10px));
+    translate: -50% calc(-100% - 14px);
+    transform: translateY(4px);
   }
   .hint.below {
-    transform: translate(-50%, 14px);
+    translate: -50% 20px;
+    transform: translateY(-4px);
   }
+  /* It moves the last 4px away from the pointer as it shows. */
   .hint.shown {
     opacity: 1;
-  }
-  .hint.above.shown {
-    transform: translate(-50%, calc(-100% - 14px));
-  }
-  .hint.below.shown {
-    transform: translate(-50%, 20px);
+    transform: none;
   }
   .hint p {
     margin: 0;
@@ -1689,11 +1689,7 @@
     animation-name: fade-in;
   }
   .hint.above,
-  .hint.above.shown {
-    transform: translate(-50%, calc(-100% - 14px));
-  }
-  .hint.below,
-  .hint.below.shown {
-    transform: translate(-50%, 20px);
+  .hint.below {
+    transform: none;
   }
 }

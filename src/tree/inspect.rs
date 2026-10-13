@@ -115,13 +115,15 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
 pub struct TraceStep<'a, K, V, S> {
     node: NodeView<'a, K, V, S>,
     outcome: TraceOutcome,
+    lacks_local_prefix: bool,
     inline_key: Option<InlineWord>,
     tied: Option<Range<usize>>,
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     /// A node the lookup searched: with what its search compared the key's
-    /// inline key against, the node's own (D18).
+    /// inline key against, the node's own (D18), unless the key lacks the
+    /// node's local search prefix (D33), which then placed it alone.
     fn searched<Kind: PageKind, Q: ?Sized>(
         handle: &NodeRef<Immut<'a>, K, V, S, Kind>,
         node: NodeRef<Immut<'a>, K, V, S, LeafOrInternal>,
@@ -131,12 +133,14 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     where
         K: Borrow<Q>,
     {
-        let target = handle.inline_target(search);
+        let lacks_local_prefix = handle.search_prefix_len(search).is_err();
+        let target = handle.inline_target(search).filter(|_| !lacks_local_prefix);
         let tied = Option::zip(target, handle.inline_keys())
             .map(|(target, inline_keys)| inline_keys.equal_run(target.inline_key()));
         Self {
             node: NodeView { node },
             outcome,
+            lacks_local_prefix,
             inline_key: target.map(|target| target.inline_key()),
             tied,
         }
@@ -147,6 +151,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         Self {
             node: NodeView { node },
             outcome,
+            lacks_local_prefix: false,
             inline_key: None,
             tied: None,
         }
@@ -160,9 +165,17 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         self.outcome
     }
 
+    /// Whether the node keeps a local search prefix (D33) that the searched
+    /// key lacks: the key differs from the node's first key within it, or
+    /// ends inside it, so the search put it before or after all the node's
+    /// keys from that check alone, comparing no inline keys.
+    pub fn lacks_local_prefix(&self) -> bool {
+        self.lacks_local_prefix
+    }
+
     /// The searched key's inline key at the node's prefix, as the node
-    /// compared it with its own; `None` if the node has no inline keys or
-    /// was not searched.
+    /// compared it with its own; `None` if the node has no inline keys, was
+    /// not searched, or placed the key by its local prefix alone.
     pub fn inline_key(&self) -> Option<InlineWord> {
         self.inline_key
     }
@@ -788,18 +801,30 @@ mod tests {
     }
 
     /// Traces every key of `map` and some absent ones, checking each trace
-    /// against `get`.
+    /// against `get`. Returns how many steps a local prefix decided alone.
     fn check_traces<K: Ord + Debug, V, S: InlineKeyStrategy<K>>(
         map: &BBTreeMap<K, V, S>,
         absent: &[K],
-    ) {
+    ) -> usize {
         let tree = map.inspect();
         let height = tree.root().unwrap().height();
-        for (key, value) in map.iter() {
-            let steps = tree.trace(key);
+        let mut placed_by_local_prefix = 0;
+        let mut check_steps = |steps: &[TraceStep<'_, K, V, S>]| {
             for (depth, step) in steps.iter().enumerate() {
                 assert_eq!(step.node().height(), height - depth);
+                if step.lacks_local_prefix() {
+                    let node = step.node();
+                    assert!(node.local_prefix_len().is_some());
+                    assert_eq!(step.inline_key(), None);
+                    let edge = step.edge_taken().unwrap();
+                    assert!(edge == 0 || edge == node.len());
+                    placed_by_local_prefix += 1;
+                }
             }
+        };
+        for (key, value) in map.iter() {
+            let steps = tree.trace(key);
+            check_steps(&steps);
             let last = steps.last().unwrap();
             let found = match last.outcome() {
                 TraceOutcome::Found { index } => {
@@ -825,6 +850,7 @@ mod tests {
         for key in absent {
             assert!(map.get(key).is_none());
             let steps = tree.trace(key);
+            check_steps(&steps);
             let last = steps.last().unwrap();
             let TraceOutcome::Absent { insert_at } = last.outcome() else {
                 panic!("{key:?} ended at {:?}", last.outcome());
@@ -833,6 +859,7 @@ mod tests {
             assert!(insert_at == 0 || leaf.key(insert_at - 1) < key);
             assert!(insert_at == leaf.len() || key < leaf.key(insert_at));
         }
+        placed_by_local_prefix
     }
 
     #[test]
@@ -843,7 +870,11 @@ mod tests {
             integers.insert(number as u64 * 2, number);
         }
         let absent: Vec<u64> = (0..200).map(|number| number * 2 + 1).collect();
-        check_traces(&integers, &absent);
+        assert_eq!(check_traces(&integers, &absent), 0);
+        // Dense integers share their high bytes, which internal nodes along
+        // the right border keep as a local prefix (D33): a key past them
+        // all lacks it.
+        assert!(check_traces(&integers, &[u64::MAX]) > 0);
 
         let mut strings = BBTreeMap::new();
         for number in shuffled(5_000, 5) {
@@ -852,7 +883,10 @@ mod tests {
         let absent: Vec<String> = (0..50)
             .map(|number| format!("https://example.com/{:06}", number * 2 + 1))
             .collect();
-        check_traces(&strings, &absent);
+        assert_eq!(check_traces(&strings, &absent), 0);
+        for outside in ["https://a", "https://example.com/~"] {
+            assert!(check_traces(&strings, &[String::from(outside)]) > 0);
+        }
     }
 
     #[test]

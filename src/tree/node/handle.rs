@@ -640,7 +640,10 @@ impl<BorrowType, K, V, S: InlineKeyStrategy<K>, Kind: PageKind> NodeRef<BorrowTy
     /// bytes the node's keys share up to it. `Err` with the first or last
     /// edge for a key without them, as it sorts before or after them all.
     #[inline(always)]
-    fn search_prefix_len<Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    pub(in crate::tree) fn search_prefix_len<Q>(
+        &self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: ?Sized,

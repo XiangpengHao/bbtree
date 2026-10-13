@@ -57,7 +57,10 @@ impl Hint {
 pub(crate) struct Spotlight {
     part: Signal<Option<(NodeAt, NodePart)>>,
     concept: Signal<Option<Concept>>,
+    /// The hint last shown, kept once it hides so that it fades out where
+    /// it stood, still saying what it said.
     hint: Signal<Option<Hint>>,
+    hint_shown: Signal<bool>,
 }
 
 impl Spotlight {
@@ -65,11 +68,13 @@ impl Spotlight {
         part: Signal<Option<(NodeAt, NodePart)>>,
         concept: Signal<Option<Concept>>,
         hint: Signal<Option<Hint>>,
+        hint_shown: Signal<bool>,
     ) -> Self {
         Self {
             part,
             concept,
             hint,
+            hint_shown,
         }
     }
 
@@ -102,7 +107,10 @@ impl Spotlight {
         if self.concept.peek().is_some() {
             self.concept.set(None);
         }
-        self.hint.set(hint);
+        match hint {
+            Some(hint) => self.raise_hint(hint),
+            None => self.lower_hint(),
+        }
     }
 
     /// Points at an idea from `anchor`, and says what it is.
@@ -113,7 +121,7 @@ impl Spotlight {
         if self.part.peek().is_some() {
             self.part.set(None);
         }
-        self.hint.set(Some(Hint::of_concept(concept, anchor)));
+        self.raise_hint(Hint::of_concept(concept, anchor));
     }
 
     /// Lights up an idea without a hint: a step of the search that names
@@ -125,9 +133,7 @@ impl Spotlight {
         if self.part.peek().is_some() {
             self.part.set(None);
         }
-        if self.hint.peek().is_some() {
-            self.hint.set(None);
-        }
+        self.lower_hint();
     }
 
     /// Says what something is that no other panel draws.
@@ -138,7 +144,7 @@ impl Spotlight {
         if self.concept.peek().is_some() {
             self.concept.set(None);
         }
-        self.hint.set(Some(hint));
+        self.raise_hint(hint);
     }
 
     /// Lights up a part without a hint.
@@ -148,6 +154,9 @@ impl Spotlight {
 
     /// Moves the hint with the pointer.
     pub(crate) fn move_hint(&mut self, anchor: (f64, f64)) {
+        if !*self.hint_shown.peek() {
+            return;
+        }
         if let Some(hint) = self.hint.write().as_mut() {
             hint.anchor = anchor;
         }
@@ -160,8 +169,21 @@ impl Spotlight {
         if self.concept.peek().is_some() {
             self.concept.set(None);
         }
-        if self.hint.peek().is_some() {
-            self.hint.set(None);
+        self.lower_hint();
+    }
+
+    fn raise_hint(&mut self, hint: Hint) {
+        self.hint.set(Some(hint));
+        if !*self.hint_shown.peek() {
+            self.hint_shown.set(true);
+        }
+    }
+
+    /// Hides the hint, keeping what it says and where it stands: it fades
+    /// out there rather than empty, from wherever no hint puts it.
+    fn lower_hint(&mut self) {
+        if *self.hint_shown.peek() {
+            self.hint_shown.set(false);
         }
     }
 }
@@ -170,14 +192,16 @@ impl Spotlight {
 #[component]
 pub(crate) fn HintLayer(spotlight: Spotlight) -> Element {
     let hint = spotlight.hint.read().clone();
+    let shown = *spotlight.hint_shown.read();
     let (x, y) = hint.as_ref().map_or((0.0, 0.0), |hint| hint.anchor);
     let side = if y < 220.0 { "below" } else { "above" };
-    let shown = if hint.is_some() { "shown" } else { "" };
+    let shown_class = if shown { "shown" } else { "" };
     rsx! {
         div {
             id: "hint",
             role: "tooltip",
-            class: "hint {shown} {side}",
+            "aria-hidden": if shown { "false" } else { "true" },
+            class: "hint {shown_class} {side}",
             style: "left:clamp(168px, {x}px, calc(100vw - 168px));top:{y}px;",
             if let Some(hint) = hint {
                 p { class: "hint-title", {hint.title} }

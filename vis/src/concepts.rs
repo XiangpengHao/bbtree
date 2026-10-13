@@ -55,7 +55,7 @@ impl Concept {
                 "Every key of a node lies between the two separators that bound it in its ancestors, its fences, so it starts with the bytes they share. The node records how many, and its inline keys start after them: deeper nodes summarize the bytes that still differ."
             }
             Concept::SearchPrefix => {
-                "An internal node of string keys whose keys all share more than their fences do keeps that longer prefix too, and its search skips it."
+                "An internal node whose keys all share more bytes than its fences do, as at the root and along the tree's borders, where a fence is missing, keeps that longer prefix too. Its search checks the key against the node's first key there: a key with those bytes skips them, a key without them goes before or after all the node's keys at once."
             }
             Concept::Separator => {
                 "A key in an internal node that divides two children. bbtree moves a key up rather than copying it, so every key is stored exactly once: a separator's value stays below, as the head of the leaf to its right."

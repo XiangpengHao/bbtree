@@ -48,7 +48,7 @@ impl Scenario {
                 "A key the root stores as a separator: the lookup finds it there, then goes down to the leaf whose head holds its value."
             }
             Scenario::PastTheEnd => {
-                "A key greater than every key: the lookup follows the right border, where nodes have no fence prefix, so many inline keys tie."
+                "A key greater than every key: the lookup follows the right border, where nodes have no fence prefix. Internal nodes there keep the bytes their keys share as a search prefix; where the key lacks them, the node sends it to its last child at once."
             }
             Scenario::Missing => {
                 "A key between two keys of the map: the inline keys place it, and the leaf says where an insert would put it."

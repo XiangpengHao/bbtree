@@ -4,12 +4,12 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use bbtree::inspect::{NodeView, PageMap};
+use bbtree::inspect::{NodeView, PageMap, TraceOutcome};
 use bbtree::{Auto, BBTreeMap, InlineKey};
 
 use crate::fences::{Fence, KeyBytes, NodeFences};
 use crate::node_inspector::{KeyRow, NodeDetail};
-use crate::trace::{Trace, TraceStep};
+use crate::trace::{LocalPrefixCheck, Trace, TraceStep};
 use crate::tree_shape::{NodeAt, TreeShape};
 use crate::workload::KeyKind;
 
@@ -243,10 +243,23 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
                 let width = step.node().inline_key_width();
                 let inline_key = Option::zip(step.inline_key(), width)
                     .map(|(word, width)| Self::inline_key_hex(word, width));
+                let searched = !matches!(
+                    step.outcome(),
+                    TraceOutcome::ToHead { .. } | TraceOutcome::Head
+                );
+                let local_prefix_check = (searched && step.node().local_prefix_len().is_some())
+                    .then(|| {
+                        if step.lacks_local_prefix() {
+                            LocalPrefixCheck::Lacks
+                        } else {
+                            LocalPrefixCheck::Has
+                        }
+                    });
                 let edge = step.edge_taken();
                 steps.push(TraceStep::new(
                     at,
                     step.outcome(),
+                    local_prefix_check,
                     inline_key,
                     step.tied(),
                     edge,

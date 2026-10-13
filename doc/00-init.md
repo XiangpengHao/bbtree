@@ -48,3 +48,7 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - When we say drop-in replacement, we're going to replace every std BTree in top 100 crates on crates.io, run their test cases, and confirm they all compile and pass.
 
+## Pitch
+
+- The agent's memory
+- Rebuilt data infra for AI agents

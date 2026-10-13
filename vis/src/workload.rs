@@ -15,12 +15,14 @@ use crate::trace::Tracer;
 /// The kinds of key on offer, each picked for what bbtree does with it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KeyKind {
-    /// `u64`: integers, with 8-byte inline keys (D31).
+    /// `u64`: dense integers, with 2-byte inline keys (D31) and local
+    /// search prefixes where fences are missing (D33).
     Integers,
     /// `String` URLs sharing long prefixes: fence prefixes, local search
     /// prefixes and length tags (D26, D33, D36).
     Urls,
-    /// `[u8; 16]` ids: 2-byte summaries, children before keys (D32, D39).
+    /// `[u8; 16]` ids: 2-byte summaries, children before keys, local search
+    /// prefixes (D32, D39, D33).
     Ids,
 }
 
