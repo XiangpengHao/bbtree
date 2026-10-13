@@ -298,9 +298,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(map.get("b"), Some(&12));
     /// ```
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
-        let root = self.root.as_mut().map(|root| root.top_mut());
         IterMut {
-            walk: BorrowedWalk::new(root, self.length),
+            walk: BorrowedWalk::new(self.root.page_mut(), self.length),
         }
     }
 
@@ -362,19 +361,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root) = &mut self.root else {
+        let Some(root) = self.root.page_mut() else {
             return RangeMut::default();
         };
         RangeMut {
-            walk: {
-                let top = root.top_mut();
-                RangeWalk::new(
-                    top,
-                    root.shared_prefix(),
-                    range.start_bound(),
-                    range.end_bound(),
-                )
-            },
+            walk: RangeWalk::new(root, range.start_bound(), range.end_bound()),
         }
     }
 }

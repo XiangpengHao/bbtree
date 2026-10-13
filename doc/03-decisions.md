@@ -49,10 +49,11 @@ leaf      | header | k0 k1 … k_n | head v0 v1 … v_n |
 internal  | header | k0 k1 … k_n | e0 e1 … e_n+1     |
 ```
 
-- Without inline keys, the header is `len: u16` and a leaf's `has_head`
-  flag (D17). The keys are an array, and the trailing slots, a leaf's head
-  and values or an internal node's edges (D12), an array right after the
-  keys' capacity. Node kind comes from the height, as in std.
+- Without inline keys, the header is `len: u16`, a leaf's `has_head` flag
+  (D17) and the node's kind (D52). The keys are an array, and the trailing
+  slots, a leaf's head and values or an internal node's edges (D12), an
+  array right after the keys' capacity. Every pointer to a node carries
+  its kind too, in a tag bit (D52).
 - Trailing slot `i + 1` goes with key `i`, so splitting, stealing and
   merging move trailing slots the same way in both kinds.
 - An insert is one shift of the keys after the position and one of the
@@ -322,8 +323,9 @@ Design in 04-inline-key.md.
   `u16`. It stands for a borrow of the whole tree, which its borrow type
   says: shared, value-mutating and dying paths copy, and an exclusive path
   (`PathMut`) changes the tree through its bottom node, from which nothing
-  leads up, and holds the `&mut` of the root to grow a new one. The nodes
-  it hands out are plain handles (D14).
+  leads up, and holds the `&mut` of the root to raise or lower the tree
+  (D52). It keeps each node as its edge does, tagged with its kind; the
+  nodes it hands out are plain handles (D14).
 - **Who uses it:**
   - an insert that reaches a full leaf searches down one (D37), inserts at
     the leaf, carries splits up the path, then goes back down through the
@@ -432,8 +434,8 @@ Design and measurements in 05-fence-key.md.
 
 - **The rule:** a traversal decides whether a node is a leaf or internal
   once, where it reads the node's page from an edge, a path or the root
-  (`Node::at`, the one cast, from the height), and the code after it is for
-  that kind. Likewise a choice fixed for a whole loop, such as the end a
+  (`Node::at`, the one cast, from the pointer's tag; the root's, from its
+  header, D52), and the code after it is for that kind. Likewise a choice fixed for a whole loop, such as the end a
   border is on, is made before the loop, as a type.
 - **Enforced by the types:** each kind is its own type (D51), and what
   depends on the kind, a node's capacity and where its slots are, is in
@@ -442,7 +444,7 @@ Design and measurements in 05-fence-key.md.
   eight times.
 - **What it takes:** a descent decides the root's kind once, then loops
   over internal nodes, the leaf's search after the loop; going down an
-  edge, an internal node's height tells its children's kind. Code for
+  edge, its tag tells the child's kind. Code for
   either kind of children (`Siblings`, prefix fits) goes through `Child`,
   decided once per node (`has_leaf_children`); a walk's cursor reads its
   leaf edge without deciding (its invariant); `NodeEnd` is a type
@@ -912,9 +914,9 @@ Design, census and measurements in 11-separator-key.md.
 Design in 05-fence-key.md, "The shared prefix".
 
 - **What:** the root has no parent to give it fences, so the tree keeps
-  them with it (`Root`, D51): the leading bytes of the encoding every key
-  shares (D18), up to 64 (`SharedPrefix`, `tree/shared_prefix.rs`), one
-  pointer, null while nothing is shared. The root, and every node with no
+  them with it, in the root page (D51, D52): the leading bytes of the
+  encoding every key shares (D18), up to 64, and how many
+  (`SharedPrefix`, `tree/shared_prefix.rs`). The root, and every node with no
   separator above it on a side, along the tree's borders, take its length
   as their prefix, where they had 0 (D26). Every key with inline
   keys gets it, `InlineKey` impls included.
@@ -937,9 +939,9 @@ Design in 05-fence-key.md, "The shared prefix".
   establishes the same for the root and the borders, where fences are
   missing, and the internal search, without the per-node check, is small
   enough for LLVM to inline into `get`.
-- **Cost:** the map is 40 bytes, 8 more. Each insert checks its key
-  against the bytes, inline: a null test when nothing is shared; starting
-  and shrinking are out of line. The insert's append shortcut (D45) checks
+- **Cost:** 65 bytes of the root page, none of the map (D52). Each insert
+  checks its key against the bytes, inline: a length test when nothing is
+  shared; starting and shrinking are out of line. The insert's append shortcut (D45) checks
   after it clears its hint, so no user code runs with the hint set.
 - **Measured** against D49, 10M, one run each; instructions per operation
   repeat exactly between runs, times vary by about 10 ns (the same binary
@@ -963,10 +965,11 @@ Design in 05-fence-key.md, "The shared prefix".
 Design in 12-tree-structure.md.
 
 - **What:** `Leaf` and `Internal` are page handles with the operations of
-  their kind, and `Root` owns the tree: the top node and its height, its
-  fences as the shared prefix (D50), and the append hint (D45). `Node`, a
-  leaf or an internal node by its height, is what an edge, a path or the
-  root leads to, and the one place a kind is decided (D28). What both
+  their kind, and `Root` owns the tree: its root page, with the top node,
+  the height and the fences as the shared prefix (D50, D52), and the
+  append hint (D45). `Node`, a leaf or an internal node, as an edge's tag
+  or the root's header says (D52), is what an edge, a path or the root
+  leads to, and the one place a kind is decided (D28). What both
   kinds share is composition (pages, slots, inline-key column) and `Child`,
   for code that works at either level: `Siblings` (merges and moves
   between children), joins and prefix fits.
@@ -994,6 +997,48 @@ Design in 12-tree-structure.md.
   per-borrow-type copies had: lookups went 4 instructions up until the
   walk to a found separator's head moved out of line (D41), and JSON
   inserts 40 until their leaf search was forced inline (D41).
+
+**D52. Nodes record their kind; the root page stays the root.** (2026-10-13)
+Design in 12-tree-structure.md, "The root page and node kinds".
+
+- **What:** a node's header says whether it is a leaf, in a byte that was
+  padding, and so does every pointer to it, an edge or a path's level, in
+  its lowest bit, which pages aligned to 512 B or more leave 0: a leaf's
+  pointer carries the tag. Following an edge decides the child's kind
+  before the child is read (D28); no height is carried down. The root node
+  lives in the root page: room for a node of either kind, and after it the
+  root area, the tree's height and its shared prefix (D50). A tree keeps
+  its root page for life. Raising it moves the root node to a fresh page of
+  its kind and makes the root internal above it; lowering it moves the
+  root's only child up and frees the child's page. `Root` holds the page
+  once the map has a tree, which its first entry allocates (D1).
+- **Why:** a node's kind is the node's, not a count the code threads down
+  from the root, which a latch taken hand over hand would have to keep
+  right too; with the kind on the pointer, a latch knows what it latches
+  before it touches the node, as bf-tree's parent flag
+  (`children_is_leaf`) tells it, per edge here. The shared prefix is the
+  root's fences, so it lives with the root node, not behind a pointer of
+  its own. A root that never moves needs no root pointer to swap and read
+  again, which bf-tree's new roots need (01-bftree.md).
+- **Cost:** a raise or lower copies a node, a page at most. A join moves
+  the shorter tree's root to a plain page first; a cut's new part and a
+  copy move their top into a root page. The root page is the larger
+  kind's page and 66 B. The map is 24 bytes, std's size, down from 40.
+- **Measured** against D51, 10M, one run each (ns per op; instructions in
+  brackets):
+
+  | cell | before | after |
+  |---|--:|--:|
+  | `u64` hit / miss | 126 / 94 [211 / 187] | 130 / 89 [218 / 192] |
+  | `u64` random insert, remove | 135, 245 [343, 649] | 137, 247 [354, 689] |
+  | `u64` `range64` | 626 [1,588] | 629 [1,657] |
+  | JSON hit / miss | 233 / 173 [374 / 338] | 246 / 174 [383 / 345] |
+  | JSON random insert | 247 [609] | 237 [622] |
+
+  Times vary by about 10 ns between runs of one binary. Instructions rose
+  by 2 to 6%: the root's kind is read from its header, a leaf's pointer
+  loses its tag, and balancing reads a child's tag where a height was in a
+  register.
 
 ## Navigation
 
@@ -1024,20 +1069,21 @@ contracts, access, positions and room, the code that holds it keeps by hand
   page, side by side or a stride apart (keys, values, edges, inline keys).
   Insert, remove, move a run to another node, view as a slice. Written and
   tested once (`tree/node/slots.rs`).
-- **Pages are owned until a node holds them:** `FreshPage`, typed by the
-  kind of node it is for, is the only way to make a node and what a node
-  turns back into.
+- **Pages are owned until a node holds them:** `FreshPage`, typed by what
+  it is for, a kind of node or the root (D52), is the only way to make a
+  node and what a node turns back into.
 - **Paths and walks carry a borrow type** (`Immut`, `Mut`, `ValMut`,
   `Dying`): it makes them `Send` and `Sync` as the borrow they stand for,
   and the walks hand out each entry once by construction (D23).
 - **Checks the algorithm makes anyway, once:** room before an insert,
-  whether siblings fit before a merge, a node's kind from its height. A
+  whether siblings fit before a merge, a node's kind from its pointer's
+  tag (D52). A
   method on the hot path checks positions and room in debug builds only;
   one off it checks them always.
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the node
   modules that touch pages (`node/mod.rs`, `page.rs`, `slots.rs`,
-  `leaf.rs`, `internal.rs`, `siblings.rs`, `inline_key_search.rs`,
-  `vector_count.rs`), and the tree's `root.rs`, `path.rs`, `search.rs` and
+  `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
+  `inline_key_search.rs`, `vector_count.rs`), and the tree's `root.rs`, `path.rs`, `search.rs` and
   `walk.rs`.
 - **Was:** after std's `node.rs`, one handle generic over access and kind,
   positions and room as proof types, and edges as owned subtrees; it froze

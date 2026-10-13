@@ -24,22 +24,26 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// The height of the root above the leaves: 0 for a map that is one leaf
     /// or nothing.
     fn height(&self) -> usize {
-        self.root.as_ref().map_or(0, |root| root.height())
+        self.root.page().map_or(0, |root| root.height())
     }
 
     /// Every node's prefix length (05-fence-key.md), from the root down, each
     /// node before its children.
     fn node_prefix_lens(&self) -> Vec<usize> {
-        self.root
-            .as_ref()
-            .map_or_else(Vec::new, |root| root.node_prefix_lens())
+        if self.root.has_tree() {
+            self.root.node_prefix_lens()
+        } else {
+            Vec::new()
+        }
     }
 
     /// The keys that live in internal nodes, in order: each one's value is a
     /// leaf's head (D17).
     fn separator_keys(&self) -> Vec<&K> {
-        self.root
-            .as_ref()
-            .map_or_else(Vec::new, |root| root.separator_keys())
+        if self.root.has_tree() {
+            self.root.separator_keys()
+        } else {
+            Vec::new()
+        }
     }
 }

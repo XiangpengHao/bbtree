@@ -176,7 +176,7 @@ An operation does its upkeep in two steps:
 | removal of separator `s`, replaced by its successor `s'` (D17) | the right border of the subtree left of `s` (upper fence `s` → `s'`) and the left border of the subtree right of it (lower fence `s` → `s'`) | before any change, the first border's nodes shrink to `min(own, LCP(s, s'))`, reading keys; then `s'` moves back to `s`'s node's prefix, filled from `s` | the second border's nodes |
 | `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes the root's prefix, the shared prefix, from the root down, each filled from its parent's key beside the path; both trees keep the shared bytes | once both maps are counted, the nodes beside each border |
 | builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the nodes a new leaf closes, from the leaf up, once it hangs after them; after `finish`, the nodes beside the right border |
-| root push / pop, clone | none | a new root has the shared prefix; a copy copies prefixes and the shared bytes | — |
+| raising or lowering the tree (D52), clone | none | a raised root has the shared prefix, and a lowered root's child had it; a copy copies prefixes and the shared bytes | — |
 | insert of a key that shares less, join | the borders' missing ones: the shared bytes shrink | every border node moves back to the new length, filled from the shared bytes' window there | — |
 
 - **Why the first border of a removed separator shrinks first.** Its
@@ -213,9 +213,10 @@ nothing from fences, yet their keys often share many bytes (dense integers,
 UUIDv7-like arrays, paths behind a common head). Every window there ties,
 and searches compare whole keys.
 
-- **Kept** by the root, as its fences (`Root`): the leading bytes of the
-  encoding every key shares, up to 64, by their bytes for byte strings and
-  by their encoding otherwise (`SharedPrefix`). A node with no separator
+- **Kept** by the root, as its fences, in the root page after the root
+  node (D52): the leading bytes of the encoding every key shares, up to 64,
+  by their bytes for byte strings and by their encoding otherwise
+  (`SharedPrefix`). A node with no separator
   above it on a side takes the root's fence there, so the root and the
   border nodes take its length as their prefix, and `prefix_len` is what
   every node's fences share.

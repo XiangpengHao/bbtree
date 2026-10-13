@@ -23,7 +23,14 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// released, before the panic goes on: nothing leaks, and the tree is
     /// unchanged.
     pub(crate) fn clone_tree(&self) -> Self {
-        Root::new(self.top().clone_nodes(), self.shared_prefix().clone())
+        let Some(root) = self.page() else {
+            return Self::EMPTY;
+        };
+        Self::from_node(
+            root.top().clone_nodes(),
+            root.height(),
+            root.shared_prefix().clone(),
+        )
     }
 }
 

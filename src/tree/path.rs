@@ -33,6 +33,10 @@
 //!   node, from which nothing leads back up;
 //! - the root changes only through an exclusive path, which updates itself
 //!   ([`PathMut::push_root`]).
+//!
+//! A path keeps each node as its edge does, tagged with its kind
+//! (`node/page.rs`), so that it decides each node's kind by the pointer it
+//! holds; debug builds check that only the node at height 0 is a leaf.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -42,7 +46,7 @@ use core::mem::MaybeUninit;
 use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByKind};
+use super::node::page::{FreshPage, PageByKind, TaggedNodePtr};
 use super::node::{KeyList, Node};
 use super::root::Root;
 use super::shared_prefix::SharedPrefix;
@@ -134,15 +138,15 @@ impl NodeEnd for LastEdge {
 /// Invariant: `bottom <= root_height + 1` and `root_height <= MAX_HEIGHT`;
 /// the path is detached exactly when `bottom > root_height`. For every
 /// height `h` from `bottom` to `root_height`, `nodes[h]` and `indexes[h]` are
-/// initialized, and `nodes[h]` holds a node at height `h` of one tree, the
-/// node at `root_height` its root. For every `h` above `bottom`, `indexes[h]`
+/// initialized, and `nodes[h]` holds a node at height `h` of one tree,
+/// tagged with its kind, the node at `root_height` its root. For every `h` above `bottom`, `indexes[h]`
 /// is an edge of `nodes[h]`, and `nodes[h - 1]` is the child at that edge.
 /// `indexes[bottom]` is the position the path ends at in the bottom node, an
 /// edge or a key, which every use checks against the node's length. A node
 /// holds at most 1023 keys (`tree/node/layout.rs`), so every index fits in a
 /// `u16`.
 pub(crate) struct Path<B, K, V, S> {
-    nodes: [MaybeUninit<NodePtr<K, V, S>>; MAX_HEIGHT + 1],
+    nodes: [MaybeUninit<TaggedNodePtr<K, V, S>>; MAX_HEIGHT + 1],
     indexes: [MaybeUninit<u16>; MAX_HEIGHT + 1],
     bottom: u8,
     root_height: u8,
@@ -204,17 +208,17 @@ impl<B, K, V, S> Path<B, K, V, S> {
         }
     }
 
-    /// Makes the path just `root`, ending at its first edge.
+    /// Makes the path just `root`, at `height`, ending at its first edge.
     ///
-    /// `root` is the root of a well-formed tree, to which the path has the
-    /// access `B` says for as long as it lives.
-    pub(crate) fn attach(&mut self, root: Node<K, V, S>) {
-        self.write_level(root.height(), root.node_ptr(), 0);
-        self.set_heights(root.height(), root.height());
+    /// `root` is the root of a well-formed tree of that height, to which the
+    /// path has the access `B` says for as long as it lives.
+    pub(crate) fn attach(&mut self, root: Node<K, V, S>, height: usize) {
+        self.write_level(height, root.tagged(), 0);
+        self.set_heights(height, height);
     }
 
     /// Writes level `height`.
-    fn write_level(&mut self, height: usize, node: NodePtr<K, V, S>, index: usize) {
+    fn write_level(&mut self, height: usize, node: TaggedNodePtr<K, V, S>, index: usize) {
         self.nodes[height].write(node);
         self.write_index(height, index);
     }
@@ -252,8 +256,9 @@ impl<B, K, V, S> Path<B, K, V, S> {
         self.height() <= height && height <= self.root_height()
     }
 
-    /// The node at `height`, which must be on the path.
-    fn node_ptr(&self, height: usize) -> NodePtr<K, V, S> {
+    /// The node at `height`, which must be on the path, as the path keeps
+    /// it.
+    fn tagged_node(&self, height: usize) -> TaggedNodePtr<K, V, S> {
         assert!(
             self.is_on_path(height),
             "height {height} is not on the path"
@@ -262,9 +267,16 @@ impl<B, K, V, S> Path<B, K, V, S> {
         unsafe { self.nodes[height].assume_init() }
     }
 
-    /// The node at `height`, which must be on the path.
+    /// The node at `height`, which must be on the path: a leaf just at
+    /// height 0, which debug builds check.
     pub(crate) fn node(&self, height: usize) -> Node<K, V, S> {
-        Node::at(self.node_ptr(height), height)
+        let node = Node::at(self.tagged_node(height));
+        debug_assert_eq!(
+            matches!(node, Node::Leaf(_)),
+            height == 0,
+            "the leaves are at height 0"
+        );
+        node
     }
 
     /// The node at `height` above the leaves, internal, as the caller
@@ -275,7 +287,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// If `height` is not on the path.
     pub(crate) fn internal(&self, height: usize) -> Internal<K, V, S> {
         debug_assert!(height > 0, "the node at height 0 is a leaf");
-        Internal::at(self.node_ptr(height), height)
+        Internal::at(self.tagged_node(height).internal_ptr())
     }
 
     /// The edge of a leaf the path ends at: where a walk's cursor stands
@@ -295,7 +307,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
         // initialized (caller and type invariant), and holds a leaf.
         unsafe {
             (
-                Leaf::at(self.nodes[0].assume_init()),
+                Leaf::at(self.nodes[0].assume_init().leaf_ptr()),
                 usize::from(self.indexes[0].assume_init()),
             )
         }
@@ -424,7 +436,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     pub(crate) fn descend(&mut self) {
         let height = self.height();
         assert!(height > 0, "descending from a leaf");
-        let child = self.internal(height).child(self.index()).node_ptr();
+        let child = self.internal(height).child(self.index()).tagged();
         self.write_level(height - 1, child, 0);
         self.bottom -= 1;
     }
@@ -447,7 +459,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
             node = internal.child(edge);
             height -= 1;
             edge = End::edge(node);
-            self.write_level(height, node.node_ptr(), edge);
+            self.write_level(height, node.tagged(), edge);
         }
         self.bottom = height as u8;
     }
@@ -522,10 +534,10 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
                 };
                 self.write_index(height, edge);
                 // SAFETY: a search returns an edge `<= len`.
-                let child = unsafe { internal.child_unchecked(edge) };
+                let child = unsafe { internal.edge_unchecked(edge) };
                 height -= 1;
-                self.nodes[height].write(child.node_ptr());
-                match child {
+                self.nodes[height].write(child);
+                match Node::at(child) {
                     Node::Leaf(leaf) => break leaf,
                     Node::Internal(child) => internal = child,
                 }
@@ -671,8 +683,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     }
 
     /// Starts the path at the root, at its first edge.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     pub(crate) fn start_at_root(&mut self) {
-        self.path.attach(self.root.top());
+        self.path.attach(self.root.top(), self.root.height());
     }
 
     /// Starts the path at the root and searches down; see [`Path::search`].
@@ -777,7 +793,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     pub(crate) fn leaf(&self) -> Leaf<K, V, S> {
         let height = self.path.height();
         assert_eq!(height, 0, "the bottom node is internal");
-        Leaf::at(self.path.node_ptr(height))
+        Leaf::at(self.path.tagged_node(height).leaf_ptr())
     }
 
     /// The bottom node, internal, as where the path went up from a node
@@ -792,37 +808,45 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.path.internal(height)
     }
 
-    /// Detaches the path, which a removal is done with, and gives way, if
-    /// merges left the root internal and without keys, to the root's only
-    /// child, handing the old root's page to `release`.
+    /// Detaches the path, which a removal is done with, and lowers the
+    /// tree, if merges left the root internal and without keys, moving the
+    /// root's only child up into the root ([`Root::lower`]), and handing the
+    /// child's page to `release`.
     pub(crate) fn detach_popping_an_empty_root(
         &mut self,
         release: &mut impl FnMut(PageByKind<K, V, S>),
     ) {
         self.path = Path::detached();
         if self.root.height() > 0 && self.root.top().len() == 0 {
-            release(self.root.pop_internal_level().into());
+            release(self.root.lower());
         }
     }
 
-    /// Puts a new root with no keys above the root, which the path must end
-    /// at, and ends the path at the new root's only edge, which leads to the
-    /// old one.
+    /// Raises the tree a level ([`Root::raise`]): the root node, which the
+    /// path must end at, moves to a page from `new_leaf_page` or
+    /// `new_internal_page`, by its kind, under the root, now internal with
+    /// no keys; the path keeps its position in the moved node, and ends at
+    /// the root's only edge, which leads there.
     ///
     /// # Panics
     ///
     /// If the path does not end at the root.
-    pub(crate) fn push_root(&mut self, page: FreshPage<Internal<K, V, S>>) {
+    pub(crate) fn push_root(
+        &mut self,
+        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
+        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
+    ) {
         assert_eq!(
             self.path.height(),
             self.path.root_height(),
             "a new root goes above a path that ends at the root"
         );
-        let root = self.root.push_internal_level(page).node_ptr();
-        // The old root is the new root's child at edge 0.
-        let height = self.path.root_height() + 1;
-        self.path.write_level(height, root, 0);
-        self.path.set_heights(height, height);
+        let moved = self.root.raise(new_leaf_page, new_internal_page);
+        let height = self.path.root_height();
+        self.path.nodes[height].write(moved.tagged());
+        self.path
+            .write_level(height + 1, self.root.top().tagged(), 0);
+        self.path.set_heights(height + 1, height + 1);
     }
 
     /// The key the path ends at.

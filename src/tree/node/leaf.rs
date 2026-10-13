@@ -23,13 +23,13 @@ use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Separator, Window}
 use super::internal::Internal;
 use super::length_tags::{LengthMatch, LengthTags};
 use super::node_plan::{KeySearch, NodePlan};
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
+use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, Insertion, InsertionSide, Split};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
-/// A leaf, by its page: a node at height 0.
+/// A leaf, by its page.
 pub(crate) struct Leaf<K, V, S> {
     node: NodePtr<K, V, S>,
 }
@@ -42,20 +42,25 @@ impl<K, V, S> Clone for Leaf<K, V, S> {
 
 impl<K, V, S> Copy for Leaf<K, V, S> {}
 
-// SAFETY: leaves are the nodes at height 0, and their pages have the leaf
-// layout.
-unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Leaf<K, V, S> {
-    const IS_LEAF: bool = true;
-
+// SAFETY: leaves have the leaf layout.
+unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Leaf<K, V, S> {
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::leaf_layout().page
     }
+}
+
+// SAFETY: as for `PageType`; leaves are leaves.
+unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Leaf<K, V, S> {
+    const IS_LEAF: bool = true;
 }
 
 impl<K, V, S> Leaf<K, V, S> {
     /// The leaf at `node`, which must hold one.
     #[inline(always)]
     pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
+        // SAFETY: the node is allocated and initialized, and nothing writes
+        // its header meanwhile (the handles' contract).
+        debug_assert!(unsafe { node.is_leaf() }, "the node is internal");
         Self { node }
     }
 

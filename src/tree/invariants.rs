@@ -24,7 +24,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// - in order, keys strictly increase;
     /// - every key lies within the separator bounds passed down from its
     ///   parent;
-    /// - all leaves are at the same depth;
+    /// - all leaves are at the same depth, the height the root page keeps,
+    ///   and every edge's tag tells its node's kind, as its header does
+    ///   (checked as nodes are reached, in debug builds);
     /// - every node below the root holds at least its `min_len` keys, which
     ///   splits and removals keep (D22);
     /// - the root of a non-empty tree holds a key, and so does an internal
@@ -42,20 +44,26 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     ///   what every key shares, whose encoding starts with the tree's
     ///   shared prefix (D50); otherwise none, and prefix 0.
     ///
+    /// Without a tree, `length` is 0.
+    ///
     /// Calls `Ord` and the strategy's inline-key encoding: a tree whose keys
     /// break their contracts fails it.
     pub(crate) fn check_invariants(&self, length: usize) {
-        let root = self.top();
-        if length > 0 || root.height() > 0 {
+        let Some(page) = self.page() else {
+            assert_eq!(length, 0, "a map without a tree has entries");
+            return;
+        };
+        let root = page.top();
+        if length > 0 || page.height() > 0 {
             assert!(root.len() > 0, "the root of a non-empty map has no keys");
         }
         let mut walk = InOrderWalk {
-            shared_prefix: self.shared_prefix(),
+            shared_prefix: page.shared_prefix(),
             previous_key: None,
             entries: 0,
             leaves: 0,
             separators: 0,
-            leaf_depth: root.height(),
+            leaf_depth: page.height(),
         };
         walk.check_nodes_under(root, KeyBounds::UNBOUNDED, 0);
         assert_eq!(
@@ -76,8 +84,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// encoding: it holds even for keys that panic or break their
     /// contracts, whose maps give wrong answers.
     pub(crate) fn check_prefix_lens(&self) {
-        let shared_len = self.shared_prefix().len();
-        Self::check_prefix_lens_in(self.top(), shared_len, shared_len, true, true);
+        let Some(page) = self.page() else {
+            return;
+        };
+        let shared_len = page.shared_prefix().len();
+        Self::check_prefix_lens_in(page.top(), shared_len, shared_len, true, true);
     }
 
     fn check_prefix_lens_in(

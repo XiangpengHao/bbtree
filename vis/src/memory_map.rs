@@ -99,7 +99,7 @@ impl PageMarks {
             SlotContents::Values => self.leaf && self.found == Some(slot),
             SlotContents::Edges => self.edge == Some(slot),
             SlotContents::HeadKey | SlotContents::Head => self.head,
-            SlotContents::Header => false,
+            SlotContents::Header | SlotContents::RootArea => false,
         }
     }
 
@@ -121,7 +121,9 @@ impl PageMarks {
     ) -> Option<(Certainty, ReadPhase)> {
         let certain = |phase| Some((Certainty::Certain, phase));
         match contents {
-            SlotContents::Header if self.searched => certain(ReadPhase::Header),
+            SlotContents::Header | SlotContents::RootArea if self.searched => {
+                certain(ReadPhase::Header)
+            }
             SlotContents::InlineKeys if self.read_inline_keys => certain(ReadPhase::InlineKeys),
             _ if !used => None,
             _ if self.is_result(contents, slot) => certain(ReadPhase::Result),
@@ -155,7 +157,7 @@ trait SlotLook: Copy {
 impl SlotLook for SlotContents {
     fn class(self) -> &'static str {
         match self {
-            SlotContents::Header => "slot-header",
+            SlotContents::Header | SlotContents::RootArea => "slot-header",
             SlotContents::InlineKeys => "slot-inline",
             SlotContents::LengthTags => "slot-tags",
             SlotContents::Keys | SlotContents::HeadKey => "slot-keys",
@@ -166,6 +168,7 @@ impl SlotLook for SlotContents {
     fn label(self) -> &'static str {
         match self {
             SlotContents::Header => "header",
+            SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline key",
             SlotContents::LengthTags => "length tag",
             SlotContents::Keys => "key",
@@ -179,6 +182,7 @@ impl SlotLook for SlotContents {
     fn legend_label(self) -> &'static str {
         match self {
             SlotContents::Header => "header",
+            SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline keys",
             SlotContents::LengthTags => "length tags",
             SlotContents::Keys | SlotContents::HeadKey => "keys",
@@ -189,7 +193,7 @@ impl SlotLook for SlotContents {
 
     fn concept(self) -> Option<Concept> {
         match self {
-            SlotContents::Header => None,
+            SlotContents::Header | SlotContents::RootArea => None,
             SlotContents::InlineKeys => Some(Concept::InlineKey),
             SlotContents::LengthTags => Some(Concept::LengthTag),
             SlotContents::Keys => None,
@@ -202,7 +206,7 @@ impl SlotLook for SlotContents {
 
     fn part(self, slot: usize) -> Option<NodePart> {
         match self {
-            SlotContents::Header => None,
+            SlotContents::Header | SlotContents::RootArea => None,
             SlotContents::InlineKeys
             | SlotContents::LengthTags
             | SlotContents::Keys
@@ -221,7 +225,12 @@ impl SlotLook for SlotContents {
                         SlotContents::Keys | SlotContents::InlineKeys | SlotContents::LengthTags
                     )
             }
-            Concept::FencePrefix | Concept::SharedPrefix => self == SlotContents::Header,
+            Concept::FencePrefix => self == SlotContents::Header,
+            // The root's prefix length is what every key shares; the bytes
+            // are in the root area (D50).
+            Concept::SharedPrefix => {
+                matches!(self, SlotContents::Header | SlotContents::RootArea)
+            }
             Concept::Separator => {
                 (self == SlotContents::Keys && !marks.leaf) || self == SlotContents::HeadKey
             }

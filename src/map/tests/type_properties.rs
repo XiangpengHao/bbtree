@@ -305,20 +305,20 @@ fn iterator_sizes() {
 
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-fn five_words_with_an_insertion_hint_and_a_shared_prefix() {
-    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 40);
+fn three_words_like_std() {
+    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 24);
     assert_eq!(
         size_of::<BBTreeMap<u64, u64>>(),
-        size_of::<BTreeMap<u64, u64>>() + 2 * size_of::<usize>()
+        size_of::<BTreeMap<u64, u64>>()
     );
-    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 40);
+    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 24);
 }
 
 #[test]
 fn new_is_const_and_allocates_nothing() {
     const EMPTY: BBTreeMap<String, String> = BBTreeMap::new();
     let map = EMPTY;
-    assert!(map.root.is_none());
+    assert!(!map.root.has_tree());
     assert!(map.is_empty());
     assert_eq!(map.len(), 0);
     assert_eq!(map.get("absent"), None);
@@ -326,6 +326,6 @@ fn new_is_const_and_allocates_nothing() {
     map.check_invariants();
 
     let mut map: BBTreeMap<u64, u64> = BBTreeMap::default();
-    assert!(map.root.is_none());
+    assert!(!map.root.has_tree());
     assert_eq!(map.get_mut(&1), None);
 }

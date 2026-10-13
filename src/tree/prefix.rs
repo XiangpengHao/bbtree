@@ -198,7 +198,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             indexes[self.height()] = self.index();
         }
         let shared_len = self.root().shared_prefix().len();
-        let mut node = self.root().top();
+        let (mut node, mut height) = (self.root().top(), self.root_height());
         debug_assert_eq!(
             node.prefix_len(),
             shared_len,
@@ -219,15 +219,16 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                     if let Some(fill) = fill {
                         internal.move_prefix_back_to(fill);
                     }
-                    if internal.height() == bottom {
+                    if height == bottom {
                         break;
                     }
-                    let index = indexes[internal.height()];
+                    let index = indexes[height];
                     fill = Some(
                         internal
                             .bound_window(index)
                             .expect("a node on a path down holds a key"),
                     );
+                    height -= 1;
                     internal.child(index)
                 }
             };
@@ -282,8 +283,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        let root = self.top();
-        if root.height() == 0 && root.len() == 0 {
+        if matches!(self.top(), Node::Leaf(root) if root.len() == 0) {
             self.start_shared_prefix(key);
             return;
         }

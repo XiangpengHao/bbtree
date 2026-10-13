@@ -4,8 +4,8 @@
 //! needs no ancestors. If the leaf is full, a
 //! second search records its path (`path.rs`) for splitting. Going
 //! back up the path, each node takes its split child's separator and right
-//! half, splitting in turn if it is full; a root that splits grows a new
-//! root above it. A separator's value stays in the right half, as the head
+//! half, splitting in turn if it is full; a root that splits raises the
+//! tree, moving the root node down a level, under the root. A separator's value stays in the right half, as the head
 //! of its leftmost leaf (D17), and so does its key where separator keys are
 //! heads (D49); its inline key goes up with it (D18), moved back to its new
 //! node's prefix length. Once
@@ -38,8 +38,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     ///
     /// Every page a split needs comes from `new_leaf_page` or
     /// `new_internal_page`, by the kind of node that splits (D21), asked for
-    /// at the time of the split; a new root's page comes from
-    /// `new_internal_page`.
+    /// at the time of the split; so does the page the root node moves to
+    /// when the tree grows a level. Without a tree, a new one's root page
+    /// comes from the global allocator.
     ///
     /// Every `Ord` call happens while validating an append or searching,
     /// and every `InlineKey` call while validating an append, checking what
@@ -69,6 +70,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             *length += 1;
             return None;
         }
+        self.page_or_new();
         self.cover_key(&key);
         match self.top_mut().find_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
@@ -193,7 +195,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let top = loop {
             let (separator, right, entry_is_right) = carried;
             if self.height() == self.root_height() {
-                self.push_root(new_internal_page());
+                self.push_root(&mut new_leaf_page, &mut new_internal_page);
             } else {
                 self.ascend();
             }

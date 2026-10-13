@@ -931,7 +931,7 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     loop {
         map.insert(BudgetedKey::new(count, &budget), count);
         count += 1;
-        let Node::Leaf(leaf) = map.root.as_mut().unwrap().top() else {
+        let Node::Leaf(leaf) = map.root.top() else {
             panic!("stop before the first split");
         };
         if leaf.len() == Leaf::<BudgetedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
@@ -942,8 +942,6 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     budget.set(usize::MAX);
     assert!(
         map.root
-            .as_ref()
-            .unwrap()
             .top()
             .find_for_insert(&SearchKey::new(&query))
             .is_err()

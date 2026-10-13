@@ -75,8 +75,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         path.search_to_edge(&SearchKey::new(key), side);
         path.clear_prefixes();
         let upper = path.cut();
-        // Every key of both parts shares what the tree's keys did (D50).
-        let mut upper = Root::new(upper, self.shared_prefix().clone());
+        // As tall as the tree; every key of both parts shares what the
+        // tree's keys did (D50).
+        let mut upper = Root::from_node(upper, self.height(), self.shared_prefix().clone());
         let release = &mut PageByKind::deallocate;
         self.fix_border::<LastEdge>(release);
         upper.fix_border::<FirstEdge>(release);
@@ -89,8 +90,8 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// it, from the leaf up, keeps what lies left of the path, and what lies
     /// right of it goes into a new node, after the part cut off from the
     /// node below. Returns the top of the new nodes, as tall as the root,
-    /// on pages from the global allocator, which nothing owns until the
-    /// caller makes it a tree's root. Nodes on either side of the cut may be
+    /// on plain pages from the global allocator, which nothing owns until
+    /// the caller makes it a tree's root. Nodes on either side of the cut may be
     /// left with fewer keys than their minimum, down to none. Compares no
     /// keys.
     ///
@@ -132,9 +133,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Makes every node along the tree's `End` edge, its last children for
     /// [`LastEdge`] or its first for [`FirstEdge`], hold at least
     /// its minimum, by merging it with its sibling or moving keys over from
-    /// it, from the root down; and gives way to the only child of a root left
+    /// it, from the root down; and lowers the tree while its root is left
     /// without keys, until the root has some or is a leaf. Every other node
-    /// must hold its minimum already. Merged pages go to `release`.
+    /// must hold its minimum already. Emptied pages go to `release`.
     ///
     /// Going down, each node on the edge is brought to one key more than its
     /// minimum, so that a merge one level down, which takes one of its keys,
@@ -162,11 +163,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         self.pop_empty_roots(release);
     }
 
-    /// Gives way to the only child of a root without keys, until the root
-    /// has some or is a leaf, handing each old root's page to `release`.
+    /// Lowers the tree while its root is internal without keys, until the
+    /// root has some or is a leaf ([`Root::lower`]), handing each page
+    /// emptied to `release`.
     fn pop_empty_roots(&mut self, release: &mut impl FnMut(PageByKind<K, V, S>)) {
         while self.height() > 0 && self.top().len() == 0 {
-            release(self.pop_internal_level().into());
+            release(self.lower());
         }
     }
 }

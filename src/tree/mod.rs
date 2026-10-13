@@ -15,8 +15,9 @@
 //!   and [`node::internal`], with every operation on one node, and what
 //!   they are both made of: pages, their layouts, slot arrays, and the
 //!   inline keys they search (D18).
-//! - [`root`] is the root: the top node, and what the tree keeps for it in
-//!   place of a parent, its fences, as the bytes every key shares (D50,
+//! - [`root`] is the root: the root page, with the top node and what the
+//!   tree keeps for it in place of a parent, its height and its fences, as
+//!   the bytes every key shares (D50, D52, `node/root_page.rs`,
 //!   `shared_prefix.rs`), and the last leaf an append went to (D45). Every
 //!   operation on a whole tree starts there.
 //! - The rest of this module is the tree's operations, each in its own
@@ -35,9 +36,10 @@
 //! paths and walks, which hand out each entry once (`path.rs`, `walk.rs`),
 //! and the slot arrays and page allocation under the nodes. `unsafe` code
 //! is in the node modules that touch pages (`page.rs`, `slots.rs`,
-//! `leaf.rs`, `internal.rs`, `siblings.rs`, `inline_key_search.rs`,
-//! `vector_count.rs`), and in `root.rs`, `path.rs`, `search.rs` and
-//! `walk.rs`, where a contract the type system doesn't check is relied on.
+//! `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
+//! `inline_key_search.rs`, `vector_count.rs`), and in `root.rs`, `path.rs`,
+//! `search.rs` and `walk.rs`, where a contract the type system doesn't
+//! check is relied on.
 //! Every other module is `#![forbid(unsafe_code)]`. What of a node's API
 //! only the tree may use, such as making a handle from a pointer, is
 //! `pub(in crate::tree)`.

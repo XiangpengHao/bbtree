@@ -23,25 +23,32 @@ use super::node::inline_key_search::NodeInlineKeys;
 use super::node::inline_keys::{InlineTarget, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodePtr, PageKind};
+use super::node::page::{
+    InlineKeyNodeHeader, NodeHeader, NodePtr, PageKind, PageType, TaggedNodePtr,
+};
+use super::node::root_page::RootPage;
 use super::node::{Child, Node};
 use super::root::Root;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// A map's tree, read in place: see [`crate::BBTreeMap::inspect`].
 pub struct TreeView<'a, K, V, S> {
-    tree: Option<&'a Root<K, V, S>>,
+    tree: Option<RootPage<K, V, S>>,
+    _borrow: PhantomData<&'a Root<K, V, S>>,
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
-    pub(crate) fn new(tree: Option<&'a Root<K, V, S>>) -> Self {
-        Self { tree }
+    pub(crate) fn new(tree: &'a Root<K, V, S>) -> Self {
+        Self {
+            tree: tree.page(),
+            _borrow: PhantomData,
+        }
     }
 
     /// The root node, or `None` if the map has never held an entry. A map
     /// whose entries were all removed may keep an empty root leaf.
     pub fn root(&self) -> Option<NodeView<'a, K, V, S>> {
-        self.tree.map(|tree| NodeView::new(tree.top()))
+        self.tree.map(NodeView::of_root)
     }
 
     /// The leading bytes of the encoding of every key of the map, as many
@@ -78,9 +85,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         if tree.shared_prefix().place(&search).is_some() {
             return steps;
         }
-        let mut node = tree.top();
+        let mut view = NodeView::of_root(tree);
         loop {
-            match node {
+            match view.node {
                 Node::Leaf(leaf) => {
                     let outcome = match leaf.search_point(&search) {
                         Some(index) => TraceOutcome::Found { index },
@@ -91,7 +98,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
                         },
                     };
                     let (target, inline_keys) = (leaf.inline_target(&search), leaf.inline_keys());
-                    steps.push(TraceStep::searched(node, target, inline_keys, outcome));
+                    steps.push(TraceStep::searched(view, target, inline_keys, outcome));
                     return steps;
                 }
                 Node::Internal(internal) => {
@@ -100,16 +107,16 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
                     match internal.search(&search) {
                         Err(edge) => {
                             let outcome = TraceOutcome::Descend { edge };
-                            steps.push(TraceStep::searched(node, target, inline_keys, outcome));
-                            node = internal.child(edge);
+                            steps.push(TraceStep::searched(view, target, inline_keys, outcome));
+                            view = view.child_below(internal, edge);
                         }
                         Ok(index) => {
                             let outcome = TraceOutcome::Found { index };
-                            steps.push(TraceStep::searched(node, target, inline_keys, outcome));
+                            steps.push(TraceStep::searched(view, target, inline_keys, outcome));
                             let value: *const V = internal.head_leaf(index).head_value();
-                            let mut below = internal.child(index + 1);
+                            let mut below = view.child_below(internal, index + 1);
                             loop {
-                                match below {
+                                match below.node {
                                     Node::Leaf(leaf) => {
                                         debug_assert!(ptr::eq(leaf.head_value(), value));
                                         steps.push(TraceStep::passed(below, TraceOutcome::Head));
@@ -118,7 +125,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
                                     Node::Internal(internal) => {
                                         let outcome = TraceOutcome::ToHead { edge: 0 };
                                         steps.push(TraceStep::passed(below, outcome));
-                                        below = internal.child(0);
+                                        below = below.child_below(internal, 0);
                                     }
                                 }
                             }
@@ -156,7 +163,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     /// A node the lookup searched: with what its search compared the key's
     /// inline key, `target`, against, the node's own (D18).
     fn searched(
-        node: Node<K, V, S>,
+        node: NodeView<'a, K, V, S>,
         target: Option<InlineTarget>,
         inline_keys: Option<NodeInlineKeys<'_>>,
         outcome: TraceOutcome,
@@ -164,7 +171,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         let tied = Option::zip(target, inline_keys)
             .map(|(target, inline_keys)| inline_keys.equal_run(target.inline_key()));
         Self {
-            node: NodeView::new(node),
+            node,
             outcome,
             inline_key: target.map(|target| target.inline_key()),
             tied,
@@ -172,9 +179,9 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     }
 
     /// A node the lookup went through without searching it.
-    fn passed(node: Node<K, V, S>, outcome: TraceOutcome) -> Self {
+    fn passed(node: NodeView<'a, K, V, S>, outcome: TraceOutcome) -> Self {
         Self {
-            node: NodeView::new(node),
+            node,
             outcome,
             inline_key: None,
             tied: None,
@@ -234,6 +241,11 @@ pub enum TraceOutcome {
 /// One node of a map's tree, read in place.
 pub struct NodeView<'a, K, V, S> {
     node: Node<K, V, S>,
+    /// How far above the leaves the node is, which the walk down from the
+    /// root counts: a node does not know it.
+    height: usize,
+    /// Whether the node is the root, in the root's page.
+    is_root: bool,
     _borrow: PhantomData<&'a (K, V)>,
 }
 
@@ -257,10 +269,23 @@ macro_rules! with_node {
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
-    /// `node`, read for as long as the map is borrowed for `'a`.
-    fn new(node: Node<K, V, S>) -> Self {
+    /// The root of the tree of `root`, read for as long as the map is
+    /// borrowed for `'a`.
+    fn of_root(root: RootPage<K, V, S>) -> Self {
         Self {
-            node,
+            node: root.top(),
+            height: root.height(),
+            is_root: true,
+            _borrow: PhantomData,
+        }
+    }
+
+    /// The child at edge `index` of `internal`, this view's node.
+    fn child_below(&self, internal: Internal<K, V, S>, index: usize) -> Self {
+        Self {
+            node: internal.child(index),
+            height: self.height - 1,
+            is_root: false,
             _borrow: PhantomData,
         }
     }
@@ -273,11 +298,11 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
 
     /// How far above the leaves the node is: 0 for a leaf.
     pub fn height(&self) -> usize {
-        self.node.height()
+        self.height
     }
 
     pub fn is_leaf(&self) -> bool {
-        self.height() == 0
+        matches!(self.node, Node::Leaf(_))
     }
 
     /// The number of keys.
@@ -394,16 +419,22 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     pub fn child(&self, index: usize) -> Option<NodeView<'a, K, V, S>> {
         match self.node {
             Node::Leaf(_) => None,
-            Node::Internal(internal) => Some(NodeView::new(internal.child(index))),
+            Node::Internal(internal) => Some(self.child_below(internal, index)),
         }
     }
 
     /// The node's page: its size, and where each of its slot arrays lies,
-    /// with how many of each array's slots it uses.
+    /// with how many of each array's slots it uses; the root's, with the
+    /// root area after the node (`tree/node/root_page.rs`).
     pub fn page_map(&self) -> PageMap {
-        match self.node {
+        let page = match self.node {
             Node::Leaf(leaf) => PageMap::of_leaf::<K, V, S>(leaf),
             Node::Internal(internal) => PageMap::of_internal::<K, V, S>(internal),
+        };
+        if self.is_root {
+            page.in_root_page::<K, V, S>()
+        } else {
+            page
         }
     }
 
@@ -530,7 +561,7 @@ impl PageMap {
             contents: SlotContents::Edges,
             offset: layout.edges_offset,
             stride: layout.edge_stride,
-            slot_size: size_of::<NodePtr<K, V, S>>(),
+            slot_size: size_of::<TaggedNodePtr<K, V, S>>(),
             capacity: capacity + 1,
             used: len + 1,
         });
@@ -538,6 +569,20 @@ impl PageMap {
             size: layout.page.size(),
             arrays,
         }
+    }
+
+    /// The same node's map in the root's page: its size, and the root area.
+    fn in_root_page<K, V, S: InlineKeyStrategy<K>>(mut self) -> Self {
+        let area = RootPage::<K, V, S>::area_bytes();
+        self.arrays.push(SlotArray::dense(
+            SlotContents::RootArea,
+            area.start,
+            area.len(),
+            1,
+            1,
+        ));
+        self.size = RootPage::<K, V, S>::page_layout().size();
+        self
     }
 
     /// The arrays every page of kind `Kind` starts with: its header, and
@@ -658,6 +703,9 @@ pub enum SlotContents {
     Values,
     /// An internal node's children.
     Edges,
+    /// What the tree keeps in the root's page, after the root node: its
+    /// height, and what every key shares (D50).
+    RootArea,
 }
 
 #[cfg(test)]

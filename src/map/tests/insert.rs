@@ -30,7 +30,7 @@ impl<'a> RedirectedKey<'a> {
 
     fn after_first_search(mut self, map: &mut BBTreeMap<Self, u64>, number: u64) -> Self {
         self.remaining.set(usize::MAX);
-        let root = map.root.as_mut().unwrap().top_mut();
+        let root = map.root.top_mut();
         let Err((leaf, _)) = root.find_for_insert(&SearchKey::new(&self)) else {
             panic!("the first search must be vacant");
         };
@@ -80,7 +80,7 @@ fn full_leaf_replay_can_find_an_existing_key() {
     loop {
         map.insert(RedirectedKey::new(count, &remaining), count);
         count += 1;
-        let Node::Leaf(leaf) = map.root.as_mut().unwrap().top() else {
+        let Node::Leaf(leaf) = map.root.top() else {
             panic!("stop before the first split");
         };
         if leaf.len() == Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
@@ -110,7 +110,7 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     loop {
         map.insert(RedirectedKey::new(2 * count, &remaining), 2 * count);
         count += 1;
-        if let Node::Internal(root) = map.root.as_mut().unwrap().top() {
+        if let Node::Internal(root) = map.root.top() {
             let Node::Leaf(right) = root.child(root.len()) else {
                 panic!("stop before a second level grows");
             };
@@ -121,13 +121,7 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     }
     assert_eq!(map.remove(&RedirectedKey::new(0, &remaining)), Some(0));
     let target = RedirectedKey::new(1, &remaining);
-    let Err((leaf, _)) = map
-        .root
-        .as_mut()
-        .unwrap()
-        .top_mut()
-        .find_for_insert(&SearchKey::new(&target))
-    else {
+    let Err((leaf, _)) = map.root.top_mut().find_for_insert(&SearchKey::new(&target)) else {
         panic!("the replay destination must be vacant");
     };
     assert!(leaf.len() < Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity());
@@ -162,10 +156,7 @@ impl AscendingInserts {
     }
 
     fn is_armed(&self) -> bool {
-        self.map
-            .root
-            .as_ref()
-            .is_some_and(|tree| tree.has_insertion_hint())
+        self.map.root.has_insertion_hint()
     }
 
     fn insert_next(&mut self) {
@@ -187,7 +178,7 @@ impl AscendingInserts {
     }
 
     fn rightmost_full(&self) -> bool {
-        let mut node = self.map.root.as_ref().unwrap().top();
+        let mut node = self.map.root.top();
         loop {
             match node {
                 Node::Leaf(leaf) => return leaf.len() == self.leaf_capacity,
@@ -234,8 +225,6 @@ fn an_unused_rightmost_append_token_leaves_the_tree_unchanged() {
         let _append = inserts
             .map
             .root
-            .as_mut()
-            .unwrap()
             .rightmost_append(&inserts.next)
             .expect("the armed leaf has room for the next key");
     }
@@ -303,10 +292,10 @@ fn rightmost_hints_follow_whole_owners_but_not_clones_or_cut_subtrees() {
     let mut inserts = AscendingInserts::new();
     inserts.arm();
     let mut cloned = inserts.map.clone();
-    assert!(!cloned.root.as_ref().unwrap().has_insertion_hint());
+    assert!(!cloned.root.has_insertion_hint());
     let mut moved = BBTreeMap::new();
     moved.append(&mut inserts.map); // Empty-destination append swaps owners.
-    assert!(moved.root.as_ref().unwrap().has_insertion_hint());
+    assert!(moved.root.has_insertion_hint());
     drop(moved);
     assert_eq!(cloned.insert(inserts.next, inserts.next), None);
     let mut other = AscendingInserts::new();
@@ -327,7 +316,7 @@ fn interior_splits_do_not_arm_a_local_last_leaf() {
     map.entry(0).and_modify(|value| *value = 0);
     for key in (1..2000).step_by(2) {
         map.insert(key, key);
-        assert!(!map.root.as_ref().unwrap().has_insertion_hint());
+        assert!(!map.root.has_insertion_hint());
     }
     map.check_invariants();
 }
@@ -396,11 +385,7 @@ fn cached_append_clears_before_callbacks_and_preserves_drop_order() {
     let mut map = BBTreeMap::with_strategy(crate::WithInlineKey);
     let mut next = 0;
     for callback in [&control.compare, &control.inline] {
-        while !map
-            .root
-            .as_ref()
-            .is_some_and(|tree| tree.has_insertion_hint())
-        {
+        while !map.root.has_insertion_hint() {
             map.insert(AppendPanicKey::new(next, &control), next);
             next += 1;
         }
@@ -413,12 +398,12 @@ fn cached_append_clears_before_callbacks_and_preserves_drop_order() {
             .is_err()
         );
         callback.set(false);
-        assert!(!map.root.as_ref().unwrap().has_insertion_hint());
+        assert!(!map.root.has_insertion_hint());
         assert_eq!(map.len(), len);
         assert_eq!(map.get(&AppendPanicKey::new(next, &control)), None);
         map.check_invariants();
     }
-    while !map.root.as_ref().unwrap().has_insertion_hint() {
+    while !map.root.has_insertion_hint() {
         map.insert(AppendPanicKey::new(next, &control), next);
         next += 1;
     }
@@ -429,6 +414,6 @@ fn cached_append_clears_before_callbacks_and_preserves_drop_order() {
         map.get(&AppendPanicKey::new(next - 1, &control)),
         Some(&(next - 1))
     );
-    assert!(!map.root.as_ref().unwrap().has_insertion_hint());
+    assert!(!map.root.has_insertion_hint());
     map.check_invariants();
 }

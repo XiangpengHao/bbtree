@@ -284,7 +284,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
 ) -> usize {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
     let rng = TestRng::new(1);
-    let mut tree = Root::new_leaf(pages.fresh());
+    let mut tree = Root::new(pages.fresh());
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
@@ -431,7 +431,7 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
         rng: &TestRng,
         entries: &mut Vec<(usize, usize)>,
     ) -> Root<Tracked<'l>, V, S> {
-        let root = tree.push_internal_level(pages.fresh());
+        let root = tree.raise_in(pages);
         assert_eq!(root.len(), 0);
         root.insert_fit(0, self.separator, Node::Leaf(self.right));
         root.assert_inline_keys_match();
@@ -458,7 +458,7 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
         pages.release(siblings.merge());
         assert_eq!(root.len(), 0);
 
-        pages.release(tree.pop_internal_level());
+        pages.release(tree.lower());
         assert_eq!(tree.height(), 0);
         tree
     }
@@ -540,7 +540,7 @@ fn split_and_insert_at_every_position() {
 fn boundary_insert_remove_keeps_split_headroom() {
     for at_front in [false, true] {
         let pages = TestPages::<u64, u64>::new();
-        let mut tree = Root::new_leaf(pages.fresh());
+        let mut tree = Root::new(pages.fresh());
         let mut length = 0;
         let capacity = Leaf::<u64, u64, Auto>::capacity() as u64;
         for key in 1..=capacity {

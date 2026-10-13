@@ -128,7 +128,7 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
     /// Takes the entries out of `map` and cuts out those in `range`.
     pub(crate) fn new(map: &'a mut BBTreeMap<K, V, S>, range: R) -> Self {
         let length = map.length;
-        let had_tree = map.root.is_some();
+        let had_tree = map.root.has_tree();
         let tree = mem::replace(map, BBTreeMap::empty()).root.take();
         let mut walk = Self {
             map,
@@ -155,10 +155,7 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
     /// Each piece is held where a panic can't lose it before the nodes
     /// beside the cuts fit their prefixes, which reads keys.
     fn cut_out_range(&mut self) {
-        let tree = self
-            .after
-            .tree_mut()
-            .expect("a map with entries has a tree");
+        let tree = self.after.tree_mut();
         let start = match self.range.start_bound() {
             Bound::Included(start) => Some((start, KeySide::Before)),
             Bound::Excluded(start) => Some((start, KeySide::After)),
@@ -182,14 +179,11 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
                 let past_end = tree.split_off_at(end, side);
                 mem::replace(tree, past_end)
             }
-            None => self.after.take().expect("the tree, cut or not"),
+            None => self.after.take(),
         };
-        self.source.rest =
-            DyingWalk::new(Some(range.into_top()), usize::MAX, PageByKind::deallocate);
-        if let Some(past_end) = self.after.tree_mut()
-            && cut_past_end
-        {
-            past_end.fit_border_siblings::<FirstEdge>();
+        self.source.rest = DyingWalk::new(range.page(), usize::MAX, PageByKind::deallocate);
+        if cut_past_end {
+            self.after.tree_mut().fit_border_siblings::<FirstEdge>();
         }
     }
 }

@@ -15,7 +15,6 @@ use crate::tree::node::page::TestPages;
 use crate::tree::node::siblings::StealError;
 use crate::tree::node::{Child, Insertion, Node, Split};
 use crate::tree::root::Root;
-use crate::tree::shared_prefix::SharedPrefix;
 use crate::tree::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 
 /// A leaf holding one tracked entry, named by the id of its key.
@@ -24,10 +23,19 @@ fn named_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     ledger: &'l DropLedger,
 ) -> (Leaf<K, Tracked<'l>, S>, usize) {
     let leaf = Leaf::new(pages.fresh_leaf());
+    (leaf, name_leaf(leaf, ledger))
+}
+
+/// Puts one tracked entry into `leaf`, which has none, and returns the id
+/// of its key, the leaf's name.
+fn name_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
+    leaf: Leaf<K, Tracked<'l>, S>,
+    ledger: &'l DropLedger,
+) -> usize {
     let key = K::from_tracked(ledger.track());
     let name = key.tracked_id();
     leaf.insert_fit(0, InlinedKey::new(key, 0), ledger.track());
-    (leaf, name)
+    name
 }
 
 /// A named leaf for the right of separator `key`, with a head to hold the
@@ -56,7 +64,7 @@ fn child_names<'l, K: FromTracked<'l>, V, S: InlineKeyStrategy<K>>(
 }
 
 /// The root of a tree that must be internal.
-fn internal_root<K, V, S>(tree: &Root<K, V, S>) -> Internal<K, V, S> {
+fn internal_root<K, V, S: InlineKeyStrategy<K>>(tree: &Root<K, V, S>) -> Internal<K, V, S> {
     match tree.top() {
         Node::Internal(root) => root,
         Node::Leaf(_) => panic!("the root is a leaf"),
@@ -69,9 +77,12 @@ fn root_above_one_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     pages: &TestPages<K, Tracked<'l>, S>,
     ledger: &'l DropLedger,
 ) -> (Root<K, Tracked<'l>, S>, usize) {
-    let (leaf, name) = named_leaf(pages, ledger);
-    let mut tree = Root::new(Node::Leaf(leaf), SharedPrefix::none());
-    tree.push_internal_level(pages.fresh());
+    let mut tree = Root::new(pages.fresh());
+    let Node::Leaf(leaf) = tree.top() else {
+        unreachable!("a new tree is a leaf");
+    };
+    let name = name_leaf(leaf, ledger);
+    tree.raise_in(pages);
     (tree, name)
 }
 
@@ -115,7 +126,6 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
                     ),
                     separators.remove(index)
                 );
-                assert_eq!(child.height(), 0);
                 let Node::Leaf(child_leaf) = child else {
                     panic!("the root's children are leaves");
                 };
@@ -152,7 +162,6 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
             9 => {
                 let index = rng.below(len + 1);
                 let child = root.child(index);
-                assert_eq!(child.height(), 0);
                 let Node::Leaf(child) = child else {
                     panic!("the children are leaves");
                 };
@@ -227,7 +236,7 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     assert_eq!(halves_children, children);
     assert!(!left.is_underfull());
     assert!(!right.is_underfull());
-    assert_eq!((left.height(), right.height()), (1, 1));
+    assert!(left.has_leaf_children() && right.has_leaf_children());
     left.assert_inline_keys_match();
     right.assert_inline_keys_match();
     drop(separator);
@@ -258,15 +267,15 @@ fn split_and_insert_at_every_position() {
     miri,
     ignore = "the rejected child is leaked on purpose, which Miri reports"
 )]
-fn insert_rejects_a_child_of_the_wrong_height() {
+fn insert_rejects_a_child_of_the_wrong_kind() {
     let ledger = DropLedger::new();
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
     let (tree, first_name) = root_above_one_leaf(&pages, &ledger);
     let (child, _, _, separator) = child_leaf(&pages, &ledger, ledger.track());
-    let too_tall = Node::Internal(Internal::new(pages.fresh(), child));
+    let internal = Node::Internal(Internal::new(pages.fresh(), child));
 
     let root = internal_root(&tree);
-    let rejected = catch_unwind(AssertUnwindSafe(|| root.insert_fit(0, separator, too_tall)));
+    let rejected = catch_unwind(AssertUnwindSafe(|| root.insert_fit(0, separator, internal)));
     assert!(rejected.is_err());
     assert_eq!(root.len(), 0);
     assert_eq!(child_names(root), [first_name]);
@@ -303,7 +312,7 @@ fn balancing_refuses_a_headless_right_leaf() {
 fn push_and_pop_levels() {
     let ledger = DropLedger::new();
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-    let mut tree = Root::new_leaf(pages.fresh());
+    let mut tree = Root::new(pages.fresh());
     for _ in 0..3 {
         let Node::Leaf(leaf) = tree.top() else {
             panic!("the root is a leaf");
@@ -317,24 +326,24 @@ fn push_and_pop_levels() {
     let ids = tree.top().tracked_ids_under();
 
     for height in 1..=3 {
-        let root = tree.push_internal_level(pages.fresh());
-        assert_eq!((root.len(), root.height()), (0, height));
+        assert_eq!(tree.raise_in(&pages).len(), 0);
         assert_eq!(tree.height(), height);
     }
-    let mut node = tree.top();
+    let (mut node, mut depth) = (tree.top(), 0);
     while let Node::Internal(internal) = node {
         assert_eq!(internal.len(), 0);
         node = internal.child(0);
+        depth += 1;
     }
-    assert_eq!(node.height(), 0);
+    assert_eq!(depth, 3);
     assert_eq!(node.tracked_ids_under(), ids);
 
     for height in (0..3).rev() {
-        pages.release(tree.pop_internal_level());
+        pages.release(tree.lower());
         assert_eq!(tree.height(), height);
     }
-    let popped_leaf = catch_unwind(AssertUnwindSafe(|| tree.pop_internal_level()));
-    assert!(popped_leaf.is_err(), "a leaf root has no level to pop");
+    let lowered_leaf = catch_unwind(AssertUnwindSafe(|| tree.lower()));
+    assert!(lowered_leaf.is_err(), "a leaf root has no level to lower");
     assert_eq!(tree.top().tracked_ids_under(), ids);
     tree.destroy(|page| pages.release(page));
     pages.assert_all_released();
@@ -468,7 +477,7 @@ fn steals_and_merges_of_internal_nodes() {
         (siblings.left_len(), siblings.right_len()),
         (left_len + 1, right_len - 1)
     );
-    assert_eq!(siblings.left().height(), 1);
+    assert!(siblings.left().has_leaf_children());
     assert_eq!(entry_ids(&tree), model);
 
     // Shrink the left child until both children fit in one node.
@@ -488,7 +497,7 @@ fn steals_and_merges_of_internal_nodes() {
     }
     let siblings = root.siblings::<BulkyInternal<'_>>(0);
     pages.release(siblings.merge());
-    assert_eq!(root.child(0).height(), 1);
+    assert!(matches!(root.child(0), Node::Internal(child) if child.has_leaf_children()));
     tree.pop_empty_roots();
     assert_eq!(entry_ids(&tree), model);
 
@@ -508,7 +517,7 @@ fn random_separator<K, V, S: InlineKeyStrategy<K>>(
             return None;
         };
         let len = internal.len();
-        if len > 0 && (internal.height() == 1 || rng.below(2) == 0) {
+        if len > 0 && (internal.has_leaf_children() || rng.below(2) == 0) {
             return Some((internal, rng.below(len)));
         }
         node = internal.child(rng.below(len + 1));

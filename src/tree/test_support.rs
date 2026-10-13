@@ -427,8 +427,7 @@ impl PageAligned {
 /// insert into the leaf, and split full nodes on the way back up), over
 /// pages from a [`TestPages`] pool.
 pub(super) struct TestTree<'p, K, V, S: InlineKeyStrategy<K> = Auto> {
-    /// `None` only while the root is being replaced.
-    root: Option<Root<K, V, S>>,
+    root: Root<K, V, S>,
     pages: &'p TestPages<K, V, S>,
 }
 
@@ -436,21 +435,17 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// A tree with an empty leaf as its root.
     pub(super) fn new(pages: &'p TestPages<K, V, S>) -> Self {
         Self {
-            root: Some(Root::new_leaf(pages.fresh())),
+            root: Root::new(pages.fresh()),
             pages,
         }
     }
 
     pub(super) fn root(&self) -> &Root<K, V, S> {
-        self.root
-            .as_ref()
-            .expect("the root is always there between calls")
+        &self.root
     }
 
     pub(super) fn root_mut(&mut self) -> &mut Root<K, V, S> {
-        self.root
-            .as_mut()
-            .expect("the root is always there between calls")
+        &mut self.root
     }
 
     pub(super) fn height(&self) -> usize {
@@ -466,21 +461,32 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         entries
     }
 
-    /// Replaces an internal root without keys by its only child, as the tree
+    /// Lowers the tree while its root is internal without keys, as the tree
     /// layer does after a merge empties the root.
     pub(super) fn pop_empty_roots(&mut self) {
         let pages = self.pages;
         let root = self.root_mut();
         while root.height() > 0 && root.top().len() == 0 {
-            pages.release(root.pop_internal_level());
+            pages.release(root.lower());
         }
     }
 
     /// Takes the tree apart, giving every page back to the pool.
     pub(super) fn destroy(mut self) {
         let pages = self.pages;
-        let root = self.root.take().expect("the root is always there");
-        root.destroy(|page| pages.release(page));
+        self.root.take().destroy(|page| pages.release(page));
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+    /// Raises the tree a level ([`Root::raise`]), the root node moving to a
+    /// page from `pages`, and returns the root, internal now.
+    pub(super) fn raise_in(&mut self, pages: &TestPages<K, V, S>) -> Internal<K, V, S> {
+        self.raise(|| pages.fresh(), || pages.fresh());
+        let Node::Internal(root) = self.top() else {
+            unreachable!("a raised root is internal");
+        };
+        root
     }
 }
 

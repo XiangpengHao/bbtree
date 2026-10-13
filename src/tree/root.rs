@@ -6,46 +6,48 @@
 //! so the tree keeps its fences beside it, as the bytes every key shares
 //! (D50, `shared_prefix.rs`): a search checks a query against them once,
 //! before the root, and a node with no separator above it on a side, along
-//! the tree's left or right border, takes the root's fence there. The tree
-//! also keeps the last leaf an append went to, to append there again
-//! without a search (D45).
+//! the tree's left or right border, takes the root's fence there. Both live
+//! in the root's page, after the root node, with the tree's height
+//! (`node/root_page.rs`). The tree also keeps the last leaf an append went
+//! to, to append there again without a search (D45).
 //!
-//! The root's node is a leaf, in a tree of one node, or an internal node;
-//! only the root grows or shrinks the tree's height. Every operation on a
-//! whole tree starts here, on [`Root`], each in its feature's module
-//! (`tree/mod.rs`).
+//! The root node is a leaf, in a tree of one node, or an internal node;
+//! only the root grows or shrinks the tree's height, in its page, which the
+//! tree keeps for life. A map without entries may have no tree at all, as
+//! std's has no root then (D1): making one allocates nothing. Every
+//! operation on a whole tree starts here, on [`Root`], each in its
+//! feature's module (`tree/mod.rs`).
 
 use core::cmp::Ordering;
+use core::mem;
 
 use super::node::Node;
 use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr};
+use super::node::page::{FreshPage, NodePtr, PageByKind};
+use super::node::root_page::RootPage;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
 
-/// A tree, by its root: the root node at `height`, which the tree owns with
-/// every node under it, its fences, as what every key shares (D50), and the
-/// last leaf an append went to.
+/// A tree, by its root page, if it has one, which the tree owns with every
+/// node under it; and the last leaf an append went to.
 ///
 /// It has no `Drop`: dropping a `Root` leaks the tree, which is safe;
 /// `Root::destroy` takes it apart (`teardown.rs`).
 ///
-/// Invariant: `node` holds a well-formed tree of nodes at `height` and
-/// below, which nothing but this `Root` reaches. Every key of the tree
-/// shares `shared_prefix`, and every node along the tree's left and right
-/// borders, the root too, has its length as its prefix length; searches
-/// trust it to route, never to stay in bounds.
+/// Invariant: `page` holds a well-formed tree, which nothing but this
+/// `Root` reaches. Every key of the tree shares its shared prefix, and every
+/// node along the tree's left and right borders, the root too, has its
+/// length as its prefix length; searches trust it to route, never to stay
+/// in bounds.
 ///
 /// If present, `rightmost_leaf` points to the tree's physically last leaf.
 /// Every exclusive use of the tree but the owner's fitting append clears it
 /// first ([`Self::top_mut`]). It holds no key reference, cached length, or
 /// assertion about the behavior of `Ord`.
 pub(crate) struct Root<K, V, S> {
-    node: NodePtr<K, V, S>,
-    height: usize,
-    shared_prefix: SharedPrefix,
+    page: Option<RootPage<K, V, S>>,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
 }
 
@@ -60,54 +62,97 @@ unsafe impl<K: Send, V: Send, S> Send for Root<K, V, S> {}
 // `&Box` does; every change needs `&mut Root` or the `Root` itself.
 unsafe impl<K: Sync, V: Sync, S> Sync for Root<K, V, S> {}
 
-impl<K, V, S> Root<K, V, S> {
-    /// A tree of `top` and the nodes under it, whose keys all share
-    /// `shared_prefix`, which every node along its borders must have as its
-    /// prefix length (D50). The tree owns them from now on.
-    pub(in crate::tree) fn new(top: Node<K, V, S>, shared_prefix: SharedPrefix) -> Self {
-        Self {
-            node: top.node_ptr(),
-            height: top.height(),
-            shared_prefix,
-            rightmost_leaf: None,
-        }
+impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+    /// No tree: what a new map has, allocating nothing.
+    pub(crate) const EMPTY: Self = Self {
+        page: None,
+        rightmost_leaf: None,
+    };
+
+    /// The tree's root page, to read the tree from; `None` without a tree.
+    #[inline(always)]
+    pub(crate) fn page(&self) -> Option<RootPage<K, V, S>> {
+        self.page
+    }
+
+    /// The tree's root page, to change the tree from: it ends the owner's
+    /// permission to append to the remembered leaf, which a change could
+    /// move or free.
+    #[inline(always)]
+    pub(crate) fn page_mut(&mut self) -> Option<RootPage<K, V, S>> {
+        self.clear_insertion_hint();
+        self.page
+    }
+
+    /// Whether there is a tree, with or without entries.
+    pub(crate) fn has_tree(&self) -> bool {
+        self.page.is_some()
+    }
+
+    /// The tree, leaving none here.
+    pub(crate) fn take(&mut self) -> Self {
+        mem::replace(self, Self::EMPTY)
+    }
+
+    /// The root page of a tree there must be.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
+    #[inline(always)]
+    fn tree(&self) -> RootPage<K, V, S> {
+        self.page.expect("an operation on a tree there is not")
     }
 
     /// The root node, to read the tree from.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     #[inline(always)]
     pub(crate) fn top(&self) -> Node<K, V, S> {
-        Node::at(self.node, self.height)
+        self.tree().top()
     }
 
     /// The root node, to change the tree from: it ends the owner's
-    /// permission to append to the remembered leaf, which a change could
-    /// move or free.
+    /// permission to append to the remembered leaf ([`Self::page_mut`]).
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     #[inline(always)]
     pub(crate) fn top_mut(&mut self) -> Node<K, V, S> {
         self.clear_insertion_hint();
         self.top()
     }
 
-    /// The root node, giving up the tree: for a walk to take it apart, or for
-    /// another tree to hang it under an edge, without what only a root has.
-    pub(crate) fn into_top(self) -> Node<K, V, S> {
-        Node::at(self.node, self.height)
-    }
-
+    /// The root node's height.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     pub(crate) fn height(&self) -> usize {
-        self.height
+        self.tree().height()
     }
 
     /// What every key of the tree shares (D50).
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     pub(crate) fn shared_prefix(&self) -> &SharedPrefix {
-        &self.shared_prefix
+        self.tree().shared_prefix()
     }
 
     /// What every key of the tree shares, to change: keeping every node
     /// along the tree's borders at its length is the caller's business
     /// (`tree/prefix.rs`).
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
     pub(in crate::tree) fn shared_prefix_mut(&mut self) -> &mut SharedPrefix {
-        &mut self.shared_prefix
+        self.tree().shared_prefix_mut()
     }
 
     /// Ends the owner's permission to append directly before another
@@ -125,42 +170,90 @@ impl<K, V, S> Root<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
-    /// An empty tree: a root leaf, without a head, and nothing shared yet.
-    pub(crate) fn new_leaf(page: FreshPage<Leaf<K, V, S>>) -> Self {
-        Self::new(Node::Leaf(Leaf::new(page)), SharedPrefix::none())
+    /// A new tree, in `page`: an empty root leaf, without a head, and
+    /// nothing shared yet.
+    pub(crate) fn new(page: FreshPage<RootPage<K, V, S>>) -> Self {
+        Self {
+            page: Some(RootPage::new(page)),
+            rightmost_leaf: None,
+        }
     }
 
-    /// Puts a new root with no keys above the current one, which becomes its
-    /// only child, and returns the new root. On both borders, it takes the
-    /// tree's shared prefix (D50), as the old root has.
-    pub(crate) fn push_internal_level(
-        &mut self,
-        page: FreshPage<Internal<K, V, S>>,
-    ) -> Internal<K, V, S> {
-        let old = self.top_mut();
-        let root = Internal::new(page, old);
-        root.set_empty_prefix_len(self.shared_prefix.len());
-        self.node = root.node_ptr();
-        self.height = root.height();
-        root
+    /// The tree's root page, after making a new tree, from the global
+    /// allocator, if there is none: what an insertion starts from.
+    pub(crate) fn page_or_new(&mut self) -> RootPage<K, V, S> {
+        *self
+            .page
+            .get_or_insert_with(|| RootPage::new(FreshPage::allocate()))
     }
 
-    /// Removes the root, which must be internal and hold no keys, making its
-    /// only child the root, and returns the old root's page: the inverse of
-    /// [`Self::push_internal_level`]. Were the root to hold keys, they and
-    /// the other children would be leaked.
+    /// The tree of `top`, `height` levels above the leaves, and the nodes
+    /// under it, on plain pages, whose keys all share `shared_prefix`, which
+    /// every node along its borders must have as its prefix length (D50):
+    /// `top` moves into a root page, from and back to the global allocator.
+    /// The tree owns them from now on.
+    pub(in crate::tree) fn from_node(
+        top: Node<K, V, S>,
+        height: usize,
+        shared_prefix: SharedPrefix,
+    ) -> Self {
+        let (page, emptied) =
+            RootPage::from_node(FreshPage::allocate(), top, height, shared_prefix);
+        emptied.deallocate();
+        Self {
+            page: Some(page),
+            rightmost_leaf: None,
+        }
+    }
+
+    /// The root node on a plain page of its kind, and its height, giving up
+    /// the tree, for another tree to hang under an edge (`tree/join.rs`):
+    /// its root page goes back to the global allocator, and the new one comes
+    /// from it.
     ///
     /// # Panics
     ///
-    /// If the root is a leaf; the tree is unchanged then.
-    pub(crate) fn pop_internal_level(&mut self) -> FreshPage<Internal<K, V, S>> {
-        let Node::Internal(root) = self.top_mut() else {
-            panic!("popping a leaf root");
+    /// Without a tree.
+    pub(in crate::tree) fn into_node(self) -> (Node<K, V, S>, usize) {
+        let page = self.tree();
+        let height = page.height();
+        let (top, emptied) = match page.top() {
+            Node::Leaf(_) => page.into_node::<Leaf<K, V, S>>(FreshPage::allocate()),
+            Node::Internal(_) => page.into_node::<Internal<K, V, S>>(FreshPage::allocate()),
         };
-        let (child, page) = root.take_only_child();
-        self.node = child.node_ptr();
-        self.height = child.height();
-        page
+        emptied.deallocate();
+        (top, height)
+    }
+
+    /// Makes the tree a level taller ([`RootPage::raise`]): the root node
+    /// moves to a page from `new_leaf_page` or `new_internal_page`, by its
+    /// kind, under the root, which is internal now. Returns the moved node.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree.
+    pub(crate) fn raise(
+        &mut self,
+        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
+        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
+    ) -> Node<K, V, S> {
+        let page = self.tree();
+        match self.top_mut() {
+            Node::Leaf(_) => page.raise(new_leaf_page()),
+            Node::Internal(_) => page.raise(new_internal_page()),
+        }
+    }
+
+    /// Makes the tree a level shorter ([`RootPage::lower`]): the root's only
+    /// child moves up into the root page, whose node must be internal and
+    /// hold no keys. Returns the child's emptied page.
+    ///
+    /// # Panics
+    ///
+    /// Without a tree, or if the root is a leaf; the tree is unchanged then.
+    pub(crate) fn lower(&mut self) -> PageByKind<K, V, S> {
+        self.clear_insertion_hint();
+        self.tree().lower()
     }
 
     /// Publishes a path's proof after it relinquishes its mutation access.
@@ -200,7 +293,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             return None;
         }
         // A key that shares less goes the general way, which covers it.
-        let shared = &self.shared_prefix;
+        let shared = self.shared_prefix();
         if shared.len_shared_with::<K, S>(key) < shared.len() {
             return None;
         }

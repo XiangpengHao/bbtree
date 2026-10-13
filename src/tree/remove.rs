@@ -4,7 +4,8 @@
 //! leads to if the removal left that child underfull, by merging it with a
 //! sibling or moving one entry over from it (D22). A merge takes a key out
 //! of the node itself, for its parent to check in turn; anything else ends
-//! the fixing. A root left without keys gives way to its only child.
+//! the fixing. A root left without keys lowers the tree: its only child
+//! moves up into the root's page.
 //!
 //! A separator's value is the head of the leftmost leaf right of it (D17),
 //! and where separator keys are heads, so is its key (D49). Removing the
@@ -55,6 +56,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        if !self.has_tree() {
+            return None;
+        }
         let mut path = PathMut::new(self);
         if path.search(&SearchKey::new(key)) {
             Some(path.remove(release, length))
@@ -71,6 +75,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         release: impl FnMut(PageByKind<K, V, S>),
         length: &mut usize,
     ) -> Option<(K, V)> {
+        if !self.has_tree() {
+            return None;
+        }
         let mut path = PathMut::new(self);
         if path.descend_to_first_key() {
             Some(path.remove(release, length))
@@ -87,6 +94,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         release: impl FnMut(PageByKind<K, V, S>),
         length: &mut usize,
     ) -> Option<(K, V)> {
+        if !self.has_tree() {
+            return None;
+        }
         let mut path = PathMut::new(self);
         if path.descend_to_last_key() {
             Some(path.remove(release, length))

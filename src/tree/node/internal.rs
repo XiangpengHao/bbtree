@@ -9,9 +9,9 @@
 //! [`Internal`] is a handle to one, with every operation on one internal
 //! node: routing a key to a child, reading and replacing its separators,
 //! taking and giving children, splitting it, cutting it, and balancing it
-//! with a sibling ([`Child`]). Its height tells what its children are:
-//! leaves at height 1, internal nodes above. The handle's contracts are the
-//! node module's (`tree/node/mod.rs`).
+//! with a sibling ([`Child`]). Its children are all of one kind, which each
+//! child's header tells. The handle's contracts are the node module's
+//! (`tree/node/mod.rs`).
 
 use core::alloc::Layout;
 use core::borrow::Borrow;
@@ -22,16 +22,15 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Separator, Window};
 use super::leaf::Leaf;
 use super::node_plan::{KeySearch, NodePlan};
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind};
+use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType, TaggedNodePtr};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
-/// An internal node, by its page and its height, above 0.
+/// An internal node, by its page.
 pub(crate) struct Internal<K, V, S> {
     node: NodePtr<K, V, S>,
-    height: usize,
 }
 
 impl<K, V, S> Clone for Internal<K, V, S> {
@@ -42,33 +41,32 @@ impl<K, V, S> Clone for Internal<K, V, S> {
 
 impl<K, V, S> Copy for Internal<K, V, S> {}
 
-// SAFETY: internal nodes are the nodes above height 0, and their pages have
-// the internal layout.
-unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Internal<K, V, S> {
-    const IS_LEAF: bool = false;
-
+// SAFETY: internal nodes have the internal layout.
+unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::internal_layout().page
     }
 }
 
+// SAFETY: as for `PageType`; internal nodes are not leaves.
+unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Internal<K, V, S> {
+    const IS_LEAF: bool = false;
+}
+
 impl<K, V, S> Internal<K, V, S> {
-    /// The internal node at `node`, at `height`, which must hold one.
+    /// The internal node at `node`, which must hold one.
     #[inline(always)]
-    pub(in crate::tree) fn at(node: NodePtr<K, V, S>, height: usize) -> Self {
-        debug_assert!(height > 0, "the node at height 0 is a leaf");
-        Self { node, height }
+    pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
+        // SAFETY: the node is allocated and initialized, and nothing writes
+        // its header meanwhile (the handles' contract).
+        debug_assert!(!unsafe { node.is_leaf() }, "the node is a leaf");
+        Self { node }
     }
 
     /// The node's page, for a path or an edge to keep.
     #[inline(always)]
     pub(in crate::tree) fn node_ptr(self) -> NodePtr<K, V, S> {
         self.node
-    }
-
-    #[inline(always)]
-    pub(crate) fn height(self) -> usize {
-        self.height
     }
 
     /// The number of separators: one fewer than children.
@@ -78,14 +76,6 @@ impl<K, V, S> Internal<K, V, S> {
         // nothing writes its header meanwhile (the handles' contract).
         unsafe { self.node.len() }
     }
-
-    /// Whether the node's children are leaves, as those of a node at height
-    /// 1 are: the one decision about their kind, after which code for that
-    /// kind takes over.
-    #[inline(always)]
-    pub(crate) fn has_leaf_children(self) -> bool {
-        self.height == 1
-    }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
@@ -94,33 +84,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// (invariant 2). Its prefix length is 0 until the caller sets it
     /// ([`Self::set_empty_prefix_len`]).
     pub(crate) fn new(page: FreshPage<Self>, first_child: Node<K, V, S>) -> Self {
-        let node = Self::at(NodePtr::from_fresh_page(page), first_child.height() + 1);
-        // SAFETY: the new node's page is allocated for an internal node, and
-        // its edge 0 becomes `first_child`, one level down; with no keys,
-        // that is its only edge, and it has no inline keys either.
-        unsafe { node.edge_slots().slot(0).write(first_child.node_ptr()) };
+        let node = Self::at(NodePtr::from_fresh_page(page));
+        node.put_only_child(first_child);
         node
     }
 
-    /// Takes apart a node with no separators: returns its only child, which
-    /// nothing owns until the caller puts it somewhere, and its page.
-    ///
-    /// # Panics
-    ///
-    /// In debug builds, if the node has separators: they and the other
-    /// children would be leaked.
-    pub(crate) fn take_only_child(self) -> (Node<K, V, S>, FreshPage<Self>) {
-        debug_assert_eq!(self.len(), 0, "taking the only child of a node with keys");
-        // SAFETY: edge 0 is initialized (invariant 1): a node one level down
-        // that this node owned. Nothing reaches this node's page anymore,
-        // an internal node's, with nothing else in it.
-        unsafe {
-            let child = self.edge_slots().slot(0).read();
-            (
-                Node::at(child, self.height - 1),
-                self.node.into_fresh_page(),
-            )
-        }
+    /// Makes `child`, a node one level down, edge 0 of this node, which
+    /// holds no separators and no edge, and its only child, which it owns
+    /// from now on (invariant 2): a new node, or the root's page turned
+    /// internal (`root_page.rs`).
+    pub(super) fn put_only_child(self, child: Node<K, V, S>) {
+        debug_assert_eq!(self.len(), 0, "a node with separators has children");
+        // SAFETY: the node is an allocated internal node, whose edge 0 holds
+        // nothing to drop or free (the caller); with no keys, that is its
+        // only edge, and it has no inline keys either.
+        unsafe { self.edge_slots().slot(0).write(child.tagged()) };
     }
 
     /// Gives the node's page back.
@@ -193,7 +171,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     #[inline(always)]
-    fn edge_slots(self) -> Slots<NodePtr<K, V, S>> {
+    fn edge_slots(self) -> Slots<TaggedNodePtr<K, V, S>> {
         // SAFETY: the node is an allocated internal node (invariant 1).
         unsafe { self.node.edge_slots() }
     }
@@ -201,14 +179,25 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
 /// An internal node's children.
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
-    /// The page of the child at edge `index`, with `index <= len`,
+    /// Whether the node's children are leaves, as its first child's header
+    /// tells for all of them: the one decision about their kind, after which
+    /// code for that kind takes over.
+    #[inline(always)]
+    pub(crate) fn has_leaf_children(self) -> bool {
+        // SAFETY: edge 0 is initialized (invariant 1), and leads to an
+        // allocated, initialized node, whose header nothing writes meanwhile
+        // (the handles' contract).
+        unsafe { self.edge_unchecked(0).is_leaf() }
+    }
+
+    /// Edge `index`, the child's tagged pointer, with `index <= len`,
     /// unchecked.
     ///
     /// # Safety
     ///
     /// `index <= len`.
     #[inline(always)]
-    pub(in crate::tree) unsafe fn child_ptr_unchecked(self, index: usize) -> NodePtr<K, V, S> {
+    pub(in crate::tree) unsafe fn edge_unchecked(self, index: usize) -> TaggedNodePtr<K, V, S> {
         debug_assert!(index <= self.len());
         // SAFETY: `index <= len` (caller), so edge `index` is initialized
         // (invariant 1).
@@ -224,7 +213,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     pub(crate) fn child(self, index: usize) -> Node<K, V, S> {
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: checked just above.
-        Node::at(unsafe { self.child_ptr_unchecked(index) }, self.height - 1)
+        Node::at(unsafe { self.edge_unchecked(index) })
     }
 
     /// The child at edge `index`, with `index <= len`, unchecked.
@@ -235,11 +224,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     #[inline(always)]
     pub(crate) unsafe fn child_unchecked(self, index: usize) -> Node<K, V, S> {
         // SAFETY: forwarded.
-        Node::at(unsafe { self.child_ptr_unchecked(index) }, self.height - 1)
+        Node::at(unsafe { self.edge_unchecked(index) })
     }
 
-    /// The child at edge `index`, a leaf: the node is at height 1, as its
-    /// caller decided once ([`Self::has_leaf_children`]), which debug builds
+    /// The child at edge `index`, a leaf, as the caller decided once for
+    /// this node's children ([`Self::has_leaf_children`]), which debug builds
     /// check.
     ///
     /// # Panics
@@ -252,12 +241,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         );
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: checked just above.
-        Leaf::at(unsafe { self.child_ptr_unchecked(index) })
+        Leaf::at(unsafe { self.edge_unchecked(index) }.leaf_ptr())
     }
 
-    /// The child at edge `index`, an internal node: the node is above
-    /// height 1, as its caller decided once ([`Self::has_leaf_children`]),
-    /// which debug builds check.
+    /// The child at edge `index`, an internal node, as the caller decided
+    /// once for this node's children ([`Self::has_leaf_children`]), which
+    /// debug builds check.
     ///
     /// # Panics
     ///
@@ -269,17 +258,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         );
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: checked just above.
-        Self::at(unsafe { self.child_ptr_unchecked(index) }, self.height - 1)
+        Self::at(unsafe { self.edge_unchecked(index) }.internal_ptr())
     }
 
     /// # Panics
     ///
-    /// If `child` is not exactly one level below this node.
-    fn assert_child_level(self, child: Node<K, V, S>) {
+    /// If `child` is not of the kind of this node's children. That they are
+    /// all at one height, which the kinds cannot tell apart above the
+    /// leaves, is the caller's business.
+    fn assert_child_kind(self, child: Node<K, V, S>) {
         assert_eq!(
-            child.height() + 1,
-            self.height,
-            "an edge must lead exactly one level down"
+            matches!(child, Node::Leaf(_)),
+            self.has_leaf_children(),
+            "an edge must lead to a node of its siblings' kind"
         );
     }
 
@@ -308,18 +299,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `child` is not exactly one level below this node, or
-    /// `index > len`; the node is unchanged then.
+    /// If `child` is not of the kind of this node's children
+    /// ([`Self::assert_child_kind`]), or `index > len`; the node is
+    /// unchanged then.
     pub(crate) fn replace_child(self, index: usize, child: Node<K, V, S>) -> Node<K, V, S> {
-        self.assert_child_level(child);
+        self.assert_child_kind(child);
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: `index <= len` (checked), so edge `index` is initialized:
         // the only pointer to a node one level down (invariant 2), which
-        // goes to the caller. `child`, checked to be one level down, takes
-        // its place, owned by this node from now on.
+        // goes to the caller. `child`, one level down (the caller), takes its
+        // place, owned by this node from now on.
         unsafe {
-            let old = self.edge_slots().slot(index).replace(child.node_ptr());
-            Node::at(old, self.height - 1)
+            let old = self.edge_slots().slot(index).replace(child.tagged());
+            Node::at(old)
         }
     }
 
@@ -589,9 +581,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// The position is in bounds for any `Ord` and `InlineKey`, consistent
     /// or not.
-    // Keep this adapter with its caller, which already owns the node and
-    // height. Outlining it returns both through a stack result at each
-    // visit. The node search itself is inlined where the plan says.
+    // Keep this adapter with its caller, which already owns the node.
+    // Outlining it returns the result through the stack at each visit. The node search itself is inlined where the plan says.
     #[inline(always)]
     pub(crate) fn search<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
@@ -722,16 +713,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `right_child` is not exactly one level below this node; the node is
-    /// unchanged then.
+    /// If `right_child` is not of the kind of this node's children
+    /// ([`Self::assert_child_kind`]); the node is unchanged then.
     pub(crate) fn insert_fit(
         self,
         index: usize,
         separator: Separator<K, S>,
         right_child: Node<K, V, S>,
     ) {
-        self.assert_child_level(right_child);
-        // SAFETY: checked just above.
+        self.assert_child_kind(right_child);
+        // SAFETY: `right_child` is of its siblings' kind, checked just above,
+        // and at their height (the caller).
         unsafe { self.insert_fit_unchecked(index, separator, right_child) }
     }
 
@@ -755,7 +747,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         unsafe {
             self.separator_slots().insert(index, len, separator);
             self.edge_slots()
-                .insert(index + 1, len + 1, right_child.node_ptr());
+                .insert(index + 1, len + 1, right_child.tagged());
             self.grow_len(len + 1);
         }
     }
@@ -769,8 +761,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `right_child` is not exactly one level below this node; the node is
-    /// unchanged then.
+    /// If `right_child` is not of the kind of this node's children
+    /// ([`Self::assert_child_kind`]); the node is unchanged then.
     pub(crate) fn insert(
         self,
         index: usize,
@@ -794,8 +786,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `right_child` is not exactly one level below this node; the node is
-    /// unchanged then.
+    /// If `right_child` is not of the kind of this node's children
+    /// ([`Self::assert_child_kind`]); the node is unchanged then.
     pub(crate) fn split_insert(
         self,
         index: usize,
@@ -803,17 +795,18 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         right_child: Node<K, V, S>,
         right_page: FreshPage<Self>,
     ) -> Split<K, S, Self> {
-        self.assert_child_level(right_child);
+        self.assert_child_kind(right_child);
         let len = self.len();
         debug_assert_eq!(len, Self::capacity());
         let (separator_index, inserted) = InsertionSide::of_split(len, index, Self::min_len());
-        let right = Self::at(NodePtr::from_fresh_page(right_page), self.height);
+        let right = Self::at(NodePtr::from_fresh_page(right_page));
         // SAFETY: `right` is a fresh internal node of the same map, reached
         // by nothing else, at this node's prefix length once set here.
         unsafe { right.node.set_prefix_len(self.prefix_len()) };
         let middle = self.split_off(separator_index, right);
-        // SAFETY: both halves have room and are at this node's height,
-        // checked against `right_child` above (`InsertionSide::of_split`).
+        // SAFETY: both halves have room (`InsertionSide::of_split`), and
+        // `right_child` is of their children's kind, checked above, and at
+        // their height (the caller).
         unsafe {
             match inserted {
                 InsertionSide::Left(index) => {
@@ -833,7 +826,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
     /// Moves the separators right of `separator_index`, and the edges right
     /// of it, into `right`, a fresh internal node at this node's prefix
-    /// length and height, and takes out separator `separator_index`, for the
+    /// length, and takes out separator `separator_index`, for the
     /// parent; returns it.
     fn split_off(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
@@ -886,7 +879,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             let separator = self.separator_slots().remove(index, len);
             let child = self.edge_slots().remove(index + 1, len + 1);
             self.set_len(len - 1);
-            (separator, Node::at(child, self.height - 1))
+            (separator, Node::at(child))
         }
     }
 
@@ -899,8 +892,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `index > len`, or if `first_child` is not exactly one level below
-    /// this node; the node is unchanged then.
+    /// If `index > len`, or if `first_child` is not of the kind of this
+    /// node's children ([`Self::assert_child_kind`]); the node is unchanged
+    /// then.
     pub(crate) fn cut_off_at(
         self,
         index: usize,
@@ -909,13 +903,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ) -> Self {
         let len = self.len();
         assert!(index <= len, "cutting a node past its last edge");
-        self.assert_child_level(first_child);
+        self.assert_child_kind(first_child);
         let count = len - index;
         let right = Self::new(page, first_child);
         // SAFETY: `index <= len`, so separators `index..len` and edges
         // `index + 1..=len` are initialized; they move to separators
         // `0..count` and edges `1..=count` of `right`, a fresh internal node
-        // of the same map at this height, after `first_child` as its edge 0,
+        // of the same map, after `first_child` as its edge 0, at the other
+        // edges' height (the caller),
         // which `right` owns from now on (invariant 2). The access is
         // exclusive, and `right` is reached by nothing else yet. Afterwards
         // this node holds separators `0..index` and edges `0..=index`. The

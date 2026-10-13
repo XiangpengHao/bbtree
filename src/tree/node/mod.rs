@@ -12,9 +12,12 @@
 //! only for keys without inline keys. A leaf is a page of a
 //! `NodeLayout::<K, V>` leaf layout, sized by its keys and values, and an
 //! internal node a page of an internal layout, sized by its keys alone
-//! (D21). The page says nothing about its kind or its parent: the height
-//! tells the kind ([`Node`]), and navigation uses paths instead of parent
-//! pointers.
+//! (D21). A node's header tells its kind, and so does every pointer to it,
+//! in a tag bit, so that following an edge decides the child's kind before
+//! reading it ([`Node`], D52); nothing tells a node's parent: navigation
+//! uses paths instead of parent pointers. The root node is in the root
+//! page, which holds either kind, and the tree's height and shared prefix
+//! after it (`root_page.rs`).
 //!
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
@@ -54,8 +57,8 @@
 //! # Safety argument
 //!
 //! This module, `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`,
-//! `siblings.rs`, `inline_key_search.rs` and `vector_count.rs` hold all of
-//! `tree/node/`'s `unsafe` code; the other node modules are
+//! `root_page.rs`, `siblings.rs`, `inline_key_search.rs` and
+//! `vector_count.rs` hold all of `tree/node/`'s `unsafe` code; the other node modules are
 //! `#![forbid(unsafe_code)]`.
 //! Given the handles' contracts, each `// SAFETY:` comment relies on these
 //! invariants:
@@ -66,9 +69,12 @@
 //!    too. An internal node holds no values (D17); its edges `0..=len` are
 //!    initialized.
 //! 2. **Edges own nodes.** Every initialized edge of a node at height `h` is
-//!    the only pointer to a distinct node at height `h - 1`. Edges are
-//!    written only from a node taken off another edge, a split, or a new
-//!    page, or moved between siblings.
+//!    the only pointer to a distinct node at height `h - 1`, leaves being at
+//!    height 0. A node's header tells whether it is a leaf, and so does the
+//!    tag of every pointer to it (`page.rs`). Edges are written only from a
+//!    node taken off another edge, a split, or a new page, or moved between
+//!    siblings. Only the root page (`root_page.rs`) holds a node of either
+//!    kind over its life; every other page, the kind it was allocated for.
 //! 3. **Heads are flagged.** A leaf's head slot is initialized exactly when
 //!    its header says the leaf has a head, and so is its head key slot in a
 //!    map whose separator keys are heads; every operation that fills or
@@ -106,6 +112,7 @@ pub(crate) mod leaf;
 mod length_tags;
 pub(super) mod node_plan;
 pub(crate) mod page;
+pub(crate) mod root_page;
 pub(crate) mod siblings;
 mod slots;
 #[cfg(test)]
@@ -119,17 +126,15 @@ use self::inline_keys::{RefitBuffer, Separator, Window};
 use self::internal::Internal;
 use self::leaf::Leaf;
 use self::node_plan::NodePlan;
-use self::page::{NodePtr, PageByKind, PageKind};
+use self::page::{NodePtr, PageByKind, PageKind, TaggedNodePtr};
 use self::siblings::Siblings;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 pub(crate) use self::slots::KeyList;
 
-/// A node whose kind its height tells: what an edge or the root leads to.
+/// A node whose kind its header tells: what an edge or the root leads to.
 pub(crate) enum Node<K, V, S> {
-    /// A node at height 0.
     Leaf(Leaf<K, V, S>),
-    /// A node above height 0.
     Internal(Internal<K, V, S>),
 }
 
@@ -142,13 +147,28 @@ impl<K, V, S> Clone for Node<K, V, S> {
 impl<K, V, S> Copy for Node<K, V, S> {}
 
 impl<K, V, S> Node<K, V, S> {
-    /// The node at `node`, of the kind `height` tells.
+    /// The node `node` leads to, of the kind its tag tells: how an edge,
+    /// or a path's level, is followed, deciding the kind before the node is
+    /// read.
     #[inline(always)]
-    pub(in crate::tree) fn at(node: NodePtr<K, V, S>, height: usize) -> Self {
-        if height == 0 {
+    pub(in crate::tree) fn at(node: TaggedNodePtr<K, V, S>) -> Self {
+        if node.is_leaf() {
+            Self::Leaf(Leaf::at(node.leaf_ptr()))
+        } else {
+            Self::Internal(Internal::at(node.internal_ptr()))
+        }
+    }
+
+    /// The node at `node`, of the kind its header tells: for the root, which
+    /// no edge leads to (`root_page.rs`).
+    #[inline(always)]
+    fn from_header(node: NodePtr<K, V, S>) -> Self {
+        // SAFETY: the node is allocated and initialized (invariant 1), and
+        // nothing writes its header meanwhile (the handles' contract).
+        if unsafe { node.is_leaf() } {
             Self::Leaf(Leaf::at(node))
         } else {
-            Self::Internal(Internal::at(node, height))
+            Self::Internal(Internal::at(node))
         }
     }
 
@@ -159,10 +179,13 @@ impl<K, V, S> Node<K, V, S> {
         }
     }
 
-    pub(crate) fn height(self) -> usize {
+    /// The node's pointer, tagged with its kind: what an edge or a path
+    /// keeps.
+    #[inline(always)]
+    pub(in crate::tree) fn tagged(self) -> TaggedNodePtr<K, V, S> {
         match self {
-            Self::Leaf(_) => 0,
-            Self::Internal(internal) => internal.height(),
+            Self::Leaf(leaf) => TaggedNodePtr::new(leaf.node_ptr(), true),
+            Self::Internal(internal) => TaggedNodePtr::new(internal.node_ptr(), false),
         }
     }
 
@@ -191,22 +214,18 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         }
     }
 
-    /// Absorbs `right`, the root of another tree at this node's height,
-    /// around `separator`, if they fit in one node; see [`Child::absorb`].
+    /// Absorbs `right`, the root of another tree at this node's height
+    /// (the caller), around `separator`, if they fit in one node; see
+    /// [`Child::absorb`].
     ///
     /// # Panics
     ///
-    /// If `right` is not at this node's height.
+    /// If `right` is not of this node's kind.
     pub(crate) fn absorb(
         self,
         separator: Separator<K, S>,
         right: Self,
     ) -> Result<PageByKind<K, V, S>, (Separator<K, S>, Self)> {
-        assert_eq!(
-            right.height(),
-            self.height(),
-            "a node absorbs a node of its own height"
-        );
         match (self, right) {
             (Self::Leaf(left), Self::Leaf(right)) => left
                 .absorb(separator, right)
@@ -214,7 +233,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
             (Self::Internal(left), Self::Internal(right)) => left
                 .absorb(separator, right)
                 .map_err(|(separator, right)| (separator, Self::Internal(right))),
-            _ => unreachable!("nodes of one height are of one kind"),
+            _ => panic!("a node absorbs a node of its own kind"),
         }
     }
 

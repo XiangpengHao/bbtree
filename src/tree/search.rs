@@ -139,11 +139,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        let root = self.page()?;
         let key = SearchKey::new(key);
-        if self.shared_prefix().place(&key).is_some() {
+        if root.shared_prefix().place(&key).is_some() {
             return None;
         }
-        self.top().find_point(&key).map(Found::key_value)
+        root.top().find_point(&key).map(Found::key_value)
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
@@ -153,11 +154,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        let root = self.page_mut()?;
         let key = SearchKey::new(key);
-        if self.shared_prefix().place(&key).is_some() {
+        if root.shared_prefix().place(&key).is_some() {
             return None;
         }
-        self.top_mut().find_point(&key).map(Found::value_mut)
+        root.top().find_point(&key).map(Found::value_mut)
     }
 }
 
@@ -273,8 +275,8 @@ mod tests {
     fn a_separator_over_a_headless_leaf_panics() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-        let mut tree = Root::new_leaf(pages.fresh());
-        let root = tree.push_internal_level(pages.fresh());
+        let mut tree = Root::new(pages.fresh());
+        let root = tree.raise_in(&pages);
         let headless = Leaf::new(pages.fresh_leaf());
         root.insert_fit(
             0,
