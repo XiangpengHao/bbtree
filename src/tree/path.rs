@@ -51,6 +51,7 @@ use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::NodePtr;
+use super::prefix::PrefixedKey;
 use super::root::Tree;
 use super::search::Found;
 use super::shared_prefix::SharedPrefix;
@@ -645,12 +646,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.tree
     }
 
-    /// Shrinks what every key of the tree shares to what `key` shares too
+    /// Shrinks what every key of the tree shares to what `key` shares too,
+    /// and returns `key`, which shares it now
     /// ([`Tree::shrink_shared_prefix_for`]), for [`Self::insert`]. The path
     /// still leads where it did: only the prefixes along the tree's borders
     /// change.
-    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: &K) {
-        self.tree.shrink_shared_prefix_for(key);
+    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: K) -> PrefixedKey<K> {
+        self.tree.shrink_shared_prefix_for(key)
     }
 
     /// Finishes a plain insertion, remembering its leaf only when the path

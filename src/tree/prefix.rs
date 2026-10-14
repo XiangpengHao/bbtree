@@ -41,7 +41,7 @@
 
 #![forbid(unsafe_code)]
 
-use super::node::inline_keys::{KeyInliner, Window};
+use super::node::inline_keys::{KeyInliner, Window, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::NodePtr;
@@ -246,30 +246,84 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 }
 
+/// A key that shares what every key of its tree shares (D50): what a
+/// search that skips each node's prefix unchecked needs, and what an
+/// insert computes the key's window from. Only the tree makes one, by
+/// shrinking what its keys share to what the key shares too
+/// ([`Tree::shrink_shared_prefix_for`]), or by checking it
+/// ([`Self::checked`]).
+pub(in crate::tree) struct PrefixedKey<K>(K);
+
+impl<K> PrefixedKey<K> {
+    /// `key`, if it shares `shared`, what every key of a tree shares; or
+    /// else `key` back.
+    pub(in crate::tree) fn checked<S: InlineKeyStrategy<K>>(
+        shared: &SharedPrefix,
+        key: K,
+    ) -> Result<Self, K> {
+        if shared.is_shared_by::<K, S>(&key) {
+            Ok(Self(key))
+        } else {
+            Err(key)
+        }
+    }
+
+    pub(in crate::tree) fn key(&self) -> &K {
+        &self.0
+    }
+
+    /// The key with its window at `prefix_len`, the prefix length of the
+    /// node it goes into, whose fences it lies between.
+    pub(in crate::tree) fn window_at<S: InlineKeyStrategy<K>>(
+        self,
+        prefix_len: usize,
+    ) -> WindowedKey<K, S> {
+        WindowedKey::new(self.0, prefix_len)
+    }
+}
+
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Shrinks what every key of the tree shares to what `key` shares too,
-    /// before the tree takes it (D50): a tree whose keys share bytes `key`
-    /// lacks shrinks to what `key` shares with them, and so do the nodes
-    /// that take the root's fences, along its borders. An empty tree, whose
-    /// prefix nothing bounds yet, takes `key`'s first bytes, and its root
-    /// leaf takes them as its prefix. Calls `InlineKey` with
-    /// [`WithInlineKey`](crate::WithInlineKey), before it changes anything.
+    /// before the tree takes it (D50), and returns `key`, which shares it
+    /// now: a tree whose keys share bytes `key` lacks shrinks to what `key`
+    /// shares with them, and so do the nodes that take the root's fences,
+    /// along its borders. An empty tree, whose prefix nothing bounds yet,
+    /// takes `key`'s first bytes, and its root leaf takes them as its
+    /// prefix. Calls `InlineKey` with [`WithInlineKey`](crate::WithInlineKey),
+    /// before it changes anything.
     ///
     /// Every insert does this, and almost every one changes nothing: the
     /// check is inline, and starting or shrinking the prefix is not.
     #[inline]
-    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: &K) {
-        if !NodePtr::<K, V, S>::has_inline_keys() {
-            return;
+    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: K) -> PrefixedKey<K> {
+        if NodePtr::<K, V, S>::has_inline_keys() {
+            if let Node::Leaf(root) = self.root()
+                && root.len() == 0
+            {
+                self.start_shared_prefix(root, &key);
+            } else {
+                let len = self.shared_prefix().len_shared_with::<K, S>(&key);
+                self.shrink_shared_prefix_to(len);
+            }
         }
-        if let Node::Leaf(root) = self.root()
-            && root.len() == 0
-        {
-            self.start_shared_prefix(root, key);
-            return;
-        }
-        let len = self.shared_prefix().len_shared_with::<K, S>(key);
+        PrefixedKey(key)
+    }
+
+    /// Shrinks what every key of this tree and of `right` shares to what
+    /// both share with `key` (D50), and returns `key` with its window there:
+    /// the separator that joins the two trees (`join.rs`). Calls `InlineKey`
+    /// before it changes anything.
+    pub(in crate::tree) fn shrink_shared_prefixes_for_separator(
+        &mut self,
+        right: &mut Self,
+        key: K,
+    ) -> WindowedKey<K, S> {
+        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
+        let len = shared_with_key(self).min(shared_with_key(right));
+        let separator = WindowedKey::new(key, len);
         self.shrink_shared_prefix_to(len);
+        right.shrink_shared_prefix_to(len);
+        separator
     }
 
     /// Makes `key`'s first bytes what every key of the tree, which has none
@@ -288,7 +342,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// around a separator, whose keys do. Reads no key and calls no
     /// `InlineKey`.
     #[inline]
-    pub(in crate::tree) fn shrink_shared_prefix_to(&mut self, len: usize) {
+    fn shrink_shared_prefix_to(&mut self, len: usize) {
         if len < self.shared_prefix().len() {
             self.shrink_borders_to(len);
         }

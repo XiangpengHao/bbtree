@@ -29,7 +29,7 @@
 
 use core::mem;
 
-use super::node::inline_keys::{Separator, WindowedKey};
+use super::node::inline_keys::Separator;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::NodePtr;
@@ -72,12 +72,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         right: &mut Self,
         alloc: &impl Allocator,
     ) {
-        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
-        let shared_len = shared_with_key(self).min(shared_with_key(right));
-        let separator = WindowedKey::new(key, shared_len);
+        let separator = self.shrink_shared_prefixes_for_separator(right, key);
         let mut right = right.take();
-        self.shrink_shared_prefix_to(shared_len);
-        right.shrink_shared_prefix_to(shared_len);
         // Down `right`'s left border, the one the join walks there, counting
         // how deep its leaves lie, to its first leaf, which takes the value.
         let (mut node, mut right_depth) = (right.root_mut(), 0);

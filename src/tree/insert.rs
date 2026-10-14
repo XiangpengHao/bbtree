@@ -21,11 +21,12 @@
 
 use core::mem;
 
-use super::node::inline_keys::{SearchKey, WindowedKey};
+use super::node::inline_keys::SearchKey;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::{Insertion, Node};
 use super::path::{MAX_DEPTH, PathMut};
+use super::prefix::PrefixedKey;
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -71,8 +72,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         self.ensure_root_page(alloc);
         // The search skips every node's prefix unchecked.
-        self.shrink_shared_prefix_for(&key);
-        match self.root_mut().search_for_insert(&SearchKey::new(&key)) {
+        let key = self.shrink_shared_prefix_for(key);
+        match self
+            .root_mut()
+            .search_for_insert(&SearchKey::new(key.key()))
+        {
             Ok(found) => {
                 // Keep std's drop-before-replacement behavior on this path
                 // too: a panicking key destructor leaves the value intact.
@@ -82,7 +86,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             Err((leaf, edge)) => {
                 if leaf.len() < Leaf::<K, V, S>::capacity() {
                     // Compute the inline key before the first change.
-                    leaf.insert_fit(edge, WindowedKey::new(key, leaf.prefix_len()), value);
+                    leaf.insert_fit(edge, key.window_at(leaf.prefix_len()), value);
                     *length += 1;
                     return None;
                 }
@@ -98,7 +102,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     #[inline(never)]
     fn insert_with_path(
         &mut self,
-        key: K,
+        key: PrefixedKey<K>,
         value: V,
         alloc: &impl Allocator,
         length: &mut usize,
@@ -107,13 +111,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         K: Ord,
     {
         let mut path = PathMut::new(self);
-        if path.search(&SearchKey::new(&key)) {
+        if path.search(&SearchKey::new(key.key())) {
             // As in std, the new key is dropped before the value changes: if
             // its `Drop` panics, the map is unchanged.
             drop(key);
             Some(mem::replace(path.value_mut(), value))
         } else {
-            path.insert_within_shared_prefix(key, value, alloc, length);
+            path.insert_prefixed(key, value, alloc, length);
             path.finish_insertion();
             None
         }
@@ -133,17 +137,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// If the path ends at no leaf edge.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
-        self.shrink_shared_prefix_for(&key);
-        self.insert_within_shared_prefix(key, value, alloc, length);
+        let key = self.shrink_shared_prefix_for(key);
+        self.insert_prefixed(key, value, alloc, length);
     }
 
     /// [`Self::insert`] of a key that shares what every key of the tree
     /// shares already: for [`Tree::insert`], which shrank it for the key
     /// before it searched.
     #[inline]
-    fn insert_within_shared_prefix(
+    fn insert_prefixed(
         &mut self,
-        key: K,
+        key: PrefixedKey<K>,
         value: V,
         alloc: &impl Allocator,
         length: &mut usize,
@@ -155,7 +159,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         if leaf.len() < Leaf::<K, V, S>::capacity() {
             // Compute the inline key before the first change, as on the
             // split path, so a panic leaves the tree unchanged.
-            leaf.insert_fit(index, WindowedKey::new(key, prefix_len), value);
+            leaf.insert_fit(index, key.window_at(prefix_len), value);
             *length += 1;
         } else {
             self.insert_splitting(key, value, alloc, length);
@@ -165,13 +169,19 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// Keeps allocation, split propagation and its temporary arrays out
     /// of the ordinary insertion's stack frame and instruction stream.
     #[inline(never)]
-    fn insert_splitting(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
+    fn insert_splitting(
+        &mut self,
+        key: PrefixedKey<K>,
+        value: V,
+        alloc: &impl Allocator,
+        length: &mut usize,
+    ) {
         let index = self.index();
         let leaf = self.leaf();
         // The key's window at the leaf's prefix length, which both halves
         // of a split keep: the last `InlineKey` call before the first change.
         // The leaf is full: `PathMut::insert` comes here only then.
-        let key = WindowedKey::new(key, leaf.prefix_len());
+        let key = key.window_at(leaf.prefix_len());
         let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc));
         // Both arrays go by how many levels the split has climbed from the
         // leaf, which a new root above doesn't change. In each node that

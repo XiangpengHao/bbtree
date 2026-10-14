@@ -24,6 +24,7 @@ use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::path::{LastEdge, PathMut};
+use super::prefix::PrefixedKey;
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -88,35 +89,40 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
         loop {
             let tree = &mut self.tree;
             tree.ensure_root_page(&self.alloc);
-            tree.shrink_shared_prefix_for(&next.0);
+            let (key, value) = next;
+            let mut entry = (tree.shrink_shared_prefix_for(key), value);
             // To tell a key that shares less without the tree, whose
             // rightmost leaf is changed below.
             let shared = tree.shared_prefix().clone();
             // On the right border, whose prefix is what every key shares.
             let leaf = tree.root_mut().border_leaf::<LastEdge>();
-            let leaf_is_full = loop {
+            // The entry past the full leaf, or one whose key shares less.
+            let past_leaf = loop {
                 let len = leaf.len();
                 if len == Leaf::<K, V, S>::capacity() {
-                    break true;
+                    break Ok(entry);
                 }
-                let (key, value) = next;
-                leaf.insert_fit(len, WindowedKey::new(key, shared.len()), value);
+                let (key, value) = entry;
+                leaf.insert_fit(len, key.window_at(shared.len()), value);
                 self.length += 1;
-                next = match entries.next() {
-                    Some(entry) => entry,
-                    None => return,
+                let Some((key, value)) = entries.next() else {
+                    return;
                 };
-                if !shared.is_shared_by::<K, S>(&next.0) {
-                    break false;
+                match PrefixedKey::checked::<S>(&shared, key) {
+                    Ok(key) => entry = (key, value),
+                    Err(key) => break Err((key, value)),
                 }
             };
-            if !leaf_is_full {
-                continue;
-            }
-            let (key, value) = next;
+            let (key, value) = match past_leaf {
+                Ok(entry) => entry,
+                Err(sharing_less) => {
+                    next = sharing_less;
+                    continue;
+                }
+            };
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let mut path = tree.start_leaf(WindowedKey::new(key, shared.len()), value, &self.alloc);
+            let mut path = tree.start_leaf(key.window_at(shared.len()), value, &self.alloc);
             self.length += 1;
             // Fits the nodes the new leaf closed, off the tree's border now:
             // the right border of the subtree left of the separator, which

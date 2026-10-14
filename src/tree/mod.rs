@@ -1,5 +1,5 @@
 //! The B+-tree under the map and the set: a root, internal nodes and leaves
-//! (`doc/12-tree-structure.md`), on fixed-size, self-aligned node pages,
+//! (`doc/03-decisions.md` D51, D52), on fixed-size, self-aligned node pages,
 //! with keys and values in leaves, and separator keys in internal nodes, or
 //! with inline keys, in leaves too (`doc/03-decisions.md` D9, D11, D12, D13,
 //! D15, D17, D21, D29, D49).

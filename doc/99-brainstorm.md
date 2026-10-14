@@ -36,6 +36,6 @@ Worked out in 11-separator-key.md.
 
 - [ ] I think, if we want to specialize the inner, leaf, and root. then the abstraction of "Subtree" doesn't makes sense. because the tree is no longer a
   recursive thing, it has well defined structure. the way we currently organize the code makes it confusing and unnecessarily complicated. wdyt?
-Worked out in 12-tree-structure.md; phase 1 built (D51).
+Phase 1 built (D51, D52).
 
 - [ ] we might want to benchmark the insert performance of roughly sorted data, compare with hashmap.

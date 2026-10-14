@@ -1008,7 +1008,6 @@ Design in 05-fence-key.md, "The shared prefix".
   local prefixes, whose root's local prefix was what every key shares.
 
 **D51. A root, internal nodes and leaves, each its own type.** (2026-10-13)
-Design in 12-tree-structure.md.
 
 - **What:** `Leaf` and `Internal` are page handles with the operations of
   their kind, and `Tree` owns the tree: its root page, with the root node
@@ -1044,7 +1043,6 @@ Design in 12-tree-structure.md.
   inserts 40 until their leaf search was forced inline (D41).
 
 **D52. Pointers carry a node's kind; the root page stays the root.** (2026-10-13)
-Design in 12-tree-structure.md, "The root page and node kinds".
 
 - **What:** every pointer to a node, an edge, a path's level, a node
   handle or the tree's to its root page, says whether the node is a leaf,
@@ -1144,7 +1142,7 @@ contracts, access, positions and room, the code that holds it keeps by hand
 - **Was:** after std's `node.rs`, one handle generic over access and kind,
   positions and room as proof types, and edges as owned subtrees; it froze
   the structure the proofs were about, and pushed leaves and internal nodes
-  through one interface (12-tree-structure.md). Which contracts get types
+  through one interface. Which contracts get types
   again is phase 2's question, once the design settles.
 
 **D44. A child's prefix is never shorter than its parent's, even with a lying encoding.** (2026-10-10)
