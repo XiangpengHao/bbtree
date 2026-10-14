@@ -316,7 +316,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             let mut path = PathMut::new(&mut right.tree);
             path.start_at_root();
             path.descend_to_leaf::<FirstEdge>();
-            path.cover_key(&key);
+            path.shrink_shared_prefix_for(&key);
             path.insert(key, value, alloc, &mut right_length);
             return right.take();
         }

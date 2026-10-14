@@ -225,10 +225,10 @@ and searches compare whole keys.
   Every query that goes down has them, so every node skips its prefix
   unchecked, as with fences. Heap strings check 32 bytes at a time;
   fixed-width keys a window at a time.
-- **Upkeep:** an insert covers its key first: an empty tree starts from the
-  key's bytes; a key that shares fewer shrinks them, and every border node
-  moves back to the new length, filled from their window there, reading no
-  key. Removals leave them, so they are what every key shares, not
+- **Upkeep:** an insert shrinks the shared prefix for its key first
+  (`shrink_shared_prefix_for`): an empty tree starts from the key's bytes;
+  a key that shares fewer shrinks them, and every border node moves back
+  to the new length, filled from their window there, reading no key. Removals leave them, so they are what every key shares, not
   exactly what the keys share. A cut gives both trees the bytes; a join
   shrinks both to what they share with the separator; the builder checks
   each key it appends.

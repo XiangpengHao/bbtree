@@ -287,7 +287,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if SearchKey::<K, S, K>::new(key).cmp_full(last_key) != Ordering::Greater {
             return None;
         }
-        // A key that shares less goes the general way, which covers it.
+        // A key that shares less goes the general way, which shrinks the
+        // shared prefix for it.
         let shared = self.shared_prefix();
         if !shared.is_shared_by::<K, S>(key) {
             return None;

@@ -21,7 +21,7 @@
 //! whose fences changed then read their keys for their new windows
 //! ([`Child::refit_prefix`]). Along the borders, a key that doesn't share
 //! what the tree's keys share shrinks it, and the border nodes with it,
-//! reading no key ([`Tree::cover_key`]).
+//! reading no key ([`Tree::shrink_shared_prefix_for`]).
 //!
 //! An operation changes the tree's shape without calling user encodings,
 //! so that a panicking `InlineKey` can't stop it halfway. A prefix may have
@@ -247,18 +247,18 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Makes what every key of the tree shares cover `key` too, before the
-    /// tree takes it (D50): an empty tree shares all of `key`'s first bytes,
-    /// and its root leaf takes them as its prefix; a tree whose keys share
-    /// bytes `key` lacks shrinks to what `key` shares with them, and so do
-    /// the nodes that take the root's fences, along its borders. Calls
-    /// `InlineKey` with [`WithInlineKey`](crate::WithInlineKey), before it
-    /// changes anything.
+    /// Shrinks what every key of the tree shares to what `key` shares too,
+    /// before the tree takes it (D50): a tree whose keys share bytes `key`
+    /// lacks shrinks to what `key` shares with them, and so do the nodes
+    /// that take the root's fences, along its borders. An empty tree, whose
+    /// prefix nothing bounds yet, takes `key`'s first bytes, and its root
+    /// leaf takes them as its prefix. Calls `InlineKey` with
+    /// [`WithInlineKey`](crate::WithInlineKey), before it changes anything.
     ///
     /// Every insert does this, and almost every one changes nothing: the
     /// check is inline, and starting or shrinking the prefix is not.
     #[inline]
-    pub(in crate::tree) fn cover_key(&mut self, key: &K) {
+    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: &K) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
         }

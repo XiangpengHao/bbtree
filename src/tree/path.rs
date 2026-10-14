@@ -645,11 +645,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.tree
     }
 
-    /// Makes what every key of the tree shares cover `key`, before the path
-    /// inserts it; see [`Tree::cover_key`]. The path still leads where it
-    /// did: only the prefixes along the tree's borders change.
-    pub(crate) fn cover_key(&mut self, key: &K) {
-        self.tree.cover_key(key);
+    /// Shrinks what every key of the tree shares to what `key` shares too,
+    /// before the path inserts it; see [`Tree::shrink_shared_prefix_for`].
+    /// The path still leads where it did: only the prefixes along the
+    /// tree's borders change.
+    pub(crate) fn shrink_shared_prefix_for(&mut self, key: &K) {
+        self.tree.shrink_shared_prefix_for(key);
     }
 
     /// Finishes a plain insertion, remembering its leaf only when the path

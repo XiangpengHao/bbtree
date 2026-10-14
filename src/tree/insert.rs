@@ -70,7 +70,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             return None;
         }
         self.ensure_root_page(alloc);
-        self.cover_key(&key);
+        self.shrink_shared_prefix_for(&key);
         match self.root_mut().search_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
                 // Keep std's drop-before-replacement behavior on this path
@@ -123,8 +123,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// Inserts `key` and `value` at the leaf edge the path ends at, counts
     /// the entry in `length`, fits the prefixes of the nodes that split,
     /// and moves the path to the new entry; pages come as for
-    /// [`Tree::insert`]. Compares no keys. What every key of the tree shares
-    /// must cover `key` already ([`Self::cover_key`]).
+    /// [`Tree::insert`]. Compares no keys. `key` must share what every key
+    /// of the tree shares already ([`Self::shrink_shared_prefix_for`]).
     ///
     /// # Panics
     ///
