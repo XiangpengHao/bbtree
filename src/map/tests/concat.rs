@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use std::string::String;
 use std::vec::Vec;
 
+use crate::allocator::Global;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::BBTreeMap;
 use crate::tree::root::Tree;
@@ -85,8 +86,9 @@ where
         let expected: Vec<usize> = left.values().chain(right.values()).copied().collect();
         leaf_depths.insert((left.leaf_depth(), right.leaf_depth()));
         let joined = BBTreeMap {
-            tree: Tree::concat(left.tree.take(), right.tree.take()),
+            tree: Tree::concat(left.tree.take(), right.tree.take(), &Global),
             length: expected.len(),
+            alloc: Global,
         };
         (left.length, right.length) = (0, 0);
         joined.check_invariants();

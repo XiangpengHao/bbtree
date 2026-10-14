@@ -115,8 +115,8 @@ let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
 Opting in goes through `with_strategy`, not an annotated `new()`: a `new()`
 generic over `S` breaks plain `BBTreeMap::new()` with "type annotations
 needed", because default type parameters don't drive inference. `new()` stays
-`Auto`-only, as std's is `Global`-only. Until the allocator parameter lands, the
-strategy is the third parameter.
+`Auto`-only, as std's is `Global`-only. The strategy is the third parameter,
+before the allocator (D8), so opting in names only the strategy.
 
 How `Auto` recognizes std types inside the tree. `type_id_of` is `TypeId`
 with lifetimes erased (dtolnay's `typeid` trick, vendored):
@@ -136,7 +136,7 @@ if is_byte_string::<K>() && is_byte_string::<Q>() {
 ```
 
 - **Drop-in compatibility.** `BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
-  means; `A` sits in std's allocator slot, and `S` is defaulted. Every method is
+  means; `S` and the allocator `A` after it are defaulted. Every method is
   identical for every `S`.
 - **Both sides must be recognized.** `Auto` uses inline keys only when **both** `K`
   and `Q` are listed types, because `K: Borrow<Q>` allows a user type with its

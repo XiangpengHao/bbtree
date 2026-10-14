@@ -2,7 +2,7 @@
 //! initialized node's header and slot arrays ([`NodePtr`]). The root's page,
 //! a node of either kind and the root area after it, is `root_page.rs`'s.
 
-use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
@@ -14,6 +14,7 @@ use super::leaf::Leaf;
 use super::node_plan::NodePlan;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
+use crate::allocator::Allocator;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What pages are allocated for: a leaf, an internal node ([`NodeKind`]s), or
@@ -58,7 +59,11 @@ pub(in crate::tree) unsafe trait NodeKind: PageType {
 /// page only ever holds a node of the layout it was allocated for, and is
 /// deallocated with the layout it was allocated with.
 ///
-/// Invariant: the page comes from the global allocator, with
+/// The type does not carry which allocator the page came from: the map's,
+/// which every operation that allocates or frees a page is given, and gives
+/// back to only pages from it.
+///
+/// Invariant: the page comes from the map's allocator, for
 /// [`PageType::page_layout`], and nothing else uses it.
 pub(crate) struct FreshPage<P> {
     page: NonNull<u8>,
@@ -79,7 +84,7 @@ impl<P: PageType> FreshPage<P> {
     ///
     /// # Safety
     ///
-    /// - `page` was allocated by the global allocator with
+    /// - `page` was allocated by the map's allocator for
     ///   [`PageType::page_layout`], which aligns it (debug-checked).
     /// - Until the page is handed back by [`Self::into_raw`], it stays
     ///   allocated and is accessed only through the returned value and the
@@ -97,43 +102,42 @@ impl<P: PageType> FreshPage<P> {
 }
 
 impl<P> FreshPage<P> {
-    /// Hands the page back, e.g. for deallocation by the global allocator
+    /// Hands the page back, e.g. for deallocation by the map's allocator
     /// with [`PageType::page_layout`].
     pub(in crate::tree) fn into_raw(self) -> NonNull<u8> {
         self.page
     }
 }
 
-/// Temporary allocation boundary, until the allocator trait (D8) replaces it:
-/// one global-allocator call per page. A node's page is a multiple of 1 KiB,
-/// or of 512 bytes for internal nodes that keep no keys (D49), and aligned to
-/// that step (D15), or more if its keys or values need it: so the lowest bit
-/// of every node pointer is free for its kind's tag ([`NodePtr`]). A root
-/// page is aligned as the larger of the two kinds' (`root_page.rs`).
+/// The allocation boundary (D8): one allocator call per page, for the
+/// page's layout. A node's page is a multiple of 1 KiB, or of 512 bytes for
+/// internal nodes that keep no keys (D49), and aligned to that step (D15),
+/// or more if its keys or values need it: so the lowest bit of every node
+/// pointer is free for its kind's tag ([`NodePtr`]). A root page is aligned
+/// as the larger of the two kinds' (`root_page.rs`).
 impl<P: PageType> FreshPage<P> {
-    /// A page from the global allocator.
+    /// A page from `alloc`, the map's allocator.
     ///
     /// Calls [`handle_alloc_error`] if the allocation fails.
-    pub(crate) fn allocate() -> Self {
+    pub(crate) fn allocate(alloc: &impl Allocator) -> Self {
         let layout = P::page_layout();
-        // SAFETY: `layout` has a non-zero size: nodes are at least 512 B.
-        let page = unsafe { alloc(layout) };
-        let Some(page) = NonNull::new(page) else {
+        // `layout` has a non-zero size: nodes are at least 512 B.
+        let Ok(page) = alloc.allocate(layout) else {
             handle_alloc_error(layout)
         };
-        // SAFETY: the page was just allocated by the global allocator with
+        // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
         unsafe { Self::from_raw(page) }
     }
 
-    /// Gives the page back to the global allocator.
-    pub(in crate::tree) fn deallocate(self) {
+    /// Gives the page back to `alloc`, the map's allocator.
+    pub(in crate::tree) fn deallocate(self, alloc: &impl Allocator) {
         let page = self.into_raw();
-        // SAFETY: the page came from the global allocator with
+        // SAFETY: the page came from the map's allocator, `alloc`, for
         // `P::page_layout()`, the same every time for this type, and is used
         // by nothing else (type invariant); consuming `self` gives up the last
         // use of it.
-        unsafe { dealloc(page.as_ptr(), P::page_layout()) }
+        unsafe { alloc.deallocate(page, P::page_layout()) }
     }
 }
 
@@ -144,12 +148,13 @@ impl<P> fmt::Debug for FreshPage<P> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> PageByType<K, V, S> {
-    /// Gives the page back to the global allocator, with its kind's layout.
-    pub(crate) fn deallocate(self) {
+    /// Gives the page back to `alloc`, the map's allocator, with its kind's
+    /// layout.
+    pub(in crate::tree) fn deallocate(self, alloc: &impl Allocator) {
         match self {
-            Self::Leaf(page) => page.deallocate(),
-            Self::Internal(page) => page.deallocate(),
-            Self::Root(page) => page.deallocate(),
+            Self::Leaf(page) => page.deallocate(alloc),
+            Self::Internal(page) => page.deallocate(alloc),
+            Self::Root(page) => page.deallocate(alloc),
         }
     }
 }
@@ -695,7 +700,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 }
 
 #[cfg(test)]
-pub(in crate::tree) use test_pages::TestPages;
+pub(crate) use test_pages::TestPages;
 
 #[cfg(test)]
 mod test_pages {
@@ -703,38 +708,38 @@ mod test_pages {
     use core::cell::RefCell;
     use core::marker::PhantomData;
     use core::ptr::NonNull;
-    use std::alloc::{alloc, dealloc, handle_alloc_error};
     use std::vec::Vec;
 
     use super::{FreshPage, PageByType, PageType};
+    use crate::allocator::{AllocError, Allocator, Global};
     use crate::inline_key::{Auto, InlineKeyStrategy};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
-    use crate::tree::node::root_page::RootPage;
 
-    /// A page allocator for tests: hands out pages of every type, for a
-    /// map with keys `K`, values `V` and strategy `S`, from the global
-    /// allocator, takes released pages back for reuse, and frees them when
-    /// dropped.
+    /// An allocator for tests, of pages for a map with keys `K`, values `V`
+    /// and strategy `S`, whose types the helpers that hand out typed pages
+    /// take: it takes blocks from the global allocator, takes them back for
+    /// reuse, scribbled over, and frees them when dropped.
     ///
-    /// It keeps each page's layout: a released page is handed out again only
-    /// for a kind of the same layout, and a page released under a kind of
-    /// another layout than it was allocated with panics.
+    /// It keeps each block's layout: a block given back is handed out again
+    /// only for the same layout, and giving one back with another layout
+    /// than it was allocated for panics, as does giving back a block twice,
+    /// or one from elsewhere.
     ///
-    /// Pages still out when it is dropped (owned by a leaked node) are never
-    /// freed, so nothing can dangle; tests check
+    /// Blocks still out when it is dropped (owned by a leaked node) are
+    /// never freed, so nothing can dangle; tests check
     /// [`TestPages::assert_all_released`] to catch such leaks.
-    pub(in crate::tree) struct TestPages<K, V, S = Auto> {
-        /// Every page this pool allocated, with its layout.
+    pub(crate) struct TestPages<K, V, S = Auto> {
+        /// Every block this pool allocated, with its layout.
         allocated: RefCell<Vec<(NonNull<u8>, Layout)>>,
-        /// Released pages, with their layouts, ready for reuse.
+        /// Blocks given back, with their layouts, ready for reuse.
         released: RefCell<Vec<(NonNull<u8>, Layout)>>,
         _marker: PhantomData<fn() -> (K, V)>,
         _strategy: PhantomData<fn() -> S>,
     }
 
     impl<K, V, S: InlineKeyStrategy<K>> TestPages<K, V, S> {
-        pub(in crate::tree) fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 allocated: RefCell::new(Vec::new()),
                 released: RefCell::new(Vec::new()),
@@ -743,27 +748,10 @@ mod test_pages {
             }
         }
 
-        /// A page of type `P`, reusing the most recently released page of
-        /// that type's layout if any.
+        /// A page of type `P`, reusing the block given back last for that
+        /// type's layout if any.
         pub(in crate::tree) fn fresh<P: PageType>(&self) -> FreshPage<P> {
-            let layout = P::page_layout();
-            let mut released = self.released.borrow_mut();
-            let reusable = (released.iter()).rposition(|&(_, page_layout)| page_layout == layout);
-            let page = match reusable {
-                Some(index) => released.remove(index).0,
-                None => {
-                    // SAFETY: `layout` has a non-zero size (at least 512 B).
-                    let raw = unsafe { alloc(layout) };
-                    let page = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
-                    self.allocated.borrow_mut().push((page, layout));
-                    page
-                }
-            };
-            // SAFETY: allocated by this pool from the global allocator with
-            // `layout`, `P`'s, and either fresh or released, so nothing
-            // else owns it. It is freed only in `drop`, and only if it was
-            // released again by then.
-            unsafe { FreshPage::from_raw(page) }
+            FreshPage::allocate(self)
         }
 
         /// [`Self::fresh`], for a leaf.
@@ -776,44 +764,22 @@ mod test_pages {
             self.fresh()
         }
 
-        /// Takes a page of any type back, and scribbles over it so that
-        /// nothing can rely on what it held.
-        ///
-        /// # Panics
-        ///
-        /// If the page is not one of this pool's, was allocated with another
-        /// layout than its kind's, or is released twice.
+        /// Takes a page of any type back.
         pub(in crate::tree) fn release(&self, page: impl Into<PageByType<K, V, S>>) {
-            let (page, layout) = match page.into() {
-                PageByType::Leaf(page) => (page.into_raw(), <Leaf<K, V, S>>::page_layout()),
-                PageByType::Internal(page) => (page.into_raw(), <Internal<K, V, S>>::page_layout()),
-                PageByType::Root(page) => (page.into_raw(), <RootPage<K, V, S>>::page_layout()),
-            };
-            assert!(
-                self.allocated.borrow().contains(&(page, layout)),
-                "released a page from elsewhere, or with another layout"
-            );
-            assert!(
-                !(self.released.borrow().iter()).any(|&(released, _)| released == page),
-                "released a page twice"
-            );
-            // SAFETY: the page was allocated by this pool with `layout`, and
-            // as a `FreshPage` it is used by nothing else.
-            unsafe { page.write_bytes(0xA5, layout.size()) };
-            self.released.borrow_mut().push((page, layout));
+            page.into().deallocate(self);
         }
 
-        /// The number of pages allocated so far, in use or not.
+        /// The number of blocks allocated so far, in use or not.
         pub(in crate::tree) fn allocated_count(&self) -> usize {
             self.allocated.borrow().len()
         }
 
-        /// The number of pages handed out and not released.
-        pub(in crate::tree) fn in_use_count(&self) -> usize {
+        /// The number of blocks handed out and not given back.
+        pub(crate) fn in_use_count(&self) -> usize {
             self.allocated.borrow().len() - self.released.borrow().len()
         }
 
-        pub(in crate::tree) fn assert_all_released(&self) {
+        pub(crate) fn assert_all_released(&self) {
             assert_eq!(
                 self.released.borrow().len(),
                 self.allocated.borrow().len(),
@@ -822,12 +788,51 @@ mod test_pages {
         }
     }
 
+    // SAFETY: every block comes from the global allocator, for its layout,
+    // and is handed out until given back, and then again only once taken
+    // off the released list; it is freed only when the pool is dropped, and
+    // only if given back by then. The pool has no clones.
+    unsafe impl<K, V, S> Allocator for TestPages<K, V, S> {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            let mut released = self.released.borrow_mut();
+            let reusable = (released.iter()).rposition(|&(_, page_layout)| page_layout == layout);
+            if let Some(index) = reusable {
+                return Ok(released.remove(index).0);
+            }
+            let block = Global.allocate(layout)?;
+            self.allocated.borrow_mut().push((block, layout));
+            Ok(block)
+        }
+
+        /// Scribbles over the block, so that nothing can rely on what it
+        /// held.
+        ///
+        /// # Panics
+        ///
+        /// If the block is not one of this pool's, was allocated for another
+        /// layout, or is given back twice.
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            assert!(
+                self.allocated.borrow().contains(&(ptr, layout)),
+                "released a page from elsewhere, or with another layout"
+            );
+            assert!(
+                !(self.released.borrow().iter()).any(|&(released, _)| released == ptr),
+                "released a page twice"
+            );
+            // SAFETY: the block was allocated by this pool for `layout`, and
+            // is given back by its only user.
+            unsafe { ptr.write_bytes(0xA5, layout.size()) };
+            self.released.borrow_mut().push((ptr, layout));
+        }
+    }
+
     impl<K, V, S> Drop for TestPages<K, V, S> {
         fn drop(&mut self) {
-            for (page, layout) in self.released.get_mut().drain(..) {
-                // SAFETY: allocated by `fresh` with `layout`; a released page
-                // has no owner left, and each is freed once.
-                unsafe { dealloc(page.as_ptr(), layout) };
+            for (block, layout) in self.released.get_mut().drain(..) {
+                // SAFETY: allocated from `Global` for `layout`; a block given
+                // back has no user left, and each is freed once.
+                unsafe { Global.deallocate(block, layout) };
             }
         }
     }

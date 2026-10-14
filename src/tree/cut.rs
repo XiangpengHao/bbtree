@@ -48,11 +48,12 @@ use core::borrow::Borrow;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, PageByType};
+use super::node::page::FreshPage;
 use super::node::siblings::Siblings;
 use super::node::{Child, Node};
 use super::path::{FirstEdge, KeySide, LastEdge, NodeEnd, PathMut};
 use super::root::Tree;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
@@ -65,8 +66,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// once both trees are where a panic can't lose them.
     ///
     /// Every `Ord` call happens first, in the search, before anything
-    /// changes.
-    pub(crate) fn split_off_at<Q>(&mut self, key: &Q, side: KeySide) -> Self
+    /// changes. Pages come from and go back to `alloc`, the map's allocator,
+    /// which owns both trees' pages.
+    pub(crate) fn split_off_at<Q>(&mut self, key: &Q, side: KeySide, alloc: &impl Allocator) -> Self
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -74,13 +76,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let mut path = PathMut::new(self);
         path.search_to_edge(&SearchKey::new(key), side);
         path.move_prefixes_back_to_root();
-        let upper = path.cut();
+        let upper = path.cut(alloc);
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
-        let mut upper = Tree::from_node(upper, self.shared_prefix().clone());
-        let release = &mut PageByType::deallocate;
-        self.fix_border::<LastEdge>(release);
-        upper.fix_border::<FirstEdge>(release);
+        let mut upper = Tree::from_node(upper, self.shared_prefix().clone(), alloc);
+        self.fix_border::<LastEdge>(alloc);
+        upper.fix_border::<FirstEdge>(alloc);
         upper
     }
 }
@@ -90,20 +91,20 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// it, from the leaf up, keeps what lies left of the path, and what lies
     /// right of it goes into a new node, after the part cut off from the node
     /// below. Returns the top of the new nodes, as tall as the root, on plain
-    /// pages from the global allocator, which nothing owns until the caller
-    /// makes it a tree's root. Nodes on either side of the cut may be left
-    /// with fewer keys than their minimum, down to none. Compares no keys.
+    /// pages from `alloc`, which nothing owns until the caller makes it a
+    /// tree's root. Nodes on either side of the cut may be left with fewer
+    /// keys than their minimum, down to none. Compares no keys.
     ///
     /// # Panics
     ///
     /// If the path ends at no leaf edge.
-    fn cut(mut self) -> Node<K, V, S> {
+    fn cut(mut self, alloc: &impl Allocator) -> Node<K, V, S> {
         let index = self.index();
-        let mut right = Node::Leaf(self.leaf().cut_off_at(index, FreshPage::allocate()));
+        let mut right = Node::Leaf(self.leaf().cut_off_at(index, FreshPage::allocate(alloc)));
         while !self.is_at_root() {
             let node = self.ascend();
             let index = self.index();
-            right = Node::Internal(node.cut_off_at(index, right, FreshPage::allocate()));
+            right = Node::Internal(node.cut_off_at(index, right, FreshPage::allocate(alloc)));
         }
         right
     }
@@ -131,16 +132,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// its minimum, by merging it with its sibling or moving keys over from
     /// it, from the root down; and lowers the tree while its root is left
     /// without keys, until the root has some or is a leaf. Every other node
-    /// must hold its minimum already. Emptied pages go to `release`.
+    /// must hold its minimum already. Emptied pages go back to `alloc`.
     ///
     /// Going down, each node on the edge is brought to one key more than its
     /// minimum, so that a merge one level down, which takes one of its keys,
     /// leaves it at its minimum still.
-    pub(in crate::tree) fn fix_border<End: NodeEnd>(
-        &mut self,
-        release: &mut impl FnMut(PageByType<K, V, S>),
-    ) {
-        self.lower_while_root_empty(release);
+    pub(in crate::tree) fn fix_border<End: NodeEnd>(&mut self, alloc: &impl Allocator) {
+        self.lower_while_root_empty(alloc);
         if let Node::Internal(mut node) = self.root_mut() {
             loop {
                 let len = node.len();
@@ -148,23 +146,23 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
                 let separator = if End::IS_LAST { len - 1 } else { 0 };
                 if node.has_leaf_children() {
                     node.siblings::<Leaf<K, V, S>>(separator)
-                        .stock_border_child::<End>(release);
+                        .stock_border_child::<End>(alloc);
                     break;
                 }
                 node = node
                     .siblings::<Internal<K, V, S>>(separator)
-                    .stock_border_child::<End>(release);
+                    .stock_border_child::<End>(alloc);
             }
         }
-        self.lower_while_root_empty(release);
+        self.lower_while_root_empty(alloc);
     }
 
     /// Lowers the tree while its root is internal without keys, until the
-    /// root has some or is a leaf ([`Tree::lower`]), handing each page
-    /// emptied to `release`.
-    pub(super) fn lower_while_root_empty(&mut self, release: &mut impl FnMut(PageByType<K, V, S>)) {
+    /// root has some or is a leaf ([`Tree::lower`]), giving each page
+    /// emptied back to `alloc`.
+    pub(super) fn lower_while_root_empty(&mut self, alloc: &impl Allocator) {
         while matches!(self.root(), Node::Internal(root) if root.len() == 0) {
-            release(self.lower());
+            self.lower().deallocate(alloc);
         }
     }
 }
@@ -176,10 +174,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// else moves keys over from the other child, which, too full to merge
     /// and holding its minimum, can spare them. Returns the child on the
     /// `End` side, merged or not.
-    fn stock_border_child<End: NodeEnd>(
-        mut self,
-        release: &mut impl FnMut(PageByType<K, V, S>),
-    ) -> C {
+    fn stock_border_child<End: NodeEnd>(mut self, alloc: &impl Allocator) -> C {
         let target = C::min_len() + 1;
         let border_len = |siblings: &Self| {
             if End::IS_LAST {
@@ -191,7 +186,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         if border_len(&self) < target {
             if self.can_merge() {
                 let merged = self.left();
-                release(self.merge());
+                self.merge().deallocate(alloc);
                 return merged;
             }
             while border_len(&self) < target {

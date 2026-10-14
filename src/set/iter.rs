@@ -15,6 +15,7 @@ use core::iter::FusedIterator;
 use core::ops::RangeBounds;
 
 use super::{BBTreeSet, SetValZST};
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::{self, ExtractionWalk, Keys};
 use crate::tree::node::leaf::KeyRun;
@@ -226,11 +227,11 @@ impl<T, S: InlineKeyStrategy<T>> Default for Range<'_, T, S> {
 /// (provided by the [`IntoIterator`] trait). See its documentation for more.
 ///
 /// [`into_iter`]: IntoIterator::into_iter
-pub struct IntoIter<T, S: InlineKeyStrategy<T> = Auto> {
-    iter: map::IntoIter<T, SetValZST, S>,
+pub struct IntoIter<T, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    iter: map::IntoIter<T, SetValZST, S, A>,
 }
 
-impl<T, S: InlineKeyStrategy<T>> Iterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator for IntoIter<T, S, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -242,23 +243,25 @@ impl<T, S: InlineKeyStrategy<T>> Iterator for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> DoubleEndedIterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> DoubleEndedIterator for IntoIter<T, S, A> {
     fn next_back(&mut self) -> Option<T> {
         self.iter.next_back().map(|(element, _)| element)
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> ExactSizeIterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> ExactSizeIterator for IntoIter<T, S, A> {
     fn len(&self) -> usize {
         self.iter.len()
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> FusedIterator for IntoIter<T, S> {}
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> FusedIterator for IntoIter<T, S, A> {}
 
 /// Prints the map's iterator, as std's does:
 /// `IntoIter { iter: [(1, SetValZST)] }`.
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for IntoIter<T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for IntoIter<T, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoIter")
             .field("iter", &self.iter)
@@ -266,7 +269,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> Default for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone + Default> Default for IntoIter<T, S, A> {
     /// Creates an empty `bbtree::bbtree_set::IntoIter`.
     ///
     /// ```
@@ -281,7 +284,7 @@ impl<T, S: InlineKeyStrategy<T>> Default for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Gets an iterator that visits the elements in the `BBTreeSet` in
     /// ascending order.
     ///
@@ -342,7 +345,7 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<'a, T, S: InlineKeyStrategy<T>> IntoIterator for &'a BBTreeSet<T, S> {
+impl<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> IntoIterator for &'a BBTreeSet<T, S, A> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T, S>;
 
@@ -351,9 +354,9 @@ impl<'a, T, S: InlineKeyStrategy<T>> IntoIterator for &'a BBTreeSet<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> IntoIterator for BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> IntoIterator for BBTreeSet<T, S, A> {
     type Item = T;
-    type IntoIter = IntoIter<T, S>;
+    type IntoIter = IntoIter<T, S, A>;
 
     /// Gets an iterator for moving out the `BBTreeSet`'s contents in
     /// ascending order.
@@ -368,7 +371,7 @@ impl<T, S: InlineKeyStrategy<T>> IntoIterator for BBTreeSet<T, S> {
     /// let v: Vec<_> = set.into_iter().collect();
     /// assert_eq!(v, [1, 2, 3, 4]);
     /// ```
-    fn into_iter(self) -> IntoIter<T, S> {
+    fn into_iter(self) -> IntoIter<T, S, A> {
         IntoIter {
             iter: self.map.into_iter(),
         }
@@ -378,17 +381,18 @@ impl<T, S: InlineKeyStrategy<T>> IntoIterator for BBTreeSet<T, S> {
 /// An iterator produced by calling `extract_if` on [`BBTreeSet`].
 #[must_use = "iterators are lazy and do nothing unless consumed; \
               use `retain` or `extract_if().for_each(drop)` to remove and discard elements"]
-pub struct ExtractIf<'a, T, R, F, S: InlineKeyStrategy<T> = Auto> {
-    walk: ExtractionWalk<'a, T, SetValZST, R, S>,
+pub struct ExtractIf<'a, T, R, F, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    walk: ExtractionWalk<'a, T, SetValZST, R, S, A>,
     pred: F,
 }
 
-impl<T, R, F, S> Iterator for ExtractIf<'_, T, R, F, S>
+impl<T, R, F, S, A> Iterator for ExtractIf<'_, T, R, F, S, A>
 where
     T: PartialOrd,
     R: RangeBounds<T>,
     F: FnMut(&T) -> bool,
     S: InlineKeyStrategy<T>,
+    A: Allocator + Clone,
 {
     type Item = T;
 
@@ -403,17 +407,20 @@ where
     }
 }
 
-impl<T, R, F, S> FusedIterator for ExtractIf<'_, T, R, F, S>
+impl<T, R, F, S, A> FusedIterator for ExtractIf<'_, T, R, F, S, A>
 where
     T: PartialOrd,
     R: RangeBounds<T>,
     F: FnMut(&T) -> bool,
     S: InlineKeyStrategy<T>,
+    A: Allocator + Clone,
 {
 }
 
 /// Prints the next element to visit, as std's does.
-impl<T: fmt::Debug, R, F, S: InlineKeyStrategy<T>> fmt::Debug for ExtractIf<'_, T, R, F, S> {
+impl<T: fmt::Debug, R, F, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for ExtractIf<'_, T, R, F, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtractIf")
             .field("peek", &self.walk.peek().map(|(element, _)| element))
@@ -421,7 +428,7 @@ impl<T: fmt::Debug, R, F, S: InlineKeyStrategy<T>> fmt::Debug for ExtractIf<'_, 
     }
 }
 
-impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Creates an iterator that visits elements in the specified range in
     /// ascending order and uses a closure to determine if an element should
     /// be removed.
@@ -461,7 +468,7 @@ impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     /// assert_eq!(low.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3]);
     /// assert_eq!(high.into_iter().collect::<Vec<_>>(), [4, 5, 6, 7]);
     /// ```
-    pub fn extract_if<F, R>(&mut self, range: R, pred: F) -> ExtractIf<'_, T, R, F, S>
+    pub fn extract_if<F, R>(&mut self, range: R, pred: F) -> ExtractIf<'_, T, R, F, S, A>
     where
         R: RangeBounds<T>,
         F: FnMut(&T) -> bool,

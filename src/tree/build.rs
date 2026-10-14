@@ -22,13 +22,15 @@ use super::node::Node;
 use super::node::inline_keys::WindowedKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, PageByType};
+use super::node::page::FreshPage;
 use super::path::{LastEdge, PathMut};
 use super::root::Tree;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-/// A tree being built from entries in ascending key order.
-pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
+/// A tree being built from entries in ascending key order, on pages from
+/// `alloc`.
+pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>, A: Allocator> {
     /// No tree until the first entry.
     tree: Tree<K, V, S>,
     /// The entries pushed so far.
@@ -36,27 +38,26 @@ pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
     /// The entries `extend` has taken from its iterators: those pushed, and
     /// each one a panicking `InlineKey` dropped while it was being placed.
     taken: usize,
+    /// The allocator of the tree's pages.
+    alloc: A,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            tree: Tree::EMPTY,
-            length: 0,
-            taken: 0,
-        }
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
+    pub(crate) const fn new(alloc: A) -> Self {
+        Self::continuing(Tree::EMPTY, alloc)
     }
 
-    /// A builder that appends to `tree`, a well-formed tree, as to one it
-    /// built: into its rightmost leaf while it has room, then into new nodes
-    /// along its right border, whose prefixes are what every key of the
-    /// tree shares, in any tree (D50). It counts only the entries it
-    /// appends.
-    pub(crate) fn continuing(tree: Tree<K, V, S>) -> Self {
+    /// A builder that appends to `tree`, a well-formed tree on pages from
+    /// `alloc`, as to one it built: into its rightmost leaf while it has
+    /// room, then into new nodes along its right border, whose prefixes are
+    /// what every key of the tree shares, in any tree (D50). It counts only
+    /// the entries it appends.
+    pub(crate) const fn continuing(tree: Tree<K, V, S>, alloc: A) -> Self {
         Self {
             tree,
             length: 0,
             taken: 0,
+            alloc,
         }
     }
 
@@ -89,7 +90,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         };
         loop {
             let tree = &mut self.tree;
-            tree.ensure_root_page();
+            tree.ensure_root_page(&self.alloc);
             tree.cover_key(&next.0);
             // To tell a key that shares less without the tree, whose
             // rightmost leaf is changed below.
@@ -118,7 +119,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             let (key, value) = next;
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let mut path = tree.start_leaf(WindowedKey::new(key, shared.len()), value);
+            let mut path = tree.start_leaf(WindowedKey::new(key, shared.len()), value, &self.alloc);
             self.length += 1;
             // Fits the nodes the new leaf closed, off the tree's border now:
             // the right border of the subtree left of the separator, which
@@ -149,8 +150,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// finished, where a tree held anywhere else would leak.
     pub(crate) fn finish(mut self) -> (Tree<K, V, S>, usize) {
         if self.tree.has_root() {
-            self.tree
-                .fix_border::<LastEdge>(&mut PageByType::deallocate);
+            self.tree.fix_border::<LastEdge>(&self.alloc);
             self.tree.refit_border_siblings::<LastEdge>();
         }
         (self.tree.take(), self.length)
@@ -165,17 +165,22 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// further up the same way; or in the root, which the tree raises for
     /// it. Returns the path up the right border it came, ending at the node
     /// that took the separator, at the edge left of it, which leads down to
-    /// the nodes the new leaf closed.
-    fn start_leaf(&mut self, separator: WindowedKey<K, S>, value: V) -> PathMut<'_, K, V, S> {
+    /// the nodes the new leaf closed. Pages come from `alloc`.
+    fn start_leaf(
+        &mut self,
+        separator: WindowedKey<K, S>,
+        value: V,
+        alloc: &impl Allocator,
+    ) -> PathMut<'_, K, V, S> {
         let shared_len = self.shared_prefix().len();
-        let leaf = Leaf::new(FreshPage::allocate());
+        let leaf = Leaf::new(FreshPage::allocate(alloc));
         leaf.set_empty_prefix_len(shared_len);
         let separator = leaf.put_separator_head(separator, value);
         let mut child = Node::Leaf(leaf);
         let mut path = PathMut::new(self);
         path.descend_to_last_key();
         loop {
-            let node = path.ascend_raising(FreshPage::allocate, FreshPage::allocate);
+            let node = path.ascend_raising(alloc);
             let len = node.len();
             if len < Internal::<K, V, S>::capacity() {
                 node.insert_fit(len, separator, child);
@@ -183,16 +188,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             }
             // Its new levels along the right border take what every key
             // shares.
-            let parent = Internal::new(FreshPage::allocate(), child);
+            let parent = Internal::new(FreshPage::allocate(alloc), child);
             parent.set_empty_prefix_len(shared_len);
             child = Node::Internal(parent);
         }
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Drop for TreeBuilder<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for TreeBuilder<K, V, S, A> {
     /// Takes apart a tree that was not finished.
     fn drop(&mut self) {
-        self.tree.take().destroy(PageByType::deallocate);
+        self.tree.take().destroy(&self.alloc);
     }
 }

@@ -31,6 +31,7 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::BBTreeMap;
 
@@ -97,12 +98,12 @@ struct SetValZST;
 ///
 /// let set = BBTreeSet::from([1, 2, 3]);
 /// ```
-pub struct BBTreeSet<T, S: InlineKeyStrategy<T> = Auto> {
-    map: BBTreeMap<T, SetValZST, S>,
+pub struct BBTreeSet<T, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    map: BBTreeMap<T, SetValZST, S, A>,
 }
 
 #[cfg(fuzzing)]
-impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Panics unless the set's tree is well formed, by the map's check
     /// ([`BBTreeMap::check_invariants`]). Only in fuzzing builds
     /// (`--cfg fuzzing`, which `cargo fuzz` sets), for the fuzz targets.
@@ -112,8 +113,10 @@ impl<T: Ord, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
 }
 
 impl<T> BBTreeSet<T> {
-    /// Makes a new, empty `BBTreeSet`, with the default strategy, [`Auto`].
-    /// For another, see [`BBTreeSet::with_strategy`].
+    /// Makes a new, empty `BBTreeSet`, with the default strategy, [`Auto`],
+    /// and the global allocator. For another strategy, see
+    /// [`BBTreeSet::with_strategy`]; for another allocator,
+    /// [`BBTreeSet::new_in`].
     ///
     /// Does not allocate anything on its own.
     ///
@@ -157,8 +160,40 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     /// ```
     #[must_use]
     pub const fn with_strategy(strategy: S) -> Self {
+        Self::with_strategy_in(strategy, Global)
+    }
+}
+
+impl<T, A: Allocator + Clone> BBTreeSet<T, Auto, A> {
+    /// Makes a new, empty `BBTreeSet` whose nodes come from `alloc`, with
+    /// the default strategy, [`Auto`].
+    ///
+    /// Does not allocate anything on its own.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::{BBTreeSet, Global};
+    ///
+    /// let mut set = BBTreeSet::new_in(Global);
+    /// set.insert(1);
+    /// assert!(set.contains(&1));
+    /// ```
+    #[must_use]
+    pub const fn new_in(alloc: A) -> Self {
+        Self::with_strategy_in(Auto, alloc)
+    }
+}
+
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
+    /// Makes a new, empty `BBTreeSet` with inline-key strategy `strategy`,
+    /// whose nodes come from `alloc`.
+    ///
+    /// Does not allocate anything on its own.
+    #[must_use]
+    pub const fn with_strategy_in(strategy: S, alloc: A) -> Self {
         Self {
-            map: BBTreeMap::with_strategy(strategy),
+            map: BBTreeMap::with_strategy_in(strategy, alloc),
         }
     }
 
@@ -569,14 +604,21 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// A set of `elements`, which ascend strictly, built into full nodes
-    /// without comparing them (`tree/build.rs`). Elements out of order make
-    /// a set whose searches give wrong answers, but that is memory-safe.
-    fn from_ascending(elements: impl Iterator<Item = T>) -> Self {
+    /// without comparing them (`tree/build.rs`), on pages from `alloc`.
+    /// Elements out of order make a set whose searches give wrong answers,
+    /// but that is memory-safe.
+    fn from_ascending(elements: impl Iterator<Item = T>, alloc: A) -> Self {
+        let entries = elements.map(|element| (element, SetValZST));
         Self {
-            map: BBTreeMap::from_ascending_entries(elements.map(|element| (element, SetValZST))),
+            map: BBTreeMap::from_ascending_entries(entries, alloc),
         }
+    }
+
+    /// The set's allocator, for a set made from it.
+    fn allocator(&self) -> &A {
+        self.map.allocator()
     }
 
     /// Whether looking up `lookups` elements in this set one by one beats
@@ -600,7 +642,7 @@ impl<T> Default for BBTreeSet<T> {
 
 /// Copies the tree as the map's `clone` does: calls `clone` on every
 /// element, in order, and no `Ord`.
-impl<T: Clone, S: InlineKeyStrategy<T>> Clone for BBTreeSet<T, S> {
+impl<T: Clone, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for BBTreeSet<T, S, A> {
     fn clone(&self) -> Self {
         Self {
             map: self.map.clone(),
@@ -608,29 +650,33 @@ impl<T: Clone, S: InlineKeyStrategy<T>> Clone for BBTreeSet<T, S> {
     }
 }
 
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for BBTreeSet<T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for BBTreeSet<T, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
 
-impl<T: PartialEq, S: InlineKeyStrategy<T>> PartialEq for BBTreeSet<T, S> {
+impl<T: PartialEq, S: InlineKeyStrategy<T>, A: Allocator + Clone> PartialEq for BBTreeSet<T, S, A> {
     fn eq(&self, other: &Self) -> bool {
         self.map == other.map
     }
 }
 
-impl<T: Eq, S: InlineKeyStrategy<T>> Eq for BBTreeSet<T, S> {}
+impl<T: Eq, S: InlineKeyStrategy<T>, A: Allocator + Clone> Eq for BBTreeSet<T, S, A> {}
 
 /// Compares the elements in order, lexicographically, as std's set does.
-impl<T: PartialOrd, S: InlineKeyStrategy<T>> PartialOrd for BBTreeSet<T, S> {
+impl<T: PartialOrd, S: InlineKeyStrategy<T>, A: Allocator + Clone> PartialOrd
+    for BBTreeSet<T, S, A>
+{
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.map.partial_cmp(&other.map)
     }
 }
 
 /// Compares the elements in order, lexicographically, as std's set does.
-impl<T: Ord, S: InlineKeyStrategy<T>> Ord for BBTreeSet<T, S> {
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Ord for BBTreeSet<T, S, A> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.map.cmp(&other.map)
     }
@@ -638,7 +684,7 @@ impl<T: Ord, S: InlineKeyStrategy<T>> Ord for BBTreeSet<T, S> {
 
 /// Hashes as the map does, the length and then every element in order: the
 /// values hash nothing, so the bytes are std's set's.
-impl<T: Hash, S: InlineKeyStrategy<T>> Hash for BBTreeSet<T, S> {
+impl<T: Hash, S: InlineKeyStrategy<T>, A: Allocator + Clone> Hash for BBTreeSet<T, S, A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.map.hash(state);
     }
@@ -680,7 +726,7 @@ impl<T: Ord, const N: usize> From<[T; N]> for BBTreeSet<T> {
     }
 }
 
-impl<T: Ord, S: InlineKeyStrategy<T>> Extend<T> for BBTreeSet<T, S> {
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Extend<T> for BBTreeSet<T, S, A> {
     /// Inserts each element in turn, as `insert` does: of equal elements,
     /// the set keeps the first.
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
@@ -690,7 +736,9 @@ impl<T: Ord, S: InlineKeyStrategy<T>> Extend<T> for BBTreeSet<T, S> {
     }
 }
 
-impl<'a, T: Ord + Copy + 'a, S: InlineKeyStrategy<T>> Extend<&'a T> for BBTreeSet<T, S> {
+impl<'a, T: Ord + Copy + 'a, S: InlineKeyStrategy<T>, A: Allocator + Clone> Extend<&'a T>
+    for BBTreeSet<T, S, A>
+{
     /// Inserts a copy of each element in turn, as `insert` does.
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         self.extend(iter.into_iter().copied());

@@ -9,6 +9,7 @@ use core::ops::BitOr;
 
 use super::BBTreeSet;
 use super::merge::{HeldSide, MergeSides};
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the union of `BBTreeSet`s.
@@ -78,7 +79,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Visits the elements representing the union, i.e., all the elements
     /// in `self` or `other`, without duplicates, in ascending order.
     ///
@@ -109,8 +110,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitOr<&BBTreeSet<T, S>> for &BBTreeSet<T, S> {
-    type Output = BBTreeSet<T, S>;
+impl<T: Ord + Clone, S: InlineKeyStrategy<T>, A: Allocator + Clone> BitOr<&BBTreeSet<T, S, A>>
+    for &BBTreeSet<T, S, A>
+{
+    type Output = BBTreeSet<T, S, A>;
 
     /// Returns the union of `self` and `rhs` as a new `BBTreeSet<T>`, built
     /// into full nodes without searching it.
@@ -126,7 +129,7 @@ impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitOr<&BBTreeSet<T, S>> for &BBTre
     /// let result = &a | &b;
     /// assert_eq!(result, BBTreeSet::from([1, 2, 3, 4, 5]));
     /// ```
-    fn bitor(self, rhs: &BBTreeSet<T, S>) -> BBTreeSet<T, S> {
-        BBTreeSet::from_ascending(self.union(rhs).cloned())
+    fn bitor(self, rhs: &BBTreeSet<T, S, A>) -> BBTreeSet<T, S, A> {
+        BBTreeSet::from_ascending(self.union(rhs).cloned(), self.allocator().clone())
     }
 }

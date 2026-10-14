@@ -24,11 +24,11 @@ use core::mem;
 
 use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
-use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageByType};
 use super::node::root_page::RootPage;
 use super::shared_prefix::SharedPrefix;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree, by its root page, if it has one, which the tree owns with every
@@ -55,8 +55,9 @@ pub(crate) struct Tree<K, V, S> {
 // SAFETY: a `Tree` owns its pages, keys and values, and nothing else reaches
 // them (type invariant), as a `Box` owns its contents: sending the `Tree` to
 // another thread sends the keys and values along. The pages come from the
-// global allocator, which any thread may free. The remembered leaf is one of
-// the tree's own pages. The strategy is only a marker.
+// map's allocator, which goes with the map: a map is `Send` only if its
+// allocator is. The remembered leaf is one of the tree's own pages. The
+// strategy is only a marker.
 unsafe impl<K: Send, V: Send, S> Send for Tree<K, V, S> {}
 
 // SAFETY: a `&Tree` gives only shared access to its keys and values, as a
@@ -186,20 +187,24 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
-    /// Makes a new tree, from the global allocator, if there is none: what
-    /// an insertion starts from.
-    pub(crate) fn ensure_root_page(&mut self) {
+    /// Makes a new tree, from `alloc`, if there is none: what an insertion
+    /// starts from.
+    pub(crate) fn ensure_root_page(&mut self, alloc: &impl Allocator) {
         self.root_page
-            .get_or_insert_with(|| RootPage::new(FreshPage::allocate()));
+            .get_or_insert_with(|| RootPage::new(FreshPage::allocate(alloc)));
     }
 
     /// The tree of `top` and the nodes under it, on plain pages, whose keys
     /// all share `shared_prefix`, which every node along its borders must
     /// have as its prefix length (D50): `top` moves into a root page, from
-    /// and back to the global allocator. The tree owns them from now on.
-    pub(in crate::tree) fn from_node(top: Node<K, V, S>, shared_prefix: SharedPrefix) -> Self {
-        let (page, emptied) = RootPage::from_node(FreshPage::allocate(), top, shared_prefix);
-        emptied.deallocate();
+    /// and back to `alloc`. The tree owns them from now on.
+    pub(in crate::tree) fn from_node(
+        top: Node<K, V, S>,
+        shared_prefix: SharedPrefix,
+        alloc: &impl Allocator,
+    ) -> Self {
+        let (page, emptied) = RootPage::from_node(FreshPage::allocate(alloc), top, shared_prefix);
+        emptied.deallocate(alloc);
         Self {
             root_page: Some(page),
             rightmost_leaf: None,
@@ -208,35 +213,27 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 
     /// The root node on a plain page of its kind, giving up the tree, for
     /// another tree to hang under an edge (`tree/join.rs`): its root page
-    /// goes back to the global allocator, and the new one comes from it.
+    /// goes back to `alloc`, and the new one comes from it.
     ///
     /// # Panics
     ///
     /// Without a tree.
-    pub(in crate::tree) fn into_node(self) -> Node<K, V, S> {
-        let (top, emptied) = self
-            .existing_root_page()
-            .into_node(FreshPage::allocate, FreshPage::allocate);
-        emptied.deallocate();
+    pub(in crate::tree) fn into_node(self, alloc: &impl Allocator) -> Node<K, V, S> {
+        let (top, emptied) = self.existing_root_page().into_node(alloc);
+        emptied.deallocate(alloc);
         top
     }
 
     /// Makes the tree a level taller ([`RootPage::raise`]): the root node
-    /// moves to a page from `new_leaf_page` or `new_internal_page`, by its
-    /// kind, under the root, which is internal now.
+    /// moves to a page of its kind from `alloc`, under the root, which is
+    /// internal now.
     ///
     /// # Panics
     ///
     /// Without a tree.
-    pub(in crate::tree) fn raise(
-        &mut self,
-        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
-    ) {
+    pub(in crate::tree) fn raise(&mut self, alloc: &impl Allocator) {
         self.forget_rightmost_leaf();
-        let root_page = self
-            .existing_root_page()
-            .raise(new_leaf_page, new_internal_page);
+        let root_page = self.existing_root_page().raise(alloc);
         self.root_page = Some(root_page);
     }
 

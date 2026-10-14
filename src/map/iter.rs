@@ -11,6 +11,7 @@ use core::iter::FusedIterator;
 use core::ops::RangeBounds;
 
 use super::BBTreeMap;
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::leaf::KeyRun;
 use crate::tree::path::Immut;
@@ -399,7 +400,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Range<'_, K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Gets an iterator over the entries of the map, sorted by key.
     ///
     /// # Examples
@@ -504,7 +505,9 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> IntoIterator for &'a BBTreeMap<K, V, S> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> IntoIterator
+    for &'a BBTreeMap<K, V, S, A>
+{
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V, S>;
 

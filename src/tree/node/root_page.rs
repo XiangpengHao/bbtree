@@ -21,6 +21,7 @@ use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
 use super::page::{FreshPage, NodePtr, PageByType, PageType};
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
@@ -179,24 +180,20 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         unsafe { &mut *self.area() }
     }
 
-    /// Moves the root node to a fresh page of its kind, from `new_leaf_page`
-    /// or `new_internal_page`, and returns it there, as a tree's top node on
-    /// a plain page. The root page holds nothing afterwards: the caller makes
-    /// it a node again, or frees it.
-    fn move_node_out(
-        self,
-        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
-    ) -> Node<K, V, S> {
+    /// Moves the root node to a fresh page of its kind, from `alloc`, and
+    /// returns it there, as a tree's top node on a plain page. The root page
+    /// holds nothing afterwards: the caller makes it a node again, or frees
+    /// it.
+    fn move_node_out(self, alloc: &impl Allocator) -> Node<K, V, S> {
         let moved = match self.node() {
             Node::Leaf(_) => {
-                let page = new_leaf_page().into_raw();
+                let page = FreshPage::<Leaf<K, V, S>>::allocate(alloc).into_raw();
                 // SAFETY: the root node is a leaf, and `page` a fresh leaf
                 // page, which nothing else uses: the node moves there whole.
                 unsafe { self.node.move_node_to::<Leaf<K, V, S>>(page) }
             }
             Node::Internal(_) => {
-                let page = new_internal_page().into_raw();
+                let page = FreshPage::<Internal<K, V, S>>::allocate(alloc).into_raw();
                 // SAFETY: as for a leaf, of the internal kind.
                 unsafe { self.node.move_node_to::<Internal<K, V, S>>(page) }
             }
@@ -205,16 +202,11 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     }
 
     /// Makes the tree a level taller: moves the root node to a fresh page of
-    /// its kind, from `new_leaf_page` or `new_internal_page`, and makes the
-    /// root an internal node with that node as its only child, at the tree's
-    /// shared prefix length (D50), as the old one had, on both borders.
-    /// Returns the page's new handle.
-    pub(in crate::tree) fn raise(
-        self,
-        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
-    ) -> Self {
-        let child = self.move_node_out(new_leaf_page, new_internal_page);
+    /// its kind, from `alloc`, and makes the root an internal node with that
+    /// node as its only child, at the tree's shared prefix length (D50), as
+    /// the old one had, on both borders. Returns the page's new handle.
+    pub(in crate::tree) fn raise(self, alloc: &impl Allocator) -> Self {
+        let child = self.move_node_out(alloc);
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.
@@ -246,16 +238,14 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         (Self { node }, emptied)
     }
 
-    /// Moves the root node to a fresh page of its kind, from `new_leaf_page`
-    /// or `new_internal_page`, for another tree to hang under an edge
-    /// (`tree/join.rs`), and returns it there, with this page, which holds
-    /// nothing anymore.
+    /// Moves the root node to a fresh page of its kind, from `alloc`, for
+    /// another tree to hang under an edge (`tree/join.rs`), and returns it
+    /// there, with this page, which holds nothing anymore.
     pub(in crate::tree) fn into_node(
         self,
-        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
+        alloc: &impl Allocator,
     ) -> (Node<K, V, S>, FreshPage<Self>) {
-        let top = self.move_node_out(new_leaf_page, new_internal_page);
+        let top = self.move_node_out(alloc);
         // SAFETY: the root node's contents moved to `top`, and the root area
         // holds nothing to drop; the caller gives up the page with `self`.
         (top, unsafe { self.free() })

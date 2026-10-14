@@ -22,12 +22,12 @@
 use core::mem;
 
 use super::node::inline_keys::{SearchKey, WindowedKey};
-use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::{Insertion, Node};
 use super::path::{MAX_DEPTH, PathMut};
 use super::root::Tree;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
@@ -37,11 +37,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// `BTreeMap::insert` does. For a separator key, the value replaced is a
     /// leaf's head (D17).
     ///
-    /// Every page a split needs comes from `new_leaf_page` or
-    /// `new_internal_page`, by the kind of node that splits (D21), asked for
-    /// at the time of the split; so does the page the root node moves to
-    /// when the tree grows a level. Without a root page, the tree's new one
-    /// comes from the global allocator.
+    /// Every page a split needs comes from `alloc`, the map's allocator,
+    /// asked for at the time of the split; so does the page the root node
+    /// moves to when the tree grows a level, and the tree's root page if it
+    /// has none.
     ///
     /// Every `Ord` call happens while validating an append or searching, and
     /// every `InlineKey` call while validating an append, checking what the
@@ -51,16 +50,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// leaves the tree with the same entries. After a split, the split nodes'
     /// prefixes fit their new fences, which calls `InlineKey` again, once the
     /// entry is in and counted (`prefix.rs`): a panic then leaves a valid
-    /// tree that has it. The page sources are called on the way back up,
-    /// possibly after the leaf has changed: the global allocator's
-    /// `handle_alloc_error` aborts by default, and a panicking page source
-    /// would leave a memory-safe tree that is missing entries.
+    /// tree that has it. `alloc` is called on the way back up, possibly
+    /// after the leaf has changed: a failed allocation calls
+    /// `handle_alloc_error`, which aborts by default, and one that panics
+    /// leaves a memory-safe tree that is missing entries.
     pub(crate) fn insert(
         &mut self,
         key: K,
         value: V,
-        new_leaf_page: impl FnMut() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnMut() -> FreshPage<Internal<K, V, S>>,
+        alloc: &impl Allocator,
         length: &mut usize,
     ) -> Option<V>
     where
@@ -71,7 +69,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             *length += 1;
             return None;
         }
-        self.ensure_root_page();
+        self.ensure_root_page(alloc);
         self.cover_key(&key);
         match self.root_mut().search_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
@@ -89,7 +87,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
                 }
             }
         }
-        self.insert_with_path(key, value, new_leaf_page, new_internal_page, length)
+        self.insert_with_path(key, value, alloc, length)
     }
 
     /// A full leaf needs ancestors to split. Keep that path and its stack
@@ -101,8 +99,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         &mut self,
         key: K,
         value: V,
-        new_leaf_page: impl FnMut() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnMut() -> FreshPage<Internal<K, V, S>>,
+        alloc: &impl Allocator,
         length: &mut usize,
     ) -> Option<V>
     where
@@ -115,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             drop(key);
             Some(mem::replace(path.value_mut(), value))
         } else {
-            path.insert(key, value, new_leaf_page, new_internal_page, length);
+            path.insert(key, value, alloc, length);
             path.finish_insertion();
             None
         }
@@ -133,14 +130,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     ///
     /// If the path ends at no leaf edge.
     #[inline]
-    pub(crate) fn insert(
-        &mut self,
-        key: K,
-        value: V,
-        new_leaf_page: impl FnMut() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnMut() -> FreshPage<Internal<K, V, S>>,
-        length: &mut usize,
-    ) {
+    pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
         let index = self.index();
         let leaf = self.leaf();
         assert!(index <= leaf.len(), "edge index out of bounds");
@@ -151,28 +141,21 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
             leaf.insert_fit(index, WindowedKey::new(key, prefix_len), value);
             *length += 1;
         } else {
-            self.insert_splitting(key, value, new_leaf_page, new_internal_page, length);
+            self.insert_splitting(key, value, alloc, length);
         }
     }
 
     /// Keeps allocation, split propagation and its temporary arrays out
     /// of the ordinary insertion's stack frame and instruction stream.
     #[inline(never)]
-    fn insert_splitting(
-        &mut self,
-        key: K,
-        value: V,
-        mut new_leaf_page: impl FnMut() -> FreshPage<Leaf<K, V, S>>,
-        mut new_internal_page: impl FnMut() -> FreshPage<Internal<K, V, S>>,
-        length: &mut usize,
-    ) {
+    fn insert_splitting(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
         let index = self.index();
         let leaf = self.leaf();
         // The key's window at the leaf's prefix length, which both halves
         // of a split keep: the last `InlineKey` call before the first change.
         // The leaf is full: `PathMut::insert` comes here only then.
         let key = WindowedKey::new(key, leaf.prefix_len());
-        let split = leaf.split_insert(index, key, value, new_leaf_page());
+        let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc));
         // Both arrays go by how many levels the split has climbed from the
         // leaf, which a new root above doesn't change. In each node that
         // split, the index that leads to the new entry in the half that took
@@ -191,14 +174,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let mut climbed = 0;
         let levels_climbed = loop {
             let (separator, right, entry_is_right) = carried;
-            let node = self.ascend_raising(&mut new_leaf_page, &mut new_internal_page);
+            let node = self.ascend_raising(alloc);
             climbed += 1;
             let index = self.index();
             // The new entry is under the edge left of the separator, or right
             // of it if it went into the right half.
             let beside_separator =
                 |separator_index: usize| separator_index + usize::from(entry_is_right);
-            match node.insert(index, separator, right, &mut new_internal_page) {
+            match node.insert(index, separator, right, alloc) {
                 Insertion::Fit(separator_index) => {
                     separator_indexes[climbed] = separator_index;
                     self.set_index(beside_separator(separator_index));

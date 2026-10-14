@@ -23,12 +23,38 @@ Verus is optional but welcome.
 
 ## Nodes
 
-**D8. Own allocator trait.** (2026-10-07)
+**D8. Own allocator trait, the map's last type parameter.** (2026-10-14)
 Every allocation is a node, counted, with a size known in advance; no runtime
-surprises. System and custom allocators are both supported through our trait.
+surprises. Two levels: an allocator hands out blocks by size and alignment
+alone, and the tree makes each block a node of its kind, a leaf, an internal
+node or the root page, with that kind's layout (D21).
 
-- Not built yet: until it is, each node is one global-allocator call
-  (`tree/node/page.rs`).
+- **Trait:** `Allocator` (`allocator.rs`), public: the part of std's unstable
+  `core::alloc::Allocator` a map needs, `allocate(&self, Layout)` and
+  `unsafe deallocate(&self, ptr, Layout)`, with std's names and contract (an
+  `unsafe trait`; a clone is the same allocator), so it works on stable.
+  `Global`, the global allocator, is the default; `&A` is an allocator too,
+  to share one between maps.
+- **In types:** `BBTreeMap<K, V, S = Auto, A: Allocator + Clone = Global>`,
+  and the same for the set: the strategy before the allocator, so opting
+  into inline keys stays `BBTreeMap<K, V, WithInlineKey>` (D18).
+  `new_in(alloc)` and `with_strategy_in(strategy, alloc)` take one; `new`,
+  `with_strategy`, `Default`, `FromIterator` and `From` stay `Global`-only,
+  as std's do.
+- **Ownership:** the map holds the allocator and passes `&A` to every tree
+  operation that allocates or frees a page; the tree stores none. A page's
+  type (`FreshPage<P>`) carries its layout, so a page goes back with the
+  layout it came with; that it goes back to the allocator it came from is
+  a convention of the tree's code, as in std's btree, not a type. What
+  outlives a borrow of the map, `IntoIter` and the pieces of `extract_if`
+  and `append`, holds a clone; `clone` and `split_off` give the new map one.
+  `append` moves entries, not pages, so maps with different allocators of
+  one type append soundly; the set operators build on the left set's.
+- **Failure:** a failed allocation calls `handle_alloc_error`, as std's
+  collections do.
+- **Cost of the parameter:** with `Global`, instructions per operation at 1M
+  entries (fat-LTO probe, mimalloc): get hit and miss, remove and
+  `pop_first` unchanged; insert +0.5 (`u64`) and +1.5 (`String`).
 - Consequence: a default allocator should carve aligned pages from large
   chunks (see "Proposed, not decided"). Per-node aligned requests cost
   glibc up to twice the memory; measured with 4 KB nodes (20k nodes, each
@@ -182,11 +208,11 @@ Design in 04-inline-key.md.
     `Vec<u8>`, `Box<str>`, byte arrays, …) and the 64- and 128-bit integers
     (D31) inline keys automatically, by compile-time type identity (option
     (d)).
-- **In types:** `BBTreeMap<K, V, S = Auto>`; the allocator parameter (D8)
-  is to go before `S`. Existing code is unchanged and gets inline keys for
-  std string and integer keys. Other key types opt in with a one-line impl
-  plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()` stays
-  `Auto`-only, since a generic `new()` breaks inference. There is no
+- **In types:** `BBTreeMap<K, V, S = Auto, A = Global>`, the strategy
+  before the allocator (D8). Existing code is unchanged and gets inline
+  keys for std string and integer keys. Other key types opt in with a
+  one-line impl plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()`
+  stays `Auto`-only, since a generic `new()` breaks inference. There is no
   separate alias type.
 - **Lint:** node handles carry five type parameters, so `clippy.toml` raises
   `type-complexity-threshold` to 300.

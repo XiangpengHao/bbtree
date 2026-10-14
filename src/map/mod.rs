@@ -18,7 +18,10 @@
 //! (`extract_if.rs`, `tree/join.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
-//! `inline_key.rs`); every method is the same for every `S`.
+//! `inline_key.rs`); every method is the same for every `S`. The allocator
+//! parameter `A` is where the map's pages come from (D8, `allocator.rs`):
+//! the map holds it, and gives it to every operation on its tree that
+//! allocates or frees a page.
 
 #![forbid(unsafe_code)]
 
@@ -40,11 +43,10 @@ use core::mem;
 use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::build::TreeBuilder;
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
-use crate::tree::node::page::{FreshPage, PageByType};
 use crate::tree::path::{FirstEdge, KeySide, LastEdge};
 use crate::tree::root::Tree;
 
@@ -70,6 +72,9 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// key type that implements [`InlineKey`]. Either way, every method behaves
 /// as std's.
 ///
+/// Its nodes come from the allocator `A`: by default ([`Global`]), the
+/// global allocator; [`BBTreeMap::new_in`] takes another.
+///
 /// [`std::collections::BTreeMap`]: https://doc.rust-lang.org/std/collections/struct.BTreeMap.html
 /// [`WithInlineKey`]: crate::WithInlineKey
 /// [`InlineKey`]: crate::InlineKey
@@ -86,14 +91,18 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// assert!(!map.contains_key(&38));
 /// assert_eq!(map.len(), 1);
 /// ```
-pub struct BBTreeMap<K, V, S: InlineKeyStrategy<K> = Auto> {
+pub struct BBTreeMap<K, V, S: InlineKeyStrategy<K> = Auto, A: Allocator + Clone = Global> {
     tree: Tree<K, V, S>,
     length: usize,
+    /// Where the tree's pages come from and go back to.
+    alloc: A,
 }
 
 impl<K, V> BBTreeMap<K, V> {
-    /// Makes a new, empty `BBTreeMap`, with the default strategy, [`Auto`].
-    /// For another, see [`BBTreeMap::with_strategy`].
+    /// Makes a new, empty `BBTreeMap`, with the default strategy, [`Auto`],
+    /// and the global allocator. For another strategy, see
+    /// [`BBTreeMap::with_strategy`]; for another allocator,
+    /// [`BBTreeMap::new_in`].
     ///
     /// Does not allocate anything on its own.
     #[must_use]
@@ -128,30 +137,63 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ```
     #[must_use]
     pub const fn with_strategy(strategy: S) -> Self {
+        Self::with_strategy_in(strategy, Global)
+    }
+}
+
+impl<K, V, A: Allocator + Clone> BBTreeMap<K, V, Auto, A> {
+    /// Makes a new, empty `BBTreeMap` whose nodes come from `alloc`, with
+    /// the default strategy, [`Auto`].
+    ///
+    /// Does not allocate anything on its own.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::{BBTreeMap, Global};
+    ///
+    /// let mut map = BBTreeMap::new_in(Global);
+    /// map.insert(1, "a");
+    /// assert_eq!(map.get(&1), Some(&"a"));
+    /// ```
+    #[must_use]
+    pub const fn new_in(alloc: A) -> Self {
+        Self::with_strategy_in(Auto, alloc)
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
+    /// Makes a new, empty `BBTreeMap` with inline-key strategy `strategy`,
+    /// whose nodes come from `alloc`.
+    ///
+    /// Does not allocate anything on its own.
+    #[must_use]
+    pub const fn with_strategy_in(strategy: S, alloc: A) -> Self {
         // Only the strategy's type matters: its value, a unit struct,
         // carries nothing.
         mem::forget(strategy);
-        Self::empty()
+        Self::empty(alloc)
     }
 
-    /// A map with no tree, of any strategy: what `new` makes.
-    const fn empty() -> Self {
+    /// A map with no tree, of any strategy, whose nodes come from `alloc`:
+    /// what `new` makes.
+    const fn empty(alloc: A) -> Self {
         Self {
             tree: Tree::EMPTY,
             length: 0,
+            alloc,
         }
-    }
-
-    /// The map of what `builder` built.
-    fn from_builder(builder: TreeBuilder<K, V, S>) -> Self {
-        let (tree, length) = builder.finish();
-        Self { tree, length }
     }
 
     /// Returns the number of elements in the map.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.length
+    }
+
+    /// The map's allocator, for a set made from it.
+    pub(crate) const fn allocator(&self) -> &A {
+        &self.alloc
     }
 
     /// Returns `true` if the map contains no elements.
@@ -178,7 +220,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ```
     pub fn clear(&mut self) {
         self.length = 0;
-        self.tree.take().destroy(PageByType::deallocate);
+        self.tree.take().destroy(&self.alloc);
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -261,8 +303,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
-        tree.pop_first(PageByType::deallocate, length)
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
+        tree.pop_first(alloc, length)
     }
 
     /// Returns the last key-value pair in the map. The key in this pair is
@@ -305,8 +351,12 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
-        tree.pop_last(PageByType::deallocate, length)
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
+        tree.pop_last(alloc, length)
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -355,13 +405,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        self.tree.insert(
-            key,
-            value,
-            FreshPage::allocate,
-            FreshPage::allocate,
-            &mut self.length,
-        )
+        self.tree.insert(key, value, &self.alloc, &mut self.length)
     }
 
     /// Removes a key from the map, returning the value at the key if the key
@@ -424,14 +468,19 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<Q> + Ord,
         Q: Ord + ?Sized,
     {
-        let Self { tree, length } = self;
-        tree.remove_entry(key, PageByType::deallocate, length)
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
+        tree.remove_entry(key, alloc, length)
     }
 }
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Splits the collection into two at the given key. Returns everything
-    /// after the given key, including the key.
+    /// after the given key, including the key. The returned map's nodes
+    /// come from a clone of this map's allocator.
     ///
     /// Every `Ord` call happens first, before any entry moves. `InlineKey`
     /// is called last, once both maps are counted: if it panics, both stay
@@ -467,11 +516,11 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         Q: Ord + ?Sized,
     {
         if self.is_empty() {
-            return Self::empty();
+            return Self::empty(self.alloc.clone());
         }
         let length = self.length;
         let lower = &mut self.tree;
-        let upper = lower.split_off_at(key, KeySide::Before);
+        let upper = lower.split_off_at(key, KeySide::Before, &self.alloc);
         let (lower_length, upper_length) = if lower.leaf_depth() < upper.leaf_depth() {
             let lower_length = lower.root().count_entries();
             (lower_length, length - lower_length)
@@ -483,6 +532,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let mut upper = Self {
             tree: upper,
             length: upper_length,
+            alloc: self.alloc.clone(),
         };
         self.tree.refit_border_siblings::<LastEdge>();
         upper.tree.refit_border_siblings::<FirstEdge>();
@@ -491,7 +541,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 }
 
 #[cfg(any(test, fuzzing))]
-impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Panics unless the map is a well-formed B+-tree of `len()` entries
     /// (D17): in order, balanced, every node at least at its minimum, every
     /// separator's value in a leaf's head, and every node's inline keys and
@@ -516,7 +566,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 }
 
 #[cfg(any(test, feature = "inspect"))]
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// The map's tree, to read node by node: its keys, inline keys, prefixes
     /// and page layouts, as the map stores them. For the visualizer (`vis/`);
     /// the `inspect` feature promises no stability.
@@ -534,21 +584,27 @@ impl<K, V> Default for BBTreeMap<K, V> {
 }
 
 /// Copies the tree node by node, with its shape, as std's map does: calls
-/// `clone` on every key and value, in key order, and no `Ord`.
-impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Clone for BBTreeMap<K, V, S> {
+/// `clone` on every key and value, in key order, and no `Ord`. The copy's
+/// nodes come from a clone of the allocator.
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>, A: Allocator + Clone> Clone
+    for BBTreeMap<K, V, S, A>
+{
     fn clone(&self) -> Self {
+        let alloc = self.alloc.clone();
         Self {
-            tree: self.tree.clone(),
+            tree: self.tree.clone_in(&alloc),
             length: self.length,
+            alloc,
         }
     }
 }
 
-impl<K, Q, V, S> Index<&Q> for BBTreeMap<K, V, S>
+impl<K, Q, V, S, A> Index<&Q> for BBTreeMap<K, V, S, A>
 where
     K: Borrow<Q> + Ord,
     Q: Ord + ?Sized,
     S: InlineKeyStrategy<K>,
+    A: Allocator + Clone,
 {
     type Output = V;
 
@@ -562,29 +618,35 @@ where
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for BBTreeMap<K, V, S> {
+impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
+    for BBTreeMap<K, V, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<K: PartialEq, V: PartialEq, S: InlineKeyStrategy<K>> PartialEq for BBTreeMap<K, V, S> {
+impl<K: PartialEq, V: PartialEq, S: InlineKeyStrategy<K>, A: Allocator + Clone> PartialEq
+    for BBTreeMap<K, V, S, A>
+{
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a == b)
     }
 }
 
-impl<K: Eq, V: Eq, S: InlineKeyStrategy<K>> Eq for BBTreeMap<K, V, S> {}
+impl<K: Eq, V: Eq, S: InlineKeyStrategy<K>, A: Allocator + Clone> Eq for BBTreeMap<K, V, S, A> {}
 
 /// Compares the entries in key order, lexicographically, as std's map does.
-impl<K: PartialOrd, V: PartialOrd, S: InlineKeyStrategy<K>> PartialOrd for BBTreeMap<K, V, S> {
+impl<K: PartialOrd, V: PartialOrd, S: InlineKeyStrategy<K>, A: Allocator + Clone> PartialOrd
+    for BBTreeMap<K, V, S, A>
+{
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.iter().partial_cmp(other.iter())
     }
 }
 
 /// Compares the entries in key order, lexicographically, as std's map does.
-impl<K: Ord, V: Ord, S: InlineKeyStrategy<K>> Ord for BBTreeMap<K, V, S> {
+impl<K: Ord, V: Ord, S: InlineKeyStrategy<K>, A: Allocator + Clone> Ord for BBTreeMap<K, V, S, A> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.iter().cmp(other.iter())
     }
@@ -593,7 +655,9 @@ impl<K: Ord, V: Ord, S: InlineKeyStrategy<K>> Ord for BBTreeMap<K, V, S> {
 /// Hashes the length, then every entry in key order. std's map writes the
 /// length with `Hasher::write_length_prefix`, unstable, whose default is
 /// `write_usize`: the same bytes for every hasher on stable.
-impl<K: Hash, V: Hash, S: InlineKeyStrategy<K>> Hash for BBTreeMap<K, V, S> {
+impl<K: Hash, V: Hash, S: InlineKeyStrategy<K>, A: Allocator + Clone> Hash
+    for BBTreeMap<K, V, S, A>
+{
     fn hash<H: Hasher>(&self, state: &mut H) {
         state.write_usize(self.len());
         for entry in self {
@@ -607,19 +671,21 @@ impl<K: Hash, V: Hash, S: InlineKeyStrategy<K>> Hash for BBTreeMap<K, V, S> {
 ///
 /// Unlike std's map, whose `Drop` marks `K` and `V` `#[may_dangle]` (nightly
 /// only), this one requires the keys and values to strictly outlive the map.
-impl<K, V, S: InlineKeyStrategy<K>> Drop for BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Drop for BBTreeMap<K, V, S, A> {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
 // Keys and values live in the node pages, so moving the map never moves
-// them: like std's map, it is `Unpin` whatever `K` and `V` are.
-impl<K, V, S: InlineKeyStrategy<K>> Unpin for BBTreeMap<K, V, S> {}
+// them: like std's map, it is `Unpin` whatever `K` and `V` are, if its
+// allocator is.
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone + Unpin> Unpin for BBTreeMap<K, V, S, A> {}
 
-// std's map is `UnwindSafe` whenever its keys and values are `RefUnwindSafe`,
-// an impl std keeps for compatibility; match it (D1).
-impl<K: RefUnwindSafe, V: RefUnwindSafe, S: InlineKeyStrategy<K>> UnwindSafe
-    for BBTreeMap<K, V, S>
+// std's map is `UnwindSafe` whenever its keys and values are `RefUnwindSafe`
+// and its allocator `UnwindSafe`, an impl std keeps for compatibility; match
+// it (D1).
+impl<K: RefUnwindSafe, V: RefUnwindSafe, S: InlineKeyStrategy<K>, A: Allocator + Clone + UnwindSafe>
+    UnwindSafe for BBTreeMap<K, V, S, A>
 {
 }

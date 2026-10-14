@@ -50,10 +50,11 @@ use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByType};
+use super::node::page::NodePtr;
 use super::root::Tree;
 use super::search::Found;
 use super::shared_prefix::SharedPrefix;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// The deepest a leaf can be below the root. A non-root internal node has
@@ -202,8 +203,9 @@ unsafe impl<K: Send, V: Send, S> Send for Path<Mut<'_, K, V>, K, V, S> {}
 unsafe impl<K: Sync, V: Sync, S> Sync for Path<Mut<'_, K, V>, K, V, S> {}
 // SAFETY: a dying path stands for ownership of the tree's keys and values,
 // as a `Box<(K, V)>` would: sending it to another thread sends them there,
-// which `K: Send` and `V: Send` allow. The pages come from the global
-// allocator, which any thread may free.
+// which `K: Send` and `V: Send` allow. The pages go back to the allocator
+// the walk holds, which goes with it: the walk is `Send` only if its
+// allocator is.
 unsafe impl<K: Send, V: Send, S> Send for Path<Dying<K, V>, K, V, S> {}
 // SAFETY: as for `Send`; through `&` it only reads.
 unsafe impl<K: Sync, V: Sync, S> Sync for Path<Dying<K, V>, K, V, S> {}
@@ -744,18 +746,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// Goes up to the bottom node's parent and returns it, as
     /// [`Self::ascend`] does; at the root, raises the tree a level first
-    /// ([`Tree::raise`]): the root node moves to a page from `new_leaf_page`
-    /// or `new_internal_page`, by its kind, under the root, now internal
-    /// with no keys, which the path then ends at, at its only edge.
-    pub(in crate::tree) fn ascend_raising(
-        &mut self,
-        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
-        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
-    ) -> Internal<K, V, S> {
+    /// ([`Tree::raise`]): the root node moves to a page of its kind from
+    /// `alloc`, under the root, now internal with no keys, which the path
+    /// then ends at, at its only edge.
+    pub(in crate::tree) fn ascend_raising(&mut self, alloc: &impl Allocator) -> Internal<K, V, S> {
         if !self.path.is_at_root() {
             return self.path.ascend();
         }
-        self.tree.raise(new_leaf_page, new_internal_page);
+        self.tree.raise(alloc);
         self.path.attach(self.tree.root());
         self.path.internal_at(0)
     }
@@ -846,15 +844,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// Detaches the path, which a removal is done with, and lowers the
     /// tree, if merges left the root internal and without keys, moving the
-    /// root's only child up into the root ([`Tree::lower`]), and handing the
-    /// child's page to `release`.
-    pub(in crate::tree) fn detach_lowering_an_empty_root(
-        &mut self,
-        release: &mut impl FnMut(PageByType<K, V, S>),
-    ) {
+    /// root's only child up into the root ([`Tree::lower`]), and giving the
+    /// child's page back to `alloc`.
+    pub(in crate::tree) fn detach_lowering_an_empty_root(&mut self, alloc: &impl Allocator) {
         self.path = Path::detached();
         if matches!(self.tree.root(), Node::Internal(root) if root.len() == 0) {
-            release(self.tree.lower());
+            self.tree.lower().deallocate(alloc);
         }
     }
 

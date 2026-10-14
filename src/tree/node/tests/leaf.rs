@@ -28,7 +28,7 @@ fn push_back<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, key: K, value: 
 /// Takes `leaf`, which the caller owns, apart, releasing its page to
 /// `pages`.
 fn destroy_leaf<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, pages: &TestPages<K, V, S>) {
-    Node::Leaf(leaf).destroy(|page| pages.release(page));
+    Node::Leaf(leaf).destroy(&pages);
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 model.entries.insert(index, (key.id(), value.tracked_id()));
                 let leaf = tree.root().expect_leaf();
-                match leaf.insert(index, WindowedKey::new(key, 0), value, || pages.fresh()) {
+                match leaf.insert(index, WindowedKey::new(key, 0), value, &pages) {
                     Insertion::Fit(fitted) => assert_eq!(fitted, index),
                     Insertion::Split(split) => {
                         model.assert_split_halves(leaf, &split);
@@ -381,7 +381,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     if leaf.has_head() {
         drop(leaf.take_head());
     }
-    tree.destroy(|page| pages.release(page));
+    tree.destroy(&pages);
     pages.assert_all_released();
     splits
 }
@@ -474,8 +474,7 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     model
         .entries
         .insert(position, (key.id(), value.tracked_id()));
-    let Insertion::Split(split) =
-        leaf.insert(position, WindowedKey::new(key, 0), value, || pages.fresh())
+    let Insertion::Split(split) = leaf.insert(position, WindowedKey::new(key, 0), value, &pages)
     else {
         panic!("a full leaf splits");
     };
@@ -520,20 +519,14 @@ fn split_and_insert_at_every_position() {
 fn popping_and_reinserting_at_a_border_neither_merges_nor_splits() {
     for at_front in [false, true] {
         let pages = TestPages::<u64, u64>::new();
-        let mut tree = Tree::new(pages.fresh());
+        let mut tree = Tree::<u64, u64, Auto>::new(pages.fresh());
         let mut length = 0;
         let capacity = Leaf::<u64, u64, Auto>::capacity() as u64;
         for key in 1..=capacity {
-            tree.insert(key, key, || pages.fresh(), || pages.fresh(), &mut length);
+            tree.insert(key, key, &pages, &mut length);
         }
         let border_key = if at_front { 0 } else { capacity + 1 };
-        tree.insert(
-            border_key,
-            border_key,
-            || pages.fresh(),
-            || pages.fresh(),
-            &mut length,
-        );
+        tree.insert(border_key, border_key, &pages, &mut length);
         assert_eq!(tree.leaf_depth(), 1);
         let root = tree.root().node_ptr();
         let allocated = pages.allocated_count();
@@ -541,27 +534,22 @@ fn popping_and_reinserting_at_a_border_neither_merges_nor_splits() {
 
         for _ in 0..16 {
             let removed = if at_front {
-                tree.pop_first(|page| pages.release(page), &mut length)
+                tree.pop_first(&pages, &mut length)
             } else {
-                tree.pop_last(|page| pages.release(page), &mut length)
+                tree.pop_last(&pages, &mut length)
             };
             assert_eq!(removed, Some((border_key, border_key)));
             assert_eq!(tree.leaf_depth(), 1, "a pop must not lower the tree");
             assert!(tree.root().node_ptr().is(root));
             assert_eq!(pages.in_use_count(), in_use, "a pop must not merge");
             assert_eq!(
-                tree.insert(
-                    border_key,
-                    border_key,
-                    || panic!("the insert must not split a leaf"),
-                    || panic!("the insert must not split an internal node"),
-                    &mut length,
-                ),
-                None,
+                tree.insert(border_key, border_key, &pages, &mut length),
+                None
             );
+            assert_eq!(pages.in_use_count(), in_use, "an insert must not split");
             assert_eq!(pages.allocated_count(), allocated);
         }
-        tree.destroy(|page| pages.release(page));
+        tree.destroy(&pages);
         pages.assert_all_released();
     }
 }
@@ -597,9 +585,7 @@ fn zero_sized_keys_and_values() {
         len += 1;
     }
     assert_eq!(len, 1023);
-    let Insertion::Split(split) =
-        leaf.insert(len / 2, WindowedKey::new((), 0), (), || pages.fresh())
-    else {
+    let Insertion::Split(split) = leaf.insert(len / 2, WindowedKey::new((), 0), (), &pages) else {
         panic!("a full leaf splits");
     };
     assert_eq!(leaf.len() + 1 + split.right.len(), len + 1);

@@ -14,9 +14,9 @@
 use core::fmt;
 
 use super::BBTreeMap;
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::inline_keys::SearchKey;
-use crate::tree::node::page::{FreshPage, PageByType};
 use crate::tree::path::PathMut;
 use crate::tree::root::Tree;
 
@@ -26,18 +26,20 @@ use crate::tree::root::Tree;
 /// This `enum` is constructed from the [`entry`] method on [`BBTreeMap`].
 ///
 /// [`entry`]: BBTreeMap::entry
-pub enum Entry<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K> = Auto> {
+pub enum Entry<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K> = Auto, A: Allocator + Clone = Global> {
     /// A vacant entry.
-    Vacant(VacantEntry<'a, K, V, S>),
+    Vacant(VacantEntry<'a, K, V, S, A>),
     /// An occupied entry.
-    Occupied(OccupiedEntry<'a, K, V, S>),
+    Occupied(OccupiedEntry<'a, K, V, S, A>),
 }
 
 /// A view into a vacant entry in a `BBTreeMap`. It is part of the [`Entry`]
 /// enum.
-pub struct VacantEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
+pub struct VacantEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto, A: Allocator + Clone = Global> {
     key: K,
     length: &'a mut usize,
+    /// The map's allocator, which the insertion takes pages from.
+    alloc: &'a A,
     place: VacantPlace<'a, K, V, S>,
 }
 
@@ -76,15 +78,17 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantPlace<'a, K, V, S> {
 
 /// A view into an occupied entry in a `BBTreeMap`. It is part of the
 /// [`Entry`] enum.
-pub struct OccupiedEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
+pub struct OccupiedEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto, A: Allocator + Clone = Global> {
     length: &'a mut usize,
+    /// The map's allocator, which a removal gives pages back to.
+    alloc: &'a A,
     /// To the key: in a leaf, or a separator in an internal node, whose
     /// value is a leaf's head (D17).
     path: PathMut<'a, K, V, S>,
 }
 
-impl<K: fmt::Debug + Ord, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug
-    for Entry<'_, K, V, S>
+impl<K: fmt::Debug + Ord, V: fmt::Debug, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
+    for Entry<'_, K, V, S, A>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -94,14 +98,16 @@ impl<K: fmt::Debug + Ord, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug
     }
 }
 
-impl<K: fmt::Debug + Ord, V, S: InlineKeyStrategy<K>> fmt::Debug for VacantEntry<'_, K, V, S> {
+impl<K: fmt::Debug + Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
+    for VacantEntry<'_, K, V, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("VacantEntry").field(self.key()).finish()
     }
 }
 
-impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug
-    for OccupiedEntry<'_, K, V, S>
+impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
+    for OccupiedEntry<'_, K, V, S, A>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedEntry")
@@ -111,7 +117,7 @@ impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug
     }
 }
 
-impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> Entry<'a, K, V, S> {
+impl<'a, K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Entry<'a, K, V, S, A> {
     /// Ensures a value is in the entry by inserting the default if empty,
     /// and returns a mutable reference to the value in the entry.
     ///
@@ -243,7 +249,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> Entry<'a, K, V, S> {
     ///
     /// assert_eq!(entry.key(), &"poneyland");
     /// ```
-    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S> {
+    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S, A> {
         match self {
             Self::Occupied(mut entry) => {
                 entry.insert(value);
@@ -254,7 +260,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Ord, V: Default, S: InlineKeyStrategy<K>> Entry<'a, K, V, S> {
+impl<'a, K: Ord, V: Default, S: InlineKeyStrategy<K>, A: Allocator + Clone> Entry<'a, K, V, S, A> {
     /// Ensures a value is in the entry by inserting the default value if
     /// empty, and returns a mutable reference to the value in the entry.
     ///
@@ -276,7 +282,7 @@ impl<'a, K: Ord, V: Default, S: InlineKeyStrategy<K>> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
+impl<'a, K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> VacantEntry<'a, K, V, S, A> {
     /// Gets a reference to the key that would be used when inserting a value
     /// through the `VacantEntry`.
     ///
@@ -327,8 +333,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// assert_eq!(map["poneyland"], 37);
     /// ```
     pub fn insert(self, value: V) -> &'a mut V {
-        let (path, _) = self.insert_and_count(value);
-        path.into_value_mut()
+        self.insert_entry(value).into_mut()
     }
 
     /// Sets the value of the entry with the `VacantEntry`'s key, and returns
@@ -348,31 +353,33 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
     /// }
     /// assert_eq!(map["poneyland"], 37);
     /// ```
-    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S> {
-        let (path, length) = self.insert_and_count(value);
-        OccupiedEntry { length, path }
-    }
-
-    /// Inserts the key with `value`, counting it in the map's length, and
-    /// returns the path to the new entry, and the length.
-    fn insert_and_count(self, value: V) -> (PathMut<'a, K, V, S>, &'a mut usize) {
-        let Self { key, length, place } = self;
+    pub fn insert_entry(self, value: V) -> OccupiedEntry<'a, K, V, S, A> {
+        let Self {
+            key,
+            length,
+            alloc,
+            place,
+        } = self;
         let mut path = match place {
             VacantPlace::InTree(path) => path,
             VacantPlace::NoTree(tree) => {
-                tree.ensure_root_page();
+                tree.ensure_root_page(alloc);
                 let mut path = PathMut::new(tree);
                 path.start_at_root();
                 path
             }
         };
         path.cover_key(&key);
-        path.insert(key, value, FreshPage::allocate, FreshPage::allocate, length);
-        (path, length)
+        path.insert(key, value, alloc, length);
+        OccupiedEntry {
+            length,
+            alloc,
+            path,
+        }
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, K, V, S, A> {
     /// Gets a reference to the key in the entry.
     ///
     /// # Examples
@@ -409,7 +416,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert!(map.is_empty());
     /// ```
     pub fn remove_entry(mut self) -> (K, V) {
-        self.path.remove(PageByType::deallocate, self.length)
+        self.path.remove(self.alloc, self.length)
     }
 
     /// Gets a reference to the value in the entry.
@@ -531,7 +538,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Gets the given key's corresponding entry in the map for in-place
     /// manipulation.
     ///
@@ -558,14 +565,27 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(count["b"], 2);
     /// assert_eq!(count["c"], 1);
     /// ```
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S>
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S, A>
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
         match VacantPlace::search(tree, &key) {
-            Ok(path) => Entry::Occupied(OccupiedEntry { length, path }),
-            Err(place) => Entry::Vacant(VacantEntry { key, length, place }),
+            Ok(path) => Entry::Occupied(OccupiedEntry {
+                length,
+                alloc,
+                path,
+            }),
+            Err(place) => Entry::Vacant(VacantEntry {
+                key,
+                length,
+                alloc,
+                place,
+            }),
         }
     }
 
@@ -582,11 +602,21 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
         match VacantPlace::search(tree, &key) {
             Ok(mut path) => Some(path.replace_key(key)),
             Err(place) => {
-                VacantEntry { key, length, place }.insert_and_count(value);
+                let vacant = VacantEntry {
+                    key,
+                    length,
+                    alloc,
+                    place,
+                };
+                vacant.insert_entry(value);
                 None
             }
         }
@@ -611,17 +641,25 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(*map.get(&1).unwrap(), "first");
     /// assert_eq!(*map.get(&2).unwrap(), "b");
     /// ```
-    pub fn first_entry(&mut self) -> Option<OccupiedEntry<'_, K, V, S>>
+    pub fn first_entry(&mut self) -> Option<OccupiedEntry<'_, K, V, S, A>>
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
         if !tree.has_root() {
             return None;
         }
         let mut path = PathMut::new(tree);
         if path.descend_to_first_key() {
-            Some(OccupiedEntry { length, path })
+            Some(OccupiedEntry {
+                length,
+                alloc,
+                path,
+            })
         } else {
             None
         }
@@ -646,17 +684,25 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(*map.get(&1).unwrap(), "a");
     /// assert_eq!(*map.get(&2).unwrap(), "last");
     /// ```
-    pub fn last_entry(&mut self) -> Option<OccupiedEntry<'_, K, V, S>>
+    pub fn last_entry(&mut self) -> Option<OccupiedEntry<'_, K, V, S, A>>
     where
         K: Ord,
     {
-        let Self { tree, length } = self;
+        let Self {
+            tree,
+            length,
+            alloc,
+        } = self;
         if !tree.has_root() {
             return None;
         }
         let mut path = PathMut::new(tree);
         if path.descend_to_last_key() {
-            Some(OccupiedEntry { length, path })
+            Some(OccupiedEntry {
+                length,
+                alloc,
+                path,
+            })
         } else {
             None
         }

@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use super::BBTreeMap;
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::build::TreeBuilder;
 
@@ -24,20 +25,27 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
     /// of equal keys is kept; the others are dropped in order.
     fn from_sorted_keeping_last(entries: impl Iterator<Item = (K, V)>) -> Self {
-        Self::from_ascending_entries(LastOfEqualKeys {
+        let entries = LastOfEqualKeys {
             entries: entries.peekable(),
-        })
+        };
+        Self::from_ascending_entries(entries, Global)
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// A map of `entries`, whose keys ascend strictly, built into full nodes
-    /// comparing no keys (`tree/build.rs`). Keys out of order make a map
-    /// whose searches give wrong answers, but that is memory-safe.
-    pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        let mut builder = TreeBuilder::new();
+    /// comparing no keys (`tree/build.rs`), on pages from `alloc`. Keys out
+    /// of order make a map whose searches give wrong answers, but that is
+    /// memory-safe.
+    pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>, alloc: A) -> Self {
+        let mut builder = TreeBuilder::new(&alloc);
         builder.extend(entries);
-        Self::from_builder(builder)
+        let (tree, length) = builder.finish();
+        Self {
+            tree,
+            length,
+            alloc,
+        }
     }
 }
 
@@ -90,7 +98,9 @@ impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BBTreeMap<K, V> {
     }
 }
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Extend<(K, V)> for BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Extend<(K, V)>
+    for BBTreeMap<K, V, S, A>
+{
     /// Inserts each entry in turn, as `insert` does.
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
         for (key, value) in iter {
@@ -99,8 +109,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Extend<(K, V)> for BBTreeMap<K, V, S> {
     }
 }
 
-impl<'a, K: Ord + Copy, V: Copy, S: InlineKeyStrategy<K>> Extend<(&'a K, &'a V)>
-    for BBTreeMap<K, V, S>
+impl<'a, K: Ord + Copy, V: Copy, S: InlineKeyStrategy<K>, A: Allocator + Clone>
+    Extend<(&'a K, &'a V)> for BBTreeMap<K, V, S, A>
 {
     /// Inserts a copy of each entry in turn, as `insert` does.
     fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {

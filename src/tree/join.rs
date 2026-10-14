@@ -32,11 +32,12 @@ use core::mem;
 use super::node::inline_keys::{Separator, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByType};
+use super::node::page::NodePtr;
 use super::node::siblings::Siblings;
 use super::node::{Child, Insertion, Node};
 use super::path::{FirstEdge, LastEdge, NodeEnd, PathMut};
 use super::root::Tree;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// Where a join left its separator: in the node on the border it joined
@@ -56,7 +57,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// ascend in that order, which both have entries, and whose keys share
     /// the same bytes as this tree's (D50), into this tree. Compares no keys;
     /// keys out of order make a tree whose searches give wrong answers, but
-    /// that is memory-safe. Pages come from and go to the global allocator.
+    /// that is memory-safe. Pages come from and go back to `alloc`, the
+    /// allocator both trees' pages came from.
     ///
     /// The caller computes the separator's window, which calls `InlineKey`,
     /// while it still holds `right`: a panic then leaves both trees with
@@ -68,6 +70,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         separator: WindowedKey<K, S>,
         value: V,
         mut right: Self,
+        alloc: &impl Allocator,
     ) {
         // Down `right`'s left border, the one the join walks there, counting
         // how deep its leaves lie, to its first leaf, which takes the value.
@@ -83,10 +86,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         };
         let left_depth = self.leaf_depth();
         if left_depth >= right_depth {
-            self.join_at_border::<LastEdge>(separator, right, right_depth);
+            self.join_at_border::<LastEdge>(separator, right, right_depth, alloc);
         } else {
             let left = mem::replace(self, right);
-            self.join_at_border::<FirstEdge>(separator, left, left_depth);
+            self.join_at_border::<FirstEdge>(separator, left, left_depth, alloc);
         }
     }
 
@@ -100,13 +103,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         separator: Separator<K, S>,
         shorter: Self,
         shorter_depth: usize,
+        alloc: &impl Allocator,
     ) {
         // The shorter root hangs under an edge, on a plain page.
-        let shorter = shorter.into_node();
+        let shorter = shorter.into_node(alloc);
         let hung = {
             let mut path = PathMut::new(self);
             path.descend_border::<End>(shorter_depth);
-            let place = path.absorb_or_hang::<End>(separator, shorter, shorter_depth);
+            let place = path.absorb_or_hang::<End>(separator, shorter, shorter_depth, alloc);
             path.refit_separator_spines(&place);
             place.hung
         };
@@ -139,6 +143,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         separator: Separator<K, S>,
         shorter: Node<K, V, S>,
         shorter_depth: usize,
+        alloc: &impl Allocator,
     ) -> SeparatorPlace {
         let right = if End::IS_LAST {
             shorter
@@ -150,7 +155,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         let index = self.node().len();
         let (separator, right) = match self.node().absorb(separator, right) {
             Ok(page) => {
-                PageByType::deallocate(page);
+                page.deallocate(alloc);
                 return SeparatorPlace {
                     child_edge: None,
                     index,
@@ -159,7 +164,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             }
             Err(unabsorbed) => unabsorbed,
         };
-        self.hang_beside(separator, right);
+        self.hang_beside(separator, right, alloc);
         // Inserted at the border's edge, the separator is the border node's
         // key on that side one level up, in the half on that side if it
         // split.
@@ -176,14 +181,19 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// that node, under `separator`, in the node one level up: under a new
     /// root if the node is the root, which the tree raises for it;
     /// splitting up the path while full, each split's right half hung
-    /// right of its left half the same way.
-    fn hang_beside(&mut self, separator: Separator<K, S>, right: Node<K, V, S>) {
+    /// right of its left half the same way, on a page from `alloc`.
+    fn hang_beside(
+        &mut self,
+        separator: Separator<K, S>,
+        right: Node<K, V, S>,
+        alloc: &impl Allocator,
+    ) {
         let mut carried = (separator, right);
         loop {
             let (separator, right) = carried;
-            let node = self.ascend_raising(FreshPage::allocate, FreshPage::allocate);
+            let node = self.ascend_raising(alloc);
             let index = self.index();
-            match node.insert(index, separator, right, FreshPage::allocate) {
+            match node.insert(index, separator, right, alloc) {
                 Insertion::Fit(_) => return,
                 Insertion::Split(split) => {
                     carried = (split.separator, Node::Internal(split.right));
@@ -282,89 +292,89 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///
     /// Both trees stay with owners that take them apart while `InlineKey`
     /// runs, as the last entry's removal, its window and the join call it:
-    /// a panic then drops their entries rather than leaking them.
-    pub(crate) fn concat(left: Self, right: Self) -> Self {
-        let (left, right) = (Self::destroy_if_empty(left), Self::destroy_if_empty(right));
+    /// a panic then drops their entries rather than leaking them. Pages
+    /// come from and go back to `alloc`, the allocator both trees' pages
+    /// came from.
+    pub(crate) fn concat(left: Self, right: Self, alloc: &impl Allocator) -> Self {
+        let left = Self::destroy_if_empty(left, alloc);
+        let right = Self::destroy_if_empty(right, alloc);
         if !left.has_root() {
             return right;
         }
         if !right.has_root() {
             return left;
         }
-        let (mut left, mut right) = (DetachedTree(left), DetachedTree(right));
+        let mut left = DetachedTree::new(left, alloc);
+        let mut right = DetachedTree::new(right, alloc);
         let mut left_length = 1;
-        let (key, value) = (left.0)
-            .pop_last(PageByType::deallocate, &mut left_length)
+        let (key, value) = (left.tree)
+            .pop_last(alloc, &mut left_length)
             .expect("a tree with entries has a last one");
-        left.0 = Self::destroy_if_empty(left.0.take());
-        if !left.0.has_root() {
+        left.tree = Self::destroy_if_empty(left.take(), alloc);
+        if !left.tree.has_root() {
             let mut right_length = 0;
-            let mut path = PathMut::new(&mut right.0);
+            let mut path = PathMut::new(&mut right.tree);
             path.start_at_root();
             path.descend_to_leaf::<FirstEdge>();
             path.cover_key(&key);
-            path.insert(
-                key,
-                value,
-                FreshPage::allocate,
-                FreshPage::allocate,
-                &mut right_length,
-            );
-            return right.0.take();
+            path.insert(key, value, alloc, &mut right_length);
+            return right.take();
         }
         // Both trees' keys, and the separator, share what both trees' keys
         // share with the separator (D50).
-        let shared_with_key =
-            |tree: &DetachedTree<K, V, S>| tree.0.shared_prefix().len_shared_with::<K, S>(&key);
-        let shared_len = shared_with_key(&left).min(shared_with_key(&right));
+        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
+        let shared_len = shared_with_key(&left.tree).min(shared_with_key(&right.tree));
         let separator = WindowedKey::new(key, shared_len);
-        let mut right = right.0.take();
-        left.0.shrink_shared_prefix_to(shared_len);
+        let mut right = right.take();
+        left.tree.shrink_shared_prefix_to(shared_len);
         right.shrink_shared_prefix_to(shared_len);
-        left.0.join(separator, value, right);
-        left.0.take()
+        left.tree.join(separator, value, right, alloc);
+        left.take()
     }
 
-    /// `tree`, if it has entries; otherwise it is taken apart, and no tree
-    /// is left.
-    fn destroy_if_empty(tree: Self) -> Self {
+    /// `tree`, if it has entries; otherwise it is taken apart, its pages
+    /// going back to `alloc`, and no tree is left.
+    fn destroy_if_empty(tree: Self, alloc: &impl Allocator) -> Self {
         if tree
             .root_page()
             .is_some_and(|root_page| root_page.node().len() > 0)
         {
             return tree;
         }
-        tree.destroy(PageByType::deallocate);
+        tree.destroy(alloc);
         Self::EMPTY
     }
 }
 
 /// A tree held apart from any map, as the pieces [`Tree::concat`] joins
-/// are, and the entries after an `extract_if`'s range while its walk lasts:
-/// taken apart if dropped.
-pub(crate) struct DetachedTree<K, V, S: InlineKeyStrategy<K>>(Tree<K, V, S>);
+/// are, and the entries after an `extract_if`'s range while its walk lasts,
+/// with the allocator its pages came from: taken apart if dropped.
+pub(crate) struct DetachedTree<K, V, S: InlineKeyStrategy<K>, A: Allocator> {
+    tree: Tree<K, V, S>,
+    alloc: A,
+}
 
-impl<K, V, S: InlineKeyStrategy<K>> DetachedTree<K, V, S> {
-    pub(crate) fn new(tree: Tree<K, V, S>) -> Self {
-        Self(tree)
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DetachedTree<K, V, S, A> {
+    pub(crate) fn new(tree: Tree<K, V, S>, alloc: A) -> Self {
+        Self { tree, alloc }
     }
 
     pub(crate) fn tree_mut(&mut self) -> &mut Tree<K, V, S> {
-        &mut self.0
+        &mut self.tree
     }
 
     pub(crate) fn take(&mut self) -> Tree<K, V, S> {
-        self.0.take()
+        self.tree.take()
     }
 
     /// The first entry, for `Debug` to print where std's walk would.
     pub(crate) fn first_key_value(&self) -> Option<(&K, &V)> {
-        self.0.first_key_value()
+        self.tree.first_key_value()
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Drop for DetachedTree<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for DetachedTree<K, V, S, A> {
     fn drop(&mut self) {
-        self.0.take().destroy(PageByType::deallocate);
+        self.tree.take().destroy(&self.alloc);
     }
 }

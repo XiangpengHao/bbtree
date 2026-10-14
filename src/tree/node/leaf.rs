@@ -29,6 +29,8 @@ use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
+#[cfg(test)]
+use crate::allocator::Allocator;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// A leaf, by its page.
@@ -786,20 +788,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
     /// Inserts `key`, with its inline key, and `value` at edge `index`,
     /// splitting the leaf first if it is full, with the right half in a page
-    /// from `new_page`.
+    /// from `alloc`.
     #[cfg(test)]
     pub(in crate::tree) fn insert(
         self,
         index: usize,
         key: WindowedKey<K, S>,
         value: V,
-        new_page: impl FnOnce() -> FreshPage<Self>,
+        alloc: &impl Allocator,
     ) -> Insertion<K, S, Self> {
         if self.len() < Self::capacity() {
             self.insert_fit(index, key, value);
             Insertion::Fit(index)
         } else {
-            Insertion::Split(self.split_insert(index, key, value, new_page()))
+            let right_page = FreshPage::allocate(alloc);
+            Insertion::Split(self.split_insert(index, key, value, right_page))
         }
     }
 

@@ -30,10 +30,10 @@ use core::borrow::Borrow;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::PageByType;
 use super::node::{Child, Node};
 use super::path::{FirstEdge, MAX_DEPTH, PathMut};
 use super::root::Tree;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
@@ -44,12 +44,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// panicking `Ord` leaves the tree unchanged. `InlineKey` is called
     /// before anything changes too, and last, once the entry is out and
     /// counted: a panic there leaves a tree without it, still valid. Every
-    /// page a merge frees, and the root's if a merge empties it, goes to
-    /// `release`.
+    /// page a merge frees, and the root's if a merge empties it, goes back
+    /// to `alloc`, the map's allocator.
     pub(crate) fn remove_entry<Q>(
         &mut self,
         key: &Q,
-        release: impl FnMut(PageByType<K, V, S>),
+        alloc: &impl Allocator,
         length: &mut usize,
     ) -> Option<(K, V)>
     where
@@ -61,7 +61,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         let mut path = PathMut::new(self);
         if path.search(&SearchKey::new(key)) {
-            Some(path.remove(release, length))
+            Some(path.remove(alloc, length))
         } else {
             None
         }
@@ -72,7 +72,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_first(
         &mut self,
-        release: impl FnMut(PageByType<K, V, S>),
+        alloc: &impl Allocator,
         length: &mut usize,
     ) -> Option<(K, V)> {
         if !self.has_root() {
@@ -80,7 +80,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         let mut path = PathMut::new(self);
         if path.descend_to_first_key() {
-            Some(path.remove(release, length))
+            Some(path.remove(alloc, length))
         } else {
             None
         }
@@ -91,7 +91,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_last(
         &mut self,
-        release: impl FnMut(PageByType<K, V, S>),
+        alloc: &impl Allocator,
         length: &mut usize,
     ) -> Option<(K, V)> {
         if !self.has_root() {
@@ -99,7 +99,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         let mut path = PathMut::new(self);
         if path.descend_to_last_key() {
-            Some(path.remove(release, length))
+            Some(path.remove(alloc, length))
         } else {
             None
         }
@@ -114,16 +114,12 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// # Panics
     ///
     /// If the path ends at no key.
-    pub(crate) fn remove(
-        &mut self,
-        mut release: impl FnMut(PageByType<K, V, S>),
-        length: &mut usize,
-    ) -> (K, V) {
+    pub(crate) fn remove(&mut self, alloc: &impl Allocator, length: &mut usize) -> (K, V) {
         let entry_depth = self.depth();
         let entry_index = self.index();
         let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
             let entry = leaf.remove(entry_index);
-            (entry, self.fix_up_the_path(None, &mut release, |_| {}))
+            (entry, self.fix_up_the_path(None, alloc, |_| {}))
         } else {
             self.refit_left_of_separator();
             // The separator's value is the head of the leftmost leaf right
@@ -136,7 +132,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
-            let changed = self.fix_up_the_path(Some(entry_depth), &mut release, |node| {
+            let changed = self.fix_up_the_path(Some(entry_depth), alloc, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
                 replaced = Some(node.replace_separator_from_below(entry_index, successor));
             });
@@ -148,7 +144,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         };
         *length -= 1;
         self.refit_changed_fences(&changed);
-        self.detach_lowering_an_empty_root(&mut release);
+        self.detach_lowering_an_empty_root(alloc);
         entry
     }
 
@@ -161,7 +157,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     fn fix_up_the_path(
         &mut self,
         must_reach: Option<usize>,
-        release: &mut impl FnMut(PageByType<K, V, S>),
+        alloc: &impl Allocator,
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
         let mut changed = ChangedFences::new(self.depth(), must_reach);
@@ -177,9 +173,9 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             }
             if child_lost_a_key {
                 let fix = if node.has_leaf_children() {
-                    node.fix_underfull_child::<Leaf<K, V, S>>(index, release)
+                    node.fix_underfull_child::<Leaf<K, V, S>>(index, alloc)
                 } else {
-                    node.fix_underfull_child::<Internal<K, V, S>>(index, release)
+                    node.fix_underfull_child::<Internal<K, V, S>>(index, alloc)
                 };
                 child_lost_a_key = matches!(
                     fix,
@@ -294,7 +290,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// entry short of its minimum (D22): merges it with a sibling, the left
     /// one if it has one, or, if the two don't fit in one node with the
     /// separator between them, moves one entry over from the sibling. The
-    /// page a merge frees goes to `release`. Only a merge takes a separator
+    /// page a merge frees goes back to `alloc`. Only a merge takes a separator
     /// from this node.
     ///
     /// A sibling too full to merge with holds more than `capacity - min_len`
@@ -311,7 +307,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     fn fix_underfull_child<C: Child<K, V, S>>(
         self,
         index: usize,
-        release: &mut impl FnMut(PageByType<K, V, S>),
+        alloc: &impl Allocator,
     ) -> ChildFix {
         if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;
@@ -326,7 +322,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let mut siblings = self.siblings::<C>(separator_index);
         let left_len = siblings.left_len();
         if siblings.can_merge() {
-            release(siblings.merge());
+            siblings.merge().deallocate(alloc);
             return if child_is_right {
                 ChildFix::MergedIntoLeft { left_len }
             } else {

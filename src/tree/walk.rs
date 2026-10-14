@@ -87,6 +87,7 @@ use super::path::{
     CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, Path, ValMut,
 };
 use super::shared_prefix::SharedPrefix;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A borrow type that walks can hand out entries with: what it hands out
@@ -1035,8 +1036,8 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
 }
 
 /// A walk that takes a tree apart: it moves every entry out, in key order
-/// from either end, and frees each node, its page going to `release`, once
-/// its ends are done with it (module safety argument). Nothing shifts and
+/// from either end, and frees each node, its page going back to `alloc`, the
+/// allocator it came from, once its ends are done with it (module safety argument). Nothing shifts and
 /// nothing is rebalanced, as nothing but the walk sees the tree again.
 ///
 /// Dropping it drops the entries left between its ends in ascending order,
@@ -1044,36 +1045,36 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
 /// nodes left. If one of their `Drop`s panics, the rest are still dropped,
 /// in the same order, and every node freed, before the panic goes on; a
 /// second panic aborts, as any panic during unwinding does.
-pub(crate) struct DyingWalk<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> {
+pub(crate) struct DyingWalk<K, V, S: InlineKeyStrategy<K>, A: Allocator> {
     walk: FullWalk<Dying<K, V>, K, V, S>,
-    release: R,
+    alloc: A,
     /// Whether the tree's top node is in a root page, which is freed as one.
     top_in_root_page: bool,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, V, S, R> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
     /// A walk taking apart the tree in `root_page`, of `length` entries, if
     /// any.
     ///
     /// A walk that only its front moves needs no count: given `usize::MAX`,
     /// it ends where the tree does.
-    pub(crate) fn new(root_page: Option<RootPage<K, V, S>>, length: usize, release: R) -> Self {
+    pub(crate) fn new(root_page: Option<RootPage<K, V, S>>, length: usize, alloc: A) -> Self {
         Self {
             walk: FullWalk::new(root_page, length),
-            release,
+            alloc,
             top_in_root_page: true,
         }
     }
 
     /// A walk taking apart the nodes under `top`, on plain pages: what is
     /// left of a tree being made (`tree/clone.rs`).
-    pub(in crate::tree) fn of_subtree(top: Node<K, V, S>, release: R) -> Self {
+    pub(in crate::tree) fn of_subtree(top: Node<K, V, S>, alloc: A) -> Self {
         let top = WalkTop {
             node: top.node_ptr(),
         };
         Self {
             walk: FullWalk::from_top(Some(top), usize::MAX),
-            release,
+            alloc,
             top_in_root_page: false,
         }
     }
@@ -1085,20 +1086,20 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
 
     /// Moves out the entry after the front end, if any is left.
     pub(crate) fn next(&mut self) -> Option<(K, V)> {
-        let release = &mut self.release;
+        let alloc = &self.alloc;
         self.walk.next_leaving(&mut |node| {
             // SAFETY: the walk is done with every node it leaves (module
             // safety argument), so each is freed once.
-            release(unsafe { node.free() });
+            unsafe { node.free() }.deallocate(alloc);
         })
     }
 
     /// Moves out the entry before the back end, if any is left.
     pub(crate) fn next_back(&mut self) -> Option<(K, V)> {
-        let release = &mut self.release;
+        let alloc = &self.alloc;
         self.walk.next_back_leaving(&mut |node| {
             // SAFETY: as for `next`.
-            release(unsafe { node.free() });
+            unsafe { node.free() }.deallocate(alloc);
         })
     }
 
@@ -1120,10 +1121,10 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
             return;
         };
         if !needs_drop::<K>() && !needs_drop::<V>() && !ends.back.path.is_attached() {
-            let release = &mut self.release;
+            let alloc = &self.alloc;
             let mut leave = |node: Node<K, V, S>| {
                 // SAFETY: as for `next`.
-                release(unsafe { node.free() });
+                unsafe { node.free() }.deallocate(alloc);
             };
             while ends.front.skip_to_next_leaf(ends.top, &mut leave) {}
             self.walk.length = 0;
@@ -1156,22 +1157,23 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
             // path is freed, and every entry on it moved out or skipped for
             // having no drop glue (module safety argument); each node here
             // is freed once, after its children.
-            (self.release)(unsafe { path.node_at(depth).free() });
+            unsafe { path.node_at(depth).free() }.deallocate(&self.alloc);
         }
         let top = path.node_at(0);
         // SAFETY: as for the nodes below; the top goes last, in its root page
         // if it has one, which nothing reaches anymore.
-        (self.release)(unsafe {
+        let top_page: PageByType<K, V, S> = unsafe {
             if self.top_in_root_page {
                 RootPage::of_node(top).free().into()
             } else {
                 top.free()
             }
-        });
+        };
+        top_page.deallocate(&self.alloc);
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> Drop for DyingWalk<K, V, S, R> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for DyingWalk<K, V, S, A> {
     fn drop(&mut self) {
         let rest = DropRest(self);
         // A panicking `Drop` unwinds through `rest`, whose own `Drop` goes on
@@ -1181,13 +1183,9 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> Drop for Dyin
 }
 
 /// The rest of a [`DyingWalk`] being dropped, which dropping this drops.
-struct DropRest<'w, K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)>(
-    &'w mut DyingWalk<K, V, S, R>,
-);
+struct DropRest<'w, K, V, S: InlineKeyStrategy<K>, A: Allocator>(&'w mut DyingWalk<K, V, S, A>);
 
-impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> Drop
-    for DropRest<'_, K, V, S, R>
-{
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for DropRest<'_, K, V, S, A> {
     fn drop(&mut self) {
         self.0.drop_rest();
     }

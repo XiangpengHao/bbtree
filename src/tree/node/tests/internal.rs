@@ -116,7 +116,7 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
                 let name = child.expect_leaf().keys()[0].tracked_id();
                 assert_eq!(name, children.remove(index + 1));
                 drop(separator);
-                child.destroy(|page| pages.release(page));
+                child.destroy(&pages);
             }
             6 if len > 0 => {
                 let index = rng.below(len);
@@ -156,7 +156,7 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
         assert_eq!(child_names(root), children);
         root.assert_inline_keys_match();
     }
-    tree.destroy(|page| pages.release(page));
+    tree.destroy(&pages);
     pages.assert_all_released();
 }
 
@@ -199,7 +199,7 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
 
     let Insertion::Split(Split {
         separator, right, ..
-    }) = left.insert(position, separator, child, || pages.fresh())
+    }) = left.insert(position, separator, child, &pages)
     else {
         panic!("a full node splits");
     };
@@ -221,8 +221,8 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     left.assert_inline_keys_match();
     right.assert_inline_keys_match();
     drop(separator);
-    Node::Internal(right).destroy(|page| pages.release(page));
-    tree.destroy(|page| pages.release(page));
+    Node::Internal(right).destroy(&pages);
+    tree.destroy(&pages);
     pages.assert_all_released();
 }
 
@@ -260,7 +260,7 @@ fn insert_rejects_a_child_of_the_wrong_kind() {
     assert!(rejected.is_err());
     assert_eq!(root.len(), 0);
     assert_eq!(child_names(root), [first_name]);
-    tree.destroy(|page| pages.release(page));
+    tree.destroy(&pages);
     assert_eq!(pages.in_use_count(), 2, "only the rejected child is leaked");
 }
 
@@ -283,7 +283,7 @@ fn balancing_refuses_a_headless_right_leaf() {
     assert!(siblings.is_err());
     // Taking the tree apart needs the head the separator's value is.
     root.leaf_child(1).put_head(None, ledger.track());
-    tree.destroy(|page| pages.release(page));
+    tree.destroy(&pages);
     pages.assert_all_released();
     ledger.assert_all_dropped_once();
 }
@@ -324,7 +324,7 @@ fn raise_and_lower() {
     let lowered_leaf = catch_unwind(AssertUnwindSafe(|| tree.lower()));
     assert!(lowered_leaf.is_err(), "a leaf root has no level to lower");
     assert_eq!(tree.root().tracked_ids_under(), ids);
-    tree.destroy(|page| pages.release(page));
+    tree.destroy(&pages);
     pages.assert_all_released();
     ledger.assert_all_dropped_once();
 }
@@ -472,7 +472,7 @@ fn steals_and_merges_of_internal_nodes() {
         removed.extend(grandchild.tracked_ids_under());
         model.retain(|entry| !removed.contains(entry));
         drop(separator);
-        grandchild.destroy(|page| pages.release(page));
+        grandchild.destroy(&pages);
     }
     let siblings = root.siblings::<BulkyInternal<'_>>(0);
     pages.release(siblings.merge());

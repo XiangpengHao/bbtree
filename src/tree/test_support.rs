@@ -546,15 +546,13 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// Lowers the tree while its root is internal without keys, as a cut
     /// does after merges empty the root.
     pub(super) fn lower_while_root_empty(&mut self) {
-        let pages = self.pages;
-        self.tree
-            .lower_while_root_empty(&mut |page| pages.release(page));
+        self.tree.lower_while_root_empty(self.pages);
     }
 
     /// Takes the tree apart, giving every page back to the pool.
     pub(super) fn destroy(self) {
         let Self { tree, pages } = self;
-        tree.destroy(|page| pages.release(page));
+        tree.destroy(pages);
     }
 }
 
@@ -562,7 +560,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Raises the tree a level ([`Tree::raise`]), the root node moving to a
     /// page from `pages`, and returns the root, internal now.
     pub(super) fn raise_in(&mut self, pages: &TestPages<K, V, S>) -> Internal<K, V, S> {
-        self.raise(|| pages.fresh(), || pages.fresh());
+        self.raise(pages);
         self.root().expect_internal()
     }
 }
@@ -571,10 +569,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
     /// Inserts `key`/`value`, or replaces the value of an equal key and
     /// returns the old one, as the map does.
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
-        let pages = self.pages;
         let mut length = 0;
-        self.tree
-            .insert(key, value, || pages.fresh(), || pages.fresh(), &mut length)
+        self.tree.insert(key, value, self.pages, &mut length)
     }
 }
 

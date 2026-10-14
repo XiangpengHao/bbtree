@@ -93,7 +93,7 @@ the keys, then the values (decisions D9).
 | Count + flags packed in one `u16`; header const-asserted | Header is `len: u16` and a head flag, plus prefix lengths in nodes with inline keys; layouts const-asserted. |
 | Node kind decided by the parent (`children_is_leaf`) | Same idea per edge: a pointer's lowest bit tags a leaf, so the parent's edge tells the child's kind before it is read; the tree's pointer to the root page tells the root's (decisions D52). |
 | Root id swapped for a new root, its kind in a bit (`ROOT_IS_LEAF_MASK`) | The root page stays the root: growing or shrinking the tree moves a node into or out of it (decisions D52). |
-| Inner nodes page-aligned | All nodes aligned to their own size, 1 KB or more, so none crosses a page (decisions D15); our own allocator is planned (D8). |
+| Inner nodes page-aligned | All nodes aligned to their own size, 1 KB or more, so none crosses a page (decisions D15), from the map's allocator (D8). |
 | No parent pointers | Same. Iterators, entries and cursors carry a path stack instead (decisions D11). |
 | Configuration limits checked once, at construction | Const-asserted per `(K, V)`: minimum capacity, so an insert needs at most one split per level and the exact allocation count is known before mutating. |
 | Debug cross-checks; const-asserted layouts | Same. |

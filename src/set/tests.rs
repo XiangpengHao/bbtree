@@ -10,6 +10,7 @@
 //! Type-level properties shared with std's `BTreeSet` and its iterators:
 //! variance, size, and a `const` constructor. The auto traits are the map's
 //! (`map/tests/type_properties.rs`), whose values here are a unit struct.
+//! And the allocator a set operator's result takes its nodes from.
 
 #![forbid(unsafe_code)]
 
@@ -25,6 +26,7 @@ use std::vec::Vec;
 use super::{BBTreeSet, IntoIter, Iter, Range};
 use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::map::BBTreeMap;
+use crate::tree::node::page::TestPages;
 use crate::tree::test_support::{FromNumber, TestRng, hash_of};
 
 /// Sets of at most this many elements, and iterators with at most this many
@@ -644,4 +646,23 @@ fn new_is_const() {
     assert_eq!(set.len(), 0);
     assert!(!set.contains("absent"));
     assert_eq!(set.first(), None);
+}
+
+/// A set operator's result takes its nodes from a clone of the left set's
+/// allocator.
+#[test]
+fn set_operators_build_from_the_left_sets_allocator() {
+    let (left_pages, right_pages) = (TestPages::<u64, ()>::new(), TestPages::<u64, ()>::new());
+    {
+        let mut left = BBTreeSet::new_in(&left_pages);
+        let mut right = BBTreeSet::new_in(&right_pages);
+        left.extend(0..300);
+        right.extend(100..400);
+        let in_use = left_pages.in_use_count();
+        let difference = &left - &right;
+        assert!(difference.iter().copied().eq(0..100));
+        assert!(left_pages.in_use_count() > in_use);
+    }
+    left_pages.assert_all_released();
+    right_pages.assert_all_released();
 }

@@ -6,28 +6,28 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::node::page::PageByType;
 use super::path::FirstEdge;
 use super::root::Tree;
 use super::walk::DyingWalk;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Takes the tree apart, if there is one: drops every key and value in
     /// ascending key order, each key before its value, as std's `BTreeMap`
-    /// does (D1), and hands every page to `release`, sorted by its type. A
-    /// separator's value is its right leaf's head (D17), dropped right after
-    /// the separator's key.
+    /// does (D1), and gives every page back to `alloc`, the map's
+    /// allocator. A separator's value is its right leaf's head (D17),
+    /// dropped right after the separator's key.
     ///
     /// If a key's or value's `Drop` panics, the rest is still taken apart, in
     /// the same order, before the panic goes on, as in std's collections:
     /// either way, every key and value is dropped once and every page
     /// released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
-    pub(crate) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
+    pub(crate) fn destroy(self, alloc: &impl Allocator) {
         // Without a count of the entries, the walk ends where the tree does:
         // only its front moves. The tree's leftmost leaf has no head.
-        drop(DyingWalk::new(self.root_page(), usize::MAX, release));
+        drop(DyingWalk::new(self.root_page(), usize::MAX, alloc));
     }
 }
 
@@ -40,10 +40,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     ///
     /// The nodes must be well-formed: every leaf right of a separator has a
     /// head (D17).
-    pub(in crate::tree) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
+    pub(in crate::tree) fn destroy(self, alloc: &impl Allocator) {
         let leftmost = self.border_leaf::<FirstEdge>();
         let head = leftmost.has_head().then(|| leftmost.take_head());
-        let walk = DyingWalk::of_subtree(self, release);
+        let walk = DyingWalk::of_subtree(self, alloc);
         drop(head);
         drop(walk);
     }

@@ -26,6 +26,7 @@ use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
+use crate::allocator::Allocator;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// An internal node, by its page.
@@ -792,7 +793,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
     /// Inserts `separator` at edge `index` with `right_child` as the edge to
     /// its right, splitting the node first if it is full, with the right
-    /// half in a page from `new_page`. This is how a child's split lands in
+    /// half in a page from `alloc`. This is how a child's split lands in
     /// its parent; the separator's value is already in `right_child`, as the
     /// head of its leftmost leaf (D17), and so is its key where separator
     /// keys are heads (D49).
@@ -806,13 +807,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         index: usize,
         separator: Separator<K, S>,
         right_child: Node<K, V, S>,
-        new_page: impl FnOnce() -> FreshPage<Self>,
+        alloc: &impl Allocator,
     ) -> Insertion<K, S, Self> {
         if self.len() < Self::capacity() {
             self.insert_fit(index, separator, right_child);
             Insertion::Fit(index)
         } else {
-            Insertion::Split(self.split_insert(index, separator, right_child, new_page()))
+            let right_page = FreshPage::allocate(alloc);
+            Insertion::Split(self.split_insert(index, separator, right_child, right_page))
         }
     }
 

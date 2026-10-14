@@ -3,10 +3,12 @@
 //! both maps the same operations (`differential.rs`), and on it, inline
 //! keys; prefixes and length tags; drops and panics; inserts that replay
 //! their search or append to the remembered rightmost leaf; iterator folds;
-//! joined trees; and type properties.
+//! joined trees; the pages a map takes from its allocator; and type
+//! properties.
 
 #![forbid(unsafe_code)]
 
+mod allocator;
 mod concat;
 mod differential;
 mod drops;
@@ -19,10 +21,11 @@ mod type_properties;
 
 use std::vec::Vec;
 
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::map::BBTreeMap;
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// How far below the root the leaves lie: 0 for a map that is one leaf
     /// or nothing.
     fn leaf_depth(&self) -> usize {

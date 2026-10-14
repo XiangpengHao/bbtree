@@ -307,7 +307,7 @@ mod tests {
         assert!(catch_unwind(AssertUnwindSafe(|| found.key_value().1.id())).is_err());
         // Taking the tree apart needs the head the separator's value is.
         root.leaf_child(1).put_head(None, ledger.track());
-        tree.destroy(|page| pages.release(page));
+        tree.destroy(&pages);
         pages.assert_all_released();
         ledger.assert_all_dropped_once();
     }
