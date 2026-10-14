@@ -106,10 +106,11 @@ key.
   `1 − 1/fanout` (94–97%) of internal nodes are parents of leaves.
 - **Several ties in one node** each need a key: about log₂ k walks for `k`
   tied separators, as the tied search is binary.
-- **Built as** `SeparatorKeys`, which lends an internal node's separator
-  keys, in place without inline keys, or walked to; searches and prefix
-  upkeep read keys through it, whatever the node kind. The tied search over
-  walked keys doesn't inline, so a search whose inline keys tie with none
+- **Built as** `HeadKeys`, the leaves' head keys an internal node's
+  separators lead to, walked to, which its searches read where separator
+  keys are heads; without inline keys, they read the node's own keys
+  (`Internal::keys`). Other code reads one through `Internal::separator_key`.
+  The tied search over walked keys doesn't inline, so a search whose inline keys tie with none
   returns before it: called on every search, it cost `u64` lookups 135
   instructions.
 

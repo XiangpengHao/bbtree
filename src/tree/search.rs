@@ -60,7 +60,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
     #[inline(never)]
     fn separator_key_value<'a>(internal: Internal<K, V, S>, index: usize) -> (&'a K, &'a V) {
         // SAFETY: the index is below the node's length (type invariant).
-        let key = unsafe { internal.key_unchecked(index) };
+        let key = unsafe { internal.separator_key_unchecked(index) };
         (key, internal.head_leaf(index).head_value())
     }
 
@@ -213,7 +213,12 @@ mod tests {
             "L leaves have L - 1 separators"
         );
         (separators.into_iter())
-            .map(|(node, index)| (*node.key(index), node.head_leaf(index).head_value().id()))
+            .map(|(node, index)| {
+                (
+                    *node.separator_key(index),
+                    node.head_leaf(index).head_value().id(),
+                )
+            })
             .collect()
     }
 

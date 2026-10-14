@@ -445,7 +445,7 @@ Every set ties 0% at 4 bytes.
   → 274 [1,102 → 393], `random_insert` 240 → 148 [1,384 → 637], `range64`
   1,119 → 1,041 [3,119 → 2,418]; `u64` and `str-json` lookups and `String`
   sets keep their instructions.
-  `InlineKeysOfWidth::equal_run` is `#[inline(always)]`: generic over the slot
+  `InlineKeysOfWidth::equal_range` is `#[inline(always)]`: generic over the slot
   width alone, out of line it was one copy shared by every map with 8-byte
   slots, with the capacity a variable.
 - **Measured,** `u64` keys with 2-byte inline keys against none, ns per

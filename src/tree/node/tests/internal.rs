@@ -397,7 +397,7 @@ fn steals_and_merges_of_leaves() {
     assert_eq!(siblings.steal_right(), Ok(()));
     assert_eq!(siblings.steal_right(), Ok(()));
     assert_eq!((siblings.left_len(), siblings.right_len()), (7, 5));
-    assert_eq!(root.key(0).tracked_id(), model[7].0);
+    assert_eq!(root.separator_key(0).tracked_id(), model[7].0);
     assert_eq!(entry_ids(&tree), model);
     assert_eq!(root.leaf_child(0).head_id(), None);
     assert_eq!(root.leaf_child(1).head_id(), Some(model[7].1));

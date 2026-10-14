@@ -905,8 +905,10 @@ Design, census and measurements in 11-separator-key.md.
 - **Moves:** a head's key moves with its value in splits, moves between
   siblings, merges and removals; internal nodes move only windows and
   edges, and no key moves between levels. `SeparatorSlots` holds an
-  internal node's separators, keys or windows; `SeparatorKeys` lends their
-  keys, in place or walked to.
+  internal node's separators, keys or windows. A node keeps its separators'
+  keys only without inline keys (`Internal::keys`); with them, a search reads
+  them as the leaves' head keys (`HeadKeys`), walked to, and other code as
+  `Internal::separator_key`.
 - **Measured** against the tree before, 10M (paths 1M), ns per operation,
   one run each:
 

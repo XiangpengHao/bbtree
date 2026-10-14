@@ -66,7 +66,7 @@ fn search_matches_slice_binary_search() {
     pages.assert_all_released();
 }
 
-/// The same check for keys that take the plain binary search, or, with
+/// The same check for keys that take the early-exit search, or, with
 /// inline keys, the search over them: whole short strings, which their
 /// inline keys hold, and long ones that tie on them.
 #[test]
@@ -120,7 +120,7 @@ fn search_borrows_keys() {
 
 /// A key whose `Ord` and `InlineKey` answer at random. `PADDING` picks
 /// the search path without inline keys: 0 keeps it small enough for the
-/// branchless search, 32 makes it take the plain binary search.
+/// branchless search, 32 makes it take the early-exit search.
 struct Chaotic<'r, const PADDING: usize>(&'r TestRng, [u8; PADDING]);
 
 impl<'r, const PADDING: usize> Chaotic<'r, PADDING> {

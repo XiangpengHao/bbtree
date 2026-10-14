@@ -15,13 +15,14 @@
 
 use core::alloc::Layout;
 use core::borrow::Borrow;
-use core::ops::{Index, Range};
+use core::marker::PhantomData;
+use core::ops::Range;
 use core::ptr::NonNull;
 
 use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{InlineTarget, SearchKey, Separator, Window, WindowedKey};
 use super::leaf::Leaf;
-use super::node_plan::{KeySearch, NodePlan};
+use super::node_plan::NodePlan;
 use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
@@ -335,60 +336,73 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
 /// An internal node's separators.
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
-    /// The node's separator keys `0..len`, in order (D17): its own, in a
-    /// map without inline keys, or each the head key of the leftmost leaf
-    /// right of it, in a map with them (D49), which getting one walks down
-    /// to.
+    /// The node's keys `0..len`, in order, in a map without inline keys,
+    /// whose internal nodes keep their separators' keys (D17). In a map with
+    /// inline keys an internal node keeps no keys: see [`Self::head_keys`].
+    ///
+    /// # Panics
+    ///
+    /// In a map whose separator keys are heads (D49).
     #[inline(always)]
-    pub(crate) fn keys<'a>(self) -> SeparatorKeys<'a, K, V, S> {
-        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
-            SeparatorKeys::InHeads {
-                node: self,
-                start: 0,
-                len: self.len(),
-                _borrow: core::marker::PhantomData,
-            }
-        } else {
-            // SAFETY: keys `0..len` are initialized and unchanged while the
-            // caller borrows them (invariant 1 and the handles' contract),
-            // and the last key's stride ends within the page (`layout.rs`).
-            SeparatorKeys::InNode(unsafe { NodeKeys::new(self.key_slots().keys(), self.len()) })
+    fn keys<'a>(self) -> NodeKeys<'a, K> {
+        assert!(
+            !NodePtr::<K, V, S>::has_separator_keys_in_heads(),
+            "an internal node keeps no keys where separator keys are heads"
+        );
+        // SAFETY: keys `0..len` are initialized and unchanged while the
+        // caller borrows them (invariant 1 and the handles' contract), and
+        // the last key's stride ends within the page (`layout.rs`).
+        unsafe { NodeKeys::new(self.key_slots().keys(), self.len()) }
+    }
+
+    /// The keys of the node's separators `0..len`, in order, in a map with
+    /// inline keys, where each is the head key of the leftmost leaf right
+    /// of its separator (D49): the node keeps none of them, and getting one
+    /// walks down to its leaf ([`Self::head_leaf`]).
+    ///
+    /// # Panics
+    ///
+    /// In a map whose internal nodes keep their keys (D17).
+    #[inline(always)]
+    fn head_keys<'a>(self) -> HeadKeys<'a, K, V, S> {
+        assert!(
+            NodePtr::<K, V, S>::has_separator_keys_in_heads(),
+            "separator keys are in their internal node, not in heads"
+        );
+        HeadKeys {
+            node: self,
+            start: 0,
+            len: self.len(),
+            _borrow: PhantomData,
         }
     }
 
-    /// Separator `index`'s key: in this node, or where separator keys are
-    /// heads, in the leaf right of it (D49).
+    /// Separator `index`'s key, wherever the map keeps it: in this node
+    /// (D17), or as the head key of the leftmost leaf right of it (D49),
+    /// which this walks down to.
     ///
     /// # Panics
     ///
     /// If `index >= len`.
-    pub(crate) fn key<'a>(self, index: usize) -> &'a K {
-        self.keys()
-            .get(index)
-            .expect("separator index out of bounds")
+    pub(crate) fn separator_key<'a>(self, index: usize) -> &'a K {
+        assert!(index < self.len(), "separator index out of bounds");
+        // SAFETY: `index < len`.
+        unsafe { self.separator_key_unchecked(index) }
     }
 
-    /// Separator `index`'s key, with `index < len`, unchecked; see
-    /// [`Self::key`].
+    /// [`Self::separator_key`], unchecked.
     ///
     /// # Safety
     ///
     /// `index < len`.
     #[inline(always)]
-    pub(crate) unsafe fn key_unchecked<'a>(self, index: usize) -> &'a K {
-        // SAFETY: forwarded.
-        unsafe { self.keys().get_unchecked(index) }
-    }
-
-    /// Separator `index`'s key where it is the head of the leftmost leaf
-    /// right of it (D49).
-    ///
-    /// # Panics
-    ///
-    /// If `index >= len`, or if that leaf has no head, which never happens
-    /// in a tree built by the node operations.
-    fn separator_key_in_head<'a>(self, index: usize) -> &'a K {
-        self.head_leaf(index).head_key()
+    pub(crate) unsafe fn separator_key_unchecked<'a>(self, index: usize) -> &'a K {
+        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            self.head_leaf(index).head_key()
+        } else {
+            // SAFETY: forwarded.
+            unsafe { self.keys().get_unchecked(index) }
+        }
     }
 
     /// Where separator `index`'s key is in a node that keeps its keys, for a
@@ -410,12 +424,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
     /// Where the entry of separator `index` is, for a walk to hand it out
     /// as its borrow allows (`tree/walk.rs`): its key, in this node or,
-    /// where separator keys are heads, in `head` (D49), and its value, the
-    /// head of `head`, which must be the leftmost leaf right of it (D17).
+    /// where separator keys are heads, in the head of `head_leaf` (D49), and
+    /// its value, the head of `head_leaf`, which must be the leftmost leaf
+    /// right of it (D17).
     ///
     /// # Panics
     ///
-    /// If `head` has no head, or this node keeps keys and `index >= len`.
+    /// If `head_leaf` has no head, or this node keeps keys and
+    /// `index >= len`.
     pub(in crate::tree) fn separator_entry_slots(
         self,
         index: usize,
@@ -457,7 +473,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         };
         let inline_key = match plan.inliner() {
             Some(inliner) if plan.rehydrates_windows() => {
-                inliner.inline_key_at(self.key(index), self.prefix_len())
+                inliner.inline_key_at(self.separator_key(index), self.prefix_len())
             }
             _ => inline_keys.inline_key(index),
         };
@@ -615,40 +631,41 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         Q: Ord + ?Sized,
     {
         if let Some(target) = self.inline_target(key)
-            && let Some(run) = self.inline_equal_run(target)
+            && let Some(candidates) = self.candidates(target)
         {
             // A node whose separator keys are heads (D49) reads a key only
             // on a tie, and most of its searches have none: they go no
             // further than the inline keys, nor into a call.
-            if NodePtr::<K, V, S>::has_separator_keys_in_heads() && run.is_empty() {
-                return Err(run.start);
+            if NodePtr::<K, V, S>::has_separator_keys_in_heads() && candidates.is_empty() {
+                return Err(candidates.start);
             }
-            return self.search_run(run, key, target);
+            return self.search_candidates(candidates, key, target);
         }
-        let keys = self.keys();
-        match Self::plan().full_search() {
-            KeySearch::Branchless => keys.branchless_search_index(key.key()),
-            KeySearch::Binary => {
-                keys.binary_search_index(|probe: &K| key.key().cmp(probe.borrow()))
-            }
+        let search = Self::plan().all_keys_search();
+        let cmp_key = |probe: &K| key.key().cmp(probe.borrow());
+        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            search.search(self.head_keys(), key.key(), cmp_key)
+        } else {
+            search.search(self.keys(), key.key(), cmp_key)
         }
     }
 
-    /// The positions of the separators whose inline keys equal `target`'s
-    /// in the bytes the node keeps (D18), or `None` if the node has no
-    /// inline keys; see [`Leaf`]'s. The count runs over the internal
+    /// The candidates for `target`: the positions of the separators whose
+    /// inline keys equal `target`'s in the bytes the node keeps (D18), or
+    /// `None` if the node has no inline keys; see [`Leaf`]'s. The count runs over the internal
     /// capacity, a constant the compiler unrolls.
     #[inline(always)]
-    fn inline_equal_run(self, target: InlineTarget) -> Option<Range<usize>> {
-        Some(self.inline_keys()?.equal_run(target.inline_key()))
+    fn candidates(self, target: InlineTarget) -> Option<Range<usize>> {
+        Some(self.inline_keys()?.equal_range(target.inline_key()))
     }
 
-    /// The search within `run`, the separators whose inline keys equal
-    /// `key`'s (D18), as the node's plan says; see [`Leaf`]'s. Where
-    /// separator keys are heads, each probe walks down to its head (D49).
-    fn search_run<Q>(
+    /// The search among `candidates`, the separators whose inline keys
+    /// equal `key`'s (D18), as the node's plan says; see [`Leaf`]'s. Their
+    /// keys are in this node, or where separator keys are heads, each probe
+    /// walks down to its leaf's head (D49).
+    fn search_candidates<Q>(
         self,
-        run: Range<usize>,
+        candidates: Range<usize>,
         key: &SearchKey<'_, K, S, Q>,
         target: InlineTarget,
     ) -> Result<usize, usize>
@@ -656,16 +673,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let candidates = self.keys().slice(run.clone());
-        let found = match Self::plan().tied_search() {
-            KeySearch::Branchless => candidates.branchless_search_index(key.key()),
-            KeySearch::Binary => {
-                candidates.binary_search_index(|stored: &K| key.cmp_tied::<Self>(target, stored))
-            }
+        let search = Self::plan().candidate_search();
+        let cmp_tied = |stored: &K| key.cmp_tied::<Self>(target, stored);
+        let found = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            search.search(
+                self.head_keys().slice(candidates.clone()),
+                key.key(),
+                cmp_tied,
+            )
+        } else {
+            search.search(self.keys().slice(candidates.clone()), key.key(), cmp_tied)
         };
         found
-            .map(|index| run.start + index)
-            .map_err(|index| run.start + index)
+            .map(|index| candidates.start + index)
+            .map_err(|index| candidates.start + index)
     }
 }
 
@@ -993,11 +1014,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
-    type Keys<'a>
-        = SeparatorKeys<'a, K, V, S>
-    where
-        K: 'a;
-
     fn child_of(parent: Internal<K, V, S>, index: usize) -> Self {
         parent.internal_child(index)
     }
@@ -1095,8 +1111,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         }
     }
 
-    fn keys<'a>(self) -> SeparatorKeys<'a, K, V, S> {
-        Internal::keys(self)
+    fn key<'a>(self, index: usize) -> &'a K {
+        self.separator_key(index)
     }
 
     fn inline_keys<'a>(self) -> Option<NodeInlineKeys<'a>> {
@@ -1132,71 +1148,45 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
     }
 }
 
-/// An internal node's separator keys `0..len`, in order, lent for `'a`
-/// (D17): its own, in a map without inline keys, or each the head key of the
-/// leftmost leaf right of it, in a map with them (D49), which getting one
-/// walks down to.
-pub(crate) enum SeparatorKeys<'a, K, V, S> {
-    InNode(NodeKeys<'a, K>),
-    InHeads {
-        node: Internal<K, V, S>,
-        start: usize,
-        len: usize,
-        _borrow: core::marker::PhantomData<&'a K>,
-    },
+/// The keys of an internal node's separators `start..start + len`, in a map
+/// whose separator keys are heads (D49), lent for `'a`: each the head key of
+/// the leftmost leaf right of its separator. The internal node keeps none of
+/// them; getting one walks down to its leaf ([`Internal::head_leaf`]).
+struct HeadKeys<'a, K, V, S> {
+    node: Internal<K, V, S>,
+    start: usize,
+    len: usize,
+    _borrow: PhantomData<&'a K>,
 }
 
-impl<K, V, S> Clone for SeparatorKeys<'_, K, V, S> {
+impl<K, V, S> Clone for HeadKeys<'_, K, V, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K, V, S> Copy for SeparatorKeys<'_, K, V, S> {}
+impl<K, V, S> Copy for HeadKeys<'_, K, V, S> {}
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> KeyList<'a, K> for SeparatorKeys<'a, K, V, S> {
+impl<'a, K, V, S: InlineKeyStrategy<K>> KeyList<'a, K> for HeadKeys<'a, K, V, S> {
     #[inline(always)]
     fn len(self) -> usize {
-        match self {
-            Self::InNode(keys) => keys.len(),
-            Self::InHeads { len, .. } => len,
-        }
+        self.len
     }
 
     #[inline(always)]
     unsafe fn get_unchecked(self, index: usize) -> &'a K {
-        match self {
-            // SAFETY: forwarded.
-            Self::InNode(keys) => unsafe { keys.get_unchecked(index) },
-            Self::InHeads { node, start, .. } => node.separator_key_in_head(start + index),
-        }
+        self.node.head_leaf(self.start + index).head_key()
     }
 
     fn slice(self, range: Range<usize>) -> Self {
-        match self {
-            Self::InNode(keys) => Self::InNode(keys.slice(range)),
-            Self::InHeads {
-                node, start, len, ..
-            } => {
-                assert!(
-                    range.start <= range.end && range.end <= len,
-                    "keys out of bounds"
-                );
-                Self::InHeads {
-                    node,
-                    start: start + range.start,
-                    len: range.end - range.start,
-                    _borrow: core::marker::PhantomData,
-                }
-            }
+        assert!(
+            range.start <= range.end && range.end <= self.len,
+            "keys out of bounds"
+        );
+        Self {
+            start: self.start + range.start,
+            len: range.end - range.start,
+            ..self
         }
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> Index<usize> for SeparatorKeys<'_, K, V, S> {
-    type Output = K;
-
-    fn index(&self, index: usize) -> &K {
-        self.get(index).expect("key index out of bounds")
     }
 }

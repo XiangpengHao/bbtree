@@ -131,7 +131,7 @@ internal node and `find` in the leaf, on the same `SearchKey`. Each
   slot `i`);
 - the key's inline key at the node's prefix, from the node's own
   `inline_target`;
-- the slots whose inline keys tie with it, from the node's own `equal_run`:
+- the slots whose inline keys tie with it, from the node's own `equal_range`:
   the only keys compared in full.
 
 A key that lacks the bytes every key shares (D50) has no steps, as `get`
@@ -143,7 +143,7 @@ A key found in an internal node is a separator (D17). The trace then follows
 debug builds asserts that it reaches the very value `head_leaf` finds.
 
 The node code changes only in visibility: `inline_target` and
-`NodeInlineKeys::equal_run` are `pub(in crate::tree)`. A test traces every
+`NodeInlineKeys::equal_range` are `pub(in crate::tree)`. A test traces every
 key of two maps, `u64` and `String`, and some absent keys, against `get`,
 with keys that lack the shared prefix on either side.
 
@@ -231,7 +231,7 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     them, replayed with each lookup: the header's, all the inline keys'
     (the count over the capacity reads them all on x86-64), a lone tied
     key's, and the result's. The search among two or more tied keys is a
-    binary search (`search_run`), whose probes the trace doesn't record, so
+    binary search (`search_candidates`), whose probes the trace doesn't record, so
     their lines get hollow dots: maybe read. The headline counts both.
   - The slots in a table (`slot_table.rs`), scrolled to the lookup's row.
     Keys show only the bytes past the shared prefix; clicking one looks it

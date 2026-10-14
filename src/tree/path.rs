@@ -45,11 +45,11 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
+use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageByType};
-use super::node::{KeyList, Node};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
@@ -598,9 +598,10 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Path<Immut<'a>, K, V, S> {
         let index = self.index();
         match self.node_at(self.depth()) {
             Node::Leaf(leaf) => leaf.key_value(index),
-            Node::Internal(internal) => {
-                (internal.key(index), internal.head_leaf(index).head_value())
-            }
+            Node::Internal(internal) => (
+                internal.separator_key(index),
+                internal.head_leaf(index).head_value(),
+            ),
         }
     }
 }
@@ -787,10 +788,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     pub(super) fn fences(&self) -> (Option<&K>, Option<&K>) {
         let (mut low, mut high) = (None, None);
         for depth in (0..self.path.depth()).rev() {
-            let keys = self.path.internal_at(depth).keys();
+            let node = self.path.internal_at(depth);
             let index = self.path.index_at(depth);
-            low = low.or_else(|| index.checked_sub(1).and_then(|left| keys.get(left)));
-            high = high.or_else(|| keys.get(index));
+            low = low.or_else(|| index.checked_sub(1).map(|left| node.separator_key(left)));
+            high = high.or_else(|| (index < node.len()).then(|| node.separator_key(index)));
             if low.is_some() && high.is_some() {
                 break;
             }
@@ -868,7 +869,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let index = self.index();
         match self.node() {
             Node::Leaf(leaf) => leaf.key(index),
-            Node::Internal(internal) => internal.key(index),
+            Node::Internal(internal) => internal.separator_key(index),
         }
     }
 

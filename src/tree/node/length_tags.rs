@@ -17,14 +17,14 @@ impl<'a> LengthTags<'a> {
         Self { slots }
     }
 
-    /// Only live keys in the primary ordered run may match. Reading the
+    /// Only `candidates`, live keys, may match. Reading the
     /// initialized capacity gives the compiler a constant vector trip count.
     #[inline]
-    pub(super) fn matching(&self, run: Range<usize>, target: u16) -> SlotMatches {
-        if let Some(matches) = U16EqualitySearch::matching(self.slots, run.clone(), target) {
+    pub(super) fn matching(&self, candidates: Range<usize>, target: u16) -> SlotMatches {
+        if let Some(matches) = U16EqualitySearch::matching(self.slots, candidates.clone(), target) {
             return matches;
         }
-        let mut matches = self.slots[run.clone()]
+        let mut matches = self.slots[candidates.clone()]
             .iter()
             .enumerate()
             .filter(|(_, tag)| **tag == target);
@@ -32,14 +32,14 @@ impl<'a> LengthTags<'a> {
             return SlotMatches::None;
         };
         let Some((upper, _)) = matches.next() else {
-            return SlotMatches::One(run.start + lower);
+            return SlotMatches::One(candidates.start + lower);
         };
         if matches.next().is_some() {
             SlotMatches::Many
         } else {
             SlotMatches::Two {
-                lower: run.start + lower,
-                upper: run.start + upper,
+                lower: candidates.start + lower,
+                upper: candidates.start + upper,
             }
         }
     }
@@ -52,7 +52,7 @@ mod tests {
     use super::{LengthTags, SlotMatches};
 
     #[test]
-    fn length_filter_checks_only_the_primary_live_run() {
+    fn length_filter_checks_only_the_candidates() {
         for capacity in 0..=65 {
             let mut slots = vec![7; capacity];
             for target_index in 0..capacity {
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-    fn two_candidates_keep_their_order_and_respect_run_bounds() {
+    fn two_matches_keep_their_order_and_stay_among_the_candidates() {
         for capacity in 0..=65 {
             let mut slots = vec![7; capacity];
             assert!(matches!(

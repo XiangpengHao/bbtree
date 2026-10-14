@@ -42,7 +42,7 @@
 use super::node::inline_keys::{KeyInliner, Window};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::{Child, KeyList, Node};
+use super::node::{Child, Node};
 use super::path::{MAX_DEPTH, NodeEnd, PathMut};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
@@ -109,23 +109,25 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         let prefix_lens = {
             let (low, high) = self.fences();
             let node = self.internal();
-            let keys = node.keys();
             edges.map(|edge| {
                 let child = C::child_of(node, edge);
                 if child.keys_differ_past_prefix() {
                     return None;
                 }
                 let child_low = match edge.checked_sub(1) {
-                    Some(left) => keys.get(left),
+                    Some(left) => Some(node.separator_key(left)),
                     None => low,
                 };
+                let child_high = (edge < node.len())
+                    .then(|| node.separator_key(edge))
+                    .or(high);
                 // Well-ordered encodings already imply this floor. Keep
                 // the numerical parent/child invariant even when a user
                 // encoding lies: later structural moves must only move
                 // windows backwards, without invoking that encoding.
                 Some(
                     inliner
-                        .fence_prefix_len(child_low, keys.get(edge).or(high), shared_len)
+                        .fence_prefix_len(child_low, child_high, shared_len)
                         .max(node.prefix_len()),
                 )
             })
@@ -163,7 +165,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             // Arbitrary user encodings may report fewer shared bytes than
             // the parent's current prefix. Shrinking the border below it
             // would break the numerical invariant used by key movement.
-            let separator = (node.keys().get(index)).expect("the path ends at a separator");
+            let separator = node.separator_key(index);
             inliner
                 .common_prefix_len(separator, successor)
                 .max(node.prefix_len())

@@ -130,8 +130,6 @@ use self::page::{NodeKind, NodePtr, PageByType};
 use self::siblings::Siblings;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
-pub(crate) use self::slots::KeyList;
-
 /// A node, of the kind its pointer's tag tells: what an edge or the root
 /// leads to.
 pub(crate) enum Node<K, V, S> {
@@ -452,14 +450,14 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         })
     }
 
-    /// The keys a node of this kind lends, in order: a leaf's own, or an
-    /// internal node's separator keys (D17, D49).
-    type Keys<'a>: KeyList<'a, K>
-    where
-        K: 'a;
-
-    /// The node's keys `0..len`, in order.
-    fn keys<'a>(self) -> Self::Keys<'a>;
+    /// Key `index`, the one its inline key is taken from: a leaf's own, or
+    /// an internal node's separator key, wherever the map keeps it
+    /// ([`Internal::separator_key`]).
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    fn key<'a>(self, index: usize) -> &'a K;
 
     /// The node's inline keys, if it has them (D18).
     fn inline_keys<'a>(self) -> Option<NodeInlineKeys<'a>>;
@@ -512,12 +510,12 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         if prefix_len == self.prefix_len() {
             return;
         }
-        let keys = self.keys();
+        let len = self.len();
         let mut buffer = RefitBuffer::new(inline_width);
-        for (index, key) in keys.iter().enumerate() {
-            buffer.set(index, inliner.inline_key_at(key, prefix_len));
+        for index in 0..len {
+            buffer.set(index, inliner.inline_key_at(self.key(index), prefix_len));
         }
-        self.set_windows(prefix_len, buffer.inline_keys(keys.len()));
+        self.set_windows(prefix_len, buffer.inline_keys(len));
     }
 
     /// Shrinks the node's prefix length to `prefix_len` if it is longer.

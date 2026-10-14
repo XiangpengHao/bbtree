@@ -44,10 +44,13 @@
 
 #![forbid(unsafe_code)]
 
+use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::mem;
 
 use super::inline_keys::KeyInliner;
 use super::page::{ByteString, NodeKind};
+use super::slots::KeyList;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
@@ -66,8 +69,9 @@ pub(in crate::tree) struct NodePlan<K> {
     /// Whether the node stores each key's length, whose 2-byte tags filter a
     /// exact-key lookup's candidates (D36).
     length_tags: bool,
-    /// How a search runs over the keys whose inline keys tie with its own.
-    tied_search: KeySearch,
+    /// The search over the candidates: the keys whose inline keys equal the
+    /// search key's.
+    candidate_search: KeySearch,
     /// Whether an exact-key lookup confirms its one candidate by comparing all of
     /// its bytes at once, rather than those past the tie (D38).
     whole_key_equality: bool,
@@ -106,7 +110,7 @@ impl<K> NodePlan<K> {
             inline_width: None,
             rehydrates_windows: false,
             length_tags: false,
-            tied_search: const { KeySearch::for_key::<K>() },
+            candidate_search: const { KeySearch::for_key::<K>() },
             whole_key_equality: false,
         }
     }
@@ -135,7 +139,7 @@ impl<K> NodePlan<K> {
         Self {
             inliner: Some(inliner),
             inline_width: Some(InlineWidth::Two),
-            tied_search: KeySearch::Binary,
+            candidate_search: KeySearch::EarlyExit,
             whole_key_equality: true,
             ..Self::without_inline_keys()
         }
@@ -160,7 +164,7 @@ impl<K> NodePlan<K> {
             }),
             rehydrates_windows: !leaf,
             length_tags: leaf,
-            tied_search: KeySearch::Binary,
+            candidate_search: KeySearch::EarlyExit,
             ..Self::without_inline_keys()
         }
     }
@@ -217,14 +221,15 @@ impl<K> NodePlan<K> {
     /// through a borrowed form the nodes can't encode (D19). The key type
     /// alone decides it, the same in every plan.
     #[inline(always)]
-    pub(super) fn full_search(self) -> KeySearch {
+    pub(super) fn all_keys_search(self) -> KeySearch {
         const { KeySearch::for_key::<K>() }
     }
 
-    /// How a search runs over the keys whose inline keys tie with its own.
+    /// The search over the candidates: the keys whose inline keys equal the
+    /// search key's.
     #[inline(always)]
-    pub(super) fn tied_search(self) -> KeySearch {
-        self.tied_search
+    pub(super) fn candidate_search(self) -> KeySearch {
+        self.candidate_search
     }
 
     /// Whether an exact-key lookup confirms its one candidate by comparing all of
@@ -267,17 +272,39 @@ pub(super) enum KeySearch {
     /// A binary search with no early exit, picking each next half with a
     /// conditional move rather than a branch.
     Branchless,
-    /// A plain binary search, which stops at an equal key.
-    Binary,
+    /// A binary search that branches on each comparison and stops at an
+    /// equal key: for keys whose comparisons cost more than a mispredict.
+    EarlyExit,
 }
 
 impl KeySearch {
+    /// `keys` searched for `key` this way: `Ok(i)` if key `i` equals it,
+    /// otherwise `Err(i)` with `i` where it belongs. The branchless search
+    /// compares by `Ord`; the early-exit one with `cmp_key(probe)`, how
+    /// `key` orders against key `probe`.
+    #[inline(always)]
+    pub(super) fn search<'a, K, Q>(
+        self,
+        keys: impl KeyList<'a, K>,
+        key: &Q,
+        cmp_key: impl Fn(&K) -> Ordering,
+    ) -> Result<usize, usize>
+    where
+        K: 'a + Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self {
+            Self::Branchless => keys.branchless_search_index(key),
+            Self::EarlyExit => keys.early_exit_search_index(cmp_key),
+        }
+    }
+
     /// Branchless for keys with no drop glue and at most 16 bytes: integers,
     /// `char`, small tuples of them. Their comparisons are a few instructions
     /// on data already loaded, so a chain of conditional moves is cheapest.
     ///
-    /// Everything else (`String`, `Vec`, `Box`, large arrays) uses plain
-    /// binary search. Without specialization this is a heuristic: `&str` and
+    /// Everything else (`String`, `Vec`, `Box`, large arrays) uses the
+    /// early-exit search. Without specialization this is a heuristic: `&str` and
     /// `&[u8]` keys also have no drop glue and fit in 16 bytes, so they take
     /// the branchless path although their comparisons follow a pointer,
     /// unless inline keys decide (D18).
@@ -285,7 +312,7 @@ impl KeySearch {
         if !mem::needs_drop::<K>() && mem::size_of::<K>() <= 16 {
             Self::Branchless
         } else {
-            Self::Binary
+            Self::EarlyExit
         }
     }
 }
@@ -309,8 +336,8 @@ mod tests {
         inline_width: Option<InlineWidth>,
         rehydrates_windows: bool,
         length_tags: bool,
-        full_search: KeySearch,
-        tied_search: KeySearch,
+        all_keys_search: KeySearch,
+        candidate_search: KeySearch,
         whole_key_equality: bool,
     }
 
@@ -321,20 +348,20 @@ mod tests {
                 inline_width: plan.inline_width(),
                 rehydrates_windows: plan.rehydrates_windows(),
                 length_tags: plan.has_length_tags(),
-                full_search: plan.full_search(),
-                tied_search: plan.tied_search(),
+                all_keys_search: plan.all_keys_search(),
+                candidate_search: plan.candidate_search(),
                 whole_key_equality: plan.has_whole_key_equality(),
             }
         }
 
-        /// The row of keys without inline keys, searched as `full_search`.
-        fn without_inline_keys(full_search: KeySearch) -> Self {
+        /// The row of keys without inline keys, searched as `all_keys_search`.
+        fn without_inline_keys(all_keys_search: KeySearch) -> Self {
             Self {
                 inline_width: None,
                 rehydrates_windows: false,
                 length_tags: false,
-                full_search,
-                tied_search: full_search,
+                all_keys_search,
+                candidate_search: all_keys_search,
                 whole_key_equality: false,
             }
         }
@@ -345,8 +372,8 @@ mod tests {
         assert_eq!(KeySearch::for_key::<u64>(), KeySearch::Branchless);
         assert_eq!(KeySearch::for_key::<u32>(), KeySearch::Branchless);
         assert_eq!(KeySearch::for_key::<(u64, u64)>(), KeySearch::Branchless);
-        assert_eq!(KeySearch::for_key::<String>(), KeySearch::Binary);
-        assert_eq!(KeySearch::for_key::<[u8; 32]>(), KeySearch::Binary);
+        assert_eq!(KeySearch::for_key::<String>(), KeySearch::EarlyExit);
+        assert_eq!(KeySearch::for_key::<[u8; 32]>(), KeySearch::EarlyExit);
         // The documented misfire: a borrowed string looks like plain data.
         assert_eq!(KeySearch::for_key::<&str>(), KeySearch::Branchless);
     }
@@ -360,7 +387,7 @@ mod tests {
             PlanRow::of::<[u8; 8], Auto, Leaf<[u8; 8], (), Auto>>(),
             plain
         );
-        let plain = PlanRow::without_inline_keys(KeySearch::Binary);
+        let plain = PlanRow::without_inline_keys(KeySearch::EarlyExit);
         assert_eq!(
             PlanRow::of::<Tracked<'_>, Auto, Leaf<Tracked<'_>, (), Auto>>(),
             plain
@@ -390,7 +417,7 @@ mod tests {
         // A std byte string under `WithInlineKey` is a key like any other.
         let eight_bytes = PlanRow {
             inline_width: Some(InlineWidth::Eight),
-            ..PlanRow::without_inline_keys(KeySearch::Binary)
+            ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
         };
         assert_eq!(
             PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
@@ -408,7 +435,7 @@ mod tests {
 
     #[test]
     fn byte_arrays_keep_two_bytes() {
-        for (leaf, internal, full_search) in [
+        for (leaf, internal, all_keys_search) in [
             (
                 PlanRow::of::<[u8; 16], Auto, Leaf<[u8; 16], (), Auto>>(),
                 PlanRow::of::<[u8; 16], Auto, Internal<[u8; 16], (), Auto>>(),
@@ -417,19 +444,19 @@ mod tests {
             (
                 PlanRow::of::<[u8; 20], Auto, Leaf<[u8; 20], (), Auto>>(),
                 PlanRow::of::<[u8; 20], Auto, Internal<[u8; 20], (), Auto>>(),
-                KeySearch::Binary,
+                KeySearch::EarlyExit,
             ),
             (
                 PlanRow::of::<[u8; 32], Auto, Leaf<[u8; 32], (), Auto>>(),
                 PlanRow::of::<[u8; 32], Auto, Internal<[u8; 32], (), Auto>>(),
-                KeySearch::Binary,
+                KeySearch::EarlyExit,
             ),
         ] {
             let expected = PlanRow {
                 inline_width: Some(InlineWidth::Two),
-                tied_search: KeySearch::Binary,
+                candidate_search: KeySearch::EarlyExit,
                 whole_key_equality: true,
-                ..PlanRow::without_inline_keys(full_search)
+                ..PlanRow::without_inline_keys(all_keys_search)
             };
             assert_eq!(leaf, expected);
             assert_eq!(internal, expected);
@@ -438,10 +465,10 @@ mod tests {
 
     #[test]
     fn heap_byte_strings_split_their_work_between_the_kinds() {
-        fn assert_heap_byte_string<K>(full_search: KeySearch) {
+        fn assert_heap_byte_string<K>(all_keys_search: KeySearch) {
             let base = PlanRow {
-                tied_search: KeySearch::Binary,
-                ..PlanRow::without_inline_keys(full_search)
+                candidate_search: KeySearch::EarlyExit,
+                ..PlanRow::without_inline_keys(all_keys_search)
             };
             assert_eq!(
                 PlanRow::of::<K, Auto, Leaf<K, (), Auto>>(),
@@ -460,10 +487,10 @@ mod tests {
                 }
             );
         }
-        assert_heap_byte_string::<String>(KeySearch::Binary);
-        assert_heap_byte_string::<Vec<u8>>(KeySearch::Binary);
-        assert_heap_byte_string::<Box<str>>(KeySearch::Binary);
-        assert_heap_byte_string::<Box<[u8]>>(KeySearch::Binary);
+        assert_heap_byte_string::<String>(KeySearch::EarlyExit);
+        assert_heap_byte_string::<Vec<u8>>(KeySearch::EarlyExit);
+        assert_heap_byte_string::<Box<str>>(KeySearch::EarlyExit);
+        assert_heap_byte_string::<Box<[u8]>>(KeySearch::EarlyExit);
         assert_heap_byte_string::<&str>(KeySearch::Branchless);
         assert_heap_byte_string::<&[u8]>(KeySearch::Branchless);
     }

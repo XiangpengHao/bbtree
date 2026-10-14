@@ -70,7 +70,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                     let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
                         Separator::without_key(window)
                     } else {
-                        let key = internal.key(index).clone();
+                        let key = internal.separator_key(index).clone();
                         Separator::with_key(WindowedKey::from_parts(key, window))
                     };
                     let child = internal.child(index + 1).clone_nodes();

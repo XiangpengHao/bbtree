@@ -93,11 +93,11 @@ impl<'a> NodeInlineKeys<'a> {
     }
 
     /// The positions of the inline keys equal to the bytes the node keeps
-    /// of `inline_key`; see [`InlineKeysOfWidth::equal_run`].
+    /// of `inline_key`; see [`InlineKeysOfWidth::equal_range`].
     #[inline(always)]
-    pub(in crate::tree) fn equal_run(self, inline_key: InlineWord) -> Range<usize> {
+    pub(in crate::tree) fn equal_range(self, inline_key: InlineWord) -> Range<usize> {
         with_inline_keys_of_width!(self, |of_width| of_width
-            .equal_run(InlineSlot::of_inline_key(inline_key)))
+            .equal_range(InlineSlot::of_inline_key(inline_key)))
     }
 
     /// An equality mask only for widths and targets that benefit from it.
@@ -158,10 +158,10 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// Found by a count of every slot: in explicit vectors where the target
     /// has them for slots of this width
     /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
-    /// compiler vectorizes it ([`Self::equal_run_by_count`]) where it
+    /// compiler vectorizes it ([`Self::equal_range_by_count`]) where it
     /// compares slots of this width in vectors
     /// ([`InlineSlot::COUNT_AUTOVECTORIZES`]); and by a binary search
-    /// otherwise ([`Self::equal_run_by_search`]): without such compares,
+    /// otherwise ([`Self::equal_range_by_search`]): without such compares,
     /// the count is an emulated sequence that costs more than the
     /// mispredicts it avoids. Measured on 1M-entry maps of 8-byte inline
     /// keys (04, Q6).
@@ -169,7 +169,7 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// beyond the one-word packed reduction, full-capacity counts cost
     /// more than dependent probes in warm routing nodes.
     #[inline(always)]
-    fn equal_run(self, target: W) -> Range<usize> {
+    fn equal_range(self, target: W) -> Range<usize> {
         if cfg!(all(
             target_arch = "x86_64",
             not(target_feature = "avx512bw"),
@@ -177,15 +177,15 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
         )) && size_of::<W>() == 4
             && self.slots.len() > 32
         {
-            return self.equal_run_by_search(target);
+            return self.equal_range_by_search(target);
         }
-        if let Some(run) = W::equal_run_in_vectors(self.slots, self.len, target) {
-            return run;
+        if let Some(equal_range) = W::equal_range_in_vectors(self.slots, self.len, target) {
+            return equal_range;
         }
         if W::COUNT_AUTOVECTORIZES {
-            self.equal_run_by_count(target)
+            self.equal_range_by_count(target)
         } else {
-            self.equal_run_by_search(target)
+            self.equal_range_by_search(target)
         }
     }
 
@@ -199,25 +199,25 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// One pass over every slot up to the capacity counts the inline keys
     /// below `target` and those equal to it. The slots from `len` on hold
     /// the greatest inline key (invariant 4), so they never count below it,
-    /// and count equal only to a greatest `target`, whose run the cut at
-    /// `len` ends where the live slots do. With no branch, no dependent load
+    /// and count equal only to a greatest `target`, whose equal range the cut
+    /// at `len` ends where the live slots do. With no branch, no dependent load
     /// and no mask per slot, and a trip count that is the capacity, one of
     /// two constants per map, the compiler unrolls it into a few vector
     /// compares whose masks it counts. Within `0..len` for any slots, by the
     /// cuts.
-    fn equal_run_by_count(self, target: W) -> Range<usize> {
+    fn equal_range_by_count(self, target: W) -> Range<usize> {
         let below = self.slots.iter().filter(|&&slot| slot < target).count();
         let equal = self.slots.iter().filter(|&&slot| slot == target).count();
         let below = below.min(self.len);
         below..(below + equal).min(self.len)
     }
 
-    /// A branchless binary search finds where the run starts, and a scan
+    /// A branchless binary search finds where the equal range starts, and a scan
     /// from there finds where it ends: one compare, which inline keys that
     /// don't tie make predictable, rather than a second search, whose exit
     /// depends on where the first one ended. Within `0..len` for any slots:
     /// the search and the scan stay within the live slots.
-    fn equal_run_by_search(self, target: W) -> Range<usize> {
+    fn equal_range_by_search(self, target: W) -> Range<usize> {
         let live = self.live();
         let start = Self::count_below(live, target);
         let mut end = start;
@@ -281,12 +281,12 @@ mod tests {
         W::of_inline_key(InlineWord::MAX)
     }
 
-    /// On sorted inline keys, the run is exactly the equal ones, wherever
+    /// On sorted inline keys, the equal range is exactly the equal ones, wherever
     /// they are and however many, over several words of slots, the
     /// greatest too, by every way of finding it, with the slots past `len`
     /// holding the greatest (invariant 4), and by the vector count whatever
     /// they hold.
-    fn assert_equal_runs_of_sorted_inline_keys<W: InlineSlot + From<u8>>(seed: u64) {
+    fn assert_equal_ranges_of_sorted_inline_keys<W: InlineSlot + From<u8>>(seed: u64) {
         let rng = TestRng::new(seed);
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
             let len = rng.below(140);
@@ -304,12 +304,12 @@ mod tests {
             for target in (0..18).map(W::from).chain([greatest()]) {
                 let start = inline_keys.partition_point(|&probe| probe < target);
                 let end = inline_keys.partition_point(|&probe| probe <= target);
-                assert_eq!(node.equal_run(target), start..end);
-                assert_eq!(node.equal_run_by_count(target), start..end);
-                assert_eq!(node.equal_run_by_search(target), start..end);
+                assert_eq!(node.equal_range(target), start..end);
+                assert_eq!(node.equal_range_by_count(target), start..end);
+                assert_eq!(node.equal_range_by_search(target), start..end);
                 for slots in [&slots, &unpadded] {
-                    if let Some(run) = W::equal_run_in_vectors(slots, len, target) {
-                        assert_eq!(run, start..end);
+                    if let Some(equal_range) = W::equal_range_in_vectors(slots, len, target) {
+                        assert_eq!(equal_range, start..end);
                     }
                 }
             }
@@ -318,14 +318,14 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-    fn equal_runs_of_sorted_inline_keys() {
-        assert_equal_runs_of_sorted_inline_keys::<u16>(51);
-        assert_equal_runs_of_sorted_inline_keys::<u32>(53);
-        assert_equal_runs_of_sorted_inline_keys::<u64>(54);
+    fn equal_ranges_of_sorted_inline_keys() {
+        assert_equal_ranges_of_sorted_inline_keys::<u16>(51);
+        assert_equal_ranges_of_sorted_inline_keys::<u32>(53);
+        assert_equal_ranges_of_sorted_inline_keys::<u64>(54);
     }
 
-    /// On any inline keys, the run stays within the live ones.
-    fn assert_equal_runs_stay_in_bounds<W: InlineSlot + From<u8>>(seed: u64) {
+    /// On any inline keys, the equal range stays within the live ones.
+    fn assert_equal_ranges_stay_in_bounds<W: InlineSlot + From<u8>>(seed: u64) {
         let rng = TestRng::new(seed);
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
             let len = rng.below(40);
@@ -333,30 +333,30 @@ mod tests {
             let slots = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
             let node = InlineKeysOfWidth::new(&slots, len);
             for target in (0..5).map(W::from) {
-                let runs = [
-                    node.equal_run(target),
-                    node.equal_run_by_count(target),
-                    node.equal_run_by_search(target),
+                let equal_ranges = [
+                    node.equal_range(target),
+                    node.equal_range_by_count(target),
+                    node.equal_range_by_search(target),
                 ];
-                for run in runs
+                for equal_range in equal_ranges
                     .into_iter()
-                    .chain(W::equal_run_in_vectors(&slots, len, target))
+                    .chain(W::equal_range_in_vectors(&slots, len, target))
                 {
-                    assert!(run.start <= run.end && run.end <= len);
+                    assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                 }
             }
         }
     }
 
     #[test]
-    fn equal_runs_stay_in_bounds_for_unsorted_inline_keys() {
-        assert_equal_runs_stay_in_bounds::<u16>(52);
-        assert_equal_runs_stay_in_bounds::<u32>(55);
-        assert_equal_runs_stay_in_bounds::<u64>(56);
+    fn equal_ranges_stay_in_bounds_for_unsorted_inline_keys() {
+        assert_equal_ranges_stay_in_bounds::<u16>(52);
+        assert_equal_ranges_stay_in_bounds::<u32>(55);
+        assert_equal_ranges_stay_in_bounds::<u64>(56);
     }
 
     /// A node's inline keys at each width keep the first bytes of the
-    /// windows written, compare by them, and find the runs of windows that
+    /// windows written, compare by them, and find the equal_ranges of windows that
     /// tie in them: three sorted windows that share 2 bytes, two of which
     /// share 4.
     #[test]
@@ -396,7 +396,7 @@ mod tests {
                 let below = windows.iter().filter(|&&other| other & kept_mask < kept);
                 let ties = windows.iter().filter(|&&other| other & kept_mask == kept);
                 let (below, ties) = (below.count(), ties.count());
-                assert_eq!(inline_keys.equal_run(window), below..below + ties);
+                assert_eq!(inline_keys.equal_range(window), below..below + ties);
             }
         }
     }

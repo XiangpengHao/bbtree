@@ -36,7 +36,11 @@ pub(super) struct U16EqualitySearch;
 
 impl U16EqualitySearch {
     #[inline]
-    pub(super) fn matching(slots: &[u16], run: Range<usize>, target: u16) -> Option<SlotMatches> {
+    pub(super) fn matching(
+        slots: &[u16],
+        candidates: Range<usize>,
+        target: u16,
+    ) -> Option<SlotMatches> {
         #[cfg(target_arch = "x86_64")]
         {
             use core::arch::x86_64::{
@@ -61,9 +65,9 @@ impl U16EqualitySearch {
                 }
             }
             // Retain one of each slot's two byte bits, then only the
-            // primary live run. Clamping also bounds every shift below.
-            let start = 2 * run.start.min(slots.len());
-            let end = 2 * run.end.min(slots.len());
+            // live candidates. Clamping also bounds every shift below.
+            let start = 2 * candidates.start.min(slots.len());
+            let end = 2 * candidates.end.min(slots.len());
             bits &= 0x5555_5555_5555_5555
                 & u64::MAX.checked_shl(start as u32).unwrap_or(0)
                 & u64::MAX.checked_shr((64 - end) as u32).unwrap_or(0);
@@ -84,14 +88,14 @@ impl U16EqualitySearch {
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            let _ = (slots, run, target);
+            let _ = (slots, candidates, target);
             None
         }
     }
 }
 
 /// Exact-key lookups over 8-byte slots need only an equality mask. An ordered
-/// search builds both comparison masks; this one can reject an empty run
+/// search builds both comparison masks; this one can reject an empty equal range
 /// without counting the slots below the target. All supported capacities
 /// fit their equality bits in one word.
 pub(in crate::tree) struct U64EqualityMask {
@@ -135,10 +139,10 @@ impl U64EqualityMask {
     }
 
     /// The live matching hull, or `None` before extracting any bounds
-    /// when no live bit matches. Sorted slots give an exact run; arbitrary
+    /// when no live bit matches. Sorted slots give an exact equal range; arbitrary
     /// slots still give bounds within `0..len`.
     #[inline(always)]
-    pub(super) fn run(self, len: usize) -> Option<Range<usize>> {
+    pub(super) fn equal_range(self, len: usize) -> Option<Range<usize>> {
         let live_bits = len.min(64);
         #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
         // SAFETY: the cfg checks BMI2 independently of vector features.
@@ -172,7 +176,7 @@ pub(in crate::tree) trait VectorCount: Copy {
     /// constant per node kind, so their masks are constants and they don't
     /// wait for `len`, which clips the results. Slots past `len` are read,
     /// but their contents do not affect the answer.
-    fn equal_run_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>>;
+    fn equal_range_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>>;
 }
 
 /// The AVX-512 count of `$slots`' first `$len` slots below and equal to
@@ -236,7 +240,7 @@ macro_rules! vector_count {
      $sse_set1:ident, $sse_greater:ident, $sse_equal:ident, $sse_pack:ident) => {
         impl VectorCount for $slot {
             #[inline(always)]
-            fn equal_run_in_vectors(
+            fn equal_range_in_vectors(
                 slots: &[Self],
                 len: usize,
                 target: Self,
@@ -381,7 +385,7 @@ impl VectorCount for u64 {
     }
 
     #[inline(always)]
-    fn equal_run_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>> {
+    fn equal_range_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>> {
         // The capacity is a constant per node kind, so the check folds.
         #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
         {
@@ -443,14 +447,14 @@ mod tests {
                 for target in values {
                     let start = slots[..len].partition_point(|&slot| slot < target);
                     let end = slots[..len].partition_point(|&slot| slot <= target);
-                    if let Some(run) = W::equal_run_in_vectors(&slots, len, target) {
-                        assert_eq!(run, start..end, "capacity {capacity}, live {len}");
+                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                        assert_eq!(equal_range, start..end, "capacity {capacity}, live {len}");
                     }
                 }
                 slots[..len].reverse();
                 for target in values {
-                    if let Some(run) = W::equal_run_in_vectors(&slots, len, target) {
-                        assert!(run.start <= run.end && run.end <= len);
+                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                        assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
                 // An inconsistent ordering can leave noncontiguous matches.
@@ -459,8 +463,8 @@ mod tests {
                     *slot = values[(index * 5 + 2) % values.len()];
                 }
                 for target in values {
-                    if let Some(run) = W::equal_run_in_vectors(&slots, len, target) {
-                        assert!(run.start <= run.end && run.end <= len);
+                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                        assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
             }
@@ -484,10 +488,10 @@ mod tests {
 
         for capacity in 0..=64 {
             let slots = std::vec![u64::MAX; capacity];
-            let run = u64::equal_run_in_vectors(&slots, capacity, u64::MAX);
-            assert_eq!(run.is_some(), (28..=31).contains(&capacity));
-            if let Some(run) = run {
-                assert_eq!(run, 0..capacity);
+            let equal_range = u64::equal_range_in_vectors(&slots, capacity, u64::MAX);
+            assert_eq!(equal_range.is_some(), (28..=31).contains(&capacity));
+            if let Some(equal_range) = equal_range {
+                assert_eq!(equal_range, 0..capacity);
             }
         }
     }
@@ -512,7 +516,7 @@ mod tests {
                         let start = slots[..len].partition_point(|&slot| slot < target);
                         let end = slots[..len].partition_point(|&slot| slot <= target);
                         assert_eq!(
-                            u16::equal_run_in_vectors(&slots, len, target),
+                            u16::equal_range_in_vectors(&slots, len, target),
                             Some(start..end),
                             "capacity {capacity}, live {len}, value {value}, target {target}"
                         );
@@ -550,19 +554,19 @@ mod tests {
                         let start = slots[..len].partition_point(|&slot| slot < target);
                         let end = slots[..len].partition_point(|&slot| slot <= target);
                         assert_eq!(
-                            u32::equal_run_in_vectors(&slots, len, target),
+                            u32::equal_range_in_vectors(&slots, len, target),
                             Some(start..end),
                             "capacity {capacity}, live {len}, uniform {uniform:?}, target {target}"
                         );
                     }
-                    // Inconsistent encodings need not give an exact run,
+                    // Inconsistent encodings need not give an exact equal_range,
                     // but neither bound may escape the live prefix.
                     for (index, slot) in slots[..len].iter_mut().enumerate() {
                         *slot = values[(index * 5 + 2) % values.len()];
                     }
                     for target in values {
-                        let run = u32::equal_run_in_vectors(&slots, len, target).unwrap();
-                        assert!(run.start <= run.end && run.end <= len);
+                        let equal_range = u32::equal_range_in_vectors(&slots, len, target).unwrap();
+                        assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
             }
@@ -570,11 +574,11 @@ mod tests {
         // Another packing stage or mask word is a separate policy.
         for capacity in [33, 36, 64] {
             let slots = std::vec![0; capacity];
-            assert_eq!(u32::equal_run_in_vectors(&slots, capacity, 0), None);
+            assert_eq!(u32::equal_range_in_vectors(&slots, capacity, 0), None);
         }
     }
 
-    /// Equality masks need not retain an empty run's insertion position, but
+    /// Equality masks need not retain an empty equal_range's insertion position, but
     /// must retain every live match and ignore stale matching tail slots.
     fn assert_equality_mask_boundaries<W: InlineSlot>() {
         let values = [0, 1_u64 << 48, 1 << 63, u64::MAX].map(W::of_inline_key);
@@ -603,7 +607,7 @@ mod tests {
                         let result = W::equality_mask_in_vectors(&slots, target);
                         assert_eq!(result.is_some(), supported, "capacity {capacity}");
                         if let Some(mask) = result {
-                            let run = mask.run(len).unwrap_or(0..0);
+                            let equal_range = mask.equal_range(len).unwrap_or(0..0);
                             let live = &slots[..len];
                             let expected = match live.iter().position(|&slot| slot == target) {
                                 None => 0..0,
@@ -612,8 +616,8 @@ mod tests {
                                         ..live.iter().rposition(|&slot| slot == target).unwrap() + 1
                                 }
                             };
-                            assert_eq!(run, expected, "capacity {capacity}, live {len}");
-                            assert!(run.start <= run.end && run.end <= len);
+                            assert_eq!(equal_range, expected, "capacity {capacity}, live {len}");
+                            assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                         }
                     }
                 }

@@ -304,7 +304,7 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Intern
         (0..self.len())
             .map(|index| {
                 let value = self.head_leaf(index).head_value();
-                (self.key(index).tracked_id(), value.tracked_id())
+                (self.separator_key(index).tracked_id(), value.tracked_id())
             })
             .collect()
     }
@@ -384,7 +384,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
                     internal.child(index).for_each_entry(on_entry);
                     if index < internal.len() {
                         let value = internal.head_leaf(index).head_value();
-                        on_entry(internal.key(index), value);
+                        on_entry(internal.separator_key(index), value);
                     }
                 }
             }

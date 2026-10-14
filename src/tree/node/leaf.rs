@@ -22,10 +22,10 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{InlineTarget, SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
 use super::length_tags::{LengthTags, SlotMatches};
-use super::node_plan::{KeySearch, NodePlan};
+use super::node_plan::NodePlan;
 use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
-use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, Slots};
+use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, Insertion, InsertionSide, Split};
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
@@ -385,7 +385,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// [`Self::search`], always inlined, whatever the plan says: for an
-    /// insert's search (`Node::find_for_insert`), which, unlike a lookup,
+    /// insert's search (`Node::search_for_insert`), which, unlike a lookup,
     /// gains more from its leaf search inline than it loses in code size
     /// (`NodePlan::inlines_node_search`). For std heap byte strings, the
     /// search out of line cost a random insert 40 instructions more.
@@ -406,22 +406,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         Q: Ord + ?Sized,
     {
         if let Some(target) = self.inline_target(key)
-            && let Some(run) = self.inline_equal_run(target)
+            && let Some(candidates) = self.candidates(target)
         {
-            return self.search_run(run, key, target);
+            return self.search_candidates(candidates, key, target);
         }
-        let keys = self.keys();
-        match Self::plan().full_search() {
-            KeySearch::Branchless => keys.branchless_search_index(key.key()),
-            KeySearch::Binary => {
-                keys.binary_search_index(|probe: &K| key.key().cmp(probe.borrow()))
-            }
-        }
+        Self::plan()
+            .all_keys_search()
+            .search(self.keys(), key.key(), |probe: &K| {
+                key.key().cmp(probe.borrow())
+            })
     }
 
-    /// The positions of the leaf's keys whose inline keys equal `target`'s
-    /// in the bytes the leaf keeps (D18), or `None` if the leaf has no
-    /// inline keys: only those can equal the key searched for. The count
+    /// The candidates for `target`: the positions of the leaf's keys whose
+    /// inline keys equal `target`'s in the bytes the leaf keeps (D18), or
+    /// `None` if the leaf has no inline keys. Only those keys can equal the
+    /// key searched for; the others differ in their inline keys. The count
     /// over the inline keys runs over the leaf's capacity, a constant, which
     /// the compiler unrolls; over a capacity chosen at run time, it
     /// compiled to a loop of several times the instructions, and over two
@@ -430,28 +429,29 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// callers: outlining shared uses also made LLVM expand 64-bit summary
     /// counts into scalar lane-bit sums.
     #[inline(always)]
-    fn inline_equal_run(self, target: InlineTarget) -> Option<Range<usize>> {
-        Some(self.inline_keys()?.equal_run(target.inline_key()))
+    fn candidates(self, target: InlineTarget) -> Option<Range<usize>> {
+        Some(self.inline_keys()?.equal_range(target.inline_key()))
     }
 
-    /// The search within `run`, the keys whose inline keys equal `key`'s
-    /// (D18). Keys outside the run differ from `key` in their inline keys,
-    /// which order them (the `InlineKey` contract), so if `key` is in no
-    /// run, its edge is where the run would start.
+    /// The search among `candidates`, the keys whose inline keys equal
+    /// `key`'s (D18). The other keys differ from `key` in their inline keys,
+    /// which order them (the `InlineKey` contract), so if `key` is none of
+    /// the candidates, its edge is where they start, even when there are
+    /// none.
     ///
     /// It runs as the leaf's plan says. Keys with their own `InlineKey`
     /// impl compare by `Ord`, and search as their type picks (D19):
-    /// branchless for plain data such as integers, whose run is the whole
-    /// leaf where their kept bytes all tie. Std byte strings search it by
-    /// binary search, comparing as [`SearchKey::cmp_tied`] does, a word at a
-    /// time from past the bytes the run shares.
+    /// branchless for plain data such as integers, whose candidates are the
+    /// whole leaf where their kept bytes all tie. Std byte strings search
+    /// them with an early exit, comparing as [`SearchKey::cmp_tied`] does, a
+    /// word at a time from past the bytes the candidates share.
     ///
-    /// In bounds for any `Ord` and `InlineKey`: the run lies within `0..len`
-    /// whatever the inline keys hold ([`NodeInlineKeys::equal_run`]), taking
+    /// In bounds for any `Ord` and `InlineKey`: the candidates lie within `0..len`
+    /// whatever the inline keys hold ([`NodeInlineKeys::equal_range`]), taking
     /// it out of the keys checks that, and either search stays within it.
-    fn search_run<Q>(
+    fn search_candidates<Q>(
         self,
-        run: Range<usize>,
+        candidates: Range<usize>,
         key: &SearchKey<'_, K, S, Q>,
         target: InlineTarget,
     ) -> Result<usize, usize>
@@ -459,20 +459,18 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let candidates = self.keys().slice(run.clone());
-        let found = match Self::plan().tied_search() {
-            KeySearch::Branchless => candidates.branchless_search_index(key.key()),
-            KeySearch::Binary => {
-                candidates.binary_search_index(|stored: &K| key.cmp_tied::<Self>(target, stored))
-            }
-        };
+        let found = Self::plan().candidate_search().search(
+            self.keys().slice(candidates.clone()),
+            key.key(),
+            |stored: &K| key.cmp_tied::<Self>(target, stored),
+        );
         found
-            .map(|index| run.start + index)
-            .map_err(|index| run.start + index)
+            .map(|index| candidates.start + index)
+            .map_err(|index| candidates.start + index)
     }
 
     /// The index of the key equal to `key`, if the leaf holds one: an exact-key
-    /// lookup, which may reject unequal lengths inside a tied run (D36) and
+    /// lookup, which may reject unequal lengths among the candidates (D36) and
     /// confirm a lone candidate by equality alone (D38). Ordered searches
     /// still use [`Self::search`]: a length tag gives no edge.
     pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<usize>
@@ -483,20 +481,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if let Some(target) = self.inline_target(key)
             && let Some(inline_keys) = self.inline_keys()
         {
-            // This typed view keeps the leaf's capacity constant, as for the
-            // ordered `inline_equal_run`. Empty masks need no bound
+            // This typed view keeps the leaf's capacity constant, as
+            // `Self::candidates` does. Empty masks need no bound
             // extraction.
-            let run = if let Some(mask) = inline_keys.equality_mask(target.inline_key()) {
-                mask.run(self.len())?
+            let candidates = if let Some(mask) = inline_keys.equality_mask(target.inline_key()) {
+                mask.equal_range(self.len())?
             } else {
-                inline_keys.equal_run(target.inline_key())
+                inline_keys.equal_range(target.inline_key())
             };
-            if run.is_empty() {
+            if candidates.is_empty() {
                 None
-            } else if run.len() == 1 {
-                // Point lookup needs no insertion edge or ordering result.
+            } else if candidates.len() == 1 {
+                // An exact-key lookup needs no insertion edge or ordering.
                 // Arrays use full equality; strings retain the prefix skip.
-                let stored = &self.keys()[run.start];
+                let stored = &self.keys()[candidates.start];
                 let matches = if Self::plan().has_whole_key_equality()
                     && let Some(query) = key.whole_bytes_query()
                 {
@@ -504,14 +502,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 } else {
                     key.cmp_tied::<Self>(target, stored) == Ordering::Equal
                 };
-                matches.then_some(run.start)
+                matches.then_some(candidates.start)
             } else if let Some(tag) = key.length_tag()
                 && let Some(tags) = self.length_tags()
             {
-                match LengthTags::new(tags).matching(run.clone(), tag) {
+                match LengthTags::new(tags).matching(candidates.clone(), tag) {
                     SlotMatches::None => None,
                     SlotMatches::One(index) => {
-                        // The mask only includes indexes in the live run;
+                        // The mask only includes live candidates;
                         // indexing keeps this fact checked locally too.
                         (key.cmp_tied::<Self>(target, &self.keys()[index]) == Ordering::Equal)
                             .then_some(index)
@@ -519,7 +517,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                     SlotMatches::Two { lower, upper } => {
                         // Binary search over the two filtered keys: the
                         // upper key is the midpoint. This avoids reading
-                        // unrelated strings in the original primary run.
+                        // the other candidates' strings.
                         let keys = self.keys();
                         match key.cmp_tied::<Self>(target, &keys[upper]) {
                             Ordering::Equal => Some(upper),
@@ -529,10 +527,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                             Ordering::Greater => None,
                         }
                     }
-                    SlotMatches::Many => self.search_run(run, key, target).ok(),
+                    SlotMatches::Many => self.search_candidates(candidates, key, target).ok(),
                 }
             } else {
-                self.search_run(run, key, target).ok()
+                self.search_candidates(candidates, key, target).ok()
             }
         } else {
             self.search_maybe_inlined(key).ok()
@@ -1050,11 +1048,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
-    type Keys<'a>
-        = NodeKeys<'a, K>
-    where
-        K: 'a;
-
     fn child_of(parent: Internal<K, V, S>, index: usize) -> Self {
         parent.leaf_child(index)
     }
@@ -1192,8 +1185,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         }
     }
 
-    fn keys<'a>(self) -> NodeKeys<'a, K> {
-        Leaf::keys(self)
+    fn key<'a>(self, index: usize) -> &'a K {
+        Leaf::key(self, index)
     }
 
     fn inline_keys<'a>(self) -> Option<NodeInlineKeys<'a>> {

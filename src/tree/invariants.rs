@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
-use super::node::{Child, KeyList, Node};
+use super::node::{Child, Node};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 
@@ -153,7 +153,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             for index in 0..=internal.len() {
                 Self::collect_separator_keys(internal.child(index), keys);
                 if index < internal.len() {
-                    keys.push(internal.key(index));
+                    keys.push(internal.separator_key(index));
                 }
             }
         }
@@ -183,14 +183,16 @@ impl<'a, K: Ord> KeyBounds<'a, K> {
         }
     }
 
-    /// The bounds of the child at edge `index` of a node with these bounds
-    /// and these keys.
-    fn of_child(&self, keys: impl KeyList<'a, K>, index: usize) -> Self {
+    /// The bounds of the child at edge `index` of `node`, an internal node
+    /// with these bounds: the separators beside the edge.
+    fn of_child<V, S: InlineKeyStrategy<K>>(&self, node: Internal<K, V, S>, index: usize) -> Self {
         Self {
             lower: index
                 .checked_sub(1)
-                .map_or(self.lower, |left| keys.get(left)),
-            upper: keys.get(index).or(self.upper),
+                .map_or(self.lower, |left| Some(node.separator_key(left))),
+            upper: (index < node.len())
+                .then(|| node.separator_key(index))
+                .or(self.upper),
         }
     }
 }
@@ -220,7 +222,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
     ) {
         match node {
             Node::Leaf(leaf) => {
-                let keys = self.check_node(leaf, &bounds, depth);
+                self.check_node(leaf, &bounds, depth);
                 let first_depth = *self.leaf_depth.get_or_insert(depth);
                 assert_eq!(depth, first_depth, "leaves at different depths");
                 let is_leftmost = self.leaves == 0;
@@ -230,17 +232,17 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
                     "every leaf but the leftmost has a head, and only those"
                 );
                 self.leaves += 1;
-                keys.iter().for_each(|key| self.visit(key));
+                leaf.keys().iter().for_each(|key| self.visit(key));
             }
             Node::Internal(internal) => {
-                let keys = self.check_node(internal, &bounds, depth);
-                for index in 0..=keys.len() {
+                self.check_node(internal, &bounds, depth);
+                for index in 0..=internal.len() {
                     let child = internal.child(index);
-                    let child_bounds = bounds.of_child(keys, index);
+                    let child_bounds = bounds.of_child(internal, index);
                     self.check_nodes_under(child, child_bounds, depth + 1);
-                    if let Some(key) = keys.get(index) {
+                    if index < internal.len() {
                         self.separators += 1;
-                        self.visit(key);
+                        self.visit(internal.separator_key(index));
                     }
                 }
             }
@@ -249,33 +251,31 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
 
     /// Checks what every node satisfies, whatever its kind: its inline keys
     /// and prefix length, at least its minimum of keys below the root, and
-    /// every key within its bounds, sharing what every key shares. Returns
-    /// its keys.
+    /// every key within its bounds, sharing what every key shares.
     fn check_node<V, S: InlineKeyStrategy<K>, C: Child<K, V, S>>(
         &self,
         node: C,
         bounds: &KeyBounds<'a, K>,
         depth: usize,
-    ) -> C::Keys<'a> {
+    ) {
         node.assert_inline_keys_match();
         node.assert_prefix_fits_fences(bounds.lower, bounds.upper, self.shared_prefix.len());
-        let keys = node.keys();
         if depth > 0 {
             assert!(
                 node.len() >= C::min_len(),
                 "a node below the root has {} keys, fewer than its minimum of {}",
-                keys.len(),
+                node.len(),
                 C::min_len()
             );
         }
-        for key in keys.iter() {
+        for index in 0..node.len() {
+            let key = node.key(index);
             bounds.assert_contains(key);
             assert!(
                 self.shared_prefix.is_shared_by::<K, S>(key),
                 "a key lacks what the tree says every key shares"
             );
         }
-        keys
     }
 
     fn visit(&mut self, key: &'a K) {
@@ -297,8 +297,8 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
         let plan = Self::plan();
         if let Some(tags) = self.length_tags() {
             assert!(plan.has_length_tags());
-            for (index, key) in self.keys().iter().enumerate() {
-                assert_eq!(Some(tags[index]), plan.length_tag(key));
+            for (index, &tag) in tags[..self.len()].iter().enumerate() {
+                assert_eq!(Some(tag), plan.length_tag(self.key(index)));
             }
         }
         let prefix_len = self.prefix_len();
@@ -308,7 +308,8 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
             // A narrow internal window may next fill a leaf's prefix, so
             // every window a node of this map hands out keeps all the bytes
             // a leaf does.
-            for (index, key) in self.keys().iter().enumerate() {
+            for index in 0..self.len() {
+                let key = self.key(index);
                 let window = self.window(index);
                 assert_eq!(window.prefix_len(), self.prefix_len());
                 assert_eq!(
@@ -321,9 +322,10 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
             .map(|(inliner, inline_width)| {
                 let dropped_bits =
                     8 * (InlineWidth::Eight.byte_len() - inline_width.byte_len()) as u32;
-                (self.keys().iter())
-                    .map(|key| {
-                        inliner.inline_key_at(key, prefix_len) >> dropped_bits << dropped_bits
+                (0..self.len())
+                    .map(|index| {
+                        inliner.inline_key_at(self.key(index), prefix_len) >> dropped_bits
+                            << dropped_bits
                     })
                     .collect()
             });

@@ -392,10 +392,10 @@ impl<K> Index<usize> for NodeKeys<'_, K> {
     }
 }
 
-/// A node's keys `0..len`, in order, lent for `'a`, as a search and the
-/// prefix upkeep read them: a leaf's, in place ([`NodeKeys`]), or an
-/// internal node's separators, in place or each a head below (D49).
-pub(crate) trait KeyList<'a, K: 'a>: Copy {
+/// Keys in order, lent for `'a`, as a node search reads them: a node's own,
+/// in place ([`NodeKeys`]), or the head keys an internal node's separators
+/// lead to (`HeadKeys`, D49).
+pub(super) trait KeyList<'a, K: 'a>: Copy {
     fn len(self) -> usize;
 
     /// Key `index`.
@@ -411,17 +411,6 @@ pub(crate) trait KeyList<'a, K: 'a>: Copy {
     ///
     /// If `range` is not within `0..len`.
     fn slice(self, range: Range<usize>) -> Self;
-
-    /// Key `index`, or `None` if `index >= len`.
-    fn get(self, index: usize) -> Option<&'a K> {
-        // SAFETY: `index < len`.
-        (index < self.len()).then(|| unsafe { self.get_unchecked(index) })
-    }
-
-    fn iter(self) -> impl DoubleEndedIterator<Item = &'a K> + ExactSizeIterator {
-        // SAFETY: `index < len`.
-        (0..self.len()).map(move |index| unsafe { self.get_unchecked(index) })
-    }
 
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` where it
     /// belongs, by a branchless binary search: every search runs the full
@@ -464,14 +453,14 @@ pub(crate) trait KeyList<'a, K: 'a>: Copy {
     }
 
     /// `Ok(i)` if key `i` is the one searched for, otherwise `Err(i)` with
-    /// `i` where it belongs, by a plain binary search that stops as soon as
+    /// `i` where it belongs, by a binary search that stops as soon as
     /// it finds it: `cmp_key(probe)` orders the key searched for against key
     /// `probe`.
     ///
     /// In bounds by construction, whatever `cmp_key` answers: the loop keeps
     /// `low <= high <= len` and probes only `mid` with `low <= mid < high`,
     /// so `Ok(mid)` is `< len` and `Err(low)` is `<= len`.
-    fn binary_search_index(self, cmp_key: impl Fn(&K) -> Ordering) -> Result<usize, usize> {
+    fn early_exit_search_index(self, cmp_key: impl Fn(&K) -> Ordering) -> Result<usize, usize> {
         let (mut low, mut high) = (0, self.len());
         while low < high {
             let mid = low + (high - low) / 2;

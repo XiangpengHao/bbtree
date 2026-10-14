@@ -167,7 +167,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
         outcome: TraceOutcome,
     ) -> Self {
         let tied = Option::zip(target, inline_keys)
-            .map(|(target, inline_keys)| inline_keys.equal_run(target.inline_key()));
+            .map(|(target, inline_keys)| inline_keys.equal_range(target.inline_key()));
         Self {
             node,
             outcome,
@@ -341,7 +341,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     pub fn key(&self, index: usize) -> &'a K {
         match self.node {
             Node::Leaf(leaf) => leaf.key(index),
-            Node::Internal(internal) => internal.key(index),
+            Node::Internal(internal) => internal.separator_key(index),
         }
     }
 
