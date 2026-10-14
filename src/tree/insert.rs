@@ -65,11 +65,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     where
         K: Ord,
     {
-        if let Some(append) = self.rightmost_append(&key) {
-            append.insert(key, value);
-            *length += 1;
-            return None;
-        }
+        let key = match self.rightmost_append(key) {
+            Ok(append) => {
+                append.insert(value);
+                *length += 1;
+                return None;
+            }
+            Err(key) => key,
+        };
         self.ensure_root_page(alloc);
         // The search skips every node's prefix unchecked.
         let key = self.shrink_shared_prefix_for(key);

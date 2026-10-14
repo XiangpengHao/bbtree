@@ -265,7 +265,7 @@ fn a_dropped_rightmost_append_forgets_the_leaf_and_changes_nothing() {
         let _append = inserts
             .map
             .tree
-            .rightmost_append(&inserts.next)
+            .rightmost_append(inserts.next)
             .expect("the remembered leaf has room for the next key");
     }
     assert!(!inserts.remembers_rightmost_leaf());

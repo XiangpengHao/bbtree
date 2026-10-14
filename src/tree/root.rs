@@ -23,10 +23,11 @@ use core::cmp::Ordering;
 use core::mem;
 
 use super::node::Node;
-use super::node::inline_keys::{SearchKey, WindowedKey};
+use super::node::inline_keys::SearchKey;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageByType};
 use super::node::root_page::RootPage;
+use super::prefix::PrefixedKey;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -263,68 +264,70 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         self.rightmost_leaf = Some(leaf.node_ptr());
     }
 
-    /// Validates a fitting append to the remembered last leaf when `key`
-    /// is greater than its current last key and has what every key shares
-    /// (D50). Forgets the leaf before comparing, and retains no borrow
-    /// of `key`: the returned token can consume it on insertion. Failure
-    /// leaves ordinary search to the caller.
+    /// An append of `key` to the remembered last leaf, if it has room, and
+    /// `key` is greater than its last key and has what every key shares
+    /// (D50); or else `key` back, for the ordinary search. Forgets the leaf
+    /// before comparing.
     #[inline]
-    pub(crate) fn rightmost_append(&mut self, key: &K) -> Option<RightmostAppend<'_, K, V, S>>
+    pub(crate) fn rightmost_append(&mut self, key: K) -> Result<RightmostAppend<'_, K, V, S>, K>
     where
         K: Ord,
     {
-        let leaf = Leaf::at(self.rightmost_leaf?);
+        let Some(leaf) = self.rightmost_leaf else {
+            return Err(key);
+        };
         self.rightmost_leaf = None;
         // The field's invariant identifies a live leaf of this tree; the
         // exclusive owner borrow is its only mutation access.
+        let leaf = Leaf::at(leaf);
         let len = leaf.len();
         if len >= Leaf::<K, V, S>::capacity() {
-            return None;
+            return Err(key);
         }
-        let last = len.checked_sub(1)?;
+        let Some(last) = len.checked_sub(1) else {
+            return Err(key);
+        };
         // SAFETY: `last < len`.
         let last_key = unsafe { leaf.key_unchecked(last) };
-        if SearchKey::<K, S, K>::new(key).cmp_full(last_key) != Ordering::Greater {
-            return None;
+        if SearchKey::<K, S, K>::new(&key).cmp_full(last_key) != Ordering::Greater {
+            return Err(key);
         }
         // A key that shares less goes the general way, which shrinks the
         // shared prefix for it.
-        let shared = self.shared_prefix();
-        if !shared.is_shared_by::<K, S>(key) {
-            return None;
-        }
-        Some(RightmostAppend {
+        let key = PrefixedKey::checked::<S>(self.shared_prefix(), key)?;
+        Ok(RightmostAppend {
             leaf,
+            key,
             rightmost_leaf: &mut self.rightmost_leaf,
         })
     }
 }
 
-/// The physically last leaf, with room, lent together with its owner's
-/// rightmost-leaf field, forgotten meanwhile. Dropping this token changes no
-/// entries and leaves the leaf forgotten; consuming it appends and remembers
-/// the leaf again.
+/// An append of a key to the physically last leaf, which has room for it,
+/// lent together with its owner's rightmost-leaf field, forgotten
+/// meanwhile. Dropping this token drops the key, changes no entries and
+/// leaves the leaf forgotten; consuming it appends and remembers the leaf
+/// again.
 pub(crate) struct RightmostAppend<'a, K, V, S> {
     leaf: Leaf<K, V, S>,
+    /// Greater than every key of the tree, and sharing what they share.
+    key: PrefixedKey<K>,
     rightmost_leaf: &'a mut Option<NodePtr<K, V, S>>,
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
-    /// Appends the same key that was validated by
-    /// [`Tree::rightmost_append`], with its value. Key identity is a logical
-    /// ordering requirement, not a memory-safety premise: the leaf was
-    /// checked for room.
+    /// Appends the key, with `value`.
     #[inline]
-    pub(in crate::tree) fn insert(self, key: K, value: V) {
+    pub(in crate::tree) fn insert(self, value: V) {
         let Self {
             leaf,
+            key,
             rightmost_leaf,
         } = self;
         let index = leaf.len();
-        let prefix_len = leaf.prefix_len();
         // Compute the key's window before the leaf changes. A panic or an
         // unused token leaves the leaf forgotten, without changing the tree.
-        leaf.insert_fit(index, WindowedKey::new(key, prefix_len), value);
+        leaf.insert_fit(index, key.window_at(leaf.prefix_len()), value);
         // Fitting appends preserve this leaf and all ancestors. There are
         // no callbacks after insertion; the caller counts the entry next.
         *rightmost_leaf = Some(leaf.node_ptr());
