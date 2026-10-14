@@ -49,6 +49,7 @@ use super::node::{Child, Node};
 use super::path::{FirstEdge, LastEdge, MAX_DEPTH, NodeEnd, PathMut};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
@@ -287,22 +288,29 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// before the tree takes it (D50), and returns `key`, which shares it
     /// now: a tree whose keys share bytes `key` lacks shrinks to what `key`
     /// shares with them, and so do the nodes that take the root's fences,
-    /// along its borders. An empty tree, whose prefix nothing bounds yet,
-    /// takes `key`'s first bytes, and its root leaf takes them as its
-    /// prefix. Calls `InlineKey` with [`WithInlineKey`](crate::WithInlineKey),
-    /// before it changes anything.
+    /// along its borders. Without a tree, there is a new one from `alloc`
+    /// first. An empty tree, whose prefix nothing bounds yet, takes `key`'s
+    /// first bytes, and its root leaf takes them as its prefix. Calls
+    /// `InlineKey` with [`WithInlineKey`](crate::WithInlineKey), before it
+    /// changes anything but making the tree.
     ///
     /// Every insert does this, and almost every one changes nothing: the
-    /// check is inline, and starting or shrinking the prefix is not.
+    /// check is inline, and making the tree or starting or shrinking the
+    /// prefix is not.
     #[inline]
-    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: K) -> PrefixedKey<K> {
+    pub(in crate::tree) fn shrink_shared_prefix_for(
+        &mut self,
+        key: K,
+        alloc: &impl Allocator,
+    ) -> PrefixedKey<K> {
+        let root_page = self.root_page_or_new(alloc);
         if NodePtr::<K, V, S>::has_inline_keys() {
-            if let Node::Leaf(root) = self.root()
+            if let Node::Leaf(root) = root_page.node()
                 && root.len() == 0
             {
                 self.start_shared_prefix(root, &key);
             } else {
-                let len = self.shared_prefix().len_shared_with::<K, S>(&key);
+                let len = root_page.shared_prefix().len_shared_with::<K, S>(&key);
                 self.shrink_shared_prefix_to(len);
             }
         }

@@ -264,8 +264,8 @@ impl<K, V, R, S: InlineKeyStrategy<K>, A: Allocator + Clone> Drop
         let (kept, _) = kept.finish();
         map.tree = Tree::concat(kept, self.after.take(), &map.alloc);
         map.length = self.length - dropped;
-        if self.had_tree {
-            map.tree.ensure_root_page(&map.alloc);
+        if self.had_tree && !map.tree.has_root() {
+            map.tree = Tree::new(&map.alloc);
         }
     }
 }

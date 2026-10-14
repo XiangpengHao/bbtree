@@ -88,9 +88,9 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
         };
         loop {
             let tree = &mut self.tree;
-            tree.ensure_root_page(&self.alloc);
             let (key, value) = next;
-            let mut entry = (tree.shrink_shared_prefix_for(key), value);
+            // The first entry makes the tree.
+            let mut entry = (tree.shrink_shared_prefix_for(key, &self.alloc), value);
             // To tell a key that shares less without the tree, whose
             // rightmost leaf is changed below.
             let shared = tree.shared_prefix().clone();

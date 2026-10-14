@@ -285,7 +285,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
 ) -> usize {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
     let rng = TestRng::new(1);
-    let mut tree = Tree::new(pages.fresh());
+    let mut tree = Tree::new(&pages);
     let mut model = LeafModel::default();
     let mut splits = 0;
 
@@ -519,7 +519,7 @@ fn split_and_insert_at_every_position() {
 fn popping_and_reinserting_at_a_border_neither_merges_nor_splits() {
     for at_front in [false, true] {
         let pages = TestPages::<u64, u64>::new();
-        let mut tree = Tree::<u64, u64, Auto>::new(pages.fresh());
+        let mut tree = Tree::<u64, u64, Auto>::new(&pages);
         let mut length = 0;
         let capacity = Leaf::<u64, u64, Auto>::capacity() as u64;
         for key in 1..=capacity {

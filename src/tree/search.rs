@@ -299,7 +299,7 @@ mod tests {
     fn a_separator_over_a_headless_leaf_panics() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-        let mut tree = Tree::new(pages.fresh());
+        let mut tree = Tree::new(&pages);
         let root = tree.raise_in(&pages);
         let headless = Leaf::new(pages.fresh_leaf(), 0);
         root.insert_fit(

@@ -517,7 +517,7 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// A tree with an empty leaf as its root.
     pub(super) fn new(pages: &'p TestPages<K, V, S>) -> Self {
         Self {
-            tree: Tree::new(pages.fresh()),
+            tree: Tree::new(pages),
             pages,
         }
     }

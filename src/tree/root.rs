@@ -179,20 +179,26 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         self.rightmost_leaf.is_some()
     }
 
-    /// A new tree, in `page`: an empty root leaf, without a head, and
-    /// nothing shared yet.
-    pub(in crate::tree) fn new(page: FreshPage<RootPage<K, V, S>>) -> Self {
+    /// A new tree, on a root page from `alloc`: an empty root leaf, without
+    /// a head, and nothing shared yet.
+    pub(crate) fn new(alloc: &impl Allocator) -> Self {
         Self {
-            root_page: Some(RootPage::new(page)),
+            root_page: Some(RootPage::new(FreshPage::allocate(alloc))),
             rightmost_leaf: None,
         }
     }
 
-    /// Makes a new tree, from `alloc`, if there is none: what an insertion
-    /// starts from.
-    pub(crate) fn ensure_root_page(&mut self, alloc: &impl Allocator) {
-        self.root_page
-            .get_or_insert_with(|| RootPage::new(FreshPage::allocate(alloc)));
+    /// The tree's root page, as [`Self::root_page`] reads it; without a
+    /// tree, that of a new one from `alloc`, as [`Self::new`] makes it:
+    /// where an insertion starts (`tree/prefix.rs`).
+    #[inline]
+    pub(in crate::tree) fn root_page_or_new(
+        &mut self,
+        alloc: &impl Allocator,
+    ) -> RootPage<K, V, S> {
+        *self
+            .root_page
+            .get_or_insert_with(|| RootPage::new(FreshPage::allocate(alloc)))
     }
 
     /// The tree of `top` and the nodes under it, on plain pages, whose keys

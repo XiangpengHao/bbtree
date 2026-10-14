@@ -67,7 +67,7 @@ fn root_above_one_leaf<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
     pages: &TestPages<K, Tracked<'l>, S>,
     ledger: &'l DropLedger,
 ) -> (Tree<K, Tracked<'l>, S>, usize) {
-    let mut tree = Tree::new(pages.fresh());
+    let mut tree = Tree::new(pages);
     let name = tree.root().expect_leaf().put_named_entry(ledger);
     tree.raise_in(pages);
     (tree, name)
@@ -293,7 +293,7 @@ fn balancing_refuses_a_headless_right_leaf() {
 fn raise_and_lower() {
     let ledger = DropLedger::new();
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-    let mut tree = Tree::new(pages.fresh());
+    let mut tree = Tree::new(&pages);
     for _ in 0..3 {
         let leaf = tree.root().expect_leaf();
         leaf.insert_fit(

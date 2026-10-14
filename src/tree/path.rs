@@ -651,8 +651,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// ([`Tree::shrink_shared_prefix_for`]), for [`Self::insert`]. The path
     /// still leads where it did: only the prefixes along the tree's borders
     /// change.
-    pub(in crate::tree) fn shrink_shared_prefix_for(&mut self, key: K) -> PrefixedKey<K> {
-        self.tree.shrink_shared_prefix_for(key)
+    pub(in crate::tree) fn shrink_shared_prefix_for(
+        &mut self,
+        key: K,
+        alloc: &impl Allocator,
+    ) -> PrefixedKey<K> {
+        self.tree.shrink_shared_prefix_for(key, alloc)
     }
 
     /// Finishes a plain insertion, remembering its leaf only when the path

@@ -73,9 +73,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             }
             Err(key) => key,
         };
-        self.ensure_root_page(alloc);
         // The search skips every node's prefix unchecked.
-        let key = self.shrink_shared_prefix_for(key);
+        let key = self.shrink_shared_prefix_for(key, alloc);
         match self
             .root_mut()
             .search_for_insert(&SearchKey::new(key.key()))
@@ -128,6 +127,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
+    /// A path at the only edge of a new tree's root, an empty leaf, made in
+    /// `tree`, which has none, from `alloc`: where a vacant entry of a map
+    /// without a tree inserts ([`Self::insert`]).
+    pub(crate) fn at_new_root(tree: &'a mut Tree<K, V, S>, alloc: &impl Allocator) -> Self {
+        debug_assert!(!tree.has_root(), "a new tree in place of one");
+        *tree = Tree::new(alloc);
+        let mut path = Self::new(tree);
+        path.start_at_root();
+        path
+    }
+
     /// Inserts `key` and `value` at the leaf edge the path ends at, counts
     /// the entry in `length`, fits the prefixes of the nodes that split,
     /// and moves the path to the new entry; pages come as for
@@ -140,7 +150,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// If the path ends at no leaf edge.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
-        let key = self.shrink_shared_prefix_for(key);
+        let key = self.shrink_shared_prefix_for(key, alloc);
         self.insert_prefixed(key, value, alloc, length);
     }
 

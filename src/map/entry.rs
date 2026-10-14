@@ -362,12 +362,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> VacantEntry<'
         } = self;
         let mut path = match place {
             VacantPlace::InTree(path) => path,
-            VacantPlace::NoTree(tree) => {
-                tree.ensure_root_page(alloc);
-                let mut path = PathMut::new(tree);
-                path.start_at_root();
-                path
-            }
+            VacantPlace::NoTree(tree) => PathMut::at_new_root(tree, alloc),
         };
         path.insert(key, value, alloc, length);
         OccupiedEntry {
