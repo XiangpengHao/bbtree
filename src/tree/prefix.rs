@@ -29,13 +29,13 @@
 //! filled from the parent's separator ([`Window::moved_back_to`]), which
 //! bounds the node (`tree/node/mod.rs`). Once it is done, and its entry
 //! counted, the nodes whose fences changed are fit to them: the halves of
-//! each split ([`PathMut::refit_split_halves`]), the nodes a removal merged
-//! or moved entries between (`remove.rs`), the siblings a cut's borders took
-//! entries from ([`Tree::refit_border_siblings`]), the spines below a join's
-//! separator (`join.rs`), and a built tree's nodes as they close
-//! (`build.rs`), down a border ([`PathMut::refit_border_below`]). A removed
-//! separator's successor is the one change read first
-//! ([`PathMut::refit_left_of_separator`]).
+//! each split ([`NodeStackMut::refit_split_halves`]), the nodes a removal
+//! merged or moved entries between (`remove.rs`), the siblings a cut's
+//! borders took entries from ([`Tree::refit_border_siblings`]), the spines
+//! below a join's separator (`join.rs`), and a built tree's nodes as they
+//! close (`build.rs`), down a border ([`NodeStackMut::refit_border_below`]).
+//! A removed separator's successor is the one change read first
+//! ([`NodeStackMut::refit_left_of_separator`]).
 //!
 //! [`Window::moved_back_to`]: super::node::inline_keys::Window::moved_back_to
 
@@ -46,20 +46,20 @@ use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::NodePtr;
 use super::node::{Child, Node};
-use super::path::{FirstEdge, LastEdge, MAX_DEPTH, NodeEnd, PathMut};
+use super::node_stack::{FirstEdge, LastEdge, MAX_DEPTH, NodeEnd, NodeStackMut};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// Fits the prefixes of the nodes an insert split to their fences, from
-    /// the leaves up, so that each node's sees its children's; the path,
+    /// the leaves up, so that each node's sees its children's; the node stack,
     /// which ends at the new entry, ends there again afterwards.
     ///
     /// `separator_indexes[climbed]`, for each `climbed` from 1 to
-    /// `levels_climbed` levels up the path from its bottom, is where the
-    /// node the path goes through there holds the separator between the two
+    /// `levels_climbed` levels up the node stack from its bottom, is where
+    /// the node stack's node there holds the separator between the two
     /// halves of the node below it that split.
     ///
     /// Calls `InlineKey`: an insert does this last, once its entry is in and
@@ -133,7 +133,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Fits the prefixes of the nodes below the bottom node's child at
     /// `edge`, down that child's `End` border, from the leaf up, so that
     /// each node's sees its children's; the child itself is the caller's to
-    /// fit, with its sibling if that changed too. The path ends at the
+    /// fit, with its sibling if that changed too. The node stack ends at the
     /// bottom node again, at `edge`.
     pub(in crate::tree) fn refit_border_below<End: NodeEnd>(&mut self, edge: usize) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
@@ -150,7 +150,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         }
     }
 
-    /// Before the separator the path ends at, `s`, in an internal node,
+    /// Before the separator the node stack ends at, `s`, in an internal node,
     /// gives way to its successor, `s'`, the first key of the leftmost leaf
     /// right of it (D17): shrinks the prefixes of the nodes along the right
     /// border under the edge left of `s`, whose upper fence `s'` becomes, to
@@ -193,13 +193,13 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         }
     }
 
-    /// Moves the prefix of every node on the path back to the root's, what
-    /// every key of the tree shares (D50), from the root down, each filled
-    /// from its parent's key beside the path, which is one of its fences,
-    /// once the parent's is the root's too. For a cut along the path
-    /// (`cut.rs`), whose nodes become the borders of two trees, both of
+    /// Moves the prefix of every node on the node stack back to the root's,
+    /// what every key of the tree shares (D50), from the root down, each
+    /// filled from its parent's key beside the node stack, which is one of its
+    /// fences, once the parent's is the root's too. For a cut along the node
+    /// stack (`cut.rs`), whose nodes become the borders of two trees, both of
     /// whose keys share what this tree's do. Reads no key; no user encoding
-    /// runs. The path stays where it is.
+    /// runs. The node stack stays where it is.
     pub(super) fn move_prefixes_back_to_root(&mut self) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
@@ -210,12 +210,12 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             "the root's prefix is what every key shares"
         );
         // Each node above the bottom, its own prefix moved back already,
-        // fills its child's on the path.
+        // fills its child's on the node stack.
         for depth in 0..self.depth() {
             let fill = self
                 .internal_at(depth)
                 .fence_window(self.index_at(depth))
-                .expect("a node on a path down holds a key");
+                .expect("a node on a node stack down holds a key");
             match self.node_at(depth + 1) {
                 Node::Leaf(leaf) => leaf.move_prefix_back_to(fill),
                 Node::Internal(internal) => internal.move_prefix_back_to(fill),
@@ -234,15 +234,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
         }
-        let mut path = PathMut::new(self);
-        path.start_at_root();
-        while !path.ends_at_leaf() {
-            let len = path.node().len();
+        let mut stack = NodeStackMut::new(self);
+        stack.start_at_root();
+        while !stack.ends_at_leaf() {
+            let len = stack.node().len();
             debug_assert!(len > 0, "a node on a fixed border holds a key");
             let sibling = if End::IS_LAST { len - 1 } else { 1 };
-            path.refit_children_to_fences([sibling]);
-            path.set_index(End::edge(path.node()));
-            path.descend();
+            stack.refit_children_to_fences([sibling]);
+            stack.set_index(End::edge(stack.node()));
+            stack.descend();
         }
     }
 }

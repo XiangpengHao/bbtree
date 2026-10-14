@@ -41,7 +41,7 @@ use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::join::DetachedTree;
-use crate::tree::path::KeySide;
+use crate::tree::node_stack::KeySide;
 use crate::tree::root::Tree;
 use crate::tree::walk::DyingWalk;
 

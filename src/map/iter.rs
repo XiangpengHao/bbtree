@@ -14,7 +14,7 @@ use super::BBTreeMap;
 use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::leaf::KeyRun;
-use crate::tree::path::Immut;
+use crate::tree::node_stack::Immut;
 use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.

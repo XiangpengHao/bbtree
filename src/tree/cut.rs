@@ -3,15 +3,15 @@
 //!
 //! A search finds the leaf edge on the given side of the key
 //! ([`KeySide`]), where the cut goes; for a key that is a separator, the
-//! edge before it is the end of the rightmost leaf left of it. Up the path
-//! from there, each node is cut at the path's edge (`Leaf::cut_off_at`,
-//! `Internal::cut_off_at`): it keeps what lies left of the path, and what
-//! lies right of it goes into a new node, after the part cut off from the
-//! node below as its first child. The new nodes make a tree as tall as the
-//! old one, with the keys past the cut.
+//! edge before it is the end of the rightmost leaf left of it. Up the node
+//! stack from there, each node is cut at the node stack's edge
+//! (`Leaf::cut_off_at`, `Internal::cut_off_at`): it keeps what lies left of
+//! the node stack, and what lies right of it goes into a new node, after the
+//! part cut off from the node below as its first child. The new nodes make a
+//! tree as tall as the old one, with the keys past the cut.
 //!
-//! The nodes on the path become the borders of the two trees, whose prefix
-//! is what every key of the tree shares (D50): before the cut, their
+//! The nodes on the node stack become the borders of the two trees, whose
+//! prefix is what every key of the tree shares (D50): before the cut, their
 //! prefixes go back to the root's, from the root down, reading no key. Both
 //! trees keep what the tree's keys shared; their keys share at least that.
 //!
@@ -29,9 +29,9 @@
 //! right tree only through [`Cut::finish`], which puts it there, and fits
 //! both.
 //!
-//! That touches the nodes along the path and the two borders: O(log n) of
-//! them. The two maps' lengths come from counting the entries of the shorter
-//! tree, a node at a time, as std's do ([`Cut::lengths`]).
+//! That touches the nodes along the node stack and the two borders: O(log n)
+//! of them. The two maps' lengths come from counting the entries of the
+//! shorter tree, a node at a time, as std's do ([`Cut::lengths`]).
 //!
 //! # Borders
 //!
@@ -55,7 +55,7 @@ use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::siblings::Siblings;
 use super::node::{Child, Node};
-use super::path::{FirstEdge, KeySide, LastEdge, NodeEnd, PathMut};
+use super::node_stack::{FirstEdge, KeySide, LastEdge, NodeEnd, NodeStackMut};
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -80,9 +80,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let mut path = PathMut::new(self);
-        path.search_to_edge(&SearchKey::new(key), side);
-        let upper = path.cut(alloc);
+        let mut stack = NodeStackMut::new(self);
+        stack.search_to_edge(&SearchKey::new(key), side);
+        let upper = stack.cut(alloc);
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
         let mut upper = Tree::from_node(upper, self.shared_prefix().clone(), alloc);
@@ -132,21 +132,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Cut<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
-    /// Cuts the tree along the path, which ends at a leaf edge: each node on
-    /// it, from the leaf up, keeps what lies left of the path, and what lies
-    /// right of it goes into a new node, after the part cut off from the node
-    /// below. Returns the top of the new nodes, as tall as the root, on plain
-    /// pages from `alloc`, which nothing owns until the caller makes it a
-    /// tree's root. Nodes on either side of the cut may be left with fewer
-    /// keys than their minimum, down to none. Compares no keys.
+impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
+    /// Cuts the tree along the node stack, which ends at a leaf edge: each
+    /// node on it, from the leaf up, keeps what lies left of the node stack,
+    /// and what lies right of it goes into a new node, after the part cut off
+    /// from the node below. Returns the top of the new nodes, as tall as the
+    /// root, on plain pages from `alloc`, which nothing owns until the caller
+    /// makes it a tree's root. Nodes on either side of the cut may be left
+    /// with fewer keys than their minimum, down to none. Compares no keys.
     ///
-    /// The nodes on the path become the two trees' borders: first, their
+    /// The nodes on the node stack become the two trees' borders: first, their
     /// prefixes move back to what every key shares (D50).
     ///
     /// # Panics
     ///
-    /// If the path ends at no leaf edge.
+    /// If the node stack ends at no leaf edge.
     fn cut(mut self, alloc: &impl Allocator) -> Node<K, V, S> {
         self.move_prefixes_back_to_root();
         let index = self.index();

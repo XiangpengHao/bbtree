@@ -209,11 +209,11 @@ impl InlineKeyNodeHeader {
 /// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
 /// strategy `S`, that tells the node's kind in its lowest bit, which every
 /// page leaves 0, being aligned to 512 B at least (D15, D49). Internal nodes
-/// store it as edges, paths and walks as the nodes on them (`tree/path.rs`),
-/// the tree as its root (`root_page.rs`), and the node handles, [`Leaf`] and
-/// [`Internal`], wrap it: following one decides the kind of the node it leads
-/// to before reading the node. A leaf's pointer carries the tag, so that a
-/// descent uses an internal node's as it is.
+/// store it as edges, node stacks and walks as the nodes on them
+/// (`tree/node_stack.rs`), the tree as its root (`root_page.rs`), and the node
+/// handles, [`Leaf`] and [`Internal`], wrap it: following one decides the kind
+/// of the node it leads to before reading the node. A leaf's pointer carries
+/// the tag, so that a descent uses an internal node's as it is.
 ///
 /// The tag is the only record of a node's kind: the node does not keep it.
 /// A pointer gets it where its page becomes a node ([`Self::initialize`],

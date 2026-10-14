@@ -186,7 +186,7 @@ tail, was prototyped and rejected.
   keys stays in the head (D49); a merge brings both back together as an
   entry. Values never leave leaves.
 - **Lookup always ends at a leaf.** A match on an internal separator continues
-  down the leftmost path of its right subtree to that leaf's head.
+  down the left border of its right subtree to that leaf's head.
 - Why: values only in leaves, as intended from the start (00-init: database
   B-trees). Internal fanout is higher (u64→u64: 64 children per 1 KB, 43
   with values in internal nodes), and large values never sit in internal
@@ -281,21 +281,21 @@ Design in 04-inline-key.md.
   memory per entry of a half-full guarantee.
 - Consequence: a non-root internal node has at least 5 children, so the
   leaves lie at most 23 levels below the root: one level more would need
-  2·5^23 KB of leaves, more than 2^64 bytes. Every path has a slot per level
-  (D24).
+  2·5^23 KB of leaves, more than 2^64 bytes. Every node stack has a slot per
+  level (D24).
 
-**D23. Iteration: a cursor per end, each a path (D24).** (2026-10-08)
+**D23. Iteration: a cursor per end, each a node stack (D24).** (2026-10-08)
 
 - **A position is an edge of a leaf.** Past a leaf's last entry, the next
-  one is the separator of the lowest node on the path with a key beyond it,
-  and its value is the head of the leftmost leaf right of it (D17).
+  one is the separator of the lowest node on the node stack with a key beyond
+  it, and its value is the head of the leftmost leaf right of it (D17).
   Separator keys live only in internal nodes, so crossing a leaf boundary
   visits an ancestor whatever we do: leaf-to-leaf links would not help.
   `next()` never calls `Ord` (D11).
-- **Each end is a path** (D24): it goes up its own levels to the separator
-  and down to the next leaf. No end walks down from the root again.
-- **Lazy:** an end that has not started holds a detached path, which writes
-  nothing; it starts at the first or last entry on its first move, so
+- **Each end is a node stack** (D24): it goes up its own levels to the
+  separator and down to the next leaf. No end walks down from the root again.
+- **Lazy:** an end that has not started holds a detached node stack, which
+  writes nothing; it starts at the first or last entry on its first move, so
   iterating from one end never descends the other. A range positions both
   ends when it is made, for std's panics on bounds out of order.
 - **In place:** a cursor is updated field by field, never rebuilt and copied
@@ -306,8 +306,8 @@ Design in 04-inline-key.md.
   28.2 → 11.5 ns per entry for 1M 4-entry maps once removed.
 - **Sizes:** `Iter` 560 B, `Range` 552 B (D33, D35; std's `Iter`: 72 B).
 - **Mutable walks** (`IterMut`, `ValuesMut`, `RangeMut`) give their
-  paths a `ValMut` borrow type, as std's give their handles: the paths
-  copy, so both ends hold some, and only read the structure and keys;
+  node stacks a `ValMut` borrow type, as std's give their handles: the node
+  stacks copy, so both ends hold some, and only read the structure and keys;
   handing out a value as `&mut V` is unsafe. The walks vouch for handing out each value once: their ends move
   toward each other, and stop by a count (whole map) or where they meet
   (range).
@@ -315,8 +315,8 @@ Design in 04-inline-key.md.
   tree, which is dropping one) takes the tree apart as it goes: each entry
   is moved out of its slot, nothing shifts and nothing rebalances, and an
   end frees each node as it goes up out of it, past its last edge (its
-  first, going backward); the nodes on the path where the ends meet go
-  last. Paths of the `Dying` borrow type copy, so both ends hold some;
+  first, going backward); the nodes on the node stack where the ends meet go
+  last. Node stacks of the `Dying` borrow type copy, so both ends hold some;
   moving an entry out and freeing a node are unsafe, vouched for by the
   walk. Entries without drop glue are skipped a leaf at a time when the map
   is dropped. 1M entries, one run (ns per entry): consuming `for` loop,
@@ -342,66 +342,67 @@ Design in 04-inline-key.md.
   can't wait to position them, having no type for the bounds' key to keep
   them in.
 
-**D24. Paths: a node pointer per level from the root, shared by every operation.** (2026-10-08)
+**D24. Node stacks: a node pointer per level from the root, shared by every operation.** (2026-10-08)
 
-- **One type** (`tree/path.rs`): a stack of the nodes from the root down
+- **One type** (`tree/node_stack.rs`): a stack of the nodes from the root down
   to a position in one of them, the root first, and the index taken at
   each, as a `u16`. It stands for a borrow of the whole tree, which its borrow type
-  says: shared, value-mutating and dying paths copy, and an exclusive path
-  (`PathMut`) changes the tree through its bottom node, from which nothing
-  leads up, and holds the `&mut` of the root to raise or lower the tree
-  (D52). It keeps each node as its edge does, tagged with its kind; the
-  nodes it hands out are plain handles (D14).
+  says: shared, value-mutating and dying node stacks copy, and an exclusive
+  node stack (`NodeStackMut`) changes the tree through its bottom node, from
+  which nothing leads up, and holds the `&mut` of the root to raise or lower
+  the tree (D52). It keeps each node as its edge does, tagged with its kind;
+  the nodes it hands out are plain handles (D14).
 - **Who uses it:**
   - an insert that reaches a full leaf searches down one (D37), inserts at
-    the leaf, carries splits up the path, then goes back down through the
-    halves that took the new entry, so the path ends at it;
-  - a removal goes up the path from where the entry came out, fixing each
-    underfull child (D22) and stopping at the first level that loses no
+    the leaf, carries splits up the node stack, then goes back down through
+    the halves that took the new entry, so the node stack ends at it;
+  - a removal goes up the node stack from where the entry came out, fixing
+    each underfull child (D22) and stopping at the first level that loses no
     key; a separator's successor comes up from the leftmost leaf right of
     it;
-  - an entry keeps the path its search found: reading or changing it goes
-    straight to the bottom node, removing or inserting goes up the path;
+  - an entry keeps the node stack its search found: reading or changing it
+    goes straight to the bottom node, removing or inserting goes up the node
+    stack;
   - each end of a walk is one (D23), and a range's bounds are searched
     with one;
   - point lookups and inserts into a leaf with room hold only the current
     node (D32, D37).
-- **Depth, counted by the path.** Nothing records how tall a tree is. A
-  path knows how deep it went, and a node's kind comes from its tag (D52).
-  A node above a path's bottom has the edge down, so it is internal: going
-  up returns it as one, reading no tag, and going up from the root raises
-  the tree first, the one way inserts, joins and builds grow it
-  (`PathMut::ascend_raising`). Work that goes back up counts from where it
+- **Depth, counted by the node stack.** Nothing records how tall a tree is. A
+  node stack knows how deep it went, and a node's kind comes from its tag
+  (D52). A node above a node stack's bottom has the edge down, so it is
+  internal: going up returns it as one, reading no tag, and going up from the
+  root raises the tree first, the one way inserts, joins and builds grow it
+  (`NodeStackMut::ascend_raising`). Work that goes back up counts from where it
   started: an insert's split numbers the levels it climbs from the leaf,
   which a new root above leaves alone, and a removal's fixing goes by
   depth, which merges keep until the root lowers, after them. Clearing
-  prefixes before a cut reads the nodes on the path, and a bulk build fits
-  the nodes a new leaf closed with the path that hung it (D25). Only a
-  join, which lines two trees up, counts how deep each one's leaves lie,
-  down the border it walks anyway (`Tree::leaf_depth`). A slot read checks
-  its depth against the levels on the path, at most 24, which also keeps
-  it in bounds. Measured against D52 at 10M, one run each, in instructions
-  per operation: lookups and inserts unchanged, removal 689 → 693,
-  `range64` 1,669 → 1,632, iteration 6.2 → 5.6 per entry; times within
+  prefixes before a cut reads the nodes on the node stack, and a bulk build
+  fits the nodes a new leaf closed with the node stack that hung it (D25).
+  Only a join, which lines two trees up, counts how deep each one's leaves
+  lie, down the border it walks anyway (`Tree::leaf_depth`). A slot read
+  checks its depth against the levels on the node stack, at most 24, which
+  also keeps it in bounds. Measured against D52 at 10M, one run each, in
+  instructions per operation: lookups and inserts unchanged, removal 689 →
+  693, `range64` 1,669 → 1,632, iteration 6.2 → 5.6 per entry; times within
   run-to-run noise.
-- **Why pointers, not indexes.** An index path is valid under the same
-  condition as a pointer path, that nothing else changes the tree, which
-  `&mut` already gives; it only turns a broken condition into a panic, and
-  costs a walk down from the root at each use.
+- **Why pointers, not indexes.** A node stack of indexes is valid under
+  the same condition as one of pointers, that nothing else changes the
+  tree, which `&mut` already gives; it only turns a broken condition into
+  a panic, and costs a walk down from the root at each use.
 - **24 slots** (`MAX_DEPTH` 23, from D22's floor of 4), 248 B. The slots are
-  uninitialized until written; a path is made detached and started where it
-  stays, and is never moved once written inside the tree code: moving one
+  uninitialized until written; a node stack is made detached and started where
+  it stays, and is never moved once written inside the tree code: moving one
   copies it with wide loads, which wait on the narrow stores that wrote it
-  (D23). Passing the path by value to `remove`, wrapping it in a search
+  (D23). Passing the node stack by value to `remove`, wrapping it in a search
   result, or returning it from a constructor each did, and made a 1k `get`
   take 31 ns instead of 10.9, and `pop_first` 1.6× as long. An entry and
   an iterator still move when returned.
-- **Rejected:** 8 levels in place and a `Vec` for the rest, which made a path
-  112 B (`Iter` 248 B). Choosing the storage at every level cost 50–70
+- **Rejected:** 8 levels in place and a `Vec` for the rest, which made a node
+  stack 112 B (`Iter` 248 B). Choosing the storage at every level cost 50–70
   instructions per operation, and `get` +13% at 10M, where fewer
   instructions let more independent lookups overlap.
-- Measured, one run each, against index paths and recursive insert and
-  removal (ns per call):
+- Measured, one run each, against node stacks of indexes and recursive
+  insert and removal (ns per call):
 
   | | 10M u64→u64 before | after | std | 1k u64→u64 before | after | std |
   |---|--:|--:|--:|--:|--:|--:|
@@ -430,8 +431,8 @@ Design in 04-inline-key.md.
   while walking, as std's `extract_if` does in place, would need the walk's
   position tracked through every merge and steal, which std's parent
   pointers give for free.
-- **`split_off` cuts the tree along the search path, as std's does**
-  (`tree/cut.rs`): from the leaf up, each node on the path keeps what
+- **`split_off` cuts the tree where its search went, as std's does**
+  (`tree/cut.rs`): from the leaf up, each node on the node stack keeps what
   lies left of it, and what lies right goes into a new node, after the part
   cut off below; then both sides of the cut are brought back to the
   minimum fill from the top down (`tree/cut.rs`, which the builder's
@@ -477,7 +478,7 @@ Design and measurements in 05-fence-key.md.
 **D28. Branch early, loop late: a node's kind is decided once per step.** (2026-10-09)
 
 - **The rule:** a traversal decides whether a node is a leaf or internal
-  once, where it reads the node's page from an edge, a path or the root
+  once, where it reads the node's page from an edge, a node stack or the root
   (`Node::at`, the one cast, from the pointer's tag, D52), and the code
   after it is for that kind. Likewise a choice fixed for a whole loop, such as the end a
   border is on, is made before the loop, as a type.
@@ -612,8 +613,8 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   memory under glibc's malloc. mimalloc puts 1 KiB blocks on 1 KiB
   boundaries either way, and an A/B showed the same instructions and RSS,
   with timing differences within run-to-run noise.
-- **Point lookups keep no path.** `get` and `get_mut` hold only the
-  current node. Inserts, entries, removals and range bounds keep paths.
+- **Point lookups keep no node stack.** `get` and `get_mut` hold only the
+  current node. Inserts, entries, removals and range bounds keep node stacks.
 - **Consuming `fold`/`rfold` run one counted loop per leaf** and update
   the cursor once per leaf; `next` still crosses leaves through the
   boundary helper. An unbounded range end is set up only when first used;
@@ -645,11 +646,11 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   (integer insert frame: 2,216 → 360 bytes). Growing a node keeps the
   max-valued summary padding already there, and an insert at the end skips
   the empty tail move. Replacing a value borrows it in place instead of
-  copying the path. 10M ordered `u64` insert: 36.0 → 34.0 ns; random
+  copying the node stack. 10M ordered `u64` insert: 36.0 → 34.0 ns; random
   insert unchanged.
 - **A range iterator caches a checked leaf interval.** Repeated
   `next`/`next_back` step inside it; switching direction, crossing a leaf
-  or folding first syncs the path; it costs `Range`/`RangeMut` 40 bytes.
+  or folding first syncs the node stack; it costs `Range`/`RangeMut` 40 bytes.
   10M `range64`: `u64` 736 → 685 ns (−7%), JSON 1302 → 1204 ns.
 
 **D34. Align leaf pairs so a key and its value share a cache line.** (2026-10-10)
@@ -703,12 +704,12 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   LLVM did once it had a second caller, its population count grew from 26
   to 244 instructions, and JSON hits got 25% slower.
 
-**D37. Inserts record a path only when the leaf is full.** (2026-10-10)
+**D37. Inserts record a node stack only when the leaf is full.** (2026-10-10)
 
-- **What:** an insert first descends without a path, like a lookup, and
+- **What:** an insert first descends without a node stack, like a lookup, and
   either replaces an existing value or inserts into a leaf with room. If
   the leaf is full, an outlined function searches again, this time
-  recording the path, and splits.
+  recording the node stack, and splits.
 - **Why:** most inserts fit; at 1M, 2.6% of `u64` inserts and 5.8% of
   string inserts reach a full leaf. The rest shouldn't record parents and
   indexes they never use.
@@ -779,7 +780,7 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 - **What:** in a paired leaf with nonzero stride, a cached run (D33, D35)
   keeps a current and an end key pointer, in the space the redundant leaf
   handle used. Each step advances one pointer: no leaf load, no index
-  arithmetic. Plain and zero-size layouts keep indexes. The path still
+  arithmetic. Plain and zero-size layouts keep indexes. The node stack still
   holds the leaf, so the index can be recovered at a boundary or a
   direction change. Iterator sizes don't change.
 - **Safety:** only the key end serves as the end marker. In a full `u64`
@@ -818,8 +819,8 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 
 - **What:** the map owner keeps an optional pointer to the tree's last
   leaf.
-  - **Set** only by a plain insert that split, when its path shows the new
-    key went into the last slot at every level.
+  - **Set** only by a plain insert that split, when its node stack shows the
+    new key went into the last slot at every level.
   - **Used** while set: an insert first checks that the leaf has room and
     that the key is strictly greater than the leaf's last key, then
     appends with no descent.
@@ -1013,10 +1014,11 @@ Design in 05-fence-key.md, "The shared prefix".
   their kind, and `Tree` owns the tree: its root page, with the root node
   and the fences as the shared prefix (D50, D52), and the rightmost leaf
   (D45). `Node`, a leaf or an internal node, as the tag of the pointer to
-  it says (D52), is what an edge, a path or the root leads to, and the one place a kind is decided (D28). What both
-  kinds share is composition (pages, slots, inline-key column) and `Child`,
-  for code that works at either level: `Siblings` (merges and moves
-  between children), joins and prefix fits.
+  it says (D52), is what an edge, a node stack or the root leads to, and the
+  one place a kind is decided (D28). What both kinds share is composition
+  (pages, slots, inline-key column) and `Child`, for code that works at either
+  level: `Siblings` (merges and moves between children), joins and prefix
+  fits.
 - **Why:** leaves and internal nodes diverged (D29, D36, D49), but a handle
   generic over kind pushed both through one interface, and the root's
   state sat on a type every split half also was. With one type per role,
@@ -1044,7 +1046,7 @@ Design in 05-fence-key.md, "The shared prefix".
 
 **D52. Pointers carry a node's kind; the root page stays the root.** (2026-10-13)
 
-- **What:** every pointer to a node, an edge, a path's level, a node
+- **What:** every pointer to a node, an edge, a node stack's level, a node
   handle or the tree's to its root page, says whether the node is a leaf,
   in its lowest bit, which pages aligned to 512 B or more leave 0: a
   leaf's pointer carries the tag. It is the only record of the kind: the
@@ -1096,14 +1098,14 @@ Design in 05-fence-key.md, "The shared prefix".
 
 ## Navigation
 
-**D11. No parent pointers; iterators use a path stack.** (2026-10-07)
+**D11. No parent pointers; iterators use a node stack.** (2026-10-07)
 
 - A split or merge never touches the moved children. std rewrites the parent
   link of every moved or shifted child (`node.rs:1045`), which would be ~85
   scattered writes per leaf split at our fanout.
-- Iterators carry the root-to-leaf path inline, with no allocation. Unlike
-  re-descending from the root (as bf-tree does), this never calls `Ord` inside
-  `next()`, matching std.
+- Iterators carry the root-to-leaf node stack inline, with no allocation.
+  Unlike re-descending from the root (as bf-tree does), this never calls `Ord`
+  inside `next()`, matching std.
 
 ## Version policy
 
@@ -1126,7 +1128,7 @@ contracts, access, positions and room, the code that holds it keeps by hand
 - **Pages are owned until a node holds them:** `FreshPage`, typed by what
   it is for, a kind of node or the root (D52), is the only way to make a
   node and what a node turns back into.
-- **Paths and walks carry a borrow type** (`Immut`, `Mut`, `ValMut`,
+- **Node stacks and walks carry a borrow type** (`Immut`, `Mut`, `ValMut`,
   `Dying`): it makes them `Send` and `Sync` as the borrow they stand for,
   and the walks hand out each entry once by construction (D23).
 - **Checks the algorithm makes anyway, once:** room before an insert,
@@ -1137,7 +1139,7 @@ contracts, access, positions and room, the code that holds it keeps by hand
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the node
   modules that touch pages (`node/mod.rs`, `page.rs`, `slots.rs`,
   `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
-  `inline_key_search.rs`, `vector_count.rs`), and the tree's `root.rs`, `path.rs`, `search.rs` and
+  `inline_key_search.rs`, `vector_count.rs`), and the tree's `root.rs`, `node_stack.rs`, `search.rs` and
   `walk.rs`.
 - **Was:** after std's `node.rs`, one handle generic over access and kind,
   positions and room as proof types, and edges as owned subtrees; it froze
@@ -1161,8 +1163,8 @@ contracts, access, positions and room, the code that holds it keeps by hand
 ## Proposed, not decided
 
 - **Exact allocation count before mutating:** insert counts the full nodes on
-  its path from the leaf upward, allocates that many first, and so can fail
-  without changing the tree. Name of the fallible insert (`try_insert` is
+  its node stack from the leaf upward, allocates that many first, and so can
+  fail without changing the tree. Name of the fallible insert (`try_insert` is
   taken in std).
 - **Default allocator:** carve pages from large chunks (≥ 256 KB). Open:
   chunks per map or per allocator instance; when chunks go back to the OS.

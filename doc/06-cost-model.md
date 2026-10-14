@@ -125,7 +125,7 @@ insert than a bigger leaf.
 
 A scan pays the descent once, then crosses a leaf boundary about every 40
 `u64` pairs or 18 `String` pairs at 70% fill. Each crossing climbs and
-descends the path. Bigger leaves mean fewer crossings; batched iteration
+descends the node stack. Bigger leaves mean fewer crossings; batched iteration
 (`fold`) means less bookkeeping per entry without bigger leaves.
 
 ## What the measurements taught us
@@ -138,7 +138,7 @@ the evidence.
    336 summaries per `u64` descent instead of 224.
 2. **A saved level is not a saved cache miss.** Upper levels are warm.
    Removing a warm level saves instructions, not DRAM time. Most wins on
-   warm levels came from fewer instructions: no path bookkeeping, no
+   warm levels came from fewer instructions: no node stack bookkeeping, no
    128-byte query copy, no result passed through memory.
 3. **Code generation can flip a result.** Adding a second caller made
    LLVM outline a tiny wrapper, and a 26-instruction population count
@@ -178,7 +178,7 @@ main suite.
 | Aligned leaf pairs | accepted | D34 |
 | String length tags | accepted | D36 |
 | Whole-map iterators reuse the leaf run | accepted | D35 |
-| Insert without a path | accepted | D37 |
+| Insert without a node stack | accepted | D37 |
 | One fixed-array candidate: equality only | accepted | D38 |
 | Two length-tag candidates; zero/one handling | accepted | D36, D38 |
 | Redistribution before a split | deferred (model) | |
@@ -427,12 +427,12 @@ Without POPCNT, LLVM counts mask bits in software, with multiplies.
 
 **Short fitting-insert path (D33).** The old insert reserved split
 scratch space every time (a 2,216-byte frame), called `memmove` even for
-an append, and copied a 256-byte path to replace a value. After: a
+an append, and copied a 256-byte node stack to replace a value. After: a
 360-byte frame. Ordered `u64` insert 36.0 → 34.0 (405 → 362
 instructions); random insert unchanged. Accepted.
 
-**Insert without a path (D37).** Full leaves are rare (2.6% of `u64`,
-5.8% of string inserts at 1M), so recording the path only then, with a
+**Insert without a node stack (D37).** Full leaves are rare (2.6% of `u64`,
+5.8% of string inserts at 1M), so recording the node stack only then, with a
 second search, saves work on the rest. Random `u64` −4.1%, ordered `u64`
 −8.8%, JSON −19.4% (824 → 649 instructions), paths −4.8%; DRAM fills
 unchanged. The bigger string gain comes from no longer calling outlined

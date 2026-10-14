@@ -1,21 +1,21 @@
 //! Walks over a tree in key order, from both ends at once (D23): the core of
-//! every iterator. Each end is a cursor: a path from the root to a position
-//! between two entries of a leaf (`path.rs`). Moving a cursor never calls
-//! `Ord` (D11).
+//! every iterator. Each end is a cursor: a node stack from the root to a
+//! position between two entries of a leaf (`node_stack.rs`). Moving a cursor
+//! never calls `Ord` (D11).
 //!
 //! Within the leaf, the next entry is beside the position. Past the leaf's
-//! last entry, it is the separator of the lowest node on the path with a key
-//! right of it, whose value is the head of the leftmost leaf right of that
-//! key (D17); the cursor goes up the path to that node and down to that leaf.
-//! Moving backward mirrors this: before the leaf's first entry, the previous
-//! one is the separator of the lowest node on the path with a key left of
-//! it, whose value is this leaf's head, and the cursor goes on from the end
-//! of the rightmost leaf left of that key.
+//! last entry, it is the separator of the lowest node on the node stack with a
+//! key right of it, whose value is the head of the leftmost leaf right of that
+//! key (D17); the cursor goes up the node stack to that node and down to that
+//! leaf. Moving backward mirrors this: before the leaf's first entry, the
+//! previous one is the separator of the lowest node on the node stack with a
+//! key left of it, whose value is this leaf's head, and the cursor goes on
+//! from the end of the rightmost leaf left of that key.
 //!
 //! Consuming folds visit the remaining entries of each leaf in one counted
 //! loop, updating the cursor once per leaf. The walk's count, or its other
 //! end's position in the same leaf, limits the final run. This removes the
-//! per-entry path bookkeeping and lets the compiler vectorize simple
+//! cursor's per-entry bookkeeping and lets the compiler vectorize simple
 //! reductions; crossing a leaf boundary uses the same code as `next`.
 //!
 //! A cursor changes in place, field by field, and is never rebuilt and
@@ -46,7 +46,8 @@
 //!   ends meet, or at the tree's boundary when the opposite, unbounded end
 //!   has not started. An end never hands out an entry the other end has.
 //!   During a cached leaf run, its interval records the logical end while
-//!   its path lags; the path is reconciled before the other end can move;
+//!   its node stack lags; the node stack is reconciled before the other end
+//!   can move;
 //! - a [`BorrowedWalk`] steps as a `RangeWalk` and takes every entry it
 //!   crosses off its count: one per step, a key run's length per run. When
 //!   it folds as a `FullWalk`, its count is the number of entries between
@@ -62,13 +63,13 @@
 //! - an end frees a node when it goes up out of it, past its last edge (its
 //!   first, going backward): every entry and child of the node then lies on
 //!   the end's side of where it stands, handed out or freed, so neither end
-//!   comes back to the node, nor reaches it through the path, which no
+//!   comes back to the node, nor reaches it through the node stack, which no
 //!   longer holds it;
 //! - an end goes up out of a leaf only after handing out what it needs from
 //!   it: going backward, the leaf's head is the separator's value;
 //! - once no entry is left between the ends, they stand at the same position,
 //!   or only one of them moved, and the nodes not yet freed are exactly those
-//!   on that end's path, which the walk frees last, from the bottom up.
+//!   on that end's node stack, which the walk frees last, from the bottom up.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -83,8 +84,8 @@ use super::node::leaf::{KeyRun, Leaf, LeafRun};
 use super::node::page::{NodePtr, PageByType};
 use super::node::root_page::RootPage;
 use super::node::{EntrySlots, Node};
-use super::path::{
-    CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, Path, ValMut,
+use super::node_stack::{
+    CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, NodeStack, ValMut,
 };
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
@@ -136,15 +137,15 @@ impl<K, V> WalkBorrow<K, V> for Dying<K, V> {
     }
 }
 
-/// One end of a walk: a path to a position between two entries of a leaf,
-/// or, until it starts, a detached path, in which case its first move starts
-/// it at the first or last position of the tree, by the direction of the
-/// move. Not starting writes no path.
+/// One end of a walk: a node stack to a position between two entries of a
+/// leaf, or, until it starts, a detached node stack, in which case its first
+/// move starts it at the first or last position of the tree, by the direction
+/// of the move. Not starting writes no node stack.
 ///
-/// Invariant, once started (its path attached): the path ends at an edge of
-/// a leaf of the walk's tree.
+/// Invariant, once started (its node stack attached): the node stack ends at
+/// an edge of a leaf of the walk's tree.
 struct Cursor<B, K, V, S> {
-    path: Path<B, K, V, S>,
+    stack: NodeStack<B, K, V, S>,
 }
 
 impl<B: CopyableBorrow, K, V, S> Clone for Cursor<B, K, V, S> {
@@ -160,13 +161,13 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline(always)]
     fn unstarted() -> Self {
         Self {
-            path: Path::detached(),
+            stack: NodeStack::detached(),
         }
     }
 
     /// Starts at the position just before or just after `key` in the tree
     /// under `top`, whose keys share `shared` (D50); see
-    /// [`Path::search_to_edge`].
+    /// [`NodeStack::search_to_edge`].
     fn start_beside_key<Q>(
         &mut self,
         top: WalkTop<K, V, S>,
@@ -177,17 +178,17 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.path.attach(top.node());
-        self.path.search_to_edge(key, side, shared);
+        self.stack.attach(top.node());
+        self.stack.search_to_edge(key, side, shared);
     }
 
     /// Starts at the `End` of the tree under `top`, unless the cursor has
     /// started: its first position, where a walk forward starts, or its
     /// last, where one backward does.
     fn ensure_started<End: NodeEnd>(&mut self, top: WalkTop<K, V, S>) {
-        if !self.path.is_attached() {
-            self.path.attach(top.node());
-            self.path.descend_to_end::<End>();
+        if !self.stack.is_attached() {
+            self.stack.attach(top.node());
+            self.stack.descend_to_end::<End>();
         }
     }
 
@@ -196,9 +197,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline(always)]
     fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
         // SAFETY: the cursor has started (precondition, kept by every caller
-        // by hand), so its path is attached and ends at an edge of a leaf
-        // (type invariant once started).
-        unsafe { self.path.leaf_edge() }
+        // by hand), so its node stack is attached and ends at an edge of a
+        // leaf (type invariant once started).
+        unsafe { self.stack.leaf_edge() }
     }
 
     /// Moves the cursor to edge `index` of its leaf, unchecked. Only for a
@@ -206,12 +207,13 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     #[inline(always)]
     fn set_leaf_index(&mut self, index: usize) {
         // SAFETY: as for `leaf_edge`.
-        unsafe { self.path.set_leaf_index(index) }
+        unsafe { self.stack.set_leaf_index(index) }
     }
 
     /// Folds `count` entries beside this cursor within its current leaf.
-    /// The path moves once for the whole contiguous run, leaving a simple
-    /// counted loop over the entries instead of a cursor step per entry.
+    /// The node stack moves once for the whole contiguous run, leaving a
+    /// simple counted loop over the entries instead of a cursor step per
+    /// entry.
     ///
     /// # Safety
     ///
@@ -242,7 +244,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
                 start + offset
             };
             // SAFETY: this loop visits each of the caller's unvisited
-            // entries once, each below the leaf's length. The path has
+            // entries once, each below the leaf's length. The node stack has
             // already moved past all of them.
             let item = unsafe { B::item(leaf.entry_slots(index)) };
             accumulator = fold(accumulator, item);
@@ -254,7 +256,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// staying put, at the end of the tree. A cursor that has not started
     /// starts at the first position of the tree under `top`.
     ///
-    /// Past a leaf's end, it goes up the path to the separator after it,
+    /// Past a leaf's end, it goes up the node stack to the separator after it,
     /// handing `leave` each node it goes up out of, from the leaf: the nodes
     /// whose last edge it has passed, which it never comes back to.
     ///
@@ -308,7 +310,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// started starts at the last position of the tree under `top`.
     ///
     /// Before a leaf's start, it hands out the separator before it, whose
-    /// value is the leaf's head, and only then goes up the path to it,
+    /// value is the leaf's head, and only then goes up the node stack to it,
     /// handing `leave` each node it goes up out of, from the leaf: the nodes
     /// whose first edge it has passed, which it never comes back to.
     ///
@@ -352,17 +354,20 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        let depth = (0..self.path.depth())
+        let depth = (0..self.stack.depth())
             .rev()
-            .find(|&depth| self.path.index_at(depth) > 0)?;
+            .find(|&depth| self.stack.index_at(depth) > 0)?;
         let (head_leaf, _) = self.leaf_edge();
-        let (node, separator_index) = (self.path.internal_at(depth), self.path.index_at(depth) - 1);
+        let (node, separator_index) = (
+            self.stack.internal_at(depth),
+            self.stack.index_at(depth) - 1,
+        );
         // SAFETY: separator `separator_index` is in the node, and its entry
         // is initialized; forwarded from the caller.
         let item = unsafe { B::item(node.separator_entry_slots(separator_index, head_leaf)) };
         self.ascend_leaving(depth, leave);
-        self.path.set_index(separator_index);
-        self.path.descend_to_leaf::<LastEdge>();
+        self.stack.set_index(separator_index);
+        self.stack.descend_to_leaf::<LastEdge>();
         Some(item)
     }
 
@@ -388,26 +393,26 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         &mut self,
         leave: &mut impl FnMut(Node<K, V, S>),
     ) -> Option<(Internal<K, V, S>, usize)> {
-        let depth = (0..self.path.depth())
+        let depth = (0..self.stack.depth())
             .rev()
-            .find(|&depth| self.path.index_at(depth) < self.path.internal_at(depth).len())?;
+            .find(|&depth| self.stack.index_at(depth) < self.stack.internal_at(depth).len())?;
         self.ascend_leaving(depth, leave);
-        let (node, index) = (self.path.internal_at(depth), self.path.index());
-        self.path.set_index(index + 1);
-        self.path.descend_to_leaf::<FirstEdge>();
+        let (node, index) = (self.stack.internal_at(depth), self.stack.index());
+        self.stack.set_index(index + 1);
+        self.stack.descend_to_leaf::<FirstEdge>();
         Some((node, index))
     }
 
-    /// Goes up the path from the cursor's leaf to `depth`, above it,
-    /// handing `leave` each node it goes up out of, once off the path: the
-    /// leaf, then the internal nodes above it.
+    /// Goes up the node stack from the cursor's leaf to `depth`, above it,
+    /// handing `leave` each node it goes up out of, once off the node stack:
+    /// the leaf, then the internal nodes above it.
     fn ascend_leaving(&mut self, depth: usize, leave: &mut impl FnMut(Node<K, V, S>)) {
         let (leaf, _) = self.leaf_edge();
-        self.path.ascend();
+        self.stack.ascend();
         leave(Node::Leaf(leaf));
-        while self.path.depth() > depth {
-            let node = self.path.internal_at(self.path.depth());
-            self.path.ascend();
+        while self.stack.depth() > depth {
+            let node = self.stack.internal_at(self.stack.depth());
+            self.stack.ascend();
             leave(Node::Internal(node));
         }
     }
@@ -416,7 +421,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// borrowed.
     fn reborrow(&self) -> Cursor<Immut<'_>, K, V, S> {
         Cursor {
-            path: self.path.reborrow(),
+            stack: self.stack.reborrow(),
         }
     }
 }
@@ -468,11 +473,11 @@ impl<B: CopyableBorrow, K, V, S> Clone for Ends<B, K, V, S> {
 impl<B: CopyableBorrow, K, V, S> Copy for Ends<B, K, V, S> {}
 
 // SAFETY: the ends have the access their borrow type gives to the tree, as
-// their paths do, and nothing more: see the `Send` and `Sync` impls of
-// `Path`, whose bounds these are.
-unsafe impl<B, K, V, S> Send for Ends<B, K, V, S> where Path<B, K, V, S>: Send {}
+// their node stacks do, and nothing more: see the `Send` and `Sync` impls of
+// `NodeStack`, whose bounds these are.
+unsafe impl<B, K, V, S> Send for Ends<B, K, V, S> where NodeStack<B, K, V, S>: Send {}
 // SAFETY: as for `Send`.
-unsafe impl<B, K, V, S> Sync for Ends<B, K, V, S> where Path<B, K, V, S>: Sync {}
+unsafe impl<B, K, V, S> Sync for Ends<B, K, V, S> where NodeStack<B, K, V, S>: Sync {}
 
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
     /// Ends that have not started, in the tree under `top`.
@@ -722,9 +727,9 @@ pub(crate) struct RangeWalk<B, K, V, S> {
     /// `None` for a map without a tree.
     ends: Option<Ends<B, K, V, S>>,
     /// The run of the end that moved last, within its leaf, bounded by the
-    /// other end where that is in the same leaf. Its cursor's path may lag
-    /// behind its progress within this leaf; `finish_run` reconciles them
-    /// before any operation reads that path or moves the opposite end.
+    /// other end where that is in the same leaf. Its cursor's node stack may
+    /// lag behind its progress within this leaf; `finish_run` reconciles them
+    /// before any operation reads that node stack or moves the opposite end.
     run: Option<RangeLeafRun<B, K, V, S>>,
 }
 
@@ -746,10 +751,10 @@ impl<B: CopyableBorrow, K, V, S> Copy for RangeLeafRun<B, K, V, S> {}
 
 // SAFETY: the run's pointers give the access the walk's borrow type gives
 // to the leaf they point into, and nothing more: see the `Send` and `Sync`
-// impls of `Path`, whose bounds these are.
-unsafe impl<B, K, V, S> Send for RangeLeafRun<B, K, V, S> where Path<B, K, V, S>: Send {}
+// impls of `NodeStack`, whose bounds these are.
+unsafe impl<B, K, V, S> Send for RangeLeafRun<B, K, V, S> where NodeStack<B, K, V, S>: Send {}
 // SAFETY: as for `Send`.
-unsafe impl<B, K, V, S> Sync for RangeLeafRun<B, K, V, S> where Path<B, K, V, S>: Sync {}
+unsafe impl<B, K, V, S> Sync for RangeLeafRun<B, K, V, S> where NodeStack<B, K, V, S>: Sync {}
 
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> RangeLeafRun<B, K, V, S> {
     /// The chosen cursor is attached. The other cursor either bounds this
@@ -762,7 +767,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> RangeLeafRun<B, K, V, S> 
         };
         let (leaf, index) = cursor.leaf_edge();
         let mut limit = if End::IS_LAST { 0 } else { leaf.len() };
-        if other.path.is_attached() {
+        if other.stack.is_attached() {
             let (other_leaf, other_index) = other.leaf_edge();
             if leaf.node_ptr().is(other_leaf.node_ptr()) {
                 limit = other_index;
@@ -845,7 +850,8 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
             _ => {}
         }
         // The ends start where they stay: positioning them writes their
-        // paths, which a copy right after would wait on (`path.rs`).
+        // node stacks, which a copy right after would wait on
+        // (`node_stack.rs`).
         let (top, shared) = (WalkTop::of_root_page(root_page), root_page.shared_prefix());
         let mut walk = Self {
             ends: Some(Ends::unstarted(top)),
@@ -860,9 +866,9 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
             ends.back
                 .start_beside_key(top, &SearchKey::new(key), side, shared);
         }
-        if ends.front.path.is_attached()
-            && ends.back.path.is_attached()
-            && ends.front.path.cmp_position(&ends.back.path) == Ordering::Greater
+        if ends.front.stack.is_attached()
+            && ends.back.stack.is_attached()
+            && ends.front.stack.cmp_position(&ends.back.stack) == Ordering::Greater
         {
             panic!("Ord is ill-defined in BTreeMap range");
         }
@@ -882,7 +888,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
             &mut ends.front
         };
         cursor.ensure_started::<End>(top);
-        if ends.front.path.is_at(&ends.back.path) {
+        if ends.front.stack.is_at(&ends.back.stack) {
             None
         } else {
             Some(ends)
@@ -913,7 +919,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         self.step_outside_run::<End>()
     }
 
-    /// Reconciles a partly consumed run before reading either path. The
+    /// Reconciles a partly consumed run before reading either node stack. The
     /// cursor has stayed in the same leaf, so only its leaf index changed.
     fn finish_run(&mut self) {
         if let Some(run) = self.run.take() {
@@ -931,7 +937,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
     }
 
     /// Attaches, changes direction, or crosses a leaf boundary once per
-    /// run. The ordinary step within a leaf never needs either path.
+    /// run. The ordinary step within a leaf never needs either node stack.
     #[inline(never)]
     fn step_outside_run<End: NodeEnd>(&mut self) -> Option<B::Item> {
         self.finish_run();
@@ -1120,7 +1126,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
         let Some(ends) = &mut self.walk.ends else {
             return;
         };
-        if !needs_drop::<K>() && !needs_drop::<V>() && !ends.back.path.is_attached() {
+        if !needs_drop::<K>() && !needs_drop::<V>() && !ends.back.stack.is_attached() {
             let alloc = &self.alloc;
             let mut leave = |node: Node<K, V, S>| {
                 // SAFETY: as for `next`.
@@ -1137,29 +1143,29 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
     }
 
     /// Frees the nodes the walk has not, once no entry is left between its
-    /// ends: those on the path of an end that moved, from the bottom up, or
-    /// the top alone, if neither did.
+    /// ends: those on the node stack of an end that moved, from the bottom up,
+    /// or the top alone, if neither did.
     fn free_remaining(&mut self) {
         let Some(ends) = self.walk.ends.take() else {
             return;
         };
-        let path = if ends.front.path.is_attached() {
-            ends.front.path
-        } else if ends.back.path.is_attached() {
-            ends.back.path
+        let stack = if ends.front.stack.is_attached() {
+            ends.front.stack
+        } else if ends.back.stack.is_attached() {
+            ends.back.stack
         } else {
-            let mut path = Path::detached();
-            path.attach(ends.top.node());
-            path
+            let mut stack = NodeStack::detached();
+            stack.attach(ends.top.node());
+            stack
         };
-        for depth in (1..=path.depth()).rev() {
+        for depth in (1..=stack.depth()).rev() {
             // SAFETY: with no entry left between the ends, every node off this
-            // path is freed, and every entry on it moved out or skipped for
-            // having no drop glue (module safety argument); each node here
+            // node stack is freed, and every entry on it moved out or skipped
+            // for having no drop glue (module safety argument); each node here
             // is freed once, after its children.
-            unsafe { path.node_at(depth).free() }.deallocate(&self.alloc);
+            unsafe { stack.node_at(depth).free() }.deallocate(&self.alloc);
         }
-        let top = path.node_at(0);
+        let top = stack.node_at(0);
         // SAFETY: as for the nodes below; the top goes last, in its root page
         // if it has one, which nothing reaches anymore.
         let top_page: PageByType<K, V, S> = unsafe {

@@ -1,7 +1,7 @@
 //! The tree's nodes: leaves ([`leaf::Leaf`]) and internal nodes
 //! ([`internal::Internal`]), what their pages hold, and how one node is read
-//! and changed. Nothing here follows a path through the tree, which is the
-//! tree's (`tree/mod.rs`), but an internal node's operations reach the
+//! and changed. Nothing here follows a node stack through the tree, which is
+//! the tree's (`tree/mod.rs`), but an internal node's operations reach the
 //! children right below it, and the leaf that holds a separator's key (D49).
 //!
 //! The two kinds are different things, and each is its own type with its own
@@ -15,7 +15,7 @@
 //! edges, and without inline keys by its keys (D21, D49). Every pointer to a
 //! node tells its kind, in a tag bit, and nothing else does, so that
 //! following an edge decides the child's kind before reading it ([`Node`],
-//! D52); nothing tells a node's parent: navigation uses paths instead of
+//! D52); nothing tells a node's parent: navigation uses node stacks instead of
 //! parent pointers. The root node is in the root page, which holds either
 //! kind, and the tree's shared prefix after it; the tree's pointer to it
 //! tells the root's kind (`root_page.rs`).
@@ -41,10 +41,10 @@
 //!
 //! A node handle is a page pointer, and carries no access of its own: code
 //! holding one has the access of the operation it is part of, which the
-//! tree's borrow gives (`tree/root.rs`, `tree/path.rs`). The handles leave
-//! to that code what the type system could check, so that a node's layout,
-//! search and changes stay plain code to change and measure; the contracts
-//! below are what it upholds by hand:
+//! tree's borrow gives (`tree/root.rs`, `tree/node_stack.rs`). The handles
+//! leave to that code what the type system could check, so that a node's
+//! layout, search and changes stay plain code to change and measure; the
+//! contracts below are what it upholds by hand:
 //!
 //! - **Access.** A reference a method returns lives for as long as its
 //!   caller picks, which is no longer than the operation's borrow of the
@@ -152,8 +152,8 @@ impl<K, V, S> Copy for Node<K, V, S> {}
 
 impl<K, V, S> Node<K, V, S> {
     /// The node `node` leads to, of the kind its tag tells: how an edge,
-    /// or a path's level, is followed, deciding the kind before the node is
-    /// read.
+    /// or a node stack's level, is followed, deciding the kind before the node
+    /// is read.
     #[inline(always)]
     pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
         if node.is_leaf() {
@@ -163,7 +163,7 @@ impl<K, V, S> Node<K, V, S> {
         }
     }
 
-    /// The node's pointer, tagged with its kind: what an edge or a path
+    /// The node's pointer, tagged with its kind: what an edge or a node stack
     /// keeps.
     #[inline(always)]
     pub(in crate::tree) fn node_ptr(self) -> NodePtr<K, V, S> {

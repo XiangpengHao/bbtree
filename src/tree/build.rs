@@ -23,7 +23,7 @@ use super::node::inline_keys::WindowedKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
-use super::path::{LastEdge, PathMut};
+use super::node_stack::{LastEdge, NodeStackMut};
 use super::prefix::PrefixedKey;
 use super::root::Tree;
 use crate::allocator::Allocator;
@@ -122,14 +122,14 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
             };
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let mut path = tree.start_leaf(key.window_at(shared.len()), value, &self.alloc);
+            let mut stack = tree.start_leaf(key.window_at(shared.len()), value, &self.alloc);
             self.length += 1;
             // Fits the nodes the new leaf closed, off the tree's border now:
             // the right border of the subtree left of the separator, which
             // no key joins again, whose upper fence the separator is.
-            let edge = path.index();
-            path.refit_border_below::<LastEdge>(edge);
-            path.refit_children_to_fences([edge]);
+            let edge = stack.index();
+            stack.refit_border_below::<LastEdge>(edge);
+            stack.refit_children_to_fences([edge]);
             next = match entries.next() {
                 Some(entry) => entry,
                 None => return,
@@ -166,27 +166,27 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// hangs it after `separator`: in the rightmost internal node one level
     /// up if it has room; or else in a new node there, which hangs one level
     /// further up the same way; or in the root, which the tree raises for
-    /// it. Returns the path up the right border it came, ending at the node
-    /// that took the separator, at the edge left of it, which leads down to
-    /// the nodes the new leaf closed. Pages come from `alloc`.
+    /// it. Returns the node stack up the right border it came, ending at the
+    /// node that took the separator, at the edge left of it, which leads down
+    /// to the nodes the new leaf closed. Pages come from `alloc`.
     fn start_leaf(
         &mut self,
         separator: WindowedKey<K, S>,
         value: V,
         alloc: &impl Allocator,
-    ) -> PathMut<'_, K, V, S> {
+    ) -> NodeStackMut<'_, K, V, S> {
         let shared_len = self.shared_prefix().len();
         let leaf = Leaf::new(FreshPage::allocate(alloc), shared_len);
         let separator = leaf.put_separator_head(separator, value);
         let mut child = Node::Leaf(leaf);
-        let mut path = PathMut::new(self);
-        path.descend_to_last_key();
+        let mut stack = NodeStackMut::new(self);
+        stack.descend_to_last_key();
         loop {
-            let node = path.ascend_raising(alloc);
+            let node = stack.ascend_raising(alloc);
             let len = node.len();
             if len < Internal::<K, V, S>::capacity() {
                 node.insert_fit(len, separator, child);
-                return path;
+                return stack;
             }
             // Its new levels along the right border take what every key
             // shares.

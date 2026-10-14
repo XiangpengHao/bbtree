@@ -1,13 +1,13 @@
 //! The entry API: [`Entry`], [`OccupiedEntry`] and [`VacantEntry`], views
 //! into one key's place in a map, as std's.
 //!
-//! An entry keeps the path its search found, from the root down to the key
-//! or to the leaf edge where it goes (`tree/path.rs`): every `Ord` call
-//! happens in `entry`, as in std. Reading or changing an occupied entry goes
-//! straight to the node at the end of the path; removing it, or inserting
-//! into a vacant one, goes back up the path, comparing no keys. An insert
-//! leaves the path at the new entry, wherever the splits took it, which is
-//! how `insert` hands out its value.
+//! An entry keeps the node stack its search found, from the root down to the
+//! key or to the leaf edge where it goes (`tree/node_stack.rs`): every `Ord`
+//! call happens in `entry`, as in std. Reading or changing an occupied entry
+//! goes straight to the node at the end of the node stack; removing it, or
+//! inserting into a vacant one, goes back up the node stack, comparing no
+//! keys. An insert leaves the node stack at the new entry, wherever the splits
+//! took it, which is how `insert` hands out its value.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +17,7 @@ use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::inline_keys::SearchKey;
-use crate::tree::path::PathMut;
+use crate::tree::node_stack::NodeStackMut;
 use crate::tree::root::Tree;
 
 /// A view into a single entry in a map, which may either be vacant or
@@ -46,32 +46,32 @@ pub struct VacantEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto, A: Allocator + 
 /// Where a vacant entry's key goes.
 #[expect(
     clippy::large_enum_variant,
-    reason = "an entry lives briefly and moves by value, as std's; boxing the path would allocate for every entry"
+    reason = "an entry lives briefly and moves by value, as std's; boxing the node stack would allocate for every entry"
 )]
 enum VacantPlace<'a, K, V, S> {
-    /// Into the leaf edge the path ends at.
-    InTree(PathMut<'a, K, V, S>),
+    /// Into the leaf edge the node stack ends at.
+    InTree(NodeStackMut<'a, K, V, S>),
     /// Into a new tree, a leaf, for the map that has none.
     NoTree(&'a mut Tree<K, V, S>),
 }
 
 impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantPlace<'a, K, V, S> {
-    /// Searches `tree` for `key`: the path to its entry, if it has one, or
-    /// else where it goes.
+    /// Searches `tree` for `key`: the node stack to its entry, if it has one,
+    /// or else where it goes.
     #[inline]
     #[expect(
         clippy::result_large_err,
         reason = "inlined into the two callers, which move either side into an entry"
     )]
-    fn search(tree: &'a mut Tree<K, V, S>, key: &K) -> Result<PathMut<'a, K, V, S>, Self> {
+    fn search(tree: &'a mut Tree<K, V, S>, key: &K) -> Result<NodeStackMut<'a, K, V, S>, Self> {
         if !tree.has_root() {
             return Err(Self::NoTree(tree));
         }
-        let mut path = PathMut::new(tree);
-        if path.search(&SearchKey::new(key)) {
-            Ok(path)
+        let mut stack = NodeStackMut::new(tree);
+        if stack.search(&SearchKey::new(key)) {
+            Ok(stack)
         } else {
-            Err(Self::InTree(path))
+            Err(Self::InTree(stack))
         }
     }
 }
@@ -84,7 +84,7 @@ pub struct OccupiedEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto, A: Allocator 
     alloc: &'a A,
     /// To the key: in a leaf, or a separator in an internal node, whose
     /// value is a leaf's head (D17).
-    path: PathMut<'a, K, V, S>,
+    stack: NodeStackMut<'a, K, V, S>,
 }
 
 impl<K: fmt::Debug + Ord, V: fmt::Debug, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
@@ -360,15 +360,15 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> VacantEntry<'
             alloc,
             place,
         } = self;
-        let mut path = match place {
-            VacantPlace::InTree(path) => path,
-            VacantPlace::NoTree(tree) => PathMut::at_new_root(tree, alloc),
+        let mut stack = match place {
+            VacantPlace::InTree(stack) => stack,
+            VacantPlace::NoTree(tree) => NodeStackMut::at_new_root(tree, alloc),
         };
-        path.insert(key, value, alloc, length);
+        stack.insert(key, value, alloc, length);
         OccupiedEntry {
             length,
             alloc,
-            path,
+            stack,
         }
     }
 }
@@ -386,7 +386,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, 
     /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
     /// ```
     pub fn key(&self) -> &K {
-        self.path.key()
+        self.stack.key()
     }
 
     /// Take ownership of the key and value from the map.
@@ -410,7 +410,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, 
     /// assert!(map.is_empty());
     /// ```
     pub fn remove_entry(mut self) -> (K, V) {
-        self.path.remove(self.alloc, self.length)
+        self.stack.remove(self.alloc, self.length)
     }
 
     /// Gets a reference to the value in the entry.
@@ -429,7 +429,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, 
     /// }
     /// ```
     pub fn get(&self) -> &V {
-        self.path.value()
+        self.stack.value()
     }
 
     /// Gets a mutable reference to the value in the entry.
@@ -459,7 +459,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, 
     /// assert_eq!(map["poneyland"], 24);
     /// ```
     pub fn get_mut(&mut self) -> &mut V {
-        self.path.value_mut()
+        self.stack.value_mut()
     }
 
     /// Converts the entry into a mutable reference to its value.
@@ -485,7 +485,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> OccupiedEntry<'a, 
     /// assert_eq!(map["poneyland"], 22);
     /// ```
     pub fn into_mut(self) -> &'a mut V {
-        self.path.into_value_mut()
+        self.stack.into_value_mut()
     }
 
     /// Sets the value of the entry with the `OccupiedEntry`'s key, and
@@ -569,10 +569,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
             alloc,
         } = self;
         match VacantPlace::search(tree, &key) {
-            Ok(path) => Entry::Occupied(OccupiedEntry {
+            Ok(stack) => Entry::Occupied(OccupiedEntry {
                 length,
                 alloc,
-                path,
+                stack,
             }),
             Err(place) => Entry::Vacant(VacantEntry {
                 key,
@@ -602,7 +602,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
             alloc,
         } = self;
         match VacantPlace::search(tree, &key) {
-            Ok(mut path) => Some(path.replace_key(key)),
+            Ok(mut stack) => Some(stack.replace_key(key)),
             Err(place) => {
                 let vacant = VacantEntry {
                     key,
@@ -647,12 +647,12 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
         if !tree.has_root() {
             return None;
         }
-        let mut path = PathMut::new(tree);
-        if path.descend_to_first_key() {
+        let mut stack = NodeStackMut::new(tree);
+        if stack.descend_to_first_key() {
             Some(OccupiedEntry {
                 length,
                 alloc,
-                path,
+                stack,
             })
         } else {
             None
@@ -690,12 +690,12 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
         if !tree.has_root() {
             return None;
         }
-        let mut path = PathMut::new(tree);
-        if path.descend_to_last_key() {
+        let mut stack = NodeStackMut::new(tree);
+        if stack.descend_to_last_key() {
             Some(OccupiedEntry {
                 length,
                 alloc,
-                path,
+                stack,
             })
         } else {
             None

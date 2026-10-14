@@ -191,8 +191,8 @@ a shared descent once cost every hit an instruction (`search.rs`).
    key, or the leaf and edge where the key belongs.
 4. **Apply in input order.** Each lane does what `Tree::insert` does after
    its search: replace the value; insert into a leaf with room
-   (`insert_fit`); or, when the leaf is full, `insert_with_path`, which
-   searches again with a path and splits.
+   (`insert_fit`); or, when the leaf is full, `insert_with_stack`, which
+   searches again with a node stack and splits.
 
 Earlier lanes change the tree under later ones. A later lane's result goes
 stale as follows, and each stale lane searches again before it applies:
@@ -201,9 +201,9 @@ stale as follows, and each stale lane searches again before it applies:
 |---|---|---|
 | replaced a value | none | |
 | inserted into leaf `L`, which had room | lanes ending in `L` | `Leaf::search_always_inlined` on `L` (cached) |
-| split (`insert_with_path`), raise included | all | `search_for_insert` from the root (path cached) |
+| split (`insert_with_stack`), raise included | all | `search_for_insert` from the root (its nodes cached) |
 
-A split moves keys between halves and adds separators up the path, and a
+A split moves keys between halves and adds separators up the node stack, and a
 raise moves the root node to a new page, so after a split every later lane
 descends again. With 24-key `String` leaves at 70% fill, the tree gains a
 leaf, so a split, about every 17 random inserts. A batch of 8 then has a
@@ -242,7 +242,7 @@ of 1M titles took 64 ms; inserting them one by one took 125 ms).
   reads and an edge's line, computed from the layout; used only by
   `tree/batch.rs`.
 - `map/from_entries.rs`, `set/mod.rs`: `extend` as above.
-- `insert.rs`: `insert_with_path` becomes `pub(in crate::tree)`;
+- `insert.rs`: `insert_with_stack` becomes `pub(in crate::tree)`;
   nothing else changes. `search.rs`: unchanged.
 
 ## Will it regress existing code?

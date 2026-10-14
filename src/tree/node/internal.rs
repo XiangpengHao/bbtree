@@ -62,7 +62,7 @@ impl<K, V, S> Internal<K, V, S> {
         Self { node }
     }
 
-    /// The node's page, for a path or an edge to keep.
+    /// The node's page, for a node stack or an edge to keep.
     #[inline(always)]
     pub(in crate::tree) fn node_ptr(self) -> NodePtr<K, V, S> {
         self.node

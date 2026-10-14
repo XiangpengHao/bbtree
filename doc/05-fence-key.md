@@ -174,7 +174,7 @@ An operation does its upkeep in two steps:
 | merge | the merged node's widen | it takes the parent's prefix: both halves move back, filled from the separator, which comes down at its window | the merged node |
 | steal | the receiver's widen, the giver's narrow; their children's don't | the receiver takes the parent's prefix, filled from the separator, which comes down at its window; the key going up moves back the same way | both |
 | removal of separator `s`, replaced by its successor `s'` (D17) | the right border of the subtree left of `s` (upper fence `s` → `s'`) and the left border of the subtree right of it (lower fence `s` → `s'`) | before any change, the first border's nodes shrink to `min(own, LCP(s, s'))`, reading keys; then `s'` moves back to `s`'s node's prefix, filled from `s` | the second border's nodes |
-| `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes the root's prefix, the shared prefix, from the root down, each filled from its parent's key beside the path; both trees keep the shared bytes | once both maps are counted, the nodes beside each border |
+| `split_off` (D25) | the node stack's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the node stack takes the root's prefix, the shared prefix, from the root down, each filled from its parent's key beside the node stack; both trees keep the shared bytes | once both maps are counted, the nodes beside each border |
 | builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the nodes a new leaf closes, from the leaf up, once it hangs after them; after `finish`, the nodes beside the right border |
 | raising or lowering the tree (D52), clone | none | a raised root has the shared prefix, and a lowered root's child had it; a copy copies prefixes and the shared bytes | — |
 | insert of a key that shares less, join | the borders' missing ones: the shared bytes shrink | every border node moves back to the new length, filled from the shared bytes' window there | — |
@@ -185,15 +185,15 @@ An operation does its upkeep in two steps:
   has fences `low` and `s`, so its new prefix is `min(own, LCP(s, s'))`, with
   no fence read: `low ≤ s ≤ s'`. It can't be skipped: a search for a key in
   `(s, s')` goes down that border.
-- **What a removal fits:** at each node it fixed, the child the path
+- **What a removal fits:** at each node it fixed, the child the node stack
   leads to and the sibling that gave it an entry; for a separator, every node
-  below it on the path, which goes down the second border. It keeps the
-  path's indexes up to date as merges and moves shift entries, to find them
-  again. A removal that fixes nothing fits nothing.
-- **Fences come from the path** (D24): a node's `low` is the key left of the
-  path's edge at the nearest ancestor where that edge isn't the first, its
-  `high` the key right of it at the nearest where it isn't the last
-  (`PathMut::bounds`). Only fitting reads them. A plain search reads no
+  below it on the node stack, which goes down the second border. It keeps the
+  node stack's indexes up to date as merges and moves shift entries, to find
+  them again. A removal that fixes nothing fits nothing.
+- **Fences come from the node stack** (D24): a node's `low` is the key left of
+  the node stack's edge at the nearest ancestor where that edge isn't the
+  first, its `high` the key right of it at the nearest where it isn't the last
+  (`NodeStackMut::fences`). Only fitting reads them. A plain search reads no
   fence.
 - **A node on a border keeps the shared prefix through a panic.** A search
   for a key past the first or last that has the shared bytes goes down a

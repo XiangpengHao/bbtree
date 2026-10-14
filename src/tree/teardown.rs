@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::path::FirstEdge;
+use super::node_stack::FirstEdge;
 use super::root::Tree;
 use super::walk::DyingWalk;
 use crate::allocator::Allocator;

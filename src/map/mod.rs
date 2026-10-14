@@ -6,14 +6,14 @@
 //! so that [`BBTreeMap::new`] allocates nothing. Exact-key lookups and ordinary
 //! fitting inserts descend from the root; increasing inserts can reuse a
 //! last leaf remembered after a split. An insert that splits records a
-//! path for going back up (`tree/path.rs`, `tree/insert.rs`), and so
-//! does removing, for merges (`tree/remove.rs`); an entry keeps its path
-//! (`entry.rs`). Iterating walks the tree from both ends at once, each end a
-//! path (`iter.rs`, `iter_mut.rs`, on `tree/walk.rs`); iterating by value
-//! takes the tree apart as it goes (`into_iter.rs`), as dropping the map
-//! does. Bulk changes drain entries in order and build trees of full nodes
+//! node stack for going back up (`tree/node_stack.rs`, `tree/insert.rs`), and
+//! so does removing, for merges (`tree/remove.rs`); an entry keeps its node
+//! stack (`entry.rs`). Iterating walks the tree from both ends at once, each
+//! end a node stack (`iter.rs`, `iter_mut.rs`, on `tree/walk.rs`); iterating
+//! by value takes the tree apart as it goes (`into_iter.rs`), as dropping the
+//! map does. Bulk changes drain entries in order and build trees of full nodes
 //! (`append.rs`, `from_entries.rs`, on `tree/build.rs`); `split_off` cuts
-//! the tree along a path (`tree/cut.rs`), and `extract_if` cuts out its
+//! the tree along a node stack (`tree/cut.rs`), and `extract_if` cuts out its
 //! range, rebuilds what it keeps of it, and joins the rest back on
 //! (`extract_if.rs`, `tree/join.rs`).
 //!
@@ -47,7 +47,7 @@ use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
-use crate::tree::path::KeySide;
+use crate::tree::node_stack::KeySide;
 use crate::tree::root::Tree;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};

@@ -2,9 +2,9 @@
 //! allowing a greater key to append directly while it has room. Otherwise a
 //! downward search finds the entry or vacant leaf edge. A fitting insertion
 //! needs no ancestors. If the leaf is full, a
-//! second search records its path (`path.rs`) for splitting. Going
-//! back up the path, each node takes its split child's separator and right
-//! half, splitting in turn if it is full; a root that splits raises the
+//! second search records its node stack (`node_stack.rs`) for splitting. Going
+//! back up the node stack, each node takes its split child's separator and
+//! right half, splitting in turn if it is full; a root that splits raises the
 //! tree, moving the root node down a level, under a new root in the root
 //! page. A separator's value stays in the right half, as the head
 //! of its leftmost leaf (D17), and so does its key where separator keys are
@@ -13,9 +13,9 @@
 //! the entry is in and counted, the halves of every split fit their prefixes
 //! to their new fences (`prefix.rs`).
 //!
-//! The path then goes back down to the new entry, through whichever half of
-//! each split took it, so that a vacant entry can hand it out, or keep it as
-//! an occupied one.
+//! The node stack then goes back down to the new entry, through whichever half
+//! of each split took it, so that a vacant entry can hand it out, or keep it
+//! as an occupied one.
 
 #![forbid(unsafe_code)]
 
@@ -25,7 +25,7 @@ use super::node::inline_keys::SearchKey;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::{Insertion, Node};
-use super::path::{MAX_DEPTH, PathMut};
+use super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::prefix::PrefixedKey;
 use super::root::Tree;
 use crate::allocator::Allocator;
@@ -94,15 +94,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
                 }
             }
         }
-        self.insert_with_path(key, value, alloc, length)
+        self.insert_with_stack(key, value, alloc, length)
     }
 
-    /// A full leaf needs ancestors to split. Keep that path and its stack
-    /// space out of fitting inserts. Search again rather than trusting the
-    /// first result: even an inconsistent `Ord` may now find an existing key
-    /// or a different leaf with room, both handled by the ordinary path.
+    /// A full leaf needs ancestors to split. Keep that node stack, and the
+    /// call stack space it takes, out of fitting inserts. Search again
+    /// rather than trusting the first result: even an inconsistent `Ord` may
+    /// now find an existing key or a different leaf with room, both handled
+    /// by the ordinary path.
     #[inline(never)]
-    fn insert_with_path(
+    fn insert_with_stack(
         &mut self,
         key: PrefixedKey<K>,
         value: V,
@@ -112,42 +113,42 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     where
         K: Ord,
     {
-        let mut path = PathMut::new(self);
-        if path.search(&SearchKey::new(key.key())) {
+        let mut stack = NodeStackMut::new(self);
+        if stack.search(&SearchKey::new(key.key())) {
             // As in std, the new key is dropped before the value changes: if
             // its `Drop` panics, the map is unchanged.
             drop(key);
-            Some(mem::replace(path.value_mut(), value))
+            Some(mem::replace(stack.value_mut(), value))
         } else {
-            path.insert_prefixed(key, value, alloc, length);
-            path.finish_insertion();
+            stack.insert_prefixed(key, value, alloc, length);
+            stack.finish_insertion();
             None
         }
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
-    /// A path at the only edge of a new tree's root, an empty leaf, made in
-    /// `tree`, which has none, from `alloc`: where a vacant entry of a map
+impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
+    /// A node stack at the only edge of a new tree's root, an empty leaf, made
+    /// in `tree`, which has none, from `alloc`: where a vacant entry of a map
     /// without a tree inserts ([`Self::insert`]).
     pub(crate) fn at_new_root(tree: &'a mut Tree<K, V, S>, alloc: &impl Allocator) -> Self {
         debug_assert!(!tree.has_root(), "a new tree in place of one");
         *tree = Tree::new(alloc);
-        let mut path = Self::new(tree);
-        path.start_at_root();
-        path
+        let mut stack = Self::new(tree);
+        stack.start_at_root();
+        stack
     }
 
-    /// Inserts `key` and `value` at the leaf edge the path ends at, counts
-    /// the entry in `length`, fits the prefixes of the nodes that split,
-    /// and moves the path to the new entry; pages come as for
+    /// Inserts `key` and `value` at the leaf edge the node stack ends at,
+    /// counts the entry in `length`, fits the prefixes of the nodes that
+    /// split, and moves the node stack to the new entry; pages come as for
     /// [`Tree::insert`]. Compares no keys. First, what every key of the tree
     /// shares shrinks to what `key` shares too
     /// ([`Self::shrink_shared_prefix_for`]).
     ///
     /// # Panics
     ///
-    /// If the path ends at no leaf edge.
+    /// If the node stack ends at no leaf edge.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
         let key = self.shrink_shared_prefix_for(key, alloc);
@@ -171,7 +172,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let prefix_len = leaf.prefix_len();
         if leaf.len() < Leaf::<K, V, S>::capacity() {
             // Compute the inline key before the first change, as on the
-            // split path, so a panic leaves the tree unchanged.
+            // split node stack, so a panic leaves the tree unchanged.
             leaf.insert_fit(index, key.window_at(prefix_len), value);
             *length += 1;
         } else {
@@ -193,7 +194,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let leaf = self.leaf();
         // The key's window at the leaf's prefix length, which both halves
         // of a split keep: the last `InlineKey` call before the first change.
-        // The leaf is full: `PathMut::insert` comes here only then.
+        // The leaf is full: `NodeStackMut::insert` comes here only then.
         let key = key.window_at(leaf.prefix_len());
         let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc));
         // Both arrays go by how many levels the split has climbed from the
@@ -204,7 +205,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let mut indexes_in_halves = [0; MAX_DEPTH + 1];
         indexes_in_halves[0] = split.inserted.index();
         // Above each node that split, where the separator between its halves
-        // went, in the node the path goes through.
+        // went, in the node stack's node there.
         let mut separator_indexes = [0; MAX_DEPTH + 1];
         let mut carried = (
             split.separator,

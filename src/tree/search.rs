@@ -1,4 +1,4 @@
-//! Searches that need no ancestor path: exact-key lookups ([`Node::find`])
+//! Searches that need no node stack: exact-key lookups ([`Node::find`])
 //! and an insert's ordered search ([`Node::search_for_insert`]), and the
 //! values of the keys they find.
 //!
@@ -12,7 +12,7 @@ use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::path::{FirstEdge, LastEdge};
+use super::node_stack::{FirstEdge, LastEdge};
 use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -73,7 +73,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// Searches downward from this node for the entry whose key equals `key`,
     /// retaining only the current node. Updates that need ancestors and range
-    /// endpoints use `Path::search`; an exact-key lookup only needs the
+    /// endpoints use `NodeStack::search`; an exact-key lookup only needs the
     /// position where it ends.
     ///
     /// Every node skips its prefix unchecked: `key` must share what every
@@ -108,8 +108,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// where it belongs. Unlike [`Self::find`]'s equality filter, the leaf
     /// search must establish where an absent key belongs. A fitting
     /// insertion needs no ancestors; a full leaf can be searched again with
-    /// a path for splitting. As for [`Self::find`], `key` must share what
-    /// every key of the tree shares, which [`Tree::insert`] shrinks to first.
+    /// a node stack for splitting. As for [`Self::find`], `key` must share
+    /// what every key of the tree shares, which [`Tree::insert`] shrinks to
+    /// first.
     pub(crate) fn search_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
     where
         K: Borrow<Q>,

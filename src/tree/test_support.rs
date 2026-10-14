@@ -24,7 +24,7 @@ use super::node::inline_keys::Separator;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{NodePtr, TestPages};
-use super::path::FirstEdge;
+use super::node_stack::FirstEdge;
 use super::root::Tree;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 

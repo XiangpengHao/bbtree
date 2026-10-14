@@ -91,7 +91,7 @@ L2:  [banana's value], berry, blueberry
 When a query's inline key ties with separator `i`'s, the search needs the
 full key. It follows edge `i + 1`, then edge 0 at each level down to a
 leaf, and reads slot 0. `Internal::head_leaf` (`tree/node/internal.rs`)
-walks the same path to find a separator's value; here the walk finds its
+walks the same edges to find a separator's value; here the walk finds its
 key.
 
 - **Nothing to keep up to date.** The walk finds the place from the tree
@@ -102,7 +102,7 @@ key.
   today (`refit_left_of_separator` in `tree/prefix.rs`).
 - **Cost.** Above a leaf, a tie reads one leaf line, often of the leaf the
   query goes to next anyway. In a node `h` levels above the leaves, it
-  costs `h` hops, and the path down need not be cached. About
+  costs `h` hops, and the nodes on the way down need not be cached. About
   `1 − 1/fanout` (94–97%) of internal nodes are parents of leaves.
 - **Several ties in one node** each need a key: about log₂ k walks for `k`
   tied separators, as the tied search is binary.
@@ -129,9 +129,9 @@ and the search resumes from the tie node through edge `i`.
 | go right first | 0 | `h` hops, then the left descent |
 
 Going right first needs the descent to remember where to resume: a stack
-no deeper than the tree, for ties inside ties. Point lookups keep no path
-today (D32), and small changes to that loop have moved instruction counts
-before (D41).
+no deeper than the tree, for ties inside ties. Point lookups keep no node
+stack today (D32), and small changes to that loop have moved instruction
+counts before (D41).
 
 ## Exact separators
 

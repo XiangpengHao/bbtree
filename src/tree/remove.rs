@@ -1,6 +1,6 @@
-//! Removing from a tree: the entry comes out where a path to it ends
-//! (`path.rs`): out of a leaf, or out of an internal node as a
-//! separator. Then, going back up the path, each node fixes the child it
+//! Removing from a tree: the entry comes out where a node stack to it ends
+//! (`node_stack.rs`): out of a leaf, or out of an internal node as a
+//! separator. Then, going back up the node stack, each node fixes the child it
 //! leads to if the removal left that child underfull, by merging it with a
 //! sibling or moving one entry over from it (D22). A merge takes a
 //! separator out of the node itself, for its parent to check in turn;
@@ -17,7 +17,7 @@
 //! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes
 //! it changes their parent's prefix. Once the entry is out and counted, the
 //! nodes whose fences changed are fit to them: at each node fixed, the
-//! child the path leads to and the sibling that gave it an entry, if one
+//! child the node stack leads to and the sibling that gave it an entry, if one
 //! did; for a separator, also the nodes along the left border of the
 //! subtree right of it, whose lower fence its successor becomes. Those along
 //! the right border of the subtree left of it, whose upper fence it becomes,
@@ -31,7 +31,7 @@ use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::{Child, Node};
-use super::path::{FirstEdge, MAX_DEPTH, PathMut};
+use super::node_stack::{FirstEdge, MAX_DEPTH, NodeStackMut};
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -59,9 +59,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if !self.has_root() {
             return None;
         }
-        let mut path = PathMut::new(self);
-        if path.search(&SearchKey::new(key)) {
-            Some(path.remove(alloc, length))
+        let mut stack = NodeStackMut::new(self);
+        if stack.search(&SearchKey::new(key)) {
+            Some(stack.remove(alloc, length))
         } else {
             None
         }
@@ -78,9 +78,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if !self.has_root() {
             return None;
         }
-        let mut path = PathMut::new(self);
-        if path.descend_to_first_key() {
-            Some(path.remove(alloc, length))
+        let mut stack = NodeStackMut::new(self);
+        if stack.descend_to_first_key() {
+            Some(stack.remove(alloc, length))
         } else {
             None
         }
@@ -97,29 +97,30 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if !self.has_root() {
             return None;
         }
-        let mut path = PathMut::new(self);
-        if path.descend_to_last_key() {
-            Some(path.remove(alloc, length))
+        let mut stack = NodeStackMut::new(self);
+        if stack.descend_to_last_key() {
+            Some(stack.remove(alloc, length))
         } else {
             None
         }
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
-    /// Removes the entry the path ends at and returns it, counting it out of
-    /// `length`, fixing the nodes up the path, and leaves the path detached;
-    /// frees pages as [`Tree::remove_entry`] does. Compares no keys.
+impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
+    /// Removes the entry the node stack ends at and returns it, counting it
+    /// out of `length`, fixing the nodes up the node stack, and leaves the
+    /// node stack detached; frees pages as [`Tree::remove_entry`] does.
+    /// Compares no keys.
     ///
     /// # Panics
     ///
-    /// If the path ends at no key.
+    /// If the node stack ends at no key.
     pub(crate) fn remove(&mut self, alloc: &impl Allocator, length: &mut usize) -> (K, V) {
         let entry_depth = self.depth();
         let entry_index = self.index();
         let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
             let entry = leaf.remove(entry_index);
-            (entry, self.fix_up_the_path(None, alloc, |_| {}))
+            (entry, self.fix_up_the_stack(None, alloc, |_| {}))
         } else {
             self.refit_left_of_separator();
             // The separator's value is the head of the leftmost leaf right
@@ -132,11 +133,11 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
-            let changed = self.fix_up_the_path(Some(entry_depth), alloc, |node| {
+            let changed = self.fix_up_the_stack(Some(entry_depth), alloc, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
                 replaced = Some(node.replace_separator_from_below(entry_index, successor));
             });
-            let replaced = replaced.expect("the path goes up past the separator");
+            let replaced = replaced.expect("the node stack goes up past the separator");
             let key = (succession.removed_key)
                 .or_else(|| replaced.into_windowed_key().map(WindowedKey::into_key))
                 .expect("a removed separator's key is in its head or its node");
@@ -148,13 +149,13 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         entry
     }
 
-    /// Goes up the path from its bottom node, a leaf, which just lost a
-    /// key, and in each node fixes the child the path came from if it is
+    /// Goes up the node stack from its bottom node, a leaf, which just lost a
+    /// key, and in each node fixes the child the node stack came from if it is
     /// underfull, as long as the child lost a key; up to depth `must_reach`,
     /// if given, it goes on regardless, and lets `at_must_reach` change that
     /// node before it fixes its child. Returns where the fences it changed
     /// are; every node from `must_reach` down counts as changed.
-    fn fix_up_the_path(
+    fn fix_up_the_stack(
         &mut self,
         must_reach: Option<usize>,
         alloc: &impl Allocator,
@@ -188,9 +189,9 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     }
 
     /// Fits the prefixes of the nodes whose fences a removal changed to them,
-    /// from the bottom up, as `changed` tells; the path, which ends where the
-    /// fixing stopped, ends at `changed`'s top depth afterwards. Calls
-    /// `InlineKey`.
+    /// from the bottom up, as `changed` tells; the node stack, which ends
+    /// where the fixing stopped, ends at `changed`'s top depth afterwards.
+    /// Calls `InlineKey`.
     fn refit_changed_fences(&mut self, changed: &ChangedFences) {
         let Some(top_depth) = changed.top_depth else {
             return;

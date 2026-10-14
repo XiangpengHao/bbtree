@@ -80,10 +80,10 @@ viewer derives from those numbers, positions on screen and aggregate colors,
 is drawing, not semantics. A key's bytes are bbtree's own encoding,
 `InlineKey::inline_key_at`, read a window at a time. A node's fences are
 the one thing it finds itself, since bbtree stores none (05-fence-key.md):
-the separators beside the way down, read as `PathMut::bounds` reads them. A
-test checks both against bbtree at nodes of every level: each node's prefix
-is what its fences share, and its inline keys are those bytes past it
-(`fences.rs`).
+the separators beside the way down, read as `NodeStackMut::fences` reads
+them. A test checks both against bbtree at nodes of every level: each
+node's prefix is what its fences share, and its inline keys are those
+bytes past it (`fences.rs`).
 
 ## The `inspect` feature: a view, not exposed fields
 
@@ -280,10 +280,10 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 ## Not done
 
 - Inserts and removals. The effects come from comparing the touched nodes
-  before and after, keyed by page address. Their way down is not one path:
-  D37 records a path only when the leaf is full, and D45 appends with no
-  descent. An exact trace needs an observer in the real code, whose default
-  does nothing, kept only if it shows instruction parity.
+  before and after, keyed by page address. Their way down is not one node
+  stack: D37 records a node stack only when the leaf is full, and D45 appends
+  with no descent. An exact trace needs an observer in the real code, whose
+  default does nothing, kept only if it shows instruction parity.
 - A view of the whole tree's health (fill and prefix per level), which the
   first design had and this one leaves out.
 - CI for `vis/`: it is a workspace of its own, which bbtree's CI doesn't

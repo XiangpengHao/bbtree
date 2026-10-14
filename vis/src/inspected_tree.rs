@@ -184,7 +184,7 @@ impl<K: VisKey> InspectedMap<K> {
 
     /// The fences of the node at `at`: the keys just left and just right of
     /// the way down to it, in the nearest ancestors that have one (bbtree's
-    /// `PathMut::bounds`, `doc/05-fence-key.md`); with its own first and
+    /// `NodeStackMut::fences`, `doc/05-fence-key.md`); with its own first and
     /// last keys.
     fn fences(&self, at: NodeAt) -> NodeFences {
         let tree = self.map.inspect();

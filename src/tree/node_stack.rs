@@ -1,23 +1,23 @@
-//! Paths down a tree: a stack of the nodes from the root down to a position
-//! in one of them, and the index taken at each (D11, D24). Every
-//! range, entry and removal keeps one, as do inserts that split. Iterators
+//! Node stacks: the nodes from a tree's root down to a position in one of
+//! them, and the index taken at each (D11, D24). Every range, entry and
+//! removal keeps one, as do inserts that split. Iterators
 //! move two of them through the tree (`walk.rs`), an entry keeps the one its
 //! search found (`map/entry.rs`), and inserting and removing go back up the
 //! one that led to the key, splitting or fixing the nodes on it
 //! (`insert.rs`, `remove.rs`).
 //!
-//! A path stands for a borrow of the whole tree, which its borrow type
+//! A node stack stands for a borrow of the whole tree, which its borrow type
 //! says: shared ([`Immut`]), value-mutating ([`ValMut`]), owning, for a
 //! walk that takes the tree apart ([`Dying`]), or exclusive ([`Mut`], held
-//! by a [`PathMut`]). The borrow type is what the walks hand entries out by
-//! (`walk.rs`), and what makes a path `Send` and `Sync` as the borrow it
-//! stands for; the nodes it hands out are plain handles, with the access of
-//! the path's borrow (`tree/node/mod.rs`).
+//! by a [`NodeStackMut`]). The borrow type is what the walks hand entries
+//! out by (`walk.rs`), and what makes a node stack `Send` and `Sync` as the
+//! borrow it stands for; the nodes it hands out are plain handles, with the
+//! access of the node stack's borrow (`tree/node/mod.rs`).
 //!
-//! A path has a slot for every level of the tallest tree there can be
+//! A node stack has a slot for every level of the tallest tree there can be
 //! ([`MAX_DEPTH`]), about 250 bytes, the root's first. Nothing records how
-//! tall a tree is: a path counts the levels it goes down, and every leaf is
-//! as deep as any other. It is made detached and started where it is,
+//! tall a tree is: a node stack counts the levels it goes down, and every leaf
+//! is as deep as any other. It is made detached and started where it is,
 //! writing only the levels in use, and is not moved once written: the
 //! CPU can't forward the narrow stores that wrote it to the wide loads of a
 //! copy, which then wait for those stores to retire, and with them every
@@ -25,18 +25,18 @@
 //!
 //! # Safety argument
 //!
-//! Every node a path hands out relies on the [`Path`] invariant, which holds
-//! because:
+//! Every node a node stack hands out relies on the [`NodeStack`] invariant,
+//! which holds because:
 //!
-//! - a path starts at a root, and every node below it on the path was read
-//!   from its parent's edge when the path moved down to it;
-//! - only the bottom node changes while a path lives: a copyable borrow
-//!   changes no structure, and an exclusive path changes only its bottom
+//! - a node stack starts at a root, and every node below it on the node stack
+//!   was read from its parent's edge when the node stack moved down to it;
+//! - only the bottom node changes while a node stack lives: a copyable borrow
+//!   changes no structure, and an exclusive node stack changes only its bottom
 //!   node, from which nothing leads back up;
-//! - the root changes only through an exclusive path, which updates itself
-//!   ([`PathMut::ascend_raising`]).
+//! - the root changes only through an exclusive node stack, which updates
+//!   itself ([`NodeStackMut::ascend_raising`]).
 //!
-//! A path keeps each node as its edge does, tagged with its kind
+//! A node stack keeps each node as its edge does, tagged with its kind
 //! (`node/page.rs`), so that it decides each node's kind by the pointer it
 //! holds; debug builds check that only its bottom node may be a leaf.
 
@@ -64,43 +64,43 @@ use crate::inline_key::InlineKeyStrategy;
 /// KB, more than 2^64 bytes.
 pub(in crate::tree) const MAX_DEPTH: usize = 23;
 
-/// Borrow type of a [`Path`]: shared access for `'a` to the tree, like
+/// Borrow type of a [`NodeStack`]: shared access for `'a` to the tree, like
 /// `&'a`.
 pub(crate) struct Immut<'a>(PhantomData<&'a ()>);
 
-/// Borrow type of a [`Path`]: exclusive access for `'a` to the tree, like
+/// Borrow type of a [`NodeStack`]: exclusive access for `'a` to the tree, like
 /// `&'a mut`.
 ///
-/// Like `&mut`, it is invariant in `K` and `V`: a path that could claim
+/// Like `&mut`, it is invariant in `K` and `V`: a node stack that could claim
 /// shorter-lived keys or values could store them into a tree that outlives
 /// them.
 pub(in crate::tree) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 
-/// Borrow type of a [`Path`]: access for `'a` to the tree by a walk that
+/// Borrow type of a [`NodeStack`]: access for `'a` to the tree by a walk that
 /// hands out each value as `&'a mut V` at most once, while keys and
 /// structure stay shared, as `IterMut` does.
 ///
-/// Its paths may be copied, so that both ends of a walk hold some: they only
-/// read the structure and keys. Handing out a value is unsafe, and the walk
-/// vouches that it does so once per value.
+/// Its node stacks may be copied, so that both ends of a walk hold some: they
+/// only read the structure and keys. Handing out a value is unsafe, and the
+/// walk vouches that it does so once per value.
 ///
 /// Invariant in `K` and `V`, like `&'a mut`.
 pub(crate) struct ValMut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 
-/// Borrow type of a [`Path`]: ownership of a tree that a walk is taking
+/// Borrow type of a [`NodeStack`]: ownership of a tree that a walk is taking
 /// apart, moving entries out from either end and freeing each node once past
 /// it (`tree/walk.rs`), as std's `IntoIter` does.
 ///
-/// Its paths may be copied, so that both ends of the walk hold some. Past
-/// the walk's ends, entries have been moved out and nodes freed, while the
-/// nodes' lengths still count them: only the walk knows where the gaps are.
-/// It reads only the structure between its ends. Moving an entry out and
+/// Its node stacks may be copied, so that both ends of the walk hold some.
+/// Past the walk's ends, entries have been moved out and nodes freed, while
+/// the nodes' lengths still count them: only the walk knows where the gaps
+/// are. It reads only the structure between its ends. Moving an entry out and
 /// freeing a node are unsafe, and the walk vouches that it does each once.
 ///
 /// It owns `K` and `V`, and is covariant in them, as an owned tree is.
 pub(in crate::tree) struct Dying<K, V>(PhantomData<(K, V)>);
 
-/// A borrow type whose paths may be copied, because nothing they do
+/// A borrow type whose node stacks may be copied, because nothing they do
 /// changes the tree's structure: [`Immut`], [`ValMut`] and [`Dying`].
 pub(crate) trait CopyableBorrow {}
 
@@ -110,7 +110,7 @@ impl<K, V> CopyableBorrow for ValMut<'_, K, V> {}
 
 impl<K, V> CopyableBorrow for Dying<K, V> {}
 
-/// An end of a node, where a path goes down to the first of its entries,
+/// An end of a node, where a node stack goes down to the first of its entries,
 /// or to the last: [`FirstEdge`] or [`LastEdge`]. A type, so that code for
 /// one end, which a caller always knows, holds no choice between them.
 pub(crate) trait NodeEnd {
@@ -150,71 +150,71 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     }
 }
 
-/// A path from a tree's root down to a position in one of its nodes, with
-/// the access to the whole tree that borrow type `B` says; or a detached
-/// path, which reaches no node until it is attached to a root.
+/// A node stack from a tree's root down to a position in one of its nodes,
+/// with the access to the whole tree that borrow type `B` says; or a detached
+/// node stack, which reaches no node until it is attached to a root.
 ///
-/// Invariant: `levels <= MAX_DEPTH + 1`, the number of nodes on the path, 0
-/// for a detached path. For every depth `d` below `levels`, `nodes[d]` and
-/// `indexes[d]` are initialized, and `nodes[d]` holds a node of one tree,
-/// tagged with its kind, `nodes[0]` its root. Above the bottom node, at
-/// depth `levels - 1`, `nodes[d]` is internal, `indexes[d]` is an edge of
+/// Invariant: `levels <= MAX_DEPTH + 1`, the number of nodes on the node
+/// stack, 0 for a detached node stack. For every depth `d` below `levels`,
+/// `nodes[d]` and `indexes[d]` are initialized, and `nodes[d]` holds a node of
+/// one tree, tagged with its kind, `nodes[0]` its root. Above the bottom node,
+/// at depth `levels - 1`, `nodes[d]` is internal, `indexes[d]` is an edge of
 /// it, and `nodes[d + 1]` is the child at that edge. The bottom's index is
-/// the position the path ends at in the bottom node, an edge or a key,
+/// the position the node stack ends at in the bottom node, an edge or a key,
 /// which every use checks against the node's length. A node holds at most
 /// 1023 keys (`tree/node/layout.rs`), so every index fits in a `u16`.
-pub(in crate::tree) struct Path<B, K, V, S> {
+pub(in crate::tree) struct NodeStack<B, K, V, S> {
     nodes: [MaybeUninit<NodePtr<K, V, S>>; MAX_DEPTH + 1],
     indexes: [MaybeUninit<u16>; MAX_DEPTH + 1],
     levels: u8,
     _borrow: PhantomData<B>,
 }
 
-impl<B: CopyableBorrow, K, V, S> Clone for Path<B, K, V, S> {
+impl<B: CopyableBorrow, K, V, S> Clone for NodeStack<B, K, V, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<B: CopyableBorrow, K, V, S> Copy for Path<B, K, V, S> {}
+impl<B: CopyableBorrow, K, V, S> Copy for NodeStack<B, K, V, S> {}
 
-// SAFETY: a shared path gives only shared access to the keys and values of
-// the tree for `'a`, as a `&'a (K, V)` would, and nothing else: sending it
+// SAFETY: a shared node stack gives only shared access to the keys and values
+// of the tree for `'a`, as a `&'a (K, V)` would, and nothing else: sending it
 // to another thread shares them with that thread, which `K: Sync` and
 // `V: Sync` allow. The strategy is only a marker.
-unsafe impl<K: Sync, V: Sync, S> Send for Path<Immut<'_>, K, V, S> {}
-// SAFETY: as for `Send`: sharing a shared path across threads shares the
+unsafe impl<K: Sync, V: Sync, S> Send for NodeStack<Immut<'_>, K, V, S> {}
+// SAFETY: as for `Send`: sharing a shared node stack across threads shares the
 // keys and values, nothing more.
-unsafe impl<K: Sync, V: Sync, S> Sync for Path<Immut<'_>, K, V, S> {}
-// SAFETY: a value-mutating path stands for an exclusive borrow of the whole
-// tree, as a `&'a mut` would, which it hands out as shared keys and
+unsafe impl<K: Sync, V: Sync, S> Sync for NodeStack<Immut<'_>, K, V, S> {}
+// SAFETY: a value-mutating node stack stands for an exclusive borrow of the
+// whole tree, as a `&'a mut` would, which it hands out as shared keys and
 // exclusive values: sending it to another thread moves that exclusive access
 // there, which `K: Send` and `V: Send` allow, as for `&mut (K, V)`; the keys
 // it hands out are shared only within the thread that has it. These are
 // std's bounds for its `IterMut`.
-unsafe impl<K: Send, V: Send, S> Send for Path<ValMut<'_, K, V>, K, V, S> {}
-// SAFETY: through `&` a value-mutating path only reads the structure, keys
-// and values, which `K: Sync` and `V: Sync` allow sharing.
-unsafe impl<K: Sync, V: Sync, S> Sync for Path<ValMut<'_, K, V>, K, V, S> {}
-// SAFETY: an exclusive path stands for an exclusive borrow of the tree, as a
-// `&mut` would: sending it moves that access to another thread, which
+unsafe impl<K: Send, V: Send, S> Send for NodeStack<ValMut<'_, K, V>, K, V, S> {}
+// SAFETY: through `&` a value-mutating node stack only reads the structure,
+// keys and values, which `K: Sync` and `V: Sync` allow sharing.
+unsafe impl<K: Sync, V: Sync, S> Sync for NodeStack<ValMut<'_, K, V>, K, V, S> {}
+// SAFETY: an exclusive node stack stands for an exclusive borrow of the tree,
+// as a `&mut` would: sending it moves that access to another thread, which
 // `K: Send` and `V: Send` allow; through `&` it only reads.
-unsafe impl<K: Send, V: Send, S> Send for Path<Mut<'_, K, V>, K, V, S> {}
+unsafe impl<K: Send, V: Send, S> Send for NodeStack<Mut<'_, K, V>, K, V, S> {}
 // SAFETY: as for `Send`.
-unsafe impl<K: Sync, V: Sync, S> Sync for Path<Mut<'_, K, V>, K, V, S> {}
-// SAFETY: a dying path stands for ownership of the tree's keys and values,
-// as a `Box<(K, V)>` would: sending it to another thread sends them there,
-// which `K: Send` and `V: Send` allow. The pages go back to the allocator
-// the walk holds, which goes with it: the walk is `Send` only if its
+unsafe impl<K: Sync, V: Sync, S> Sync for NodeStack<Mut<'_, K, V>, K, V, S> {}
+// SAFETY: a dying node stack stands for ownership of the tree's keys and
+// values, as a `Box<(K, V)>` would: sending it to another thread sends them
+// there, which `K: Send` and `V: Send` allow. The pages go back to the
+// allocator the walk holds, which goes with it: the walk is `Send` only if its
 // allocator is.
-unsafe impl<K: Send, V: Send, S> Send for Path<Dying<K, V>, K, V, S> {}
+unsafe impl<K: Send, V: Send, S> Send for NodeStack<Dying<K, V>, K, V, S> {}
 // SAFETY: as for `Send`; through `&` it only reads.
-unsafe impl<K: Sync, V: Sync, S> Sync for Path<Dying<K, V>, K, V, S> {}
+unsafe impl<K: Sync, V: Sync, S> Sync for NodeStack<Dying<K, V>, K, V, S> {}
 
-impl<B, K, V, S> Path<B, K, V, S> {
-    /// A path that reaches no node. Making it writes nothing but its count of
-    /// levels, where it is made: a struct literal, not a constant, which
-    /// would be copied in whole.
+impl<B, K, V, S> NodeStack<B, K, V, S> {
+    /// A node stack that reaches no node. Making it writes nothing but its
+    /// count of levels, where it is made: a struct literal, not a constant,
+    /// which would be copied in whole.
     #[inline(always)]
     pub(in crate::tree) fn detached() -> Self {
         Self {
@@ -225,10 +225,10 @@ impl<B, K, V, S> Path<B, K, V, S> {
         }
     }
 
-    /// Makes the path just `root`, ending at its first edge.
+    /// Makes the node stack just `root`, ending at its first edge.
     ///
-    /// `root` is the root of a well-formed tree, to which the path has the
-    /// access `B` says for as long as it lives.
+    /// `root` is the root of a well-formed tree, to which the node stack has
+    /// the access `B` says for as long as it lives.
     pub(in crate::tree) fn attach(&mut self, root: Node<K, V, S>) {
         self.write_level(0, root.node_ptr(), 0);
         self.levels = 1;
@@ -246,44 +246,47 @@ impl<B, K, V, S> Path<B, K, V, S> {
         self.indexes[depth].write(index as u16);
     }
 
-    /// How far below the root the node the path ends at is: 0 at the root.
-    /// A detached path ends at no node: its depth is past every slot, which
-    /// each use of it checks, as it checks any depth.
+    /// How far below the root the node stack's bottom node is: 0 at the
+    /// root. A detached node stack ends at no node: its depth is past every
+    /// slot, which each use of it checks, as it checks any depth.
     pub(in crate::tree) fn depth(&self) -> usize {
         usize::from(self.levels).wrapping_sub(1)
     }
 
-    /// Whether the path ends at the root.
+    /// Whether the node stack ends at the root.
     pub(in crate::tree) fn is_at_root(&self) -> bool {
         self.levels == 1
     }
 
-    /// Whether the path reaches a node: it was attached to a root.
+    /// Whether the node stack reaches a node: it was attached to a root.
     pub(in crate::tree) fn is_attached(&self) -> bool {
         self.levels > 0
     }
 
-    /// Whether `depth` is on the path.
-    fn is_on_path(&self, depth: usize) -> bool {
+    /// Whether `depth` is on the node stack.
+    fn is_on_stack(&self, depth: usize) -> bool {
         depth < usize::from(self.levels)
     }
 
-    /// The node at `depth`, which must be on the path, as the path keeps
-    /// it.
+    /// The node at `depth`, which must be on the node stack, as the node stack
+    /// keeps it.
     fn node_ptr(&self, depth: usize) -> NodePtr<K, V, S> {
-        assert!(self.is_on_path(depth), "depth {depth} is not on the path");
-        // SAFETY: the levels on the path are in the array and initialized
-        // (type invariant).
+        assert!(
+            self.is_on_stack(depth),
+            "depth {depth} is not on the node stack"
+        );
+        // SAFETY: the levels on the node stack are in the array and
+        // initialized (type invariant).
         unsafe { self.nodes.get_unchecked(depth).assume_init() }
     }
 
-    /// The node at `depth`, which must be on the path: internal above the
-    /// bottom, which debug builds check.
+    /// The node at `depth`, which must be on the node stack: internal above
+    /// the bottom, which debug builds check.
     pub(in crate::tree) fn node_at(&self, depth: usize) -> Node<K, V, S> {
         let node = Node::at(self.node_ptr(depth));
         debug_assert!(
             depth == self.depth() || matches!(node, Node::Internal(_)),
-            "a path's nodes above its bottom are internal"
+            "a node stack's nodes above its bottom are internal"
         );
         node
     }
@@ -293,33 +296,33 @@ impl<B, K, V, S> Path<B, K, V, S> {
     ///
     /// # Panics
     ///
-    /// If `depth` is not on the path.
+    /// If `depth` is not on the node stack.
     pub(in crate::tree) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
         Internal::at(self.node_ptr(depth))
     }
 
-    /// Whether the node the path ends at is a leaf.
+    /// Whether the node stack's bottom node is a leaf.
     ///
     /// # Panics
     ///
-    /// If the path is detached.
+    /// If the node stack is detached.
     pub(in crate::tree) fn ends_at_leaf(&self) -> bool {
         self.node_ptr(self.depth()).is_leaf()
     }
 
-    /// The edge of a leaf the path ends at: where a walk's cursor stands
+    /// The edge of a leaf the node stack ends at: where a walk's cursor stands
     /// once started, read with no check on its way.
     ///
     /// # Safety
     ///
-    /// The path is attached and ends at an edge of a leaf: at an index no
-    /// greater than the leaf's length.
+    /// The node stack is attached and ends at an edge of a leaf: at an index
+    /// no greater than the leaf's length.
     #[inline(always)]
     pub(in crate::tree) unsafe fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
-        debug_assert!(self.ends_at_leaf(), "the path ends at no leaf");
+        debug_assert!(self.ends_at_leaf(), "the node stack ends at no leaf");
         let bottom = usize::from(self.levels) - 1;
-        // SAFETY: the bottom level is on the path and initialized (caller
-        // and type invariant), and holds a leaf.
+        // SAFETY: the bottom level is on the node stack and initialized
+        // (caller and type invariant), and holds a leaf.
         unsafe {
             (
                 Leaf::at(self.nodes.get_unchecked(bottom).assume_init()),
@@ -328,51 +331,55 @@ impl<B, K, V, S> Path<B, K, V, S> {
         }
     }
 
-    /// The index the path takes at `depth`: above the bottom, the edge that
-    /// leads down the path.
+    /// The index the node stack takes at `depth`: above the bottom, the edge
+    /// that leads down the node stack.
     ///
     /// # Panics
     ///
-    /// If `depth` is not on the path.
+    /// If `depth` is not on the node stack.
     pub(in crate::tree) fn index_at(&self, depth: usize) -> usize {
-        assert!(self.is_on_path(depth), "depth {depth} is not on the path");
-        // SAFETY: the levels on the path are in the array and initialized
-        // (type invariant).
+        assert!(
+            self.is_on_stack(depth),
+            "depth {depth} is not on the node stack"
+        );
+        // SAFETY: the levels on the node stack are in the array and
+        // initialized (type invariant).
         usize::from(unsafe { self.indexes.get_unchecked(depth).assume_init() })
     }
 
-    /// The position the path ends at in its bottom node: an edge or a key.
+    /// The position the node stack ends at in its bottom node: an edge or a
+    /// key.
     ///
     /// # Panics
     ///
-    /// If the path is detached.
+    /// If the node stack is detached.
     pub(in crate::tree) fn index(&self) -> usize {
         self.index_at(self.depth())
     }
 
-    /// Makes `index` the position the path ends at in its bottom node: an
-    /// edge, or a key, which its uses check.
+    /// Makes `index` the position the node stack ends at in its bottom node:
+    /// an edge, or a key, which its uses check.
     ///
     /// # Panics
     ///
-    /// If the path is detached.
+    /// If the node stack is detached.
     pub(in crate::tree) fn set_index(&mut self, index: usize) {
         self.write_index(self.depth(), index);
     }
 
-    /// Makes `index` the position the path ends at in its leaf, where a
+    /// Makes `index` the position the node stack ends at in its leaf, where a
     /// walk's cursor stands: the cursor's own move, which checks nothing.
     ///
     /// # Safety
     ///
-    /// The path is attached and ends at a leaf.
+    /// The node stack is attached and ends at a leaf.
     #[inline(always)]
     pub(in crate::tree) unsafe fn set_leaf_index(&mut self, index: usize) {
-        debug_assert!(self.ends_at_leaf(), "the path ends at no leaf");
+        debug_assert!(self.ends_at_leaf(), "the node stack ends at no leaf");
         debug_assert!(index <= u16::MAX.into());
         let bottom = usize::from(self.levels) - 1;
-        // SAFETY: an attached path's bottom level is in the array (caller
-        // and type invariant).
+        // SAFETY: an attached node stack's bottom level is in the array
+        // (caller and type invariant).
         unsafe { self.indexes.get_unchecked_mut(bottom) }.write(index as u16);
     }
 
@@ -388,8 +395,8 @@ impl<B, K, V, S> Path<B, K, V, S> {
         self.internal_at(usize::from(self.levels) - 1)
     }
 
-    /// Whether `self` and `other`, paths in the same tree, are attached and
-    /// end at the same position of the same node.
+    /// Whether `self` and `other`, node stacks in the same tree, are attached
+    /// and end at the same position of the same node.
     pub(in crate::tree) fn is_at(&self, other: &Self) -> bool {
         self.is_attached()
             && self.levels == other.levels
@@ -410,9 +417,9 @@ impl<B, K, V, S> Path<B, K, V, S> {
     }
 }
 
-impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
-    /// Goes down the edge the path ends at, to the child there, at its first
-    /// edge.
+impl<B, K, V, S: InlineKeyStrategy<K>> NodeStack<B, K, V, S> {
+    /// Goes down the edge the node stack ends at, to the child there, at its
+    /// first edge.
     ///
     /// # Panics
     ///
@@ -427,12 +434,12 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         self.levels += 1;
     }
 
-    /// Goes down from the edge the path ends at to a leaf, along the `End`
-    /// edge of every node below, and ends at that leaf's `End` edge. At a
-    /// leaf already, stays.
+    /// Goes down from the edge the node stack ends at to a leaf, along the
+    /// `End` edge of every node below, and ends at that leaf's `End` edge. At
+    /// a leaf already, stays.
     ///
-    /// The node and its depth stay in registers on the way down; the path
-    /// only takes stores, which nothing reads until it is done.
+    /// The node and its depth stay in registers on the way down; the node
+    /// stack only takes stores, which nothing reads until it is done.
     ///
     /// # Panics
     ///
@@ -481,15 +488,15 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
 
     /// Goes down from the bottom node, the root of a tree whose keys all
     /// share `shared` (D50), searching each node on the way for `key`, and
-    /// returns whether it is there: the path ends at it then, in whichever
-    /// node holds it, or else at the leaf edge where it belongs. A key that
-    /// lacks what every key shares belongs at the tree's first or last edge,
-    /// which the path goes to without searching.
+    /// returns whether it is there: the node stack ends at it then, in
+    /// whichever node holds it, or else at the leaf edge where it belongs. A
+    /// key that lacks what every key shares belongs at the tree's first or
+    /// last edge, which the node stack goes to without searching.
     ///
-    /// The node and its depth stay in registers on the way down; the path
-    /// only takes stores, which nothing reads until it is done. The root's
-    /// kind is decided once, and each internal node's children's, as the
-    /// way down reads an edge; the loop runs over internal nodes only, and
+    /// The node and its depth stay in registers on the way down; the node
+    /// stack only takes stores, which nothing reads until it is done. The
+    /// root's kind is decided once, and each internal node's children's, as
+    /// the way down reads an edge; the loop runs over internal nodes only, and
     /// the leaf's search follows it.
     pub(in crate::tree) fn search<Q>(
         &mut self,
@@ -569,7 +576,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     }
 }
 
-/// Where a path stands relative to a key it looked up.
+/// Where a node stack stands relative to a key it looked up.
 #[derive(Clone, Copy)]
 pub(crate) enum KeySide {
     /// Just before the key, or where it would be.
@@ -600,14 +607,15 @@ impl KeySide {
     }
 }
 
-impl<B: CopyableBorrow, K, V, S> Path<B, K, V, S> {
-    /// The same path, with shared access for as long as `self` is borrowed.
-    pub(in crate::tree) fn reborrow(&self) -> Path<Immut<'_>, K, V, S> {
+impl<B: CopyableBorrow, K, V, S> NodeStack<B, K, V, S> {
+    /// The same node stack, with shared access for as long as `self` is
+    /// borrowed.
+    pub(in crate::tree) fn reborrow(&self) -> NodeStack<Immut<'_>, K, V, S> {
         // A copyable borrow gives at least shared access to the structure
         // and keys, and `&self` keeps the tree unchanged meanwhile. Reading
         // a value through it is sound only for values not handed out as
         // `&mut`, which the walks see to.
-        Path {
+        NodeStack {
             nodes: self.nodes,
             indexes: self.indexes,
             levels: self.levels,
@@ -616,41 +624,41 @@ impl<B: CopyableBorrow, K, V, S> Path<B, K, V, S> {
     }
 }
 
-/// An exclusive path, from the root down: what an entry keeps, and what
+/// An exclusive node stack, from the root down: what an entry keeps, and what
 /// inserts and removals go back up. It changes the nodes below the root
 /// through the bottom node, and the root only through
 /// [`Self::ascend_raising`] and [`Self::detach_lowering_an_empty_root`].
 ///
 /// It is made detached, and starts where it is: every way of starting it
 /// first attaches it to the root.
-pub(crate) struct PathMut<'a, K, V, S> {
+pub(crate) struct NodeStackMut<'a, K, V, S> {
     tree: &'a mut Tree<K, V, S>,
-    path: Path<Mut<'a, K, V>, K, V, S>,
+    stack: NodeStack<Mut<'a, K, V>, K, V, S>,
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
-    /// A detached path down `tree`, for one of the methods that
+impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
+    /// A detached node stack down `tree`, for one of the methods that
     /// start it. It ends the owner's permission to append to its remembered
-    /// leaf, which the path may change.
+    /// leaf, which the node stack may change.
     #[inline(always)]
     pub(crate) fn new(tree: &'a mut Tree<K, V, S>) -> Self {
         tree.forget_rightmost_leaf();
         Self {
             tree,
-            path: Path::detached(),
+            stack: NodeStack::detached(),
         }
     }
 
-    /// The tree the path goes down, shared.
+    /// The tree the node stack goes down, shared.
     pub(in crate::tree) fn tree(&self) -> &Tree<K, V, S> {
         self.tree
     }
 
     /// Shrinks what every key of the tree shares to what `key` shares too,
     /// and returns `key`, which shares it now
-    /// ([`Tree::shrink_shared_prefix_for`]), for [`Self::insert`]. The path
-    /// still leads where it did: only the prefixes along the tree's borders
-    /// change.
+    /// ([`Tree::shrink_shared_prefix_for`]), for [`Self::insert`]. The node
+    /// stack still leads where it did: only the prefixes along the tree's
+    /// borders change.
     pub(in crate::tree) fn shrink_shared_prefix_for(
         &mut self,
         key: K,
@@ -659,15 +667,16 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.tree.shrink_shared_prefix_for(key, alloc)
     }
 
-    /// Finishes a plain insertion, remembering its leaf only when the path
-    /// proves the new entry is physically last. This consumes the path:
-    /// entry handles that keep their path may still remove or merge nodes,
-    /// so they must never remember the leaf while retaining mutation access.
+    /// Finishes a plain insertion, remembering its leaf only when the node
+    /// stack proves the new entry is physically last. This consumes the node
+    /// stack: entry handles that keep their node stack may still remove or
+    /// merge nodes, so they must never remember the leaf while retaining
+    /// mutation access.
     pub(in crate::tree) fn finish_insertion(self) {
         let leaf = self.leaf();
-        let last_edges = (0..self.path.depth())
-            .all(|depth| self.path.index_at(depth) == self.path.internal_at(depth).len());
-        if self.path.index() + 1 != leaf.len() || !last_edges {
+        let last_edges = (0..self.stack.depth())
+            .all(|depth| self.stack.index_at(depth) == self.stack.internal_at(depth).len());
+        if self.stack.index() + 1 != leaf.len() || !last_edges {
             return;
         }
         // SAFETY: every ancestor takes its final edge, so this is the
@@ -676,118 +685,119 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         unsafe { self.tree.remember_rightmost_leaf(leaf) };
     }
 
-    /// Starts the path at the root, at its first edge.
+    /// Starts the node stack at the root, at its first edge.
     ///
     /// # Panics
     ///
     /// Without a tree.
     pub(crate) fn start_at_root(&mut self) {
-        self.path.attach(self.tree.root());
+        self.stack.attach(self.tree.root());
     }
 
-    /// Starts the path at the root and searches down; see [`Path::search`].
+    /// Starts the node stack at the root and searches down; see
+    /// [`NodeStack::search`].
     pub(crate) fn search<Q>(&mut self, key: &SearchKey<'_, K, S, Q>) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         self.start_at_root();
-        self.path.search(key, self.tree.shared_prefix())
+        self.stack.search(key, self.tree.shared_prefix())
     }
 
-    /// Starts the path at the root and goes down to the leaf edge beside
-    /// `key`; see [`Path::search_to_edge`].
+    /// Starts the node stack at the root and goes down to the leaf edge beside
+    /// `key`; see [`NodeStack::search_to_edge`].
     pub(in crate::tree) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         self.start_at_root();
-        self.path
+        self.stack
             .search_to_edge(key, side, self.tree.shared_prefix());
     }
 
-    /// Starts the path at the root and goes down to the tree's first key;
-    /// see [`Path::descend_to_first_key`].
+    /// Starts the node stack at the root and goes down to the tree's first
+    /// key; see [`NodeStack::descend_to_first_key`].
     pub(crate) fn descend_to_first_key(&mut self) -> bool {
         self.start_at_root();
-        self.path.descend_to_first_key()
+        self.stack.descend_to_first_key()
     }
 
-    /// Starts the path at the root and goes down to the tree's last key; see
-    /// [`Path::descend_to_last_key`].
+    /// Starts the node stack at the root and goes down to the tree's last key;
+    /// see [`NodeStack::descend_to_last_key`].
     pub(crate) fn descend_to_last_key(&mut self) -> bool {
         self.start_at_root();
-        self.path.descend_to_last_key()
+        self.stack.descend_to_last_key()
     }
 
-    /// See [`Path::depth`].
+    /// See [`NodeStack::depth`].
     pub(in crate::tree) fn depth(&self) -> usize {
-        self.path.depth()
+        self.stack.depth()
     }
 
-    /// See [`Path::is_at_root`].
+    /// See [`NodeStack::is_at_root`].
     pub(in crate::tree) fn is_at_root(&self) -> bool {
-        self.path.is_at_root()
+        self.stack.is_at_root()
     }
 
-    /// See [`Path::ends_at_leaf`].
+    /// See [`NodeStack::ends_at_leaf`].
     pub(in crate::tree) fn ends_at_leaf(&self) -> bool {
-        self.path.ends_at_leaf()
+        self.stack.ends_at_leaf()
     }
 
-    /// See [`Path::index`].
+    /// See [`NodeStack::index`].
     pub(in crate::tree) fn index(&self) -> usize {
-        self.path.index()
+        self.stack.index()
     }
 
-    /// See [`Path::set_index`].
+    /// See [`NodeStack::set_index`].
     pub(in crate::tree) fn set_index(&mut self, index: usize) {
-        self.path.set_index(index);
+        self.stack.set_index(index);
     }
 
-    /// See [`Path::ascend`].
+    /// See [`NodeStack::ascend`].
     pub(in crate::tree) fn ascend(&mut self) -> Internal<K, V, S> {
-        self.path.ascend()
+        self.stack.ascend()
     }
 
     /// Goes up to the bottom node's parent and returns it, as
     /// [`Self::ascend`] does; at the root, raises the tree a level first
     /// ([`Tree::raise`]): the root node moves to a page of its kind from
-    /// `alloc`, under the root, now internal with no keys, which the path
-    /// then ends at, at its only edge.
+    /// `alloc`, under the root, now internal with no keys, which the node
+    /// stack then ends at, at its only edge.
     pub(in crate::tree) fn ascend_raising(&mut self, alloc: &impl Allocator) -> Internal<K, V, S> {
-        if !self.path.is_at_root() {
-            return self.path.ascend();
+        if !self.stack.is_at_root() {
+            return self.stack.ascend();
         }
         self.tree.raise(alloc);
-        self.path.attach(self.tree.root());
-        self.path.internal_at(0)
+        self.stack.attach(self.tree.root());
+        self.stack.internal_at(0)
     }
 
-    /// See [`Path::descend`].
+    /// See [`NodeStack::descend`].
     pub(in crate::tree) fn descend(&mut self) {
-        self.path.descend();
+        self.stack.descend();
     }
 
-    /// See [`Path::descend_to_leaf`].
+    /// See [`NodeStack::descend_to_leaf`].
     pub(in crate::tree) fn descend_to_leaf<End: NodeEnd>(&mut self) {
-        self.path.descend_to_leaf::<End>();
+        self.stack.descend_to_leaf::<End>();
     }
 
-    /// See [`Path::descend_to_end`].
+    /// See [`NodeStack::descend_to_end`].
     pub(in crate::tree) fn descend_to_end<End: NodeEnd>(&mut self) {
-        self.path.descend_to_end::<End>();
+        self.stack.descend_to_end::<End>();
     }
 
     /// The bottom node's bounds, low and high: the keys just left and just
-    /// right of the path in the nodes above it, nearest first; `None` past
-    /// the tree's first or last key.
+    /// right of the node stack in the nodes above it, nearest first; `None`
+    /// past the tree's first or last key.
     pub(super) fn fences(&self) -> (Option<&K>, Option<&K>) {
         let (mut low, mut high) = (None, None);
-        for depth in (0..self.path.depth()).rev() {
-            let node = self.path.internal_at(depth);
-            let index = self.path.index_at(depth);
+        for depth in (0..self.stack.depth()).rev() {
+            let node = self.stack.internal_at(depth);
+            let index = self.stack.index_at(depth);
             low = low.or_else(|| index.checked_sub(1).map(|left| node.separator_key(left)));
             high = high.or_else(|| (index < node.len()).then(|| node.separator_key(index)));
             if low.is_some() && high.is_some() {
@@ -797,30 +807,30 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         (low, high)
     }
 
-    /// The bottom node. Changing it leaves the path leading to it.
+    /// The bottom node. Changing it leaves the node stack leading to it.
     pub(in crate::tree) fn node(&self) -> Node<K, V, S> {
-        self.path.node_at(self.path.depth())
+        self.stack.node_at(self.stack.depth())
     }
 
-    /// The node at `depth` on the path, at or above its bottom: changing
-    /// its prefix or its keys' windows leaves the path leading where it
+    /// The node at `depth` on the node stack, at or above its bottom: changing
+    /// its prefix or its keys' windows leaves the node stack leading where it
     /// did, while its edges are the bottom node's business to change.
     ///
     /// # Panics
     ///
-    /// If `depth` is not on the path.
+    /// If `depth` is not on the node stack.
     pub(super) fn node_at(&self, depth: usize) -> Node<K, V, S> {
-        self.path.node_at(depth)
+        self.stack.node_at(depth)
     }
 
-    /// See [`Path::index_at`].
+    /// See [`NodeStack::index_at`].
     pub(super) fn index_at(&self, depth: usize) -> usize {
-        self.path.index_at(depth)
+        self.stack.index_at(depth)
     }
 
-    /// See [`Path::internal_at`].
+    /// See [`NodeStack::internal_at`].
     pub(super) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
-        self.path.internal_at(depth)
+        self.stack.internal_at(depth)
     }
 
     /// The bottom node, a leaf, as where a search or a descent to a leaf
@@ -836,7 +846,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         }
     }
 
-    /// The bottom node, internal, as where the path went up from a node
+    /// The bottom node, internal, as where the node stack went up from a node
     /// below.
     ///
     /// # Panics
@@ -849,22 +859,22 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         }
     }
 
-    /// Detaches the path, which a removal is done with, and lowers the
+    /// Detaches the node stack, which a removal is done with, and lowers the
     /// tree, if merges left the root internal and without keys, moving the
     /// root's only child up into the root ([`Tree::lower`]), and giving the
     /// child's page back to `alloc`.
     pub(in crate::tree) fn detach_lowering_an_empty_root(&mut self, alloc: &impl Allocator) {
-        self.path = Path::detached();
+        self.stack = NodeStack::detached();
         if matches!(self.tree.root(), Node::Internal(root) if root.len() == 0) {
             self.tree.lower().deallocate(alloc);
         }
     }
 
-    /// The key the path ends at.
+    /// The key the node stack ends at.
     ///
     /// # Panics
     ///
-    /// If the path ends at no key.
+    /// If the node stack ends at no key.
     pub(crate) fn key(&self) -> &K {
         let index = self.index();
         match self.node() {
@@ -873,13 +883,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         }
     }
 
-    /// Puts `key` in place of the key the path ends at, with its inline key
-    /// at the node's prefix length, and returns the old key: its value, and
-    /// the path, stay. Keeping the keys in order is the caller's business.
+    /// Puts `key` in place of the key the node stack ends at, with its inline
+    /// key at the node's prefix length, and returns the old key: its value,
+    /// and the node stack, stay. Keeping the keys in order is the caller's
+    /// business.
     ///
     /// # Panics
     ///
-    /// If the path ends at no key.
+    /// If the node stack ends at no key.
     pub(crate) fn replace_key(&mut self, key: K) -> K {
         let index = self.index();
         match self.node() {
@@ -890,39 +901,39 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         }
     }
 
-    /// The key the path ends at, as a search finds it.
+    /// The key the node stack ends at, as a search finds it.
     ///
     /// # Panics
     ///
-    /// If the path ends at no key.
+    /// If the node stack ends at no key.
     fn found(&self) -> Found<K, V, S> {
         let index = self.index();
         let node = self.node();
-        assert!(index < node.len(), "the path ends at no key");
+        assert!(index < node.len(), "the node stack ends at no key");
         match node {
             Node::Leaf(leaf) => Found::InLeaf(leaf, index),
             Node::Internal(internal) => Found::Separator(internal, index),
         }
     }
 
-    /// The value of the key the path ends at: beside it in a leaf, or for a
-    /// separator, a head below (D17).
+    /// The value of the key the node stack ends at: beside it in a leaf, or
+    /// for a separator, a head below (D17).
     ///
     /// # Panics
     ///
-    /// If the path ends at no key.
+    /// If the node stack ends at no key.
     pub(crate) fn value(&self) -> &V {
         self.found().key_value().1
     }
 
-    /// The value of the key the path ends at, exclusive; see
+    /// The value of the key the node stack ends at, exclusive; see
     /// [`Self::value`].
     pub(crate) fn value_mut(&mut self) -> &mut V {
         self.found().value_mut()
     }
 
-    /// The value of the key the path ends at, exclusive for the rest of
-    /// `'a`, giving up the path; see [`Self::value`].
+    /// The value of the key the node stack ends at, exclusive for the rest of
+    /// `'a`, giving up the node stack; see [`Self::value`].
     pub(crate) fn into_value_mut(self) -> &'a mut V {
         self.found().value_mut()
     }

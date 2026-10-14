@@ -35,14 +35,14 @@ use super::node::leaf::Leaf;
 use super::node::page::NodePtr;
 use super::node::siblings::Siblings;
 use super::node::{Child, Insertion, Node};
-use super::path::{FirstEdge, LastEdge, NodeEnd, PathMut};
+use super::node_stack::{FirstEdge, LastEdge, NodeEnd, NodeStackMut};
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// Where a join left its separator: in the node on the border it joined
-/// that a path ends at, or, where keys moved over, in that node's child at
-/// `child_edge`, one level down; at `index` there.
+/// that a node stack ends at, or, where keys moved over, in that node's child
+/// at `child_edge`, one level down; at `index` there.
 struct SeparatorPlace {
     child_edge: Option<usize>,
     index: usize,
@@ -110,10 +110,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         // The shorter root hangs under an edge, on a plain page.
         let shorter = shorter.into_node(alloc);
         let hung = {
-            let mut path = PathMut::new(self);
-            path.descend_border::<End>(shorter_depth);
-            let place = path.absorb_or_hang::<End>(separator, shorter, shorter_depth, alloc);
-            path.refit_separator_spines(&place);
+            let mut stack = NodeStackMut::new(self);
+            stack.descend_border::<End>(shorter_depth);
+            let place = stack.absorb_or_hang::<End>(separator, shorter, shorter_depth, alloc);
+            stack.refit_separator_spines(&place);
             place.hung
         };
         if hung {
@@ -122,10 +122,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
-    /// Starts the path at the root and takes it down `End`'s border to the
-    /// node whose leaves lie `subtree_depth` below it: down to the border's
-    /// leaf, and back up that many levels.
+impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
+    /// Starts the node stack at the root and takes it down `End`'s border to
+    /// the node whose leaves lie `subtree_depth` below it: down to the
+    /// border's leaf, and back up that many levels.
     fn descend_border<End: NodeEnd>(&mut self, subtree_depth: usize) {
         self.start_at_root();
         self.descend_to_end::<End>();
@@ -182,7 +182,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Hangs `right`, a tree as deep as the bottom node's subtree, right of
     /// that node, under `separator`, in the node one level up: under a new
     /// root if the node is the root, which the tree raises for it;
-    /// splitting up the path while full, each split's right half hung
+    /// splitting up the node stack while full, each split's right half hung
     /// right of its left half the same way, on a page from `alloc`.
     fn hang_beside(
         &mut self,
@@ -224,7 +224,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// whose fences the separator joined (05-fence-key.md): the right border
     /// of the child left of it and the left border of the child right of
     /// it, from the leaves up, and then those two children: an internal
-    /// node's prefix grows no further than its children's. The path ends
+    /// node's prefix grows no further than its children's. The node stack ends
     /// at the node `place` is in, and goes to its child there if keys moved
     /// over; a separator in a leaf has nothing below it.
     fn refit_separator_spines(&mut self, place: &SeparatorPlace) {
@@ -246,7 +246,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
-    /// [`PathMut::stock_beside_separator`], for the children beside the
+    /// [`NodeStackMut::stock_beside_separator`], for the children beside the
     /// separator at `index` in their parent.
     fn stock_beside_separator(mut self, index: usize) -> SeparatorPlace {
         let min_len = C::min_len();
@@ -315,10 +315,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         left.tree = Self::destroy_if_empty(left.take(), alloc);
         if !left.tree.has_root() {
             let mut right_length = 0;
-            let mut path = PathMut::new(&mut right.tree);
-            path.start_at_root();
-            path.descend_to_leaf::<FirstEdge>();
-            path.insert(key, value, alloc, &mut right_length);
+            let mut stack = NodeStackMut::new(&mut right.tree);
+            stack.start_at_root();
+            stack.descend_to_leaf::<FirstEdge>();
+            stack.insert(key, value, alloc, &mut right_length);
             return right.take();
         }
         left.tree.join(key, value, &mut right.tree, alloc);

@@ -13,11 +13,11 @@
 //!
 //! The root node is a leaf, in a tree of one node, or an internal node; the
 //! tree grows and shrinks a level only at its root, in its page, which the
-//! tree keeps for life. Nothing records how tall the tree is: a path down
-//! counts its own steps (`path.rs`). A map without entries may have no tree
-//! at all, as std's has no root then (D1): making one allocates nothing.
-//! Every operation on a whole tree starts here, on [`Tree`], each in its
-//! feature's module (`tree/mod.rs`).
+//! tree keeps for life. Nothing records how tall the tree is: a node stack
+//! down counts its own steps (`node_stack.rs`). A map without entries may have
+//! no tree at all, as std's has no root then (D1): making one allocates
+//! nothing. Every operation on a whole tree starts here, on [`Tree`], each in
+//! its feature's module (`tree/mod.rs`).
 
 use core::cmp::Ordering;
 use core::mem;
