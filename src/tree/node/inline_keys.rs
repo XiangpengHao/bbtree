@@ -321,7 +321,7 @@ struct SearchBytes<'q> {
     bytes: &'q [u8],
 }
 
-/// A byte query that a point lookup compares with a std byte string key's
+/// A byte query that an exact-key lookup compares with a std byte string key's
 /// bytes all at once, for equality alone: once the inline keys leave one
 /// candidate, a leaf needs no order. Where the plan says so (D38), a fixed
 /// byte array's, whose length the compiler knows.

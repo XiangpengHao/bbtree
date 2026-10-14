@@ -439,7 +439,7 @@ impl<K, V, S> WalkTop<K, V, S> {
         S: InlineKeyStrategy<K>,
     {
         Self {
-            node: root_page.root().node_ptr(),
+            node: root_page.node().node_ptr(),
         }
     }
 
@@ -1191,7 +1191,7 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
         // if it has one, which nothing reaches anymore.
         (self.release)(unsafe {
             if self.top_in_root_page {
-                RootPage::of_root(top).free().into()
+                RootPage::of_node(top).free().into()
             } else {
                 top.free()
             }

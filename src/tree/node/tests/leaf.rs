@@ -25,9 +25,9 @@ fn push_back<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, key: K, value: 
     leaf.insert_fit(leaf.len(), WindowedKey::new(key, 0), value);
 }
 
-/// The root of a tree that must be a leaf.
-fn root_leaf<K, V, S: InlineKeyStrategy<K>>(tree: &Tree<K, V, S>) -> Leaf<K, V, S> {
-    match tree.root() {
+/// A root that must be a leaf.
+fn root_leaf<K, V, S: InlineKeyStrategy<K>>(root: Node<K, V, S>) -> Leaf<K, V, S> {
+    match root {
         Node::Leaf(leaf) => leaf,
         Node::Internal(_) => panic!("the root is internal"),
     }
@@ -303,7 +303,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let index = rng.below(len + 1);
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 model.entries.insert(index, (key.id(), value.tracked_id()));
-                let leaf = root_leaf(&tree);
+                let leaf = root_leaf(tree.root());
                 match leaf.insert(index, WindowedKey::new(key, 0), value, || pages.fresh()) {
                     Insertion::Fit(fitted) => assert_eq!(fitted, index),
                     Insertion::Split(split) => {
@@ -320,15 +320,18 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
             }
             4 | 5 if len > 0 => {
                 let index = rng.below(len);
-                let (key, value) = root_leaf(&tree).remove(index);
+                let (key, value) = root_leaf(tree.root()).remove(index);
                 assert_eq!((key.id(), value.tracked_id()), model.entries.remove(index));
             }
             6 if len > 0 => {
                 let index = rng.below(len);
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 let new_ids = (key.id(), value.tracked_id());
-                let (old_key, old_value) =
-                    root_leaf(&tree).replace_key_value(index, WindowedKey::new(key, 0), value);
+                let (old_key, old_value) = root_leaf(tree.root()).replace_key_value(
+                    index,
+                    WindowedKey::new(key, 0),
+                    value,
+                );
                 assert_eq!((old_key.id(), old_value.tracked_id()), model.entries[index]);
                 model.entries[index] = new_ids;
             }
@@ -336,12 +339,12 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let index = rng.below(len);
                 let value = V::from_tracked(ledger.track());
                 model.entries[index].1 = value.tracked_id();
-                let leaf = root_leaf(&tree);
+                let leaf = root_leaf(tree.root());
                 let old_value = core::mem::replace(leaf.value_mut(index), value);
                 drop(old_value);
             }
             8 if len > 0 => {
-                let leaf = root_leaf(&tree);
+                let leaf = root_leaf(tree.root());
                 let index = rng.below(len);
                 assert_eq!(leaf.key(index).id(), model.entries[index].0);
                 let (key, value) = leaf.key_value(index);
@@ -349,7 +352,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 assert_eq!(leaf.keys().len(), len);
             }
             9 => {
-                let leaf = root_leaf(&tree);
+                let leaf = root_leaf(tree.root());
                 match (model.head, rng.below(3)) {
                     (Some(head_id), 0) => {
                         let (key, value) = leaf.take_head();
@@ -389,7 +392,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
             }
             _ => {}
         }
-        model.assert_matches(root_leaf(&tree));
+        model.assert_matches(root_leaf(tree.root()));
     }
     tree.destroy(|page| pages.release(page));
     pages.assert_all_released();

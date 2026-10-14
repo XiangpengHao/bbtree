@@ -448,6 +448,10 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         self.tree.root()
     }
 
+    pub(super) fn root_mut(&mut self) -> Node<K, V, S> {
+        self.tree.root_mut()
+    }
+
     pub(super) fn tree_mut(&mut self) -> &mut Tree<K, V, S> {
         &mut self.tree
     }

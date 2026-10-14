@@ -123,7 +123,7 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 ## Lookup traces: `TreeView::trace`
 
 `trace(&key)` runs the searches `get` runs, node by node: `search` in each
-internal node and `search_point` in the leaf, on the same `SearchKey`. Each
+internal node and `find` in the leaf, on the same `SearchKey`. Each
 `TraceStep` carries:
 
 - the node;

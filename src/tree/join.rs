@@ -364,7 +364,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     fn destroy_if_empty(tree: Self) -> Self {
         if tree
             .root_page()
-            .is_some_and(|root_page| root_page.root().len() > 0)
+            .is_some_and(|root_page| root_page.node().len() > 0)
         {
             return tree;
         }
@@ -395,7 +395,7 @@ impl<K, V, S: InlineKeyStrategy<K>> DetachedTree<K, V, S> {
     pub(crate) fn first_entry(&self) -> Option<(&K, &V)> {
         let root_page = self.0.root_page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root_page.root());
+        path.attach(root_page.node());
         if path.descend_to_first_key() {
             Some(path.key_value())
         } else {

@@ -1,5 +1,6 @@
-//! Point searches, which need no ancestor path, and the values of the keys
-//! they find.
+//! Searches that need no ancestor path: exact-key lookups ([`Node::find`])
+//! and an insert's ordered search ([`Node::search_for_insert`]), and the
+//! values of the keys they find.
 //!
 //! A separator is a key of an internal node, and its value is the head of
 //! the leftmost leaf right of it (D17): reading or changing the value of a
@@ -74,9 +75,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// Searches downward from this node for the entry whose key equals
     /// `key`, retaining only the current node. Updates that need ancestors
-    /// and range endpoints use `Path::search`; a point lookup only needs the
+    /// and range endpoints use `Path::search`; an exact-key lookup only needs the
     /// position where it ends.
-    pub(crate) fn find_point<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
+    pub(crate) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -94,16 +95,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 }
             },
         };
-        leaf.search_point(key)
-            .map(|index| Found::InLeaf(leaf, index))
+        leaf.find(key).map(|index| Found::InLeaf(leaf, index))
     }
 
     /// Searches in key order, returning an existing key or the leaf and edge
-    /// where it belongs. Unlike a point search's equality filter, the leaf
+    /// where it belongs. Unlike [`Self::find`]'s equality filter, the leaf
     /// search must establish where an absent key belongs. A fitting
     /// insertion needs no ancestors; a full leaf can be searched again with
     /// a path for splitting.
-    pub(crate) fn find_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
+    pub(crate) fn search_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -142,7 +142,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root_page.root().find_point(&key).map(Found::key_value)
+        root_page.node().find(&key).map(Found::key_value)
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
@@ -157,7 +157,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root_page.root().find_point(&key).map(Found::value_mut)
+        root_page.node().find(&key).map(Found::value_mut)
     }
 }
 
@@ -241,7 +241,7 @@ mod tests {
         assert!(!separators.is_empty());
         for &(key, value_id) in &separators {
             assert_eq!(value_id, value_ids[&key]);
-            let found = tree.root().find_point(&SearchKey::new(&key));
+            let found = tree.root().find(&SearchKey::new(&key));
             let Some(found @ Found::Separator(..)) = found else {
                 panic!("a separator is found where it lives, above the leaves");
             };

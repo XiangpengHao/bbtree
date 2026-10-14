@@ -112,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Without a tree.
     #[inline(always)]
     pub(crate) fn root(&self) -> Node<K, V, S> {
-        self.existing_root_page().root()
+        self.existing_root_page().node()
     }
 
     /// The root node, to change the tree from: it ends the owner's
@@ -217,7 +217,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Without a tree.
     pub(in crate::tree) fn into_node(self) -> Node<K, V, S> {
         let root_page = self.existing_root_page();
-        let (top, emptied) = match root_page.root() {
+        let (top, emptied) = match root_page.node() {
             Node::Leaf(_) => root_page.into_node::<Leaf<K, V, S>>(FreshPage::allocate()),
             Node::Internal(_) => root_page.into_node::<Internal<K, V, S>>(FreshPage::allocate()),
         };

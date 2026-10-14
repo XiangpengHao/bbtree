@@ -513,11 +513,11 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
             return;
         }
         let keys = self.keys();
-        let mut inline_keys = RefitBuffer::new(inline_width);
+        let mut buffer = RefitBuffer::new(inline_width);
         for (index, key) in keys.iter().enumerate() {
-            inline_keys.set(index, inliner.inline_key_at(key, prefix_len));
+            buffer.set(index, inliner.inline_key_at(key, prefix_len));
         }
-        self.set_windows(prefix_len, inline_keys.inline_keys(keys.len()));
+        self.set_windows(prefix_len, buffer.inline_keys(keys.len()));
     }
 
     /// Shrinks the node's prefix length to `prefix_len` if it is longer.

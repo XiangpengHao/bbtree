@@ -60,9 +60,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
-    /// The steps the map's point lookup takes for `key`
+    /// The steps the map's exact-key lookup takes for `key`
     /// ([`crate::BBTreeMap::get`]), node by node, through the same
-    /// searches: `search` in each internal node, `search_point` in the
+    /// searches: `search` in each internal node, `find` in the
     /// leaf. A key found in an internal node is a separator, whose value is
     /// a head below (D17): the trace then goes on the way the value is read
     /// (`Internal::head_leaf`), down the separator's right edge and first
@@ -87,7 +87,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         loop {
             match view.node {
                 Node::Leaf(leaf) => {
-                    let outcome = match leaf.search_point(&search) {
+                    let outcome = match leaf.find(&search) {
                         Some(index) => TraceOutcome::Found { index },
                         None => TraceOutcome::Absent {
                             insert_at: match leaf.search(&search) {
@@ -271,7 +271,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     /// borrowed for `'a`.
     fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
         Self {
-            node: root_page.root(),
+            node: root_page.node(),
             depth: 0,
             is_root: true,
             _borrow: PhantomData,

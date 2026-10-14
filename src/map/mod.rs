@@ -2,8 +2,8 @@
 //! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15), as a
 //! B+-tree that stores each key once (D17).
 //!
-//! The map owns at most one tree, by its [`Tree`]: none until the first insert, so
-//! that [`BBTreeMap::new`] allocates nothing. Point searches and ordinary
+//! The map owns at most one [`Tree`]: none until the first insert, so
+//! that [`BBTreeMap::new`] allocates nothing. Exact-key lookups and ordinary
 //! fitting inserts descend from the root; increasing inserts can reuse a
 //! last leaf remembered after a split. An insert that splits records a
 //! path for going back up (`tree/path.rs`, `tree/insert.rs`), and so
@@ -247,7 +247,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         let root_page = self.tree.root_page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root_page.root());
+        path.attach(root_page.node());
         if path.descend_to_first_key() {
             Some(path.key_value())
         } else {
@@ -298,7 +298,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         let root_page = self.tree.root_page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root_page.root());
+        path.attach(root_page.node());
         if path.descend_to_last_key() {
             Some(path.key_value())
         } else {
@@ -559,7 +559,7 @@ impl<K, V> Default for BBTreeMap<K, V> {
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Clone for BBTreeMap<K, V, S> {
     fn clone(&self) -> Self {
         Self {
-            tree: self.tree.clone_tree(),
+            tree: self.tree.clone(),
             length: self.length,
         }
     }

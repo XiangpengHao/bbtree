@@ -31,7 +31,7 @@ impl<'a> RedirectedKey<'a> {
     fn after_first_search(mut self, map: &mut BBTreeMap<Self, u64>, number: u64) -> Self {
         self.remaining.set(usize::MAX);
         let root = map.tree.root_mut();
-        let Err((leaf, _)) = root.find_for_insert(&SearchKey::new(&self)) else {
+        let Err((leaf, _)) = root.search_for_insert(&SearchKey::new(&self)) else {
             panic!("the first search must be vacant");
         };
         assert_eq!(
@@ -124,7 +124,7 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     let Err((leaf, _)) = map
         .tree
         .root_mut()
-        .find_for_insert(&SearchKey::new(&target))
+        .search_for_insert(&SearchKey::new(&target))
     else {
         panic!("the replay destination must be vacant");
     };

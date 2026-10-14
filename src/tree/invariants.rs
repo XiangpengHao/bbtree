@@ -52,7 +52,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             assert_eq!(length, 0, "a map without a tree has entries");
             return;
         };
-        let root = root_page.root();
+        let root = root_page.node();
         if length > 0 || matches!(root, Node::Internal(_)) {
             assert!(root.len() > 0, "the root of a non-empty map has no keys");
         }
@@ -87,7 +87,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             return;
         };
         let shared_len = root_page.shared_prefix().len();
-        Self::check_prefix_lens_in(root_page.root(), shared_len, shared_len, true, true);
+        Self::check_prefix_lens_in(root_page.node(), shared_len, shared_len, true, true);
     }
 
     fn check_prefix_lens_in(

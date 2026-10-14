@@ -72,7 +72,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         self.ensure_root_page();
         self.cover_key(&key);
-        match self.root_mut().find_for_insert(&SearchKey::new(&key)) {
+        match self.root_mut().search_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
                 // Keep std's drop-before-replacement behavior on this path
                 // too: a panicking key destructor leaves the value intact.

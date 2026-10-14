@@ -63,9 +63,9 @@ fn child_names<'l, K: FromTracked<'l>, V, S: InlineKeyStrategy<K>>(
         .collect()
 }
 
-/// The root of a tree that must be internal.
-fn root_internal<K, V, S: InlineKeyStrategy<K>>(tree: &Tree<K, V, S>) -> Internal<K, V, S> {
-    match tree.root() {
+/// A root that must be internal.
+fn root_internal<K, V, S: InlineKeyStrategy<K>>(root: Node<K, V, S>) -> Internal<K, V, S> {
+    match root {
         Node::Internal(root) => root,
         Node::Leaf(_) => panic!("the root is a leaf"),
     }
@@ -102,7 +102,7 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
 
     for _ in 0..steps {
         let len = separators.len();
-        let root = root_internal(&tree);
+        let root = root_internal(tree.root());
         match rng.below(10) {
             0..=3 => {
                 let index = rng.below(len + 1);
@@ -170,7 +170,7 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
             }
             _ => {}
         }
-        let root = root_internal(&tree);
+        let root = root_internal(tree.root());
         assert_eq!(root.tracked_ids(), separators);
         assert_eq!(child_names(root), children);
         root.assert_inline_keys_match();
@@ -199,7 +199,7 @@ fn split_at<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
 ) {
     let pages = TestPages::<K, Tracked<'l>, S>::new();
     let (tree, first_name) = root_above_one_leaf(&pages, ledger);
-    let left = root_internal(&tree);
+    let left = root_internal(tree.root());
     let mut separators = Vec::new();
     let mut children = std::vec![first_name];
     while left.len() < Internal::<K, Tracked<'l>, S>::capacity() {
@@ -274,7 +274,7 @@ fn insert_rejects_a_child_of_the_wrong_kind() {
     let (child, _, _, separator) = child_leaf(&pages, &ledger, ledger.track());
     let internal = Node::Internal(Internal::new(pages.fresh(), child));
 
-    let root = root_internal(&tree);
+    let root = root_internal(tree.root());
     let rejected = catch_unwind(AssertUnwindSafe(|| root.insert_fit(0, separator, internal)));
     assert!(rejected.is_err());
     assert_eq!(root.len(), 0);
@@ -292,7 +292,7 @@ fn balancing_refuses_a_headless_right_leaf() {
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
     let (tree, _) = root_above_one_leaf(&pages, &ledger);
     let (headless, _) = named_leaf(&pages, &ledger);
-    let root = root_internal(&tree);
+    let root = root_internal(tree.root());
     let key = WindowedKey::new(ledger.track(), 0);
     root.insert_fit(0, Separator::with_key(key), Node::Leaf(headless));
     let siblings = catch_unwind(AssertUnwindSafe(|| {
@@ -385,7 +385,7 @@ fn steals_and_merges_of_leaves() {
     let mut model = entry_ids(&tree);
     assert_eq!(tree.leaf_depth(), 1);
 
-    let root = root_internal(tree.tree());
+    let root = root_internal(tree.root());
     let mut siblings = root.siblings::<BulkyLeaf<'_>>(0);
     assert_eq!((siblings.left_len(), siblings.right_len()), (6, 6));
     assert!(
@@ -430,7 +430,7 @@ fn steals_refuse_an_empty_donor_or_a_full_receiver() {
     assert_eq!(tree.leaf_depth(), 1);
     let model = entry_ids(&tree);
 
-    let root = root_internal(tree.tree());
+    let root = root_internal(tree.root());
     let mut siblings = root.siblings::<BulkyLeaf<'_>>(0);
     assert_eq!((siblings.left_len(), siblings.right_len()), (6, 12));
     assert_eq!(siblings.steal_left(), Err(StealError::ReceiverFull));
@@ -467,7 +467,7 @@ fn steals_and_merges_of_internal_nodes() {
     assert_eq!(tree.leaf_depth(), 2);
     let mut model = entry_ids(&tree);
 
-    let root = root_internal(tree.tree());
+    let root = root_internal(tree.root());
     let mut siblings = root.siblings::<BulkyInternal<'_>>(0);
     let (left_len, right_len) = (siblings.left_len(), siblings.right_len());
     assert_eq!(siblings.steal_left(), Ok(()));
@@ -565,10 +565,10 @@ fn random_balancing<'l, K: FromTracked<'l> + Ord, S: InlineKeyStrategy<K>>(
     let (mut merges, mut steals, mut refusals) = (0, 0, 0);
     for _ in 0..steps {
         if rng.below(3) == 0 {
-            if let Some((key, value)) = remove_random_leaf_entry(tree.tree_mut().root_mut(), &rng) {
+            if let Some((key, value)) = remove_random_leaf_entry(tree.root_mut(), &rng) {
                 model.retain(|&entry| entry != (key.tracked_id(), value.id()));
             }
-        } else if let Some((node, index)) = random_separator(tree.tree_mut().root_mut(), &rng) {
+        } else if let Some((node, index)) = random_separator(tree.root_mut(), &rng) {
             let balanced = if node.has_leaf_children() {
                 balance_randomly(
                     node.siblings::<Leaf<K, Tracked<'l>, S>>(index),

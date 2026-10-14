@@ -61,7 +61,7 @@ fn two_length_candidates_confirm_modulo_collisions() {
 }
 
 #[test]
-fn length_collisions_and_mutations_preserve_point_lookups() {
+fn length_collisions_and_mutations_preserve_exact_key_lookups() {
     // The initial leaf has one primary run. Distinct lengths can select
     // one candidate; repeated lengths must retain the ordered fallback.
     let mut actual = BBTreeMap::<String, usize>::new();

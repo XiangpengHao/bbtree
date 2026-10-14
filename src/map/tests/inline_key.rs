@@ -388,12 +388,12 @@ fn integer_keys_match_std() {
     workload.run::<i128, (), WithInlineKey>(79);
 }
 
-/// Array point lookup may use equality after its summary finds one
+/// Array exact-key lookup may use equality after its summary finds one
 /// candidate. Borrowed slices still distinguish proper zero-padded
 /// prefixes, and differences anywhere in the full array must be checked.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-fn fixed_array_point_queries_match_std() {
+fn fixed_array_exact_key_lookups_match_std() {
     struct ArrayQueries;
 
     impl ArrayQueries {

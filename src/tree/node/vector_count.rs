@@ -90,7 +90,7 @@ impl U16EqualitySearch {
     }
 }
 
-/// Point lookups over 8-byte slots need only an equality mask. An ordered
+/// Exact-key lookups over 8-byte slots need only an equality mask. An ordered
 /// search builds both comparison masks; this one can reject an empty run
 /// without counting the slots below the target. All supported capacities
 /// fit their equality bits in one word.
@@ -156,7 +156,7 @@ impl U64EqualityMask {
 
 /// Inline-key slots that the target counts in explicit vectors.
 pub(in crate::tree) trait VectorCount: Copy {
-    /// An equality mask for point lookup where it avoids ordered work.
+    /// An equality mask for exact-key lookup where it avoids ordered work.
     /// Narrow slots and unsupported targets retain the ordered reduction.
     #[inline(always)]
     fn equality_mask_in_vectors(_slots: &[Self], _target: Self) -> Option<U64EqualityMask> {
@@ -574,9 +574,9 @@ mod tests {
         }
     }
 
-    /// Point masks need not retain an empty run's insertion position, but
+    /// Equality masks need not retain an empty run's insertion position, but
     /// must retain every live match and ignore stale matching tail slots.
-    fn assert_point_boundaries<W: InlineSlot>() {
+    fn assert_equality_mask_boundaries<W: InlineSlot>() {
         let values = [0, 1_u64 << 48, 1 << 63, u64::MAX].map(W::of_inline_key);
         for capacity in 0..=80 {
             let supported = size_of::<W>() == 8
@@ -623,9 +623,9 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-    fn point_masks_bound_live_matches_across_lane_edges() {
-        assert_point_boundaries::<u16>();
-        assert_point_boundaries::<u32>();
-        assert_point_boundaries::<u64>();
+    fn equality_masks_bound_live_matches_across_lane_edges() {
+        assert_equality_mask_boundaries::<u16>();
+        assert_equality_mask_boundaries::<u32>();
+        assert_equality_mask_boundaries::<u64>();
     }
 }

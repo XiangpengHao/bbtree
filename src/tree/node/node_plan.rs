@@ -11,7 +11,7 @@
 //! | without inline keys | none | nothing | `Ord` (D19) |
 //! | std integers | the impl's width in both | nothing | `Ord` (D19) |
 //! | every key under `WithInlineKey` | the impl's width in both | nothing | `Ord` (D19) |
-//! | std byte arrays | 2 / 2 (D32) | nothing | bytes; a point lookup's one candidate all at once (D38) |
+//! | std byte arrays | 2 / 2 (D32) | nothing | bytes; an exact-key lookup's one candidate all at once (D38) |
 //! | std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36) | bytes, past the tie |
 //!
 //! Every row with inline keys keeps its separator keys in leaves, each the
@@ -64,11 +64,11 @@ pub(in crate::tree) struct NodePlan<K> {
     /// the key again (D43).
     rehydrates_windows: bool,
     /// Whether the node stores each key's length, whose 2-byte tags filter a
-    /// point lookup's candidates (D36).
+    /// exact-key lookup's candidates (D36).
     length_tags: bool,
     /// How a search runs over the keys whose inline keys tie with its own.
     tied_search: KeySearch,
-    /// Whether a point lookup confirms its one candidate by comparing all of
+    /// Whether an exact-key lookup confirms its one candidate by comparing all of
     /// its bytes at once, rather than those past the tie (D38).
     whole_key_equality: bool,
 }
@@ -90,7 +90,7 @@ impl<K> NodePlan<K> {
         };
         match inliner {
             KeyInliner::InlineKeyTrait { width, .. } => Self::with_inline_key_impl(inliner, width),
-            KeyInliner::ByteString(bytes) if bytes.holds_its_bytes() => {
+            KeyInliner::ByteString(byte_string) if byte_string.holds_its_bytes() => {
                 Self::for_byte_arrays(inliner)
             }
             KeyInliner::ByteString(_) => Self::for_heap_byte_strings::<Kind>(inliner),
@@ -127,7 +127,7 @@ impl<K> NodePlan<K> {
     /// Std byte arrays, `[u8; 16]`, `[u8; 20]` and `[u8; 32]`, which hold
     /// their bytes in the node: a tie costs a load from the node, so 2 bytes
     /// of each inline key do, which pack more of them per cache line (D32).
-    /// Keys whose inline keys tie compare by their bytes, and a point
+    /// Keys whose inline keys tie compare by their bytes, and an exact-key
     /// lookup's one candidate by all of them at once, a length the compiler
     /// knows (D38).
     #[inline(always)]
@@ -227,7 +227,7 @@ impl<K> NodePlan<K> {
         self.tied_search
     }
 
-    /// Whether a point lookup confirms its one candidate by comparing all of
+    /// Whether an exact-key lookup confirms its one candidate by comparing all of
     /// its bytes at once (D38).
     #[inline(always)]
     pub(super) fn has_whole_key_equality(self) -> bool {
@@ -248,7 +248,7 @@ impl<K> NodePlan<K> {
     pub(in crate::tree) fn inlines_node_search(self) -> bool {
         !self
             .byte_string()
-            .is_some_and(|bytes| !bytes.holds_its_bytes())
+            .is_some_and(|byte_string| !byte_string.holds_its_bytes())
     }
 
     /// The proof that the keys are std byte strings, if they are.

@@ -943,7 +943,7 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     assert!(
         map.tree
             .root()
-            .find_for_insert(&SearchKey::new(&query))
+            .search_for_insert(&SearchKey::new(&query))
             .is_err()
     );
     let first_search_comparisons = usize::MAX - budget.get();

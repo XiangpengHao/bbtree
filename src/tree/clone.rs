@@ -1,4 +1,4 @@
-//! Copying an owned tree: [`Tree::clone_tree`], node by node, so that the
+//! Copying an owned tree: [`Tree`]'s `Clone`, node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
 //! `Ord` and no `InlineKey`: every inline key is copied (D18), every node's
 //! prefix length (05-fence-key.md), and what every key shares (D50).
@@ -13,7 +13,7 @@ use super::node::page::{FreshPage, NodePtr, PageByType};
 use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Clone for Tree<K, V, S> {
     /// A copy of the tree, with every key and value cloned in key order,
     /// each separator's value right after its key (D17), its head's own
     /// where separator keys are heads (D49), on pages from the global
@@ -22,12 +22,12 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// If a `clone` panics, what was copied so far is dropped, and its pages
     /// released, before the panic goes on: nothing leaks, and the tree is
     /// unchanged.
-    pub(crate) fn clone_tree(&self) -> Self {
+    fn clone(&self) -> Self {
         let Some(root_page) = self.root_page() else {
             return Self::EMPTY;
         };
         Self::from_node(
-            root_page.root().clone_nodes(),
+            root_page.node().clone_nodes(),
             root_page.shared_prefix().clone(),
         )
     }

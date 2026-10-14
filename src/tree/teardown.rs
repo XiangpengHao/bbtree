@@ -27,7 +27,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let Some(root_page) = self.root_page() else {
             return;
         };
-        let head = root_page.root().take_leftmost_head();
+        let head = root_page.node().take_leftmost_head();
         // Without a count of the entries, the walk ends where the tree does:
         // only its front moves.
         let walk = DyingWalk::new(Some(root_page), usize::MAX, release);

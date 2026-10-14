@@ -471,11 +471,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             .map_err(|index| run.start + index)
     }
 
-    /// The index of the key equal to `key`, if the leaf holds one: a point
+    /// The index of the key equal to `key`, if the leaf holds one: an exact-key
     /// lookup, which may reject unequal lengths inside a tied run (D36) and
     /// confirm a lone candidate by equality alone (D38). Ordered searches
     /// still use [`Self::search`]: a length tag gives no edge.
-    pub(in crate::tree) fn search_point<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<usize>
+    pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
