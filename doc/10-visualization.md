@@ -96,8 +96,9 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 
 - **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
   and whose `shared_prefix()` is the bytes every key shares (D50).
-- **`NodeView`** wraps a `Node`, a leaf or an internal node by its height,
-  and answers through the node types' own methods:
+- **`NodeView`** wraps a `Node`, a leaf or an internal node as the tag of
+  the edge to it says, or for the root its header (D52), and answers
+  through the node types' own methods:
   - id (the page address), height, `len`, capacity, `min_len`;
   - `prefix_len`;
   - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `length_tag(i)`
@@ -107,7 +108,8 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **`PageMap`** comes from the page's `LeafLayout` or `InternalLayout`: each
   slot array (header, inline keys, length tags, keys, head, values, edges)
   by offset, stride, slot size, capacity, and how many slots the node uses.
-  Arrays, rather than contiguous regions, because inline-key leaves
+  The root's page adds its root area, after room for a node of either kind
+  (D52). Arrays, rather than contiguous regions, because inline-key leaves
   interleave keys with values (D29). Whatever no array covers is padding.
 - **Not offered:** raw page bytes, since unused slots are uninitialized and
   reading them is UB; and any mutable access.

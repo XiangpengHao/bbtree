@@ -55,7 +55,7 @@ impl Concept {
                 "Every key of a node lies between the two separators that bound it in its ancestors, its fences, so it starts with the bytes they share. The node records how many, and its inline keys start after them: deeper nodes summarize the bytes that still differ."
             }
             Concept::SharedPrefix => {
-                "The bytes every key of the map shares, up to 64, which the map keeps beside its root. Nodes along the tree's borders, where a fence is missing, take them as their prefix, as the root does. A lookup checks the key against them once, before the root: a key without them sorts before or after every key, and reads no node."
+                "The bytes every key of the map shares, up to 64, which the map keeps in its root's page, after the root node. Nodes along the tree's borders, where a fence is missing, take them as their prefix, as the root does. A lookup checks the key against them once, before the root: a key without them sorts before or after every key, and reads no node."
             }
             Concept::Separator => {
                 "A key in an internal node that divides two children. bbtree moves a key up rather than copying it, so every key is stored exactly once: a separator's value stays below, as the head of the leaf to its right."
@@ -67,10 +67,10 @@ impl Concept {
                 "String leaves keep each key's length in 2 bytes of spare padding. When several inline keys tie, matching lengths narrow the candidates before any key is read from the heap."
             }
             Concept::Child => {
-                "An internal node's child pointers. Child i holds the keys between key i − 1 and key i."
+                "An internal node's child pointers. Child i holds the keys between key i − 1 and key i. A pointer to a leaf has its lowest bit set, so a lookup knows a child's kind before reading it."
             }
             Concept::Page => {
-                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. Whatever no array covers is padding."
+                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's height and shared prefix. Whatever no array covers is padding."
             }
             Concept::CacheLine => {
                 "The processor fetches memory 64 bytes at a time. A lookup is fast when it needs few lines of each node it passes through."
