@@ -2,10 +2,10 @@
 //! (`path.rs`): out of a leaf, or out of an internal node as a
 //! separator. Then, going back up the path, each node fixes the child it
 //! leads to if the removal left that child underfull, by merging it with a
-//! sibling or moving one entry over from it (D22). A merge takes a key out
-//! of the node itself, for its parent to check in turn; anything else ends
-//! the fixing. A root left without keys lowers the tree: its only child
-//! moves up into the root's page.
+//! sibling or moving one entry over from it (D22). A merge takes a
+//! separator out of the node itself, for its parent to check in turn;
+//! anything else ends the fixing. A root left without separators lowers the
+//! tree: its only child moves up into the root's page.
 //!
 //! A separator's value is the head of the leftmost leaf right of it (D17),
 //! and where separator keys are heads, so is its key (D49). Removing the
@@ -133,7 +133,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             let succession = self
                 .leaf()
                 .take_head_and_first_key()
-                .expect("the leaf right of a separator has a head and keys");
+                .expect("the leaf right of a separator has keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
             let changed = self.fix_up_the_path(Some(entry_depth), &mut release, |node| {
@@ -191,9 +191,9 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         changed
     }
 
-    /// Fits the prefixes of the nodes whose fences a removal changed to
-    /// them, from the bottom up, as `changed` tells; the path, which ends
-    /// where the fixing stopped, ends at `changed`'s top afterwards. Calls
+    /// Fits the prefixes of the nodes whose fences a removal changed to them,
+    /// from the bottom up, as `changed` tells; the path, which ends where the
+    /// fixing stopped, ends at `changed`'s top depth afterwards. Calls
     /// `InlineKey`.
     fn refit_changed_fences(&mut self, changed: &ChangedFences) {
         let Some(top_depth) = changed.top_depth else {
@@ -246,14 +246,14 @@ struct ChangedFences {
     /// The depth of the leaf the fixing went up from, which it doesn't
     /// change: the root lowers only once it is done.
     leaf_depth: usize,
-    /// The child of every node from depth `top` down to the leaf's parent
+    /// The child of every node from depth `top_depth` down to the leaf's parent
     /// has new fences; none does if `None`.
     top_depth: Option<usize>,
 }
 
 impl ChangedFences {
     /// Nothing fixed yet, up from a leaf at `leaf_depth`, with the children
-    /// of the nodes from `top` down counting as changed.
+    /// of the nodes from `top_depth` down counting as changed.
     fn new(leaf_depth: usize, top_depth: Option<usize>) -> Self {
         Self {
             indexes: [0; MAX_DEPTH + 1],
@@ -291,24 +291,23 @@ impl ChangedFences {
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// Fixes the child at edge `index` if a removal left it underfull, one
-    /// key short of its minimum (D22): merges it with a sibling, the left
+    /// entry short of its minimum (D22): merges it with a sibling, the left
     /// one if it has one, or, if the two don't fit in one node with the
     /// separator between them, moves one entry over from the sibling. The
-    /// page a merge frees goes to `release`. Only a merge takes a key from
-    /// this node.
+    /// page a merge frees goes to `release`. Only a merge takes a separator
+    /// from this node.
     ///
     /// A sibling too full to merge with holds more than `capacity - min_len`
-    /// keys, so it can spare one; after at most `min_len` such steals in a
-    /// row, the two fit.
+    /// entries, so it can spare one.
     ///
     /// The children are of kind `C`, which the caller decided once for the
     /// node ([`Internal::has_leaf_children`]).
     ///
     /// # Panics
     ///
-    /// If the node has no keys, so that the child has no sibling: a node
-    /// that a removal went through holds a key until it fixes its child,
-    /// which is the only time it can lose one.
+    /// If the node has no separators, so that the child has no sibling: a
+    /// node that a removal went through holds a separator until it fixes its
+    /// child, which is the only time it can lose one.
     fn fix_underfull_child<C: Child<K, V, S>>(
         self,
         index: usize,
@@ -317,14 +316,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;
         }
-        let (separator, child_is_right) = if index > 0 {
+        let (separator_index, child_is_right) = if index > 0 {
             (index - 1, true)
         } else if index < self.len() {
             (index, false)
         } else {
-            unreachable!("an internal node a removal went through has a key")
+            unreachable!("an internal node a removal went through has a separator")
         };
-        let mut siblings = self.siblings::<C>(separator);
+        let mut siblings = self.siblings::<C>(separator_index);
         let left_len = siblings.left_len();
         if siblings.can_merge() {
             release(siblings.merge());
@@ -339,7 +338,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         } else {
             siblings.steal_right()
         };
-        stolen.expect("a sibling too full to merge with can spare a key");
+        stolen.expect("a sibling too full to merge with can spare an entry");
         if child_is_right {
             ChildFix::TookFromLeft
         } else {

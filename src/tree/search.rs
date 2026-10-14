@@ -2,17 +2,18 @@
 //! and an insert's ordered search ([`Node::search_for_insert`]), and the
 //! values of the keys they find.
 //!
-//! A separator is a key of an internal node, and its value is the head of
-//! the leftmost leaf right of it (D17): reading or changing the value of a
-//! key found anywhere in the tree goes down through that separator's right
-//! child.
+//! A separator's value is the head of the leftmost leaf right of it (D17),
+//! and with inline keys so is its key (D49): reading or changing what a
+//! search found at a separator goes down its right edge.
 
 use core::borrow::Borrow;
+use core::ops::ControlFlow;
 
 use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
+use super::path::{FirstEdge, LastEdge};
 use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -28,12 +29,12 @@ pub(crate) enum Found<K, V, S> {
 
 /// What a search for an insertion finds: the existing key, or the leaf and
 /// the edge of it where the key belongs.
-pub(crate) type InsertSearch<K, V, S> = Result<Found<K, V, S>, (Leaf<K, V, S>, usize)>;
+pub(in crate::tree) type InsertSearch<K, V, S> = Result<Found<K, V, S>, (Leaf<K, V, S>, usize)>;
 
 impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
     /// The key and its value, for as long as the caller borrows the tree.
     #[inline(always)]
-    pub(crate) fn key_value<'a>(self) -> (&'a K, &'a V) {
+    pub(in crate::tree) fn key_value<'a>(self) -> (&'a K, &'a V) {
         match self {
             // SAFETY: the index is below the leaf's length (type invariant).
             Self::InLeaf(leaf, index) => unsafe { leaf.key_value_unchecked(index) },
@@ -44,7 +45,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
     /// The value, exclusive, for as long as the caller borrows the tree
     /// exclusively.
     #[inline(always)]
-    pub(crate) fn value_mut<'a>(self) -> &'a mut V {
+    pub(in crate::tree) fn value_mut<'a>(self) -> &'a mut V {
         match self {
             // SAFETY: the index is below the leaf's length (type invariant).
             Self::InLeaf(leaf, index) => unsafe { leaf.value_mut_unchecked(index) },
@@ -59,9 +60,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
     /// to its head would otherwise sit in every descent's loop.
     #[inline(never)]
     fn separator_key_value<'a>(internal: Internal<K, V, S>, index: usize) -> (&'a K, &'a V) {
-        // SAFETY: the index is below the node's length (type invariant).
-        let key = unsafe { internal.separator_key_unchecked(index) };
-        (key, internal.head_leaf(index).head_value())
+        internal.separator_key_value(index)
     }
 
     /// [`Self::value_mut`] of separator `index` of `internal`; out of line
@@ -73,29 +72,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// Searches downward from this node for the entry whose key equals
-    /// `key`, retaining only the current node. Updates that need ancestors
-    /// and range endpoints use `Path::search`; an exact-key lookup only needs the
+    /// Searches downward from this node for the entry whose key equals `key`,
+    /// retaining only the current node. Updates that need ancestors and range
+    /// endpoints use `Path::search`; an exact-key lookup only needs the
     /// position where it ends.
-    pub(crate) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
+    pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let leaf = match self {
-            Node::Leaf(leaf) => leaf,
-            Node::Internal(mut internal) => loop {
-                match internal.search(key) {
-                    Ok(index) => return Some(Found::Separator(internal, index)),
-                    // SAFETY: a search returns an edge `<= len`.
-                    Err(edge) => match unsafe { internal.child_unchecked(edge) } {
-                        Node::Leaf(leaf) => break leaf,
-                        Node::Internal(child) => internal = child,
-                    },
-                }
-            },
-        };
-        leaf.find(key).map(|index| Found::InLeaf(leaf, index))
+        match self.descend(key) {
+            ControlFlow::Break(separator) => Some(separator),
+            ControlFlow::Continue(leaf) => leaf.find(key).map(|index| Found::InLeaf(leaf, index)),
+        }
     }
 
     /// Searches in key order, returning an existing key or the leaf and edge
@@ -108,27 +97,57 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let leaf = match self {
-            Node::Leaf(leaf) => leaf,
-            Node::Internal(mut internal) => loop {
-                match internal.search(key) {
-                    Ok(index) => return Ok(Found::Separator(internal, index)),
-                    // SAFETY: a search returns an edge `<= len`.
-                    Err(edge) => match unsafe { internal.child_unchecked(edge) } {
-                        Node::Leaf(leaf) => break leaf,
-                        Node::Internal(child) => internal = child,
-                    },
-                }
-            },
+        let leaf = match self.descend(key) {
+            ControlFlow::Break(separator) => return Ok(separator),
+            ControlFlow::Continue(leaf) => leaf,
         };
         match leaf.search_always_inlined(key) {
             Ok(index) => Ok(Found::InLeaf(leaf, index)),
             Err(edge) => Err((leaf, edge)),
         }
     }
+
+    /// Goes down from this node toward `key`, routing through each internal
+    /// node: stops at the separator it equals, or goes on at the leaf it
+    /// belongs in. Always inlined: it is every lookup's loop.
+    #[inline(always)]
+    fn descend<Q>(self, key: &SearchKey<'_, K, S, Q>) -> ControlFlow<Found<K, V, S>, Leaf<K, V, S>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let mut internal = match self {
+            Node::Leaf(leaf) => return ControlFlow::Continue(leaf),
+            Node::Internal(internal) => internal,
+        };
+        loop {
+            match internal.search(key) {
+                Ok(index) => return ControlFlow::Break(Found::Separator(internal, index)),
+                // SAFETY: a search returns an edge `<= len`.
+                Err(edge) => match unsafe { internal.child_unchecked(edge) } {
+                    Node::Leaf(leaf) => return ControlFlow::Continue(leaf),
+                    Node::Internal(child) => internal = child,
+                },
+            }
+        }
+    }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// The first entry, the first key of the leftmost leaf, if the tree has
+    /// one.
+    pub(crate) fn first_key_value(&self) -> Option<(&K, &V)> {
+        let leaf = self.root_page()?.node().border_leaf::<FirstEdge>();
+        (leaf.len() > 0).then(|| leaf.key_value(0))
+    }
+
+    /// The last entry, the last key of the rightmost leaf, if the tree has
+    /// one.
+    pub(crate) fn last_key_value(&self) -> Option<(&K, &V)> {
+        let leaf = self.root_page()?.node().border_leaf::<LastEdge>();
+        Some(leaf.key_value(leaf.len().checked_sub(1)?))
+    }
+
     /// The entry whose key equals `key`, if the tree holds one. A key that
     /// lacks what every key of the tree shares (D50) is in none of its
     /// nodes, and needs no search.

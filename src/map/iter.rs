@@ -1,5 +1,5 @@
 //! Iterating over a map by shared reference: [`Iter`], [`Keys`], [`Values`]
-//! and [`Range`], each a walk from both ends (`walk.rs`, D23). The whole-map
+//! and [`Range`], each a walk from both ends (`tree/walk.rs`, D23). The whole-map
 //! iterators know how many entries are left; a range stops where its ends
 //! meet. Only building a range calls `Ord`, to find its ends.
 

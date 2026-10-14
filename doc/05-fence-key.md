@@ -119,9 +119,10 @@ pub trait InlineKey: Ord {
   Once the entry is in or out and counted, it calls it to fit the nodes
   whose fences changed. An insert also takes the new key's window before
   the first change, and a separator's removal shrinks the border its
-  successor widens before the first change. A node being fit computes every
-  window into a buffer before writing any. A wrong impl gives wrong answers,
-  never undefined behaviour.
+  successor widens before the first change. A node being fit writes each
+  window as it computes it, and its prefix length last: a panic there leaves
+  windows off the prefix, which only makes searches wrong. A wrong impl
+  gives wrong answers, never undefined behaviour.
 - **Nodes keep `InlineKey::WIDTH` bytes of each window** (see "Width").
 - **Capped at `u16::MAX`:** two different keys can have equal encodings (a
   lossy encoding, or `"ab"` and `"ab\0"`), so the common prefix scan stops
@@ -163,9 +164,8 @@ An operation does its upkeep in two steps:
   they share no more than its prefix, and fitting only ever grows one. On
   inserts, that settles 84% of split halves for `str-json` and 66% for
   `str-16` without a heap read; a prefix changes in 13% and 28%. A node
-  whose prefix changes computes every window into a buffer of 128 on the
-  stack before writing any (more than any node with inline keys holds: each
-  takes 8 bytes of a 1 KB node for its inline key alone).
+  whose prefix changes writes each window as it reads its key, then its
+  prefix length.
 
 | operation | fences that change | during | once counted |
 |---|---|---|---|

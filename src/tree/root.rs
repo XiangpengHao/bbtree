@@ -14,9 +14,9 @@
 //! The root node is a leaf, in a tree of one node, or an internal node; the
 //! tree grows and shrinks a level only at its root, in its page, which the
 //! tree keeps for life. Nothing records how tall the tree is: a path down
-//! counts its own steps (`path.rs`). A map without entries may have no tree at all, as
-//! std's has no root then (D1): making one allocates nothing. Every
-//! operation on a whole tree starts here, on [`Tree`], each in its
+//! counts its own steps (`path.rs`). A map without entries may have no tree
+//! at all, as std's has no root then (D1): making one allocates nothing.
+//! Every operation on a whole tree starts here, on [`Tree`], each in its
 //! feature's module (`tree/mod.rs`).
 
 use core::cmp::Ordering;
@@ -37,7 +37,7 @@ use crate::inline_key::InlineKeyStrategy;
 /// It has no `Drop`: dropping a `Tree` leaks the tree, which is safe;
 /// `Tree::destroy` takes it apart (`teardown.rs`).
 ///
-/// Invariant: `page` holds a well-formed tree, which nothing but this
+/// Invariant: `root_page` holds a well-formed tree, which nothing but this
 /// `Tree` reaches. Every key of the tree shares its shared prefix, and every
 /// node along the tree's left and right borders, the root too, has its
 /// length as its prefix length; searches trust it to route, never to stay
@@ -149,7 +149,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// # Panics
     ///
     /// Without a tree.
-    pub(crate) fn shared_prefix(&self) -> &SharedPrefix {
+    pub(in crate::tree) fn shared_prefix(&self) -> &SharedPrefix {
         self.existing_root_page().shared_prefix()
     }
 
@@ -176,12 +176,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     pub(crate) fn remembers_rightmost_leaf(&self) -> bool {
         self.rightmost_leaf.is_some()
     }
-}
 
-impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// A new tree, in `page`: an empty root leaf, without a head, and
     /// nothing shared yet.
-    pub(crate) fn new(page: FreshPage<RootPage<K, V, S>>) -> Self {
+    pub(in crate::tree) fn new(page: FreshPage<RootPage<K, V, S>>) -> Self {
         Self {
             root_page: Some(RootPage::new(page)),
             rightmost_leaf: None,
@@ -195,10 +193,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             .get_or_insert_with(|| RootPage::new(FreshPage::allocate()));
     }
 
-    /// The tree of `top` and the nodes under it, on plain pages, whose keys all share `shared_prefix`, which
-    /// every node along its borders must have as its prefix length (D50):
-    /// `top` moves into a root page, from and back to the global allocator.
-    /// The tree owns them from now on.
+    /// The tree of `top` and the nodes under it, on plain pages, whose keys
+    /// all share `shared_prefix`, which every node along its borders must
+    /// have as its prefix length (D50): `top` moves into a root page, from
+    /// and back to the global allocator. The tree owns them from now on.
     pub(in crate::tree) fn from_node(top: Node<K, V, S>, shared_prefix: SharedPrefix) -> Self {
         let (page, emptied) = RootPage::from_node(FreshPage::allocate(), top, shared_prefix);
         emptied.deallocate();
@@ -208,42 +206,38 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
-    /// The root node on a plain page of its kind, giving up the tree, for another tree to hang under an edge (`tree/join.rs`):
-    /// its root page goes back to the global allocator, and the new one comes
-    /// from it.
+    /// The root node on a plain page of its kind, giving up the tree, for
+    /// another tree to hang under an edge (`tree/join.rs`): its root page
+    /// goes back to the global allocator, and the new one comes from it.
     ///
     /// # Panics
     ///
     /// Without a tree.
     pub(in crate::tree) fn into_node(self) -> Node<K, V, S> {
-        let root_page = self.existing_root_page();
-        let (top, emptied) = match root_page.node() {
-            Node::Leaf(_) => root_page.into_node::<Leaf<K, V, S>>(FreshPage::allocate()),
-            Node::Internal(_) => root_page.into_node::<Internal<K, V, S>>(FreshPage::allocate()),
-        };
+        let (top, emptied) = self
+            .existing_root_page()
+            .into_node(FreshPage::allocate, FreshPage::allocate);
         emptied.deallocate();
         top
     }
 
     /// Makes the tree a level taller ([`RootPage::raise`]): the root node
     /// moves to a page from `new_leaf_page` or `new_internal_page`, by its
-    /// kind, under the root, which is internal now. Returns the moved node.
+    /// kind, under the root, which is internal now.
     ///
     /// # Panics
     ///
     /// Without a tree.
-    pub(crate) fn raise(
+    pub(in crate::tree) fn raise(
         &mut self,
         new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
         new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
-    ) -> Node<K, V, S> {
-        let root_page = self.existing_root_page();
-        let (page, child) = match self.root_mut() {
-            Node::Leaf(_) => root_page.raise(new_leaf_page()),
-            Node::Internal(_) => root_page.raise(new_internal_page()),
-        };
-        self.root_page = Some(page);
-        child
+    ) {
+        self.forget_rightmost_leaf();
+        let root_page = self
+            .existing_root_page()
+            .raise(new_leaf_page, new_internal_page);
+        self.root_page = Some(root_page);
     }
 
     /// Makes the tree a level shorter ([`RootPage::lower`]): the root's only
@@ -253,14 +247,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// # Panics
     ///
     /// Without a tree, or if the root is a leaf; the tree is unchanged then.
-    pub(crate) fn lower(&mut self) -> PageByType<K, V, S> {
+    pub(in crate::tree) fn lower(&mut self) -> PageByType<K, V, S> {
         self.forget_rightmost_leaf();
         let (page, emptied) = self.existing_root_page().lower();
         self.root_page = Some(page);
         emptied
     }
 
-    /// Publishes a path's proof after it relinquishes its mutation access.
+    /// Remembers `leaf`, the tree's last leaf, for the next insert to append
+    /// to (D45).
     ///
     /// # Safety
     ///
@@ -284,8 +279,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let leaf = Leaf::at(self.rightmost_leaf?);
         self.rightmost_leaf = None;
         // The field's invariant identifies a live leaf of this tree; the
-        // exclusive owner borrow is its only mutation access. No ordering
-        // result is used to justify the pointer or its bounds.
+        // exclusive owner borrow is its only mutation access.
         let len = leaf.len();
         if len >= Leaf::<K, V, S>::capacity() {
             return None;
@@ -298,7 +292,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
         // A key that shares less goes the general way, which covers it.
         let shared = self.shared_prefix();
-        if shared.len_shared_with::<K, S>(key) < shared.len() {
+        if !shared.is_shared_by::<K, S>(key) {
             return None;
         }
         Some(RightmostAppend {
@@ -323,15 +317,15 @@ impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
     /// ordering requirement, not a memory-safety premise: the leaf was
     /// checked for room.
     #[inline]
-    pub(crate) fn insert(self, key: K, value: V) {
+    pub(in crate::tree) fn insert(self, key: K, value: V) {
         let Self {
             leaf,
             rightmost_leaf,
         } = self;
         let index = leaf.len();
         let prefix_len = leaf.prefix_len();
-        // Compute the summary before mutation. A panic or an unused token
-        // leaves the leaf forgotten, without changing the tree.
+        // Compute the key's window before the leaf changes. A panic or an
+        // unused token leaves the leaf forgotten, without changing the tree.
         leaf.insert_fit(index, WindowedKey::new(key, prefix_len), value);
         // Fitting appends preserve this leaf and all ancestors. There are
         // no callbacks after insertion; the caller counts the entry next.

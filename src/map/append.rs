@@ -71,7 +71,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             },
             merged: TreeBuilder::new(),
         };
-        merge.run();
+        merge.merged.extend(&mut merge.entries);
     }
 }
 
@@ -98,14 +98,6 @@ struct MergedEntries<K, V, S: InlineKeyStrategy<K>> {
     /// drops the key last, where it drops the keys of later duplicates as it
     /// meets them.
     first_duplicate_key: Option<K>,
-}
-
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
-    /// Builds the new tree from the merged entries in one go, which finds
-    /// the tree's rightmost leaf once per leaf rather than once per entry.
-    fn run(&mut self) {
-        self.merged.extend(&mut self.entries);
-    }
 }
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> Iterator for MergedEntries<K, V, S> {

@@ -43,19 +43,20 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         }
     }
 
-    /// The root node, or `None` if the map has never held an entry. A map
-    /// whose entries were all removed may keep an empty root leaf.
+    /// The root node, or `None` if the map has no tree: a new or cleared
+    /// map. A map whose entries were removed one by one may keep an empty
+    /// root leaf.
     pub fn root(&self) -> Option<NodeView<'a, K, V, S>> {
         self.root_page.map(NodeView::of_root_page)
     }
 
     /// The leading bytes of the encoding of every key of the map, as many
     /// as the map keeps (D50): the prefix of the nodes along the tree's
-    /// borders. Empty if the map has never held a key, or its keys have no
-    /// inline keys.
+    /// borders. Empty if the map has no tree, its keys share no byte, or
+    /// they have no inline keys.
     pub fn shared_prefix(&self) -> &'a [u8] {
         self.root_page
-            .map_or(&[], |tree| tree.shared_prefix().as_bytes())
+            .map_or(&[], |root_page| root_page.shared_prefix().as_bytes())
     }
 }
 
@@ -69,7 +70,8 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// edges, to the leaf that holds it.
     ///
     /// Empty if the map has no root, or the lookup reads no node: the key
-    /// lacks what every key of the map shares ([`Self::placed_by_shared_prefix`]).
+    /// lacks what every key of the map shares
+    /// ([`Self::placed_by_shared_prefix`]).
     pub fn trace<Q>(&self, key: &Q) -> Vec<TraceStep<'a, K, V, S>>
     where
         K: Borrow<Q>,
@@ -242,8 +244,6 @@ pub struct NodeView<'a, K, V, S> {
     /// How far below the root the node is, which the walk down from the
     /// root counts: a node does not know it.
     depth: usize,
-    /// Whether the node is the root, in the root's page.
-    is_root: bool,
     _borrow: PhantomData<&'a (K, V)>,
 }
 
@@ -267,13 +267,12 @@ macro_rules! with_node {
 }
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
-    /// The root of the tree of `root`, read for as long as the map is
+    /// The root node of `root_page`, read for as long as the map is
     /// borrowed for `'a`.
     fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
         Self {
             node: root_page.node(),
             depth: 0,
-            is_root: true,
             _borrow: PhantomData,
         }
     }
@@ -283,7 +282,6 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
         Self {
             node: internal.child(index),
             depth: self.depth + 1,
-            is_root: false,
             _borrow: PhantomData,
         }
     }
@@ -359,6 +357,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     ///
     /// If `index >= len`.
     pub fn inline_key(&self, index: usize) -> Option<InlineWord> {
+        assert!(index < self.len(), "key index out of bounds");
         with_node!(self, |node| Child::inline_keys(node)
             .map(|inline_keys| inline_keys.inline_key(index)))
     }
@@ -370,8 +369,10 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     /// If `index >= len`.
     pub fn length_tag(&self, index: usize) -> Option<u16> {
         assert!(index < self.len(), "key index out of bounds");
-        with_node!(self, |node| Child::length_tags(node)
-            .map(|tags| tags[index]))
+        match self.node {
+            Node::Leaf(leaf) => leaf.length_tags().map(|tags| tags[index]),
+            Node::Internal(_) => None,
+        }
     }
 
     /// The leaf's head, the value of the separator just left of it (D17):
@@ -403,6 +404,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     ///
     /// If `index >= len`.
     pub fn value(&self, index: usize) -> Option<&'a V> {
+        assert!(index < self.len(), "key index out of bounds");
         match self.node {
             Node::Leaf(leaf) => Some(leaf.key_value(index).1),
             Node::Internal(_) => None,
@@ -416,6 +418,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     ///
     /// If `index > len`.
     pub fn child(&self, index: usize) -> Option<NodeView<'a, K, V, S>> {
+        assert!(index <= self.len(), "edge index out of bounds");
         match self.node {
             Node::Leaf(_) => None,
             Node::Internal(internal) => Some(self.child_below(internal, index)),
@@ -430,7 +433,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
             Node::Leaf(leaf) => PageMap::of_leaf::<K, V, S>(leaf),
             Node::Internal(internal) => PageMap::of_internal::<K, V, S>(internal),
         };
-        if self.is_root {
+        if self.depth == 0 {
             page.in_root_page::<K, V, S>()
         } else {
             page
@@ -528,7 +531,7 @@ impl PageMap {
         ));
         arrays.push(SlotArray {
             contents: SlotContents::Values,
-            offset: layout.head_offset + layout.value_stride,
+            offset: layout.values_offset(),
             stride: layout.value_stride,
             slot_size: size_of::<V>(),
             capacity,
@@ -687,7 +690,8 @@ impl SlotArray {
 /// What a page's slot array holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SlotContents {
-    /// The node's length, and with inline keys, its prefix lengths.
+    /// The node's length and whether a leaf has a head, and with inline
+    /// keys, its prefix length.
     Header,
     /// The first bytes of each key's window past the node's prefix (D18).
     InlineKeys,

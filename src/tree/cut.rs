@@ -1,14 +1,14 @@
 //! Cutting a tree in two at a key: [`Tree::split_off_at`], for the map's
 //! `split_off` and `extract_if`.
 //!
-//! A search finds the leaf edge just before the key, where the cut goes; for
-//! a key that is a separator, that is the end of the rightmost leaf left of
-//! it. Up the path from there, each node is cut at the path's edge
-//! (`Leaf::cut_off_at`, `Internal::cut_off_at`): it keeps what lies left of
-//! the path, and what
+//! A search finds the leaf edge on the given side of the key
+//! ([`KeySide`]), where the cut goes; for a key that is a separator, the
+//! edge before it is the end of the rightmost leaf left of it. Up the path
+//! from there, each node is cut at the path's edge (`Leaf::cut_off_at`,
+//! `Internal::cut_off_at`): it keeps what lies left of the path, and what
 //! lies right of it goes into a new node, after the part cut off from the
 //! node below as its first child. The new nodes make a tree as tall as the
-//! old one, with the keys from the key on.
+//! old one, with the keys past the cut.
 //!
 //! The nodes on the path become the borders of the two trees, whose prefix
 //! is what every key of the tree shares (D50): before the cut, their
@@ -88,12 +88,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Cuts the tree along the path, which ends at a leaf edge: each node on
     /// it, from the leaf up, keeps what lies left of the path, and what lies
-    /// right of it goes into a new node, after the part cut off from the
-    /// node below. Returns the top of the new nodes, as tall as the root,
-    /// on plain pages from the global allocator, which nothing owns until
-    /// the caller makes it a tree's root. Nodes on either side of the cut may be
-    /// left with fewer keys than their minimum, down to none. Compares no
-    /// keys.
+    /// right of it goes into a new node, after the part cut off from the node
+    /// below. Returns the top of the new nodes, as tall as the root, on plain
+    /// pages from the global allocator, which nothing owns until the caller
+    /// makes it a tree's root. Nodes on either side of the cut may be left
+    /// with fewer keys than their minimum, down to none. Compares no keys.
     ///
     /// # Panics
     ///
@@ -137,7 +136,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Going down, each node on the edge is brought to one key more than its
     /// minimum, so that a merge one level down, which takes one of its keys,
     /// leaves it at its minimum still.
-    pub(crate) fn fix_border<End: NodeEnd>(
+    pub(in crate::tree) fn fix_border<End: NodeEnd>(
         &mut self,
         release: &mut impl FnMut(PageByType<K, V, S>),
     ) {
@@ -163,7 +162,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Lowers the tree while its root is internal without keys, until the
     /// root has some or is a leaf ([`Tree::lower`]), handing each page
     /// emptied to `release`.
-    fn lower_while_root_empty(&mut self, release: &mut impl FnMut(PageByType<K, V, S>)) {
+    pub(super) fn lower_while_root_empty(&mut self, release: &mut impl FnMut(PageByType<K, V, S>)) {
         while matches!(self.root(), Node::Internal(root) if root.len() == 0) {
             release(self.lower());
         }

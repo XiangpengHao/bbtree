@@ -13,7 +13,7 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::Sub;
 
-use super::merge::{MergeSides, MergeStep};
+use super::merge::{MergeSides, MergeStep, SetCursor};
 use super::{BBTreeSet, Iter};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
@@ -179,7 +179,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'
                 .field(
                     "other_iter",
                     &PrintedAsPeekable {
-                        sides,
+                        other: &sides.right,
                         peeked: *other_peeked,
                     },
                 )
@@ -201,13 +201,13 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'
 /// `other`'s side of a difference, printed as std's `Peekable` over it is,
 /// with its next element, or the end, peeked or not.
 struct PrintedAsPeekable<'d, 'a, T, S> {
-    sides: &'d MergeSides<'a, T, S>,
+    other: &'d SetCursor<'a, T, S>,
     peeked: bool,
 }
 
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsPeekable<'_, '_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let other = &self.sides.right;
+        let other = self.other;
         let peeked = self.peeked.then(|| other.first_remaining());
         f.debug_struct("Peekable")
             .field("iter", &other.printed_as_iter(self.peeked))

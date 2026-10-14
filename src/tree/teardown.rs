@@ -7,6 +7,7 @@
 
 use super::node::Node;
 use super::node::page::PageByType;
+use super::path::FirstEdge;
 use super::root::Tree;
 use super::walk::DyingWalk;
 use crate::inline_key::InlineKeyStrategy;
@@ -24,15 +25,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
     pub(crate) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
-        let Some(root_page) = self.root_page() else {
-            return;
-        };
-        let head = root_page.node().take_leftmost_head();
         // Without a count of the entries, the walk ends where the tree does:
-        // only its front moves.
-        let walk = DyingWalk::new(Some(root_page), usize::MAX, release);
-        drop(head);
-        drop(walk);
+        // only its front moves. The tree's leftmost leaf has no head.
+        drop(DyingWalk::new(self.root_page(), usize::MAX, release));
     }
 }
 
@@ -45,23 +40,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     ///
     /// The nodes must be well-formed: every leaf right of a separator has a
     /// head (D17).
-    pub(crate) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
-        let head = self.take_leftmost_head();
+    pub(in crate::tree) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
+        let leftmost = self.border_leaf::<FirstEdge>();
+        let head = leftmost.has_head().then(|| leftmost.take_head());
         let walk = DyingWalk::of_subtree(self, release);
         drop(head);
         drop(walk);
-    }
-
-    /// Takes the head out of the leftmost leaf under this node, if it has
-    /// one, with its key where separator keys are heads (D49).
-    fn take_leftmost_head(self) -> Option<(Option<K>, V)> {
-        let mut node = self;
-        loop {
-            node = match node {
-                Node::Leaf(leaf) => return leaf.has_head().then(|| leaf.take_head()),
-                Node::Internal(internal) => internal.child(0),
-            };
-        }
     }
 }
 

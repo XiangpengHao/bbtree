@@ -763,11 +763,11 @@ impl Workload {
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
     /// followed by overwriting every separator's value, iterating and
-    /// checking ranges; the random and the shuffled ones then go through
-    /// bulk changes, whose rebuilds make any shape the same. Then each loses its entries: removed in random order
-    /// (after which the map of random operations takes more of them, and is
-    /// cleared), popped from the front or the back, or consumed by an owning
-    /// iterator.
+    /// checking ranges; the random and the shuffled ones then go through bulk
+    /// changes, whose rebuilds make any shape the same. Then each loses its
+    /// entries: removed in random order (after which the map of random
+    /// operations takes more of them, and is cleared), popped from the front
+    /// or the back, or consumed by an owning iterator.
     pub(super) fn run<K, V, S>(&self, seed: u64)
     where
         K: Ord + Clone + Debug + FromNumber,

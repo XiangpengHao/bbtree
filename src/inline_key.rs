@@ -21,7 +21,8 @@ use core::mem::size_of;
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
 /// compare like the bytes they come from (see [`InlineKey`]).
 ///
-/// Always 8 bytes, of which the nodes keep the first [`InlineKey::WIDTH`].
+/// Always 8 bytes, of which the nodes keep the first 2, 4 or 8
+/// ([`InlineWidth`]).
 pub type InlineWord = u64;
 
 /// How many bytes of each inline key the nodes keep: the first 2, the first
@@ -39,7 +40,8 @@ pub type InlineWord = u64;
 /// declared width in both kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineWidth {
-    /// The first 2 bytes: the integers' width.
+    /// The first 2 bytes: the std integers' width, and under [`Auto`], fixed
+    /// byte arrays'.
     Two,
     /// The first 4 bytes.
     Four,
@@ -70,9 +72,11 @@ impl InlineWidth {
 /// compares the full keys. Offsets past 0 let the map skip bytes that all the
 /// keys of a node share.
 ///
-/// The nodes keep the first [`Self::WIDTH`] bytes of each inline key, all 8
-/// unless the impl says fewer: kept bytes that differ order the keys the
-/// same way, and kept bytes that tie say nothing.
+/// Where the map uses this impl, every key under [`WithInlineKey`] and the
+/// std integers under [`Auto`], the nodes keep the first [`Self::WIDTH`]
+/// bytes of each inline key, all 8 unless the impl says fewer: kept bytes
+/// that differ order the keys the same way, and kept bytes that tie say
+/// nothing.
 ///
 /// A key wrapping a byte string can window its bytes. A key ordered by
 /// several fields encodes them one after the other: a `u32` and then a
@@ -105,8 +109,8 @@ impl InlineWidth {
 /// assert_eq!(names.get(&UserName("ferris".to_string())), Some(&7));
 /// ```
 pub trait InlineKey: Ord {
-    /// How many bytes of each inline key the nodes keep (see
-    /// [`InlineWidth`]).
+    /// How many bytes of each inline key the nodes keep, where the map uses
+    /// this impl (see [`InlineWidth`]).
     const WIDTH: InlineWidth = InlineWidth::Eight;
 
     /// This key's inline key at `offset`: bytes `offset..offset + 8` of its
@@ -258,8 +262,8 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
     }
 }
 
-/// The default strategy: std byte-string and integer keys have inline keys,
-/// other keys have none, at no cost.
+/// The default strategy: std byte-string keys and 64- and 128-bit integer
+/// keys have inline keys, other keys have none, at no cost.
 ///
 /// The key types recognized are the byte strings `String`, `str`,
 /// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,

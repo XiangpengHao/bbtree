@@ -895,7 +895,7 @@ Design, census and measurements in 11-separator-key.md.
 - **What:** in a map whose keys have inline keys, each separator's key is
   the head of the leftmost leaf right of it, beside its value (D17), in
   entry 0's key place (D29). Internal nodes keep only inline keys and
-  edges, in 512 B pages (D15). A search compares inline keys, and on a tie
+  edges, in 512 B pages (D21). A search compares inline keys, and on a tie
   reads a separator's key by walking down its right edge and first edges to
   that head. Without inline keys, internal nodes keep their keys (D17).
 - **Why:** inline keys decide most internal searches (0.06–0.26 ties per

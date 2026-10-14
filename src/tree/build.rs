@@ -19,7 +19,7 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::node::inline_keys::{KeyInliner, WindowedKey};
+use super::node::inline_keys::WindowedKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, PageByType};
@@ -78,9 +78,10 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// The entries go into the rightmost leaf while it has room, found once
     /// per leaf and once per call: callers append runs, not single entries.
     ///
-    /// An `InlineKey` that panics, computing an entry's inline key or the
-    /// prefix of a node the entry closes, drops the entry, which
-    /// [`Self::dropped`] counts, and leaves the tree well formed.
+    /// An `InlineKey` that panics computing an entry's inline key drops the
+    /// entry, which [`Self::dropped`] counts; one that panics fitting the
+    /// prefix of a node the entry closes leaves the entry placed. Either
+    /// way the tree stays well formed.
     pub(crate) fn extend(&mut self, entries: impl IntoIterator<Item = (K, V)>) {
         let mut entries = entries.into_iter().inspect(|_| self.taken += 1);
         let Some(mut next) = entries.next() else {
@@ -93,21 +94,21 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             // To tell a key that shares less without the tree, whose
             // rightmost leaf is changed below.
             let shared = tree.shared_prefix().clone();
-            let leaf = Self::rightmost_leaf(tree.root_mut());
-            let prefix_len = leaf.prefix_len();
+            // On the right border, whose prefix is what every key shares.
+            let leaf = tree.root_mut().border_leaf::<LastEdge>();
             let leaf_is_full = loop {
                 let len = leaf.len();
                 if len == Leaf::<K, V, S>::capacity() {
                     break true;
                 }
                 let (key, value) = next;
-                leaf.insert_fit(len, WindowedKey::new(key, prefix_len), value);
+                leaf.insert_fit(len, WindowedKey::new(key, shared.len()), value);
                 self.length += 1;
                 next = match entries.next() {
                     Some(entry) => entry,
                     None => return,
                 };
-                if shared.len_shared_with::<K, S>(&next.0) < shared.len() {
+                if !shared.is_shared_by::<K, S>(&next.0) {
                     break false;
                 }
             };
@@ -117,9 +118,14 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             let (key, value) = next;
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let path = Self::start_leaf(tree, WindowedKey::new(key, shared.len()), value);
+            let mut path = tree.start_leaf(WindowedKey::new(key, shared.len()), value);
             self.length += 1;
-            Self::refit_closed_nodes(path);
+            // Fits the nodes the new leaf closed, off the tree's border now:
+            // the right border of the subtree left of the separator, which
+            // no key joins again, whose upper fence the separator is.
+            let edge = path.index();
+            path.refit_border_below::<LastEdge>(edge);
+            path.refit_children_to_fences([edge]);
             next = match entries.next() {
                 Some(entry) => entry,
                 None => return,
@@ -149,62 +155,24 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         }
         (self.tree.take(), self.length)
     }
+}
 
-    /// The rightmost leaf under `node`.
-    fn rightmost_leaf(mut node: Node<K, V, S>) -> Leaf<K, V, S> {
-        loop {
-            node = match node {
-                Node::Leaf(leaf) => return leaf,
-                Node::Internal(internal) => internal.child(internal.len()),
-            };
-        }
-    }
-
-    /// Fits the prefixes of the nodes that a new leaf closed, which
-    /// [`Self::start_leaf`] hung after a separator in the node `path` ends
-    /// at, at the edge left of it: the right border of the subtree there,
-    /// full, which no key joins again, whose upper fence the separator is
-    /// from now on. These are the nodes the path came up through to hang
-    /// the leaf, and it goes back down them. From the leaf up, so that each
-    /// node's prefix sees its children's.
-    ///
-    /// Reads keys only once the new leaf hangs beside them: until then they
-    /// are on the tree's right border, where a prefix must be 0, and a
-    /// panicking `InlineKey` would leave one there that searches past the
-    /// last key misread. Off the border, a prefix it leaves short of the
-    /// fences is one searches allow (`prefix.rs`).
-    fn refit_closed_nodes(mut path: PathMut<'_, K, V, S>) {
-        if KeyInliner::<K>::resolve::<S>().is_none() {
-            return;
-        }
-        let start_depth = path.depth();
-        path.descend_to_leaf::<LastEdge>();
-        while path.depth() > start_depth {
-            path.ascend();
-            let edge = path.index();
-            path.refit_children_to_fences([edge]);
-        }
-    }
-
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Starts a new rightmost leaf after a full one, with `value` as its
     /// head, and `separator`'s key where separator keys are heads (D49), and
-    /// hangs it in `tree` after `separator`: in the rightmost internal node
-    /// one level up if it has room; or else in a new node there, which hangs
-    /// one level further up the same way; or in the root, which the tree
-    /// raises for it. Returns the path up the right border it came, ending
-    /// at the node that took the separator, at the edge left of it, which
-    /// leads down to the nodes the new leaf closed.
-    fn start_leaf(
-        tree: &mut Tree<K, V, S>,
-        separator: WindowedKey<K, S>,
-        value: V,
-    ) -> PathMut<'_, K, V, S> {
-        let shared_len = tree.shared_prefix().len();
+    /// hangs it after `separator`: in the rightmost internal node one level
+    /// up if it has room; or else in a new node there, which hangs one level
+    /// further up the same way; or in the root, which the tree raises for
+    /// it. Returns the path up the right border it came, ending at the node
+    /// that took the separator, at the edge left of it, which leads down to
+    /// the nodes the new leaf closed.
+    fn start_leaf(&mut self, separator: WindowedKey<K, S>, value: V) -> PathMut<'_, K, V, S> {
+        let shared_len = self.shared_prefix().len();
         let leaf = Leaf::new(FreshPage::allocate());
         leaf.set_empty_prefix_len(shared_len);
         let separator = leaf.put_separator_head(separator, value);
         let mut child = Node::Leaf(leaf);
-        let mut path = PathMut::new(tree);
+        let mut path = PathMut::new(self);
         path.descend_to_last_key();
         loop {
             let node = path.ascend_raising(FreshPage::allocate, FreshPage::allocate);

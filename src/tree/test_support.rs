@@ -1,8 +1,8 @@
 //! Test-only helpers: a deterministic PRNG, which also walks two iterators
 //! alike from random ends, keys and values made from numbers, drop tracking,
 //! padded and over-aligned test types, trees built through the node API, and
-//! a check of inline keys. The map's and the set's tests use the first four
-//! and the last too.
+//! a check of inline keys. The map's and the set's tests use the first
+//! four.
 
 #![forbid(unsafe_code)]
 
@@ -19,6 +19,7 @@ use super::node::inline_keys::Separator;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{NodePtr, TestPages};
+use super::path::FirstEdge;
 use super::root::Tree;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 
@@ -216,8 +217,8 @@ impl InlineKey for Tracked<'_> {
 /// values, they fill a 2 KB node with exactly 12 entries in both node kinds
 /// (D13, D15, D17, D21): tall trees from few entries, which Miri can afford,
 /// and the node shapes the balancing tests spell out. No key size gives
-/// exactly 12 in both kinds of a 1 KB node. As values, they test large values in
-/// leaves. Ordered by id.
+/// exactly 12 in both kinds of a 1 KB node. As values, they test large values
+/// in leaves. Ordered by id.
 pub(super) struct Bulky<'l> {
     tracked: Tracked<'l>,
     _padding: [u8; 136],
@@ -322,7 +323,7 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K
     /// The id of the head of the leftmost leaf under this node, if it has
     /// one: the value of the separator just left of the node (D17).
     pub(super) fn leftmost_head_id(self) -> Option<usize> {
-        self.leftmost_leaf().head_id()
+        self.border_leaf::<FirstEdge>().head_id()
     }
 
     /// The id of the key of the separator just left of this node, given
@@ -331,27 +332,18 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K
     pub(super) fn separator_key_id(self, separator: &Separator<K, S>) -> usize {
         match separator.key() {
             Some(key) => key.tracked_id(),
-            None => (self.leftmost_leaf().head_key_id())
+            None => (self.border_leaf::<FirstEdge>().head_key_id())
                 .expect("the leaf right of a separator has a head with its key"),
-        }
-    }
-
-    fn leftmost_leaf(self) -> Leaf<K, V, S> {
-        let mut node = self;
-        loop {
-            match node {
-                Node::Leaf(leaf) => return leaf,
-                Node::Internal(internal) => node = internal.child(0),
-            }
         }
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// Panics unless every node under and at this one has the inline keys
-    /// of its keys, in order, and a prefix length of 0, or has neither
-    /// (D18); see [`NodeChecks::assert_inline_keys_match`].
-    pub(crate) fn assert_inline_keys_match_under(self) {
+    /// Panics unless every node under and at this one has its keys'
+    /// windows at its prefix length as its inline keys, or, without inline
+    /// keys, none and a prefix length of 0 (D18, 05-fence-key.md); see
+    /// [`NodeChecks::assert_inline_keys_match`].
+    pub(in crate::tree) fn assert_inline_keys_match_under(self) {
         match self {
             Node::Leaf(leaf) => leaf.assert_inline_keys_match(),
             Node::Internal(internal) => {
@@ -363,7 +355,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         }
     }
 
-    /// Calls `entry` on every entry under this node in key order: each
+    /// Calls `on_entry` on every entry under this node in key order: each
     /// leaf's keys and values, and each separator's key with its value from
     /// the head that holds it (D17). A head in the leftmost leaf belongs to
     /// a separator outside, and is skipped.
@@ -402,7 +394,7 @@ impl CacheLineAligned {
         Self(value)
     }
 
-    pub(crate) fn get(self) -> u64 {
+    pub(in crate::tree) fn get(self) -> u64 {
         self.0
     }
 }
@@ -440,10 +432,6 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         }
     }
 
-    pub(super) fn tree(&self) -> &Tree<K, V, S> {
-        &self.tree
-    }
-
     pub(super) fn root(&self) -> Node<K, V, S> {
         self.tree.root()
     }
@@ -452,15 +440,11 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         self.tree.root_mut()
     }
 
-    pub(super) fn tree_mut(&mut self) -> &mut Tree<K, V, S> {
-        &mut self.tree
-    }
-
     pub(super) fn leaf_depth(&self) -> usize {
-        self.tree().leaf_depth()
+        self.tree.leaf_depth()
     }
 
-    /// One `entry(key, value)` per entry, in order.
+    /// One `on_entry(key, value)` per entry, in order.
     pub(super) fn entries<T>(&self, mut on_entry: impl FnMut(&K, &V) -> T) -> Vec<T> {
         let mut entries = Vec::new();
         self.root().for_each_entry(&mut |key, value| {
@@ -469,20 +453,18 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         entries
     }
 
-    /// Lowers the tree while its root is internal without keys, as the tree
-    /// layer does after a merge empties the root.
+    /// Lowers the tree while its root is internal without keys, as a cut
+    /// does after merges empty the root.
     pub(super) fn lower_while_root_empty(&mut self) {
         let pages = self.pages;
-        let tree = self.tree_mut();
-        while matches!(tree.root(), Node::Internal(root) if root.len() == 0) {
-            pages.release(tree.lower());
-        }
+        self.tree
+            .lower_while_root_empty(&mut |page| pages.release(page));
     }
 
     /// Takes the tree apart, giving every page back to the pool.
-    pub(super) fn destroy(mut self) {
-        let pages = self.pages;
-        self.tree.take().destroy(|page| pages.release(page));
+    pub(super) fn destroy(self) {
+        let Self { tree, pages } = self;
+        tree.destroy(|page| pages.release(page));
     }
 }
 
@@ -504,12 +486,11 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
         let pages = self.pages;
         let mut length = 0;
-        self.tree_mut()
+        self.tree
             .insert(key, value, || pages.fresh(), || pages.fresh(), &mut length)
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::{Bulky, CacheLineAligned, PageAligned, Tracked};
     use crate::tree::node::layout::NodeLayout;

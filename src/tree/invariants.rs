@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
+use super::node::page::NodePtr;
 use super::node::{Child, Node};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
@@ -54,7 +55,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         };
         let root = root_page.node();
         if length > 0 || matches!(root, Node::Internal(_)) {
-            assert!(root.len() > 0, "the root of a non-empty map has no keys");
+            assert!(
+                root.len() > 0,
+                "a root that is internal or holds the entries of a non-empty map has no keys"
+            );
         }
         let mut walk = InOrderWalk {
             shared_prefix: root_page.shared_prefix(),
@@ -288,7 +292,9 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
 }
 
 /// The checks of one node, of either kind.
-pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
+pub(in crate::tree) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>:
+    Child<K, V, S>
+{
     /// Panics unless the node has inline keys exactly if its map's strategy
     /// gives its keys some, and then has the first bytes of its keys'
     /// windows at its prefix length, as many as this kind keeps, in order
@@ -296,28 +302,11 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
     fn assert_inline_keys_match(self) {
         let plan = Self::plan();
         if let Some(tags) = self.length_tags() {
-            assert!(plan.has_length_tags());
             for (index, &tag) in tags[..self.len()].iter().enumerate() {
                 assert_eq!(Some(tag), plan.length_tag(self.key(index)));
             }
         }
         let prefix_len = self.prefix_len();
-        if let Some(inliner) = plan.inliner()
-            && Internal::<K, V, S>::plan().rehydrates_windows()
-        {
-            // A narrow internal window may next fill a leaf's prefix, so
-            // every window a node of this map hands out keeps all the bytes
-            // a leaf does.
-            for index in 0..self.len() {
-                let key = self.key(index);
-                let window = self.window(index);
-                assert_eq!(window.prefix_len(), self.prefix_len());
-                assert_eq!(
-                    window.inline_key(),
-                    inliner.inline_key_at(key, self.prefix_len())
-                );
-            }
-        }
         let expected: Option<Vec<InlineWord>> = Option::zip(plan.inliner(), plan.inline_width())
             .map(|(inliner, inline_width)| {
                 let dropped_bits =
@@ -351,9 +340,11 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
     /// and `upper`, share (05-fence-key.md), or `shared_len`, what every key
     /// shares, if either is missing (D50).
     fn assert_prefix_fits_fences(self, lower: Option<&K>, upper: Option<&K>, shared_len: usize) {
-        let fence_prefix_len = KeyInliner::<K>::resolve::<S>().map_or(0, |inliner| {
-            inliner.fence_prefix_len(lower, upper, shared_len)
-        });
+        let fence_prefix_len = if NodePtr::<K, V, S>::has_inline_keys() {
+            KeyInliner::fence_prefix_len::<S>(lower, upper, shared_len)
+        } else {
+            0
+        };
         assert_eq!(
             self.prefix_len(),
             fence_prefix_len,

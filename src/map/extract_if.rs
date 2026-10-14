@@ -34,7 +34,7 @@
 use core::fmt;
 use core::iter::{self, FusedIterator};
 use core::mem;
-use core::ops::{Bound, ControlFlow, RangeBounds, RangeFull};
+use core::ops::{ControlFlow, RangeBounds};
 
 use super::BBTreeMap;
 use super::into_iter::Deallocate;
@@ -60,7 +60,9 @@ pub(crate) struct ExtractionWalk<'a, K, V, R, S: InlineKeyStrategy<K>> {
     /// Empty until the walk is dropped, when it gets back the entries not
     /// handed out.
     map: &'a mut BBTreeMap<K, V, S>,
-    /// Whether the map had a tree, which it keeps even if no entry stays.
+    /// Whether the map had a tree, which it keeps even if no entry stays, as
+    /// std's map keeps an empty root after losing its entries, which decides
+    /// whether `range` checks its bounds.
     had_tree: bool,
     /// The map's entries not handed out: its length less those the walk has
     /// handed out, which std's walk counts down in the map as it goes. The
@@ -127,9 +129,9 @@ impl<K, V, S: InlineKeyStrategy<K>> ExtractionSource<K, V, S> {
 impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'a, K, V, R, S> {
     /// Takes the entries out of `map` and cuts out those in `range`.
     pub(crate) fn new(map: &'a mut BBTreeMap<K, V, S>, range: R) -> Self {
-        let length = map.length;
+        let length = mem::take(&mut map.length);
         let had_tree = map.tree.has_root();
-        let tree = mem::replace(map, BBTreeMap::empty()).tree.take();
+        let tree = map.tree.take();
         let mut walk = Self {
             map,
             had_tree,
@@ -156,23 +158,14 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
     /// beside the cuts fit their prefixes, which reads keys.
     fn cut_out_range(&mut self) {
         let tree = self.after.tree_mut();
-        let start = match self.range.start_bound() {
-            Bound::Included(start) => Some((start, KeySide::Before)),
-            Bound::Excluded(start) => Some((start, KeySide::After)),
-            Bound::Unbounded => None,
-        };
-        if let Some((start, side)) = start {
+        if let Some((start, side)) = KeySide::of_start(self.range.start_bound()) {
             let from_start = tree.split_off_at(start, side);
             let before = mem::replace(tree, from_start);
             self.kept = TreeBuilder::continuing(before);
             self.kept.refit_border_siblings();
             tree.refit_border_siblings::<FirstEdge>();
         }
-        let end = match self.range.end_bound() {
-            Bound::Included(end) => Some((end, KeySide::After)),
-            Bound::Excluded(end) => Some((end, KeySide::Before)),
-            Bound::Unbounded => None,
-        };
+        let end = KeySide::of_end(self.range.end_bound());
         let cut_past_end = end.is_some();
         let range_tree = match end {
             Some((end, side)) => {
@@ -234,7 +227,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> ExtractionWalk<'_, K, V, R, S> {
             return Some((key, value));
         }
         let mut rest = source.rest.remaining();
-        rest.next().or_else(|| self.after.first_entry())
+        rest.next().or_else(|| self.after.first_key_value())
     }
 }
 
@@ -263,7 +256,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
         self.map.tree = Tree::concat(kept, self.after.take());
         self.map.length = self.length - dropped;
         if self.had_tree {
-            self.map.keep_a_tree();
+            self.map.tree.ensure_root_page();
         }
     }
 }
@@ -323,8 +316,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// remaining elements will be retained. Use [`retain`] with a negated
     /// predicate if you do not need the returned iterator.
     ///
-    /// Unlike std's, this walk takes every entry out of the map and puts the
-    /// kept ones back, wherever the range is: O(n).
+    /// Unlike std's, which passes over the range in place, this walk cuts the
+    /// range out of the map, and puts its kept entries back: O(log n) beyond
+    /// the range's entries.
     ///
     /// [`retain`]: BBTreeMap::retain
     ///
@@ -373,10 +367,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// map.retain(|&k, _| k % 2 == 0);
     /// assert!(map.into_iter().eq(vec![(0, 0), (2, 20), (4, 40), (6, 60)]));
     /// ```
-    pub fn retain<F>(&mut self, mut f: F)
+    pub fn retain<F>(&mut self, f: F)
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        ExtractionWalk::<_, _, RangeFull, _>::new(self, ..).retain(|key, value| f(key, value));
+        ExtractionWalk::new(self, ..).retain(f);
     }
 }

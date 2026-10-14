@@ -70,7 +70,7 @@ impl<T, S> Clone for Union<'_, T, S> {
 }
 
 /// Prints as std's does: `Union(MergeIterInner(..))`.
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Union")
             .field(&self.sides.printed_as_merge_iter(self.held))

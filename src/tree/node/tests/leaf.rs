@@ -394,6 +394,11 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
         }
         model.assert_matches(root_leaf(tree.root()));
     }
+    // A tree's leftmost leaf has no head, which taking it apart relies on.
+    let leaf = root_leaf(tree.root());
+    if leaf.has_head() {
+        drop(leaf.take_head());
+    }
     tree.destroy(|page| pages.release(page));
     pages.assert_all_released();
     splits

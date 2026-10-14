@@ -1,9 +1,9 @@
 //! [`BBTreeMap`]: an ordered map with the API and behavior of std's
-//! `BTreeMap` (D1), on 1 KB nodes without parent pointers (D11, D15), as a
-//! B+-tree that stores each key once (D17).
+//! `BTreeMap` (D1), on nodes sized in 1 KB or 512-byte steps without parent
+//! pointers (D11, D15, D21), as a B+-tree that stores each key once (D17).
 //!
-//! The map owns at most one [`Tree`]: none until the first insert, so
-//! that [`BBTreeMap::new`] allocates nothing. Exact-key lookups and ordinary
+//! The map owns a [`Tree`], which has no root page until the first insert,
+//! so that [`BBTreeMap::new`] allocates nothing. Exact-key lookups and ordinary
 //! fitting inserts descend from the root; increasing inserts can reuse a
 //! last leaf remembered after a split. An insert that splits records a
 //! path for going back up (`tree/path.rs`, `tree/insert.rs`), and so
@@ -12,8 +12,10 @@
 //! path (`iter.rs`, `iter_mut.rs`, on `tree/walk.rs`); iterating by value
 //! takes the tree apart as it goes (`into_iter.rs`), as dropping the map
 //! does. Bulk changes drain entries in order and build trees of full nodes
-//! (`append.rs`, `extract_if.rs`, `from_entries.rs`, on `tree/build.rs`),
-//! but `split_off`, which cuts the tree along a path (`tree/cut.rs`).
+//! (`append.rs`, `from_entries.rs`, on `tree/build.rs`); `split_off` cuts
+//! the tree along a path (`tree/cut.rs`), and `extract_if` cuts out its
+//! range, rebuilds what it keeps of it, and joins the rest back on
+//! (`extract_if.rs`, `tree/join.rs`).
 //!
 //! The strategy parameter `S` decides which keys have inline keys (D18,
 //! `inline_key.rs`); every method is the same for every `S`.
@@ -43,7 +45,7 @@ use crate::tree::build::TreeBuilder;
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
 use crate::tree::node::page::{FreshPage, PageByType};
-use crate::tree::path::{FirstEdge, Immut, KeySide, LastEdge, Path};
+use crate::tree::path::{FirstEdge, KeySide, LastEdge};
 use crate::tree::root::Tree;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
@@ -60,10 +62,11 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// relative to other keys while it is in the map; the behavior that results
 /// is unspecified but memory-safe.
 ///
-/// Its nodes store an inline key beside each key, a register-sized summary
-/// that searches compare first, when the strategy `S` gives the key type
-/// one: by default ([`Auto`]), std byte-string and 64- and 128-bit integer
-/// keys have them, and other keys don't. [`WithInlineKey`] gives them to any
+/// Its nodes store an inline key beside each key, the first bytes of the
+/// key's encoding in a register, that searches compare first, when the
+/// strategy `S` gives the key type one: by default ([`Auto`]), std byte
+/// strings, 16-, 20- and 32-byte arrays, and 64- and 128-bit integers have
+/// them, and other keys don't. [`WithInlineKey`] gives them to any
 /// key type that implements [`InlineKey`]. Either way, every method behaves
 /// as std's.
 ///
@@ -128,10 +131,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         // Only the strategy's type matters: its value, a unit struct,
         // carries nothing.
         mem::forget(strategy);
-        Self {
-            tree: Tree::EMPTY,
-            length: 0,
-        }
+        Self::empty()
     }
 
     /// A map with no tree, of any strategy: what `new` makes.
@@ -146,13 +146,6 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     fn from_builder(builder: TreeBuilder<K, V, S>) -> Self {
         let (tree, length) = builder.finish();
         Self { tree, length }
-    }
-
-    /// Gives the map a tree, an empty leaf, if it has none: as std's map
-    /// keeps an empty root after losing its entries, which decides whether
-    /// `range` checks its bounds.
-    fn keep_a_tree(&mut self) {
-        self.tree.ensure_root_page();
     }
 
     /// Returns the number of elements in the map.
@@ -245,14 +238,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let root_page = self.tree.root_page()?;
-        let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root_page.node());
-        if path.descend_to_first_key() {
-            Some(path.key_value())
-        } else {
-            None
-        }
+        self.tree.first_key_value()
     }
 
     /// Removes and returns the first element in the map. The key of this
@@ -296,14 +282,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let root_page = self.tree.root_page()?;
-        let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root_page.node());
-        if path.descend_to_last_key() {
-            Some(path.key_value())
-        } else {
-            None
-        }
+        self.tree.last_key_value()
     }
 
     /// Removes and returns the last element in the map. The key of this

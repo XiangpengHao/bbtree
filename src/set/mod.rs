@@ -1,8 +1,8 @@
 //! [`BBTreeSet`]: an ordered set with the API and behavior of std's
 //! `BTreeSet` (D1), as a [`BBTreeMap`] whose values are zero-sized, as std's
 //! set is a map of zero-sized values. Each method hands its work to the map's
-//! method of the same job; the iterators wrap the map's (`iter.rs`,
-//! `iter.rs`).
+//! method of the same job; the iterators wrap the map's (`iter.rs`, on
+//! `map/iter.rs` and `map/into_iter.rs`).
 //!
 //! The operations on two sets are std's algorithms on the set's iterators
 //! and lookups: `difference.rs`, `intersection.rs`, `union.rs` and
@@ -42,7 +42,7 @@ pub use union::Union;
 
 /// The value of every element of a set's map: it takes no space, and
 /// compares, hashes and prints as std's does.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct SetValZST;
 
 /// An ordered set based on a B-tree with page-sized nodes: a drop-in

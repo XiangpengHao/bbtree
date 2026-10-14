@@ -47,7 +47,7 @@ impl<T, S> Clone for SetCursor<'_, T, S> {
 }
 
 impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
-    pub(super) fn new(iter: Iter<'a, T, S>) -> Self {
+    fn new(iter: Iter<'a, T, S>) -> Self {
         Self {
             iter,
             run: KeyRun::EMPTY,
@@ -86,7 +86,7 @@ impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
     }
 
     /// How many elements are left.
-    pub(super) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.run.len() + self.iter.len()
     }
 
@@ -187,7 +187,7 @@ impl<T, S> Clone for MergeSides<'_, T, S> {
     }
 }
 
-impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
+impl<'a, T, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
     pub(super) fn new(left: Iter<'a, T, S>, right: Iter<'a, T, S>) -> Self {
         Self {
             left: SetCursor::new(left),
@@ -195,6 +195,19 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
         }
     }
 
+    /// How many elements each side has left.
+    pub(super) fn lens(&self) -> (usize, usize) {
+        (self.left.len(), self.right.len())
+    }
+
+    /// The merge, printed as std's `MergeIterInner` is after the same steps,
+    /// holding the element of `held`'s side taken out of its iterator.
+    pub(super) fn printed_as_merge_iter(&self, held: HeldSide) -> PrintedAsMergeIter<'_, 'a, T, S> {
+        PrintedAsMergeIter { sides: self, held }
+    }
+}
+
+impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
     /// The next step of the merge, moving past it, and which side std's
     /// merge would hold an element of then; `None` once both sides are done.
     #[inline]
@@ -320,17 +333,6 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
             }
         }
         ControlFlow::Continue(accumulator)
-    }
-
-    /// How many elements each side has left.
-    pub(super) fn lens(&self) -> (usize, usize) {
-        (self.left.len(), self.right.len())
-    }
-
-    /// The merge, printed as std's `MergeIterInner` is after the same steps,
-    /// holding the element of `held`'s side taken out of its iterator.
-    pub(super) fn printed_as_merge_iter(&self, held: HeldSide) -> PrintedAsMergeIter<'_, 'a, T, S> {
-        PrintedAsMergeIter { sides: self, held }
     }
 }
 

@@ -15,11 +15,12 @@ use core::alloc::Layout;
 use core::mem::size_of;
 #[cfg(any(test, feature = "inspect"))]
 use core::ops::Range;
+use core::ptr::NonNull;
 
 use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
-use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
+use super::page::{FreshPage, NodePtr, PageByType, PageType};
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
@@ -63,7 +64,7 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for RootPage<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// A new tree's root page, in `page`: an empty leaf, whose keys share
     /// nothing yet.
-    pub(crate) fn new(page: FreshPage<Self>) -> Self {
+    pub(in crate::tree) fn new(page: FreshPage<Self>) -> Self {
         // SAFETY: the page is a fresh root page, aligned to and larger than
         // a leaf's, which nothing else uses.
         let node = unsafe { NodePtr::initialize::<Leaf<K, V, S>>(page.into_raw()) };
@@ -74,42 +75,52 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         root_page
     }
 
-    /// The root page for `top`, the root of a tree whose keys share
-    /// `shared_prefix`, in `page`: moves `top` there, and returns `top`'s emptied page. For a tree made on plain
-    /// pages: a copy (`tree/clone.rs`), or the part a cut makes
-    /// (`tree/cut.rs`).
-    pub(crate) fn from_node(
+    /// The root page for `top`, the top node of a tree on plain pages whose
+    /// keys share `shared_prefix`, in `page`: moves `top` there, and returns
+    /// `top`'s emptied page. For a tree made on plain pages: a copy
+    /// (`tree/clone.rs`), or the part a cut makes (`tree/cut.rs`).
+    pub(in crate::tree) fn from_node(
         page: FreshPage<Self>,
         top: Node<K, V, S>,
         shared_prefix: SharedPrefix,
     ) -> (Self, PageByType<K, V, S>) {
-        let page = page.into_raw();
-        // SAFETY: the page is a fresh root page, aligned to and as large as
-        // a node of either kind, which nothing else uses. `top`'s contents
-        // move there whole, and its page holds nothing anymore: the root
-        // takes its place, as nothing points to a tree's top node but its
-        // owner.
-        let (moved, emptied) = unsafe {
-            match top {
-                Node::Leaf(leaf) => (
-                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(page),
-                    leaf.free().into(),
-                ),
-                Node::Internal(internal) => (
-                    internal.node_ptr().move_node_to::<Internal<K, V, S>>(page),
-                    internal.free().into(),
-                ),
-            }
-        };
-        let root_page = Self { node: moved };
+        // SAFETY: the page is a fresh root page, which nothing else uses, and
+        // nothing points to a tree's top node but its owner, who gives it up.
+        let (node, emptied) = unsafe { Self::move_in(page.into_raw(), top) };
+        let root_page = Self { node };
         // SAFETY: the root area lies past the node, in the page.
         unsafe { root_page.area().write(shared_prefix) };
         (root_page, emptied)
     }
 
-    /// The root page `top`, the root node of a tree, is in: for a walk that
-    /// kept the node alone (`tree/walk.rs`).
-    pub(crate) fn of_node(node: Node<K, V, S>) -> Self {
+    /// Moves `node`, on a plain page of its kind, whole into the root page at
+    /// `page`: returns the node there, and `node`'s emptied page.
+    ///
+    /// # Safety
+    ///
+    /// `page` is a root page, aligned to and as large as a node of either
+    /// kind, with exclusive access, which holds nothing that needs dropping;
+    /// nothing reaches `node`'s page afterwards but to free it.
+    unsafe fn move_in(
+        page: NonNull<u8>,
+        node: Node<K, V, S>,
+    ) -> (NodePtr<K, V, S>, PageByType<K, V, S>) {
+        // SAFETY: as the caller promises; each arm moves the node as its own
+        // kind, and its page then holds nothing.
+        unsafe {
+            let moved = match node {
+                Node::Leaf(leaf) => leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(page),
+                Node::Internal(internal) => {
+                    internal.node_ptr().move_node_to::<Internal<K, V, S>>(page)
+                }
+            };
+            (moved, node.free())
+        }
+    }
+
+    /// The root page `node`, a tree's root node, is in: for a walk that kept
+    /// the node alone (`tree/walk.rs`).
+    pub(in crate::tree) fn of_node(node: Node<K, V, S>) -> Self {
         Self {
             node: node.node_ptr(),
         }
@@ -127,7 +138,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
 
     /// Where the root area lies in the page (`tree/inspect.rs`).
     #[cfg(any(test, feature = "inspect"))]
-    pub(crate) fn area_bytes() -> Range<usize> {
+    pub(in crate::tree) fn area_bytes() -> Range<usize> {
         let start = Self::area_offset();
         start..start + size_of::<SharedPrefix>()
     }
@@ -147,13 +158,13 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
 
     /// The root node, of the kind the tag tells.
     #[inline(always)]
-    pub(crate) fn node(self) -> Node<K, V, S> {
+    pub(in crate::tree) fn node(self) -> Node<K, V, S> {
         Node::at(self.node)
     }
 
     /// What every key of the tree shares (D50).
     #[inline(always)]
-    pub(crate) fn shared_prefix<'a>(self) -> &'a SharedPrefix {
+    pub(in crate::tree) fn shared_prefix<'a>(self) -> &'a SharedPrefix {
         // SAFETY: the root area was written with the page; nothing writes it
         // while the caller borrows it (the handles' contract).
         unsafe { &*self.area() }
@@ -162,43 +173,48 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// What every key of the tree shares, to change: keeping every node
     /// along the tree's borders at its length is the caller's business
     /// (`tree/prefix.rs`).
-    pub(crate) fn shared_prefix_mut<'a>(self) -> &'a mut SharedPrefix {
+    pub(in crate::tree) fn shared_prefix_mut<'a>(self) -> &'a mut SharedPrefix {
         // SAFETY: the root area was written with the page; the access is
         // exclusive while the caller borrows it (the handles' contract).
         unsafe { &mut *self.area() }
     }
 
-    /// Moves the root node to `page`, a fresh page of its kind, `Kind`, and
-    /// returns it there, as a tree's top node on a plain page. The root page
-    /// holds nothing afterwards: the caller makes it a node again, or frees
-    /// it.
-    ///
-    /// # Panics
-    ///
-    /// If the root node is not of kind `Kind`; nothing changes then.
-    fn move_node_to<Kind: NodeKind>(self, page: FreshPage<Kind>) -> Node<K, V, S> {
-        assert_eq!(
-            matches!(self.node(), Node::Leaf(_)),
-            Kind::IS_LEAF,
-            "moving the root node to a page of the other kind"
-        );
-        // SAFETY: the root node is of kind `Kind` (checked), and `page` a
-        // fresh page of that kind, which nothing else uses: the node's
-        // contents move there whole.
-        Node::at(unsafe { self.node.move_node_to::<Kind>(page.into_raw()) })
+    /// Moves the root node to a fresh page of its kind, from `new_leaf_page`
+    /// or `new_internal_page`, and returns it there, as a tree's top node on
+    /// a plain page. The root page holds nothing afterwards: the caller makes
+    /// it a node again, or frees it.
+    fn move_node_out(
+        self,
+        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
+        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
+    ) -> Node<K, V, S> {
+        let moved = match self.node() {
+            Node::Leaf(_) => {
+                let page = new_leaf_page().into_raw();
+                // SAFETY: the root node is a leaf, and `page` a fresh leaf
+                // page, which nothing else uses: the node moves there whole.
+                unsafe { self.node.move_node_to::<Leaf<K, V, S>>(page) }
+            }
+            Node::Internal(_) => {
+                let page = new_internal_page().into_raw();
+                // SAFETY: as for a leaf, of the internal kind.
+                unsafe { self.node.move_node_to::<Internal<K, V, S>>(page) }
+            }
+        };
+        Node::at(moved)
     }
 
-    /// Makes the tree a level taller: moves the root node to `page`, a fresh
-    /// page of its kind, `Kind`, and makes the root an internal node with no
-    /// separators above it, at the tree's shared prefix length (D50), as the
-    /// old one had, on both borders. Returns the page's new handle, and the
-    /// moved node, the root's only child now.
-    ///
-    /// # Panics
-    ///
-    /// If the root node is not of kind `Kind`; nothing changes then.
-    pub(crate) fn raise<Kind: NodeKind>(self, page: FreshPage<Kind>) -> (Self, Node<K, V, S>) {
-        let child = self.move_node_to(page);
+    /// Makes the tree a level taller: moves the root node to a fresh page of
+    /// its kind, from `new_leaf_page` or `new_internal_page`, and makes the
+    /// root an internal node with that node as its only child, at the tree's
+    /// shared prefix length (D50), as the old one had, on both borders.
+    /// Returns the page's new handle.
+    pub(in crate::tree) fn raise(
+        self,
+        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
+        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
+    ) -> Self {
+        let child = self.move_node_out(new_leaf_page, new_internal_page);
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.
@@ -206,58 +222,40 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         let root = Internal::at(node);
         root.put_only_child(child);
         root.set_empty_prefix_len(self.shared_prefix().len());
-        (Self::of_node(Node::Internal(root)), child)
+        Self { node }
     }
 
     /// Makes the tree a level shorter: moves the root's only child up into
     /// the root page, and returns the page's new handle and the child's
-    /// emptied page. The inverse of
-    /// [`Self::raise`]: the child, on both borders, has the tree's shared
-    /// prefix length already.
+    /// emptied page. The inverse of [`Self::raise`]: the child, on both
+    /// borders, has the tree's shared prefix length already.
     ///
     /// # Panics
     ///
     /// If the root is a leaf; and in debug builds, if it holds separators,
     /// which would be leaked with the other children. Nothing changes then.
-    pub(crate) fn lower(self) -> (Self, PageByType<K, V, S>) {
+    pub(in crate::tree) fn lower(self) -> (Self, PageByType<K, V, S>) {
         let Node::Internal(root) = self.node() else {
             panic!("lowering a leaf root");
         };
         debug_assert_eq!(root.len(), 0, "lowering a root with separators");
-        let child = root.child(0);
-        let page = self.node.page();
-        // SAFETY: the root holds nothing but its edge to `child`, which it
-        // owned (invariant 2): overwriting it leaks nothing. `child`'s
-        // contents move up whole, of its kind, which fits in the root page,
-        // and its page holds nothing afterwards: nothing pointed to it but
-        // the root's edge.
-        let (moved, emptied) = unsafe {
-            match child {
-                Node::Leaf(leaf) => (
-                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(page),
-                    leaf.free().into(),
-                ),
-                Node::Internal(internal) => (
-                    internal.node_ptr().move_node_to::<Internal<K, V, S>>(page),
-                    internal.free().into(),
-                ),
-            }
-        };
-        (Self { node: moved }, emptied)
+        // SAFETY: the root holds nothing but its edge to its only child,
+        // which it owned (invariant 2): overwriting it leaks nothing, and
+        // nothing pointed to the child's page but that edge.
+        let (node, emptied) = unsafe { Self::move_in(self.node.page(), root.child(0)) };
+        (Self { node }, emptied)
     }
 
-    /// Moves the root node to `page`, a fresh page of its kind, `Kind`, for
-    /// another tree to hang under an edge (`tree/join.rs`), and returns it
-    /// there, with this page, which holds nothing anymore.
-    ///
-    /// # Panics
-    ///
-    /// If the root node is not of kind `Kind`; nothing changes then.
-    pub(crate) fn into_node<Kind: NodeKind>(
+    /// Moves the root node to a fresh page of its kind, from `new_leaf_page`
+    /// or `new_internal_page`, for another tree to hang under an edge
+    /// (`tree/join.rs`), and returns it there, with this page, which holds
+    /// nothing anymore.
+    pub(in crate::tree) fn into_node(
         self,
-        page: FreshPage<Kind>,
+        new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
+        new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
     ) -> (Node<K, V, S>, FreshPage<Self>) {
-        let top = self.move_node_to(page);
+        let top = self.move_node_out(new_leaf_page, new_internal_page);
         // SAFETY: the root node's contents moved to `top`, and the root area
         // holds nothing to drop; the caller gives up the page with `self`.
         (top, unsafe { self.free() })
@@ -270,7 +268,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// Every key, value and edge of the root node has been moved out,
     /// dropped or freed, or deliberately leaked, and nothing uses the page,
     /// through this handle or a copy, again.
-    pub(crate) unsafe fn free(self) -> FreshPage<Self> {
+    pub(in crate::tree) unsafe fn free(self) -> FreshPage<Self> {
         // SAFETY: the page was allocated as a root page (`new`, `from_node`),
         // and the caller hands over everything in it and every use of it.
         unsafe { self.node.into_fresh_page() }

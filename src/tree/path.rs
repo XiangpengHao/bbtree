@@ -44,6 +44,7 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
+use core::ops::Bound;
 
 use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
@@ -51,6 +52,7 @@ use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageByType};
 use super::root::Tree;
+use super::search::Found;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -58,7 +60,7 @@ use crate::inline_key::InlineKeyStrategy;
 /// at least 5 children (D13, D22), the root at least 2, and a leaf takes at
 /// least 1 KB (D15), so leaves one level deeper would take at least 2·5^23
 /// KB, more than 2^64 bytes.
-pub(crate) const MAX_DEPTH: usize = 23;
+pub(in crate::tree) const MAX_DEPTH: usize = 23;
 
 /// Borrow type of a [`Path`]: shared access for `'a` to the tree, like
 /// `&'a`.
@@ -70,7 +72,7 @@ pub(crate) struct Immut<'a>(PhantomData<&'a ()>);
 /// Like `&mut`, it is invariant in `K` and `V`: a path that could claim
 /// shorter-lived keys or values could store them into a tree that outlives
 /// them.
-pub(crate) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
+pub(in crate::tree) struct Mut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 
 /// Borrow type of a [`Path`]: access for `'a` to the tree by a walk that
 /// hands out each value as `&'a mut V` at most once, while keys and
@@ -94,7 +96,7 @@ pub(crate) struct ValMut<'a, K, V>(PhantomData<&'a mut (K, V)>);
 /// freeing a node are unsafe, and the walk vouches that it does each once.
 ///
 /// It owns `K` and `V`, and is covariant in them, as an owned tree is.
-pub(crate) struct Dying<K, V>(PhantomData<(K, V)>);
+pub(in crate::tree) struct Dying<K, V>(PhantomData<(K, V)>);
 
 /// A borrow type whose paths may be copied, because nothing they do
 /// changes the tree's structure: [`Immut`], [`ValMut`] and [`Dying`].
@@ -133,6 +135,19 @@ impl NodeEnd for LastEdge {
     const IS_LAST: bool = true;
 }
 
+impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// The leaf at this node's `End` border: down its first or last edges.
+    pub(in crate::tree) fn border_leaf<End: NodeEnd>(self) -> Leaf<K, V, S> {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => return leaf,
+                Node::Internal(internal) => node = internal.child(End::edge(node)),
+            }
+        }
+    }
+}
+
 /// A path from a tree's root down to a position in one of its nodes, with
 /// the access to the whole tree that borrow type `B` says; or a detached
 /// path, which reaches no node until it is attached to a root.
@@ -146,7 +161,7 @@ impl NodeEnd for LastEdge {
 /// the position the path ends at in the bottom node, an edge or a key,
 /// which every use checks against the node's length. A node holds at most
 /// 1023 keys (`tree/node/layout.rs`), so every index fits in a `u16`.
-pub(crate) struct Path<B, K, V, S> {
+pub(in crate::tree) struct Path<B, K, V, S> {
     nodes: [MaybeUninit<NodePtr<K, V, S>>; MAX_DEPTH + 1],
     indexes: [MaybeUninit<u16>; MAX_DEPTH + 1],
     levels: u8,
@@ -198,7 +213,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// levels, where it is made: a struct literal, not a constant, which
     /// would be copied in whole.
     #[inline(always)]
-    pub(crate) fn detached() -> Self {
+    pub(in crate::tree) fn detached() -> Self {
         Self {
             nodes: [const { MaybeUninit::uninit() }; MAX_DEPTH + 1],
             indexes: [const { MaybeUninit::uninit() }; MAX_DEPTH + 1],
@@ -211,7 +226,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     ///
     /// `root` is the root of a well-formed tree, to which the path has the
     /// access `B` says for as long as it lives.
-    pub(crate) fn attach(&mut self, root: Node<K, V, S>) {
+    pub(in crate::tree) fn attach(&mut self, root: Node<K, V, S>) {
         self.write_level(0, root.node_ptr(), 0);
         self.levels = 1;
     }
@@ -231,17 +246,17 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// How far below the root the node the path ends at is: 0 at the root.
     /// A detached path ends at no node: its depth is past every slot, which
     /// each use of it checks, as it checks any depth.
-    pub(crate) fn depth(&self) -> usize {
+    pub(in crate::tree) fn depth(&self) -> usize {
         usize::from(self.levels).wrapping_sub(1)
     }
 
     /// Whether the path ends at the root.
-    pub(crate) fn is_at_root(&self) -> bool {
+    pub(in crate::tree) fn is_at_root(&self) -> bool {
         self.levels == 1
     }
 
     /// Whether the path reaches a node: it was attached to a root.
-    pub(crate) fn is_attached(&self) -> bool {
+    pub(in crate::tree) fn is_attached(&self) -> bool {
         self.levels > 0
     }
 
@@ -261,7 +276,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
 
     /// The node at `depth`, which must be on the path: internal above the
     /// bottom, which debug builds check.
-    pub(crate) fn node_at(&self, depth: usize) -> Node<K, V, S> {
+    pub(in crate::tree) fn node_at(&self, depth: usize) -> Node<K, V, S> {
         let node = Node::at(self.node_ptr(depth));
         debug_assert!(
             depth == self.depth() || matches!(node, Node::Internal(_)),
@@ -276,7 +291,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If `depth` is not on the path.
-    pub(crate) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
+    pub(in crate::tree) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
         Internal::at(self.node_ptr(depth))
     }
 
@@ -285,7 +300,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If the path is detached.
-    pub(crate) fn ends_at_leaf(&self) -> bool {
+    pub(in crate::tree) fn ends_at_leaf(&self) -> bool {
         self.node_ptr(self.depth()).is_leaf()
     }
 
@@ -297,7 +312,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// The path is attached and ends at an edge of a leaf: at an index no
     /// greater than the leaf's length.
     #[inline(always)]
-    pub(crate) unsafe fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
+    pub(in crate::tree) unsafe fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
         debug_assert!(self.ends_at_leaf(), "the path ends at no leaf");
         let bottom = usize::from(self.levels) - 1;
         // SAFETY: the bottom level is on the path and initialized (caller
@@ -316,7 +331,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If `depth` is not on the path.
-    pub(crate) fn index_at(&self, depth: usize) -> usize {
+    pub(in crate::tree) fn index_at(&self, depth: usize) -> usize {
         assert!(self.is_on_path(depth), "depth {depth} is not on the path");
         // SAFETY: the levels on the path are in the array and initialized
         // (type invariant).
@@ -328,7 +343,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If the path is detached.
-    pub(crate) fn index(&self) -> usize {
+    pub(in crate::tree) fn index(&self) -> usize {
         self.index_at(self.depth())
     }
 
@@ -338,7 +353,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If the path is detached.
-    pub(crate) fn set_index(&mut self, index: usize) {
+    pub(in crate::tree) fn set_index(&mut self, index: usize) {
         self.write_index(self.depth(), index);
     }
 
@@ -349,7 +364,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     ///
     /// The path is attached and ends at a leaf.
     #[inline(always)]
-    pub(crate) unsafe fn set_leaf_index(&mut self, index: usize) {
+    pub(in crate::tree) unsafe fn set_leaf_index(&mut self, index: usize) {
         debug_assert!(self.ends_at_leaf(), "the path ends at no leaf");
         debug_assert!(index <= u16::MAX.into());
         let bottom = usize::from(self.levels) - 1;
@@ -364,59 +379,31 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// At the root.
-    pub(crate) fn ascend(&mut self) -> Internal<K, V, S> {
+    pub(in crate::tree) fn ascend(&mut self) -> Internal<K, V, S> {
         assert!(self.levels > 1, "ascending from the root");
         self.levels -= 1;
         self.internal_at(usize::from(self.levels) - 1)
     }
 
-    /// Whether `self` and `other`, paths in the same tree, end at the same
-    /// position of the same node. A range checks that both ends have
-    /// started before calling this on each step.
-    ///
-    /// # Safety
-    ///
-    /// Both paths are attached.
-    pub(crate) unsafe fn is_at(&self, other: &Self) -> bool {
-        debug_assert!(
-            self.is_attached() && other.is_attached(),
-            "comparing a detached path"
-        );
-        let bottom = usize::from(self.levels) - 1;
-        // SAFETY: both paths are attached (caller), so their bottom levels
-        // are on the path and initialized (type invariant); `bottom` is
-        // `other`'s too once the first comparison holds.
-        self.levels == other.levels
-            && unsafe {
-                self.indexes[bottom].assume_init() == other.indexes[bottom].assume_init()
-                    && self.nodes[bottom]
-                        .assume_init()
-                        .is(other.nodes[bottom].assume_init())
-            }
+    /// Whether `self` and `other`, paths in the same tree, are attached and
+    /// end at the same position of the same node.
+    pub(in crate::tree) fn is_at(&self, other: &Self) -> bool {
+        self.is_attached()
+            && self.levels == other.levels
+            && self.index() == other.index()
+            && self
+                .node_ptr(self.depth())
+                .is(other.node_ptr(other.depth()))
     }
 
     /// How the position `self` ends at compares with `other`'s, in the same
     /// tree, both at the leaves: in key order, by the indexes from the root
     /// down.
-    pub(crate) fn cmp_position(&self, other: &Self) -> Ordering {
+    pub(in crate::tree) fn cmp_position(&self, other: &Self) -> Ordering {
         debug_assert!(self.ends_at_leaf() && other.ends_at_leaf());
         let own = (0..=self.depth()).map(|depth| self.index_at(depth));
         let others = (0..=other.depth()).map(|depth| other.index_at(depth));
         own.cmp(others)
-    }
-
-    /// The same path, with the access `B2` to the tree.
-    ///
-    /// # Safety
-    ///
-    /// The path has access `B2` to the tree for as long as the result lives.
-    unsafe fn with_borrow<B2>(&self) -> Path<B2, K, V, S> {
-        Path {
-            nodes: self.nodes,
-            indexes: self.indexes,
-            levels: self.levels,
-            _borrow: PhantomData,
-        }
     }
 }
 
@@ -427,7 +414,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If the bottom node is a leaf, or has no such edge.
-    pub(crate) fn descend(&mut self) {
+    pub(in crate::tree) fn descend(&mut self) {
         let depth = self.depth();
         let Node::Internal(internal) = self.node_at(depth) else {
             panic!("descending from a leaf");
@@ -447,7 +434,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If the bottom node has no such edge.
-    pub(crate) fn descend_to_leaf<End: NodeEnd>(&mut self) {
+    pub(in crate::tree) fn descend_to_leaf<End: NodeEnd>(&mut self) {
         let mut depth = self.depth();
         let mut edge = self.index();
         let mut node = self.node_at(depth);
@@ -460,22 +447,26 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         self.levels = depth as u8 + 1;
     }
 
+    /// Goes down from the bottom node to its `End` end: its first or last
+    /// edge, then the `End` edges of the nodes below it, to a leaf.
+    pub(in crate::tree) fn descend_to_end<End: NodeEnd>(&mut self) {
+        self.set_index(End::edge(self.node_at(self.depth())));
+        self.descend_to_leaf::<End>();
+    }
+
     /// Goes down from the bottom node to the first key under it, at the
     /// start of its leftmost leaf; returns `false`, ending at that leaf's
     /// edge, if the leaf has no key, which only an empty tree's root has.
-    pub(crate) fn descend_to_first_key(&mut self) -> bool {
-        self.set_index(0);
-        self.descend_to_leaf::<FirstEdge>();
+    pub(in crate::tree) fn descend_to_first_key(&mut self) -> bool {
+        self.descend_to_end::<FirstEdge>();
         self.node_at(self.depth()).len() > 0
     }
 
     /// Goes down from the bottom node to the last key under it, at the end
     /// of its rightmost leaf; returns `false`, ending at that leaf's edge, if
     /// the leaf has no key, which only an empty tree's root has.
-    pub(crate) fn descend_to_last_key(&mut self) -> bool {
-        let last_edge = self.node_at(self.depth()).len();
-        self.set_index(last_edge);
-        self.descend_to_leaf::<LastEdge>();
+    pub(in crate::tree) fn descend_to_last_key(&mut self) -> bool {
+        self.descend_to_end::<LastEdge>();
         match self.index().checked_sub(1) {
             Some(last_key) => {
                 self.set_index(last_key);
@@ -497,21 +488,22 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// kind is decided once, and each internal node's children's, as the
     /// way down reads an edge; the loop runs over internal nodes only, and
     /// the leaf's search follows it.
-    pub(crate) fn search<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, shared: &SharedPrefix) -> bool
+    pub(in crate::tree) fn search<Q>(
+        &mut self,
+        key: &SearchKey<'_, K, S, Q>,
+        shared: &SharedPrefix,
+    ) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         match shared.place_outside(key) {
             Some(Ordering::Less) => {
-                self.set_index(0);
-                self.descend_to_leaf::<FirstEdge>();
+                self.descend_to_end::<FirstEdge>();
                 return false;
             }
             Some(Ordering::Greater) => {
-                let len = self.node_at(self.depth()).len();
-                self.set_index(len);
-                self.descend_to_leaf::<LastEdge>();
+                self.descend_to_end::<LastEdge>();
                 return false;
             }
             Some(Ordering::Equal) | None => {}
@@ -552,7 +544,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// after `key`, or, if no entry has that key, where it would be. A
     /// separator stands between the end of the leaf left of it and the start
     /// of the leaf right of it (D17).
-    pub(crate) fn search_to_edge<Q>(
+    pub(in crate::tree) fn search_to_edge<Q>(
         &mut self,
         key: &SearchKey<'_, K, S, Q>,
         side: KeySide,
@@ -564,14 +556,10 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         if !self.search(key, shared) {
             return;
         }
-        let index = self.index();
         match side {
-            KeySide::Before => {
-                self.set_index(index);
-                self.descend_to_leaf::<LastEdge>();
-            }
+            KeySide::Before => self.descend_to_leaf::<LastEdge>(),
             KeySide::After => {
-                self.set_index(index + 1);
+                self.set_index(self.index() + 1);
                 self.descend_to_leaf::<FirstEdge>();
             }
         }
@@ -587,37 +575,45 @@ pub(crate) enum KeySide {
     After,
 }
 
-impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Path<Immut<'a>, K, V, S> {
-    /// The key the path ends at and its value: beside it in a leaf, or for
-    /// a separator, the head of the leftmost leaf right of it (D17).
-    ///
-    /// # Panics
-    ///
-    /// If the path ends at no key.
-    pub(crate) fn key_value(&self) -> (&'a K, &'a V) {
-        let index = self.index();
-        match self.node_at(self.depth()) {
-            Node::Leaf(leaf) => leaf.key_value(index),
-            Node::Internal(internal) => (
-                internal.separator_key(index),
-                internal.head_leaf(index).head_value(),
-            ),
+impl KeySide {
+    /// Where a range starting at `start` starts: before an included key,
+    /// after an excluded one; `None` if it starts at the tree's start.
+    pub(crate) fn of_start<Q: ?Sized>(start: Bound<&Q>) -> Option<(&Q, Self)> {
+        match start {
+            Bound::Included(key) => Some((key, Self::Before)),
+            Bound::Excluded(key) => Some((key, Self::After)),
+            Bound::Unbounded => None,
+        }
+    }
+
+    /// Where a range ending at `end` ends: after an included key, before an
+    /// excluded one; `None` if it ends at the tree's end.
+    pub(crate) fn of_end<Q: ?Sized>(end: Bound<&Q>) -> Option<(&Q, Self)> {
+        match end {
+            Bound::Included(key) => Some((key, Self::After)),
+            Bound::Excluded(key) => Some((key, Self::Before)),
+            Bound::Unbounded => None,
         }
     }
 }
 
 impl<B: CopyableBorrow, K, V, S> Path<B, K, V, S> {
     /// The same path, with shared access for as long as `self` is borrowed.
-    pub(crate) fn reborrow(&self) -> Path<Immut<'_>, K, V, S> {
-        // SAFETY: a copyable borrow gives at least shared access to the
-        // structure and keys, and `&self` keeps the tree unchanged meanwhile.
-        // Reading a value through it is sound only for values not handed out
-        // as `&mut`, which the walks see to.
-        unsafe { self.with_borrow() }
+    pub(in crate::tree) fn reborrow(&self) -> Path<Immut<'_>, K, V, S> {
+        // A copyable borrow gives at least shared access to the structure
+        // and keys, and `&self` keeps the tree unchanged meanwhile. Reading
+        // a value through it is sound only for values not handed out as
+        // `&mut`, which the walks see to.
+        Path {
+            nodes: self.nodes,
+            indexes: self.indexes,
+            levels: self.levels,
+            _borrow: PhantomData,
+        }
     }
 }
 
-/// An exclusive path, from `root` down: what an entry keeps, and what
+/// An exclusive path, from the root down: what an entry keeps, and what
 /// inserts and removals go back up. It changes the nodes below the root
 /// through the bottom node, and the root only through
 /// [`Self::ascend_raising`] and [`Self::detach_lowering_an_empty_root`].
@@ -630,7 +626,7 @@ pub(crate) struct PathMut<'a, K, V, S> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
-    /// A detached path down the tree of `root`, for one of the methods that
+    /// A detached path down `tree`, for one of the methods that
     /// start it. It ends the owner's permission to append to its remembered
     /// leaf, which the path may change.
     #[inline(always)]
@@ -642,8 +638,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         }
     }
 
-    /// The root the path goes down from, shared.
-    pub(crate) fn tree(&self) -> &Tree<K, V, S> {
+    /// The tree the path goes down, shared.
+    pub(in crate::tree) fn tree(&self) -> &Tree<K, V, S> {
         self.tree
     }
 
@@ -658,20 +654,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// proves the new entry is physically last. This consumes the path:
     /// entry handles that keep their path may still remove or merge nodes,
     /// so they must never remember the leaf while retaining mutation access.
-    /// No ordinary fitting search needs to track ancestors for this proof.
-    pub(crate) fn finish_insertion(self) {
-        if !self.path.ends_at_leaf() {
-            return;
-        }
+    pub(in crate::tree) fn finish_insertion(self) {
         let leaf = self.leaf();
-        if leaf.len() == 0 || self.path.index() != leaf.len() - 1 {
+        let last_edges = (0..self.path.depth())
+            .all(|depth| self.path.index_at(depth) == self.path.internal_at(depth).len());
+        if self.path.index() + 1 != leaf.len() || !last_edges {
             return;
-        }
-        for depth in 0..self.path.depth() {
-            let node = self.path.internal_at(depth);
-            if self.path.index_at(depth) != node.len() {
-                return;
-            }
         }
         // SAFETY: every ancestor takes its final edge, so this is the
         // physically last leaf. `self` is consumed and lends no handles;
@@ -700,7 +688,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// Starts the path at the root and goes down to the leaf edge beside
     /// `key`; see [`Path::search_to_edge`].
-    pub(crate) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
+    pub(in crate::tree) fn search_to_edge<Q>(&mut self, key: &SearchKey<'_, K, S, Q>, side: KeySide)
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -725,32 +713,32 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     }
 
     /// See [`Path::depth`].
-    pub(crate) fn depth(&self) -> usize {
+    pub(in crate::tree) fn depth(&self) -> usize {
         self.path.depth()
     }
 
     /// See [`Path::is_at_root`].
-    pub(crate) fn is_at_root(&self) -> bool {
+    pub(in crate::tree) fn is_at_root(&self) -> bool {
         self.path.is_at_root()
     }
 
     /// See [`Path::ends_at_leaf`].
-    pub(crate) fn ends_at_leaf(&self) -> bool {
+    pub(in crate::tree) fn ends_at_leaf(&self) -> bool {
         self.path.ends_at_leaf()
     }
 
     /// See [`Path::index`].
-    pub(crate) fn index(&self) -> usize {
+    pub(in crate::tree) fn index(&self) -> usize {
         self.path.index()
     }
 
     /// See [`Path::set_index`].
-    pub(crate) fn set_index(&mut self, index: usize) {
+    pub(in crate::tree) fn set_index(&mut self, index: usize) {
         self.path.set_index(index);
     }
 
     /// See [`Path::ascend`].
-    pub(crate) fn ascend(&mut self) -> Internal<K, V, S> {
+    pub(in crate::tree) fn ascend(&mut self) -> Internal<K, V, S> {
         self.path.ascend()
     }
 
@@ -759,7 +747,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// ([`Tree::raise`]): the root node moves to a page from `new_leaf_page`
     /// or `new_internal_page`, by its kind, under the root, now internal
     /// with no keys, which the path then ends at, at its only edge.
-    pub(crate) fn ascend_raising(
+    pub(in crate::tree) fn ascend_raising(
         &mut self,
         new_leaf_page: impl FnOnce() -> FreshPage<Leaf<K, V, S>>,
         new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
@@ -773,13 +761,18 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     }
 
     /// See [`Path::descend`].
-    pub(crate) fn descend(&mut self) {
+    pub(in crate::tree) fn descend(&mut self) {
         self.path.descend();
     }
 
     /// See [`Path::descend_to_leaf`].
-    pub(crate) fn descend_to_leaf<End: NodeEnd>(&mut self) {
+    pub(in crate::tree) fn descend_to_leaf<End: NodeEnd>(&mut self) {
         self.path.descend_to_leaf::<End>();
+    }
+
+    /// See [`Path::descend_to_end`].
+    pub(in crate::tree) fn descend_to_end<End: NodeEnd>(&mut self) {
+        self.path.descend_to_end::<End>();
     }
 
     /// The bottom node's bounds, low and high: the keys just left and just
@@ -800,7 +793,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     }
 
     /// The bottom node. Changing it leaves the path leading to it.
-    pub(crate) fn node(&self) -> Node<K, V, S> {
+    pub(in crate::tree) fn node(&self) -> Node<K, V, S> {
         self.path.node_at(self.path.depth())
     }
 
@@ -820,13 +813,18 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         self.path.index_at(depth)
     }
 
+    /// See [`Path::internal_at`].
+    pub(super) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
+        self.path.internal_at(depth)
+    }
+
     /// The bottom node, a leaf, as where a search or a descent to a leaf
     /// ended.
     ///
     /// # Panics
     ///
     /// If the bottom node is internal.
-    pub(crate) fn leaf(&self) -> Leaf<K, V, S> {
+    pub(in crate::tree) fn leaf(&self) -> Leaf<K, V, S> {
         match self.node() {
             Node::Leaf(leaf) => leaf,
             Node::Internal(_) => panic!("the bottom node is internal"),
@@ -839,7 +837,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// # Panics
     ///
     /// If the bottom node is a leaf.
-    pub(crate) fn internal(&self) -> Internal<K, V, S> {
+    pub(in crate::tree) fn internal(&self) -> Internal<K, V, S> {
         match self.node() {
             Node::Internal(internal) => internal,
             Node::Leaf(_) => panic!("the bottom node is a leaf"),
@@ -850,7 +848,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// tree, if merges left the root internal and without keys, moving the
     /// root's only child up into the root ([`Tree::lower`]), and handing the
     /// child's page to `release`.
-    pub(crate) fn detach_lowering_an_empty_root(
+    pub(in crate::tree) fn detach_lowering_an_empty_root(
         &mut self,
         release: &mut impl FnMut(PageByType<K, V, S>),
     ) {
@@ -882,11 +880,26 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// If the path ends at no key.
     pub(crate) fn replace_key(&mut self, key: K) -> K {
         let index = self.index();
+        match self.node() {
+            Node::Leaf(leaf) => leaf.replace_key(index, WindowedKey::new(key, leaf.prefix_len())),
+            Node::Internal(internal) => {
+                internal.replace_key(index, WindowedKey::new(key, internal.prefix_len()))
+            }
+        }
+    }
+
+    /// The key the path ends at, as a search finds it.
+    ///
+    /// # Panics
+    ///
+    /// If the path ends at no key.
+    fn found(&self) -> Found<K, V, S> {
+        let index = self.index();
         let node = self.node();
-        let key = WindowedKey::new(key, node.prefix_len());
+        assert!(index < node.len(), "the path ends at no key");
         match node {
-            Node::Leaf(leaf) => leaf.replace_key(index, key),
-            Node::Internal(internal) => internal.replace_key(index, key),
+            Node::Leaf(leaf) => Found::InLeaf(leaf, index),
+            Node::Internal(internal) => Found::Separator(internal, index),
         }
     }
 
@@ -897,30 +910,18 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     ///
     /// If the path ends at no key.
     pub(crate) fn value(&self) -> &V {
-        let index = self.index();
-        match self.node() {
-            Node::Leaf(leaf) => leaf.key_value(index).1,
-            Node::Internal(internal) => internal.head_leaf(index).head_value(),
-        }
+        self.found().key_value().1
     }
 
     /// The value of the key the path ends at, exclusive; see
     /// [`Self::value`].
     pub(crate) fn value_mut(&mut self) -> &mut V {
-        let index = self.index();
-        match self.node() {
-            Node::Leaf(leaf) => leaf.value_mut(index),
-            Node::Internal(internal) => internal.head_leaf(index).head_value_mut(),
-        }
+        self.found().value_mut()
     }
 
     /// The value of the key the path ends at, exclusive for the rest of
     /// `'a`, giving up the path; see [`Self::value`].
     pub(crate) fn into_value_mut(self) -> &'a mut V {
-        let index = self.index();
-        match self.node() {
-            Node::Leaf(leaf) => leaf.value_mut(index),
-            Node::Internal(internal) => internal.head_leaf(index).head_value_mut(),
-        }
+        self.found().value_mut()
     }
 }

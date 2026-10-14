@@ -44,42 +44,46 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         }
     }
 
-    pub(crate) fn parent(&self) -> Internal<K, V, S> {
+    pub(in crate::tree) fn parent(&self) -> Internal<K, V, S> {
         self.parent
     }
 
     /// The separator's index in the parent.
-    pub(crate) fn index(&self) -> usize {
+    pub(in crate::tree) fn index(&self) -> usize {
         self.index
     }
 
-    pub(crate) fn left(&self) -> C {
+    pub(in crate::tree) fn left(&self) -> C {
         self.left
     }
 
-    pub(crate) fn right(&self) -> C {
+    pub(in crate::tree) fn right(&self) -> C {
         self.right
     }
 
-    pub(crate) fn left_len(&self) -> usize {
+    pub(in crate::tree) fn left_len(&self) -> usize {
         self.left.len()
     }
 
-    pub(crate) fn right_len(&self) -> usize {
+    pub(in crate::tree) fn right_len(&self) -> usize {
         self.right.len()
     }
 
     /// The merge decision: whether both children and the parent's separator
     /// fit in one node.
-    pub(crate) fn can_merge(&self) -> bool {
+    pub(in crate::tree) fn can_merge(&self) -> bool {
         self.left.len() + 1 + self.right.len() <= C::capacity()
     }
 
     /// Moves the parent's separator and all of the right child into the left
     /// child, and removes the separator and the edge to the right child from
     /// the parent, whose edge `index` leads to the merged child afterwards.
-    /// Returns the right child's emptied page. The children fit in one node
-    /// with the separator ([`Self::can_merge`]), which debug builds check.
+    /// Returns the right child's emptied page.
+    ///
+    /// # Panics
+    ///
+    /// If the children don't fit in one node with the separator
+    /// ([`Self::can_merge`]); nothing changes then.
     ///
     /// Between leaves, the separator rejoins its value, the right child's
     /// head, as an ordinary entry, and the left child keeps its own head, if
@@ -91,14 +95,17 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// move back to it, filled from the separator's, a fence of both, reading
     /// no key. Fitting the merged child's prefix to its fences, which reads
     /// keys, is the caller's business, as for [`Self::steal_left`].
-    pub(crate) fn merge(self) -> PageByType<K, V, S> {
-        debug_assert!(self.can_merge());
+    pub(in crate::tree) fn merge(self) -> PageByType<K, V, S> {
+        assert!(
+            self.can_merge(),
+            "the children don't fit in one node with their separator"
+        );
         let fill = self.parent.window(self.index);
         let (separator, _) = self.parent.remove_with_right_child(self.index);
         self.left.move_prefix_back_to(fill);
         self.right.move_prefix_back_to(fill);
-        // SAFETY: both children and the separator fit in one node (the
-        // caller). The right child is another node of kind `C`, at the left
+        // SAFETY: both children and the separator fit in one node (checked
+        // just above). The right child is another node of kind `C`, at the left
         // one's depth, in the same map, with its trailing slot 0 initialized
         // (type invariant); its edge is gone from the parent, so nothing
         // reaches its page but to free it, with nothing left in it. The
@@ -128,7 +135,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// both children, reading no key. Fitting both children's prefixes to
     /// their new fences, which reads keys, is the caller's business, once
     /// its operation is done (`tree/prefix.rs`).
-    pub(crate) fn steal_left(&mut self) -> Result<(), StealError> {
+    pub(in crate::tree) fn steal_left(&mut self) -> Result<(), StealError> {
         if self.left.len() == 0 {
             return Err(StealError::DonorEmpty);
         }
@@ -146,8 +153,8 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
 
     /// Rotates one entry leftwards: the right child's first key goes up into
     /// the parent, and the parent's separator comes down to the end of the
-    /// left child, each with its inline key; the right child's first
-    /// trailing slot becomes the left child's last ([`Child::steal_right_unchecked`]).
+    /// left child, each with its inline key; the right child's first trailing
+    /// slot becomes the left child's last ([`Child::steal_right_unchecked`]).
     /// The left child takes the parent's prefix length, as in
     /// [`Self::steal_left`].
     ///
@@ -156,7 +163,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// that went up becomes the head (D17), with that key where separator
     /// keys are heads (D49). Between internal children, the right child's
     /// first edge becomes the left child's last.
-    pub(crate) fn steal_right(&mut self) -> Result<(), StealError> {
+    pub(in crate::tree) fn steal_right(&mut self) -> Result<(), StealError> {
         if self.right.len() == 0 {
             return Err(StealError::DonorEmpty);
         }

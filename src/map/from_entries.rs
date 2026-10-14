@@ -23,7 +23,7 @@ use crate::tree::build::TreeBuilder;
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
     /// of equal keys is kept; the others are dropped in order.
-    fn from_sorted_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
+    fn from_sorted_keeping_last(entries: impl Iterator<Item = (K, V)>) -> Self {
         Self::from_ascending_entries(LastOfEqualKeys {
             entries: entries.peekable(),
         })
@@ -67,7 +67,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for BBTreeMap<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut entries: Vec<(K, V)> = iter.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_entries(entries.into_iter())
+        Self::from_sorted_keeping_last(entries.into_iter())
     }
 }
 
@@ -86,7 +86,7 @@ impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BBTreeMap<K, V> {
     /// ```
     fn from(mut entries: [(K, V); N]) -> Self {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_entries(entries.into_iter())
+        Self::from_sorted_keeping_last(entries.into_iter())
     }
 }
 

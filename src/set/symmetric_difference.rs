@@ -77,7 +77,7 @@ impl<T, S> Clone for SymmetricDifference<'_, T, S> {
 }
 
 /// Prints as std's does: `SymmetricDifference(MergeIterInner(..))`.
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SymmetricDifference")
             .field(&self.sides.printed_as_merge_iter(self.held))

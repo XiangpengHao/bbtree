@@ -32,9 +32,9 @@
 //! bytes from the key while keys move (D43).
 //!
 //! Layouts (`layout.rs`), slots (`slots.rs`), searches (`leaf.rs`,
-//! `internal.rs`) and
-//! prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`) read the plan; none of
-//! them asks what the key type is.
+//! `internal.rs`) and prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`)
+//! read the plan, or the [`KeyInliner`] it is made from; none of them asks
+//! what the key type is.
 //!
 //! A plan is a pure function of `K`, `S` and the node kind, which folds to a
 //! constant after monomorphization. Code asks for it where it uses it, from
@@ -49,8 +49,10 @@ use core::cmp::Ordering;
 use core::mem;
 
 use super::inline_keys::KeyInliner;
-use super::page::{ByteString, NodeKind};
+use super::length_tags::LengthTags;
+use super::page::NodeKind;
 use super::slots::KeyList;
+use super::type_identity::ByteString;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
@@ -66,14 +68,14 @@ pub(in crate::tree) struct NodePlan<K> {
     /// so that a window it hands out, which may go into a leaf, is read from
     /// the key again (D43).
     rehydrates_windows: bool,
-    /// Whether the node stores each key's length, whose 2-byte tags filter a
+    /// Whether the node stores each key's length, whose 2-byte tags filter an
     /// exact-key lookup's candidates (D36).
     length_tags: bool,
     /// The search over the candidates: the keys whose inline keys equal the
     /// search key's.
     candidate_search: KeySearch,
-    /// Whether an exact-key lookup confirms its one candidate by comparing all of
-    /// its bytes at once, rather than those past the tie (D38).
+    /// Whether an exact-key lookup confirms its one candidate by comparing
+    /// all of its bytes at once, rather than those past the tie (D38).
     whole_key_equality: bool,
 }
 
@@ -86,7 +88,10 @@ impl<K> Clone for NodePlan<K> {
 impl<K> Copy for NodePlan<K> {}
 
 impl<K> NodePlan<K> {
-    /// The plan of the nodes of kind `Kind` in a map with strategy `S`.
+    /// The plan of the nodes of kind `Kind` in a map with strategy `S`. A
+    /// pure function of `K`, `S` and `Kind` that folds to a constant: every
+    /// page of a map and kind gets the same answer, so accesses match its
+    /// allocation layout.
     #[inline(always)]
     pub(in crate::tree) fn of<S: InlineKeyStrategy<K>, Kind: NodeKind>() -> Self {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
@@ -203,7 +208,7 @@ impl<K> NodePlan<K> {
             let byte_string = self
                 .byte_string()
                 .expect("only std byte strings have length tags");
-            byte_string.bytes(key).len() as u16
+            LengthTags::tag_of(byte_string.bytes(key).len())
         })
     }
 
@@ -232,23 +237,22 @@ impl<K> NodePlan<K> {
         self.candidate_search
     }
 
-    /// Whether an exact-key lookup confirms its one candidate by comparing all of
-    /// its bytes at once (D38).
+    /// Whether an exact-key lookup confirms its one candidate by comparing
+    /// all of its bytes at once (D38).
     #[inline(always)]
     pub(super) fn has_whole_key_equality(self) -> bool {
         self.whole_key_equality
     }
 
-    /// Whether every search inlines its node search (`leaf.rs`,
-    /// `internal.rs`), or
-    /// leaves that to LLVM at each caller, as for std heap byte strings.
-    /// Other keys' node searches are short, and LLVM, weighing the local
-    /// prefix branch, outlined some, each level then returning through the
-    /// stack: 10M `[u8; 32]` lookups ran 442 instructions each instead of
-    /// 271. A heap byte string's reads keys past the node, so a call costs
-    /// little beside it, and inlined into every lookup it made the lookup
-    /// twice the code, with its state on the stack: the benchmark's
-    /// `String` lookups ran 449 instructions instead of 433.
+    /// Whether every lookup's node search is inlined (`leaf.rs`,
+    /// `internal.rs`), or left to LLVM at each caller, as for std heap byte
+    /// strings; an insert's leaf search is always inlined. Other keys' node
+    /// searches are short, and LLVM outlined some, each level then returning
+    /// through the stack: 10M `[u8; 32]` lookups ran 442 instructions each
+    /// instead of 271. A heap byte string's search reads keys past the node,
+    /// so a call costs little beside it, and inlined into every lookup it
+    /// made the lookup twice the code, with its state on the stack: the
+    /// benchmark's `String` lookups ran 449 instructions instead of 433.
     #[inline(always)]
     pub(in crate::tree) fn inlines_node_search(self) -> bool {
         !self
@@ -304,9 +308,9 @@ impl KeySearch {
     /// on data already loaded, so a chain of conditional moves is cheapest.
     ///
     /// Everything else (`String`, `Vec`, `Box`, large arrays) uses the
-    /// early-exit search. Without specialization this is a heuristic: `&str` and
-    /// `&[u8]` keys also have no drop glue and fit in 16 bytes, so they take
-    /// the branchless path although their comparisons follow a pointer,
+    /// early-exit search. Without specialization this is a heuristic: `&str`
+    /// and `&[u8]` keys also have no drop glue and fit in 16 bytes, so they
+    /// take the branchless path although their comparisons follow a pointer,
     /// unless inline keys decide (D18).
     const fn for_key<K>() -> Self {
         if !mem::needs_drop::<K>() && mem::size_of::<K>() <= 16 {

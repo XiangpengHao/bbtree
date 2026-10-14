@@ -27,9 +27,10 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use super::layout::KeyArea;
+use super::length_tags::LengthTags;
 use super::node_plan::NodePlan;
-use super::page::{ByteString, InlineKeyNodeHeader, NodeKind, SameType, StdInteger};
+use super::page::{InlineKeyNodeHeader, NodeKind};
+use super::type_identity::{ByteString, SameType, StdInteger};
 use super::vector_count::VectorCount;
 use crate::inline_key::sealed::InlineKeySource;
 use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
@@ -38,7 +39,7 @@ use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
 const WINDOW_LEN: usize = size_of::<InlineWord>();
 
 /// How many bytes a search's check against what every key shares tests for
-/// equality at once ([`SearchBytes::cmp_span`]).
+/// equality at once ([`SearchBytes::cmp_shared`]).
 const SHARED_PREFIX_CHUNK_LEN: usize = 4 * WINDOW_LEN;
 
 /// How keys `K` get their inline keys under a map's strategy: the strategy's
@@ -111,78 +112,113 @@ impl<K> KeyInliner<K> {
     }
 
     /// How many leading bytes the encodings of `a` and `b` share, both
-    /// padded with zeros, compared a window at a time: a node bounded by
-    /// `a` and `b` may skip that many bytes of its keys (05-fence-key.md).
+    /// padded with zeros, compared a window at a time, under strategy `S`;
+    /// 0 for keys without inline keys: a node bounded by `a` and `b` may
+    /// skip that many bytes of its keys (05-fence-key.md).
     ///
     /// At most the longest prefix a node records: two different keys can
     /// have equal padded encodings (`"ab"` and `"ab\0"`, or a lossy
     /// [`InlineKey`] impl), and stopping short is always safe, as a shorter
-    /// prefix is.
-    pub(in crate::tree) fn common_prefix_len(self, a: &K, b: &K) -> usize {
+    /// prefix is. Byte strings stop comparing past the longer one's end,
+    /// where every window is zeros.
+    pub(in crate::tree) fn common_prefix_len<S: InlineKeyStrategy<K>>(a: &K, b: &K) -> usize {
         const MAX_LEN: usize = InlineKeyNodeHeader::MAX_PREFIX_LEN;
-        let mut offset = 0;
-        while offset < MAX_LEN {
-            let differing_bits = self.inline_key_at(a, offset) ^ self.inline_key_at(b, offset);
-            if differing_bits != 0 {
-                let shared_bytes = differing_bits.leading_zeros() as usize / 8;
-                return (offset + shared_bytes).min(MAX_LEN);
+        let difference = match Self::resolve::<S>() {
+            None => return 0,
+            Some(Self::ByteString(byte_string)) => {
+                let (a, b) = (byte_string.bytes(a), byte_string.bytes(b));
+                Self::first_difference(
+                    a.len().max(b.len()),
+                    |offset| a.inline_key_at(offset),
+                    |offset| b.inline_key_at(offset),
+                )
             }
-            offset += WINDOW_LEN;
-        }
-        MAX_LEN
+            Some(inliner) => Self::first_difference(
+                MAX_LEN,
+                |offset| inliner.inline_key_at(a, offset),
+                |offset| inliner.inline_key_at(b, offset),
+            ),
+        };
+        difference.map_or(MAX_LEN, |difference| difference.min(MAX_LEN))
     }
 
-    /// The prefix length of a node whose fences are `low` and `high`: what
-    /// they share, or if either is missing, along the tree's borders,
-    /// `shared_len`, what every key of the tree shares (D50).
-    pub(in crate::tree) fn fence_prefix_len(
-        self,
+    /// The prefix length of a node whose fences are `low` and `high`, under
+    /// strategy `S`: what they share, or if either is missing, along the
+    /// tree's borders, `shared_len`, what every key of the tree shares
+    /// (D50).
+    pub(in crate::tree) fn fence_prefix_len<S: InlineKeyStrategy<K>>(
         low: Option<&K>,
         high: Option<&K>,
         shared_len: usize,
     ) -> usize {
         match (low, high) {
-            (Some(low), Some(high)) => self.common_prefix_len(low, high),
+            (Some(low), Some(high)) => Self::common_prefix_len::<S>(low, high),
             _ => shared_len,
         }
     }
 
     /// How many leading bytes `key`'s encoding shares with `shared`, at
-    /// most `shared.len()`: for a byte string, by its bytes, so that a key
-    /// is at least as long as what it shares; otherwise by windows, padded
-    /// with zeros.
-    pub(in crate::tree) fn common_prefix_len_with_bytes(self, key: &K, shared: &[u8]) -> usize {
-        if let Self::ByteString(byte_string) = self {
-            let bytes = byte_string.bytes(key);
-            return (bytes.iter().zip(shared))
+    /// most `shared.len()`, under strategy `S`; 0 for keys without inline
+    /// keys: for a byte string, by its bytes, so that a key is at least as
+    /// long as what it shares; otherwise by windows, padded with zeros.
+    pub(in crate::tree) fn common_prefix_len_with_bytes<S: InlineKeyStrategy<K>>(
+        key: &K,
+        shared: &[u8],
+    ) -> usize {
+        match Self::resolve::<S>() {
+            None => 0,
+            Some(Self::ByteString(byte_string)) => (byte_string.bytes(key).iter().zip(shared))
                 .take_while(|(a, b)| a == b)
-                .count();
+                .count(),
+            Some(inliner) => Self::first_difference(
+                shared.len(),
+                |offset| inliner.inline_key_at(key, offset),
+                |offset| shared.inline_key_at(offset),
+            )
+            .map_or(shared.len(), |difference| difference.min(shared.len())),
         }
+    }
+
+    /// Where two zero-padded encodings first differ, before `limit`, if they
+    /// do, compared a window at a time: `a_at(offset)` and `b_at(offset)`
+    /// are their windows at `offset`.
+    #[inline(always)]
+    fn first_difference(
+        limit: usize,
+        a_at: impl Fn(usize) -> InlineWord,
+        b_at: impl Fn(usize) -> InlineWord,
+    ) -> Option<usize> {
         let mut offset = 0;
-        while offset < shared.len() {
-            let differing_bits = self.inline_key_at(key, offset) ^ shared.inline_key_at(offset);
+        while offset < limit {
+            let differing_bits = a_at(offset) ^ b_at(offset);
             if differing_bits != 0 {
-                let shared_bytes = differing_bits.leading_zeros() as usize / 8;
-                return (offset + shared_bytes).min(shared.len());
+                return Some(offset + differing_bits.leading_zeros() as usize / 8);
             }
             offset += WINDOW_LEN;
         }
-        shared.len()
+        None
     }
 
-    /// Writes the first bytes of `key`'s encoding into `bytes`, at most as
-    /// many as it holds, and returns how many: of a byte string, as many as
-    /// it has; of a std integer, its size; of a key with its own impl, all
-    /// of `bytes`, padded with zeros past its encoding.
-    pub(in crate::tree) fn write_leading_bytes(self, key: &K, bytes: &mut [u8]) -> usize {
-        let len = match self {
+    /// Writes the first bytes of `key`'s encoding under strategy `S` into
+    /// `bytes`, at most as many as it holds, and returns how many: of a byte
+    /// string, as many as it has; of a std integer, its size; of a key with
+    /// its own impl, all of `bytes`, padded with zeros past its encoding; of
+    /// a key without inline keys, none.
+    pub(in crate::tree) fn write_leading_bytes<S: InlineKeyStrategy<K>>(
+        key: &K,
+        bytes: &mut [u8],
+    ) -> usize {
+        let Some(inliner) = Self::resolve::<S>() else {
+            return 0;
+        };
+        let len = match inliner {
             Self::ByteString(byte_string) => byte_string.bytes(key).len(),
             Self::InlineKeyTrait { .. } if StdInteger::<K>::recognize().is_some() => size_of::<K>(),
             Self::InlineKeyTrait { .. } => bytes.len(),
         }
         .min(bytes.len());
         for (index, chunk) in bytes[..len].chunks_mut(WINDOW_LEN).enumerate() {
-            let window = self.inline_key_at(key, index * WINDOW_LEN).to_be_bytes();
+            let window = inliner.inline_key_at(key, index * WINDOW_LEN).to_be_bytes();
             chunk.copy_from_slice(&window[..chunk.len()]);
         }
         len
@@ -190,13 +226,13 @@ impl<K> KeyInliner<K> {
 }
 
 /// What a node stores an inline key as (D18): the first bytes of its window,
-/// as many as the node kind's [`InlineWidth`], in an unsigned integer of as many
-/// bytes, which orders like them.
-pub(in crate::tree) trait InlineSlot: Copy + Ord + VectorCount {
-    /// Whether one pass that counts every slot up to the capacity compiles
-    /// to vector compares on the build target, which makes it faster than a binary
-    /// search (`inline_key_search.rs`): 16- and 32-bit lanes on x86-64 and AArch64, but
-    /// 64-bit ones only with AVX-512 (04, Q6).
+/// as many as the node kind's [`InlineWidth`], in an unsigned integer of as
+/// many bytes, which orders like them.
+pub(in crate::tree) trait InlineSlot: Ord + VectorCount {
+    /// Whether one pass that counts every slot up to the capacity compiles to
+    /// vector compares on the build target, which makes it faster than a
+    /// binary search (`inline_key_search.rs`): 16- and 32-bit lanes on x86-64
+    /// and AArch64, but 64-bit ones only with AVX-512 (04, Q6).
     const COUNT_AUTOVECTORIZES: bool;
 
     /// The first bytes of `inline_key`, which a node keeps.
@@ -206,8 +242,8 @@ pub(in crate::tree) trait InlineSlot: Copy + Ord + VectorCount {
     fn inline_key(self) -> InlineWord;
 }
 
-/// Implements [`InlineSlot`] for an unsigned integer narrower than an inline key:
-/// its top bits.
+/// Implements [`InlineSlot`] for an unsigned integer narrower than an inline
+/// key: its top bits.
 macro_rules! narrow_inline_slot {
     ($slot:ty) => {
         impl InlineSlot for $slot {
@@ -249,14 +285,14 @@ impl InlineSlot for u64 {
 /// `prefix_len..prefix_len + 8` of a key's encoding, of which a node with
 /// that prefix length stores the first (05-fence-key.md).
 ///
-/// Raw inline slots yield their kept bytes, zeros after them. A window
-/// exported with a heap-byte key or bound is rehydrated to all eight bytes,
-/// even from a four-byte internal node, so it can fill a leaf window. Other
-/// encodings keep the same width in both node kinds. Moving to a shorter
-/// prefix preserves that many correct bytes (`moved_back_to`); a node whose
-/// prefix grows reads its keys.
+/// Raw inline slots yield their kept bytes, zeros after them. A window an
+/// internal node of heap byte strings hands out, for a separator or a fence,
+/// is read from its key again, all eight bytes (D43), so that it can fill a
+/// leaf's. Other encodings keep the same width in both node kinds. Moving to
+/// a shorter prefix preserves that many correct bytes (`moved_back_to`); a
+/// node whose prefix grows reads its keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Window {
+pub(in crate::tree) struct Window {
     prefix_len: usize,
     inline_key: InlineWord,
 }
@@ -321,33 +357,10 @@ struct SearchBytes<'q> {
     bytes: &'q [u8],
 }
 
-/// A byte query that an exact-key lookup compares with a std byte string key's
-/// bytes all at once, for equality alone: once the inline keys leave one
-/// candidate, a leaf needs no order. Where the plan says so (D38), a fixed
-/// byte array's, whose length the compiler knows.
-pub(super) struct WholeBytesQuery<'q, K> {
-    query: &'q [u8],
-    byte_string: ByteString<K>,
-}
-
-impl<K> WholeBytesQuery<'_, K> {
-    #[inline]
-    pub(super) fn matches(&self, key: &K) -> bool {
-        self.query == self.byte_string.bytes(key)
-    }
-}
-
 impl<'q> SearchBytes<'q> {
     #[inline]
     fn new(bytes: &'q [u8]) -> Self {
         Self { bytes }
-    }
-
-    /// The key's inline key at `offset`. Always inlined, as
-    /// [`KeyInliner::inline_key_at`] is.
-    #[inline(always)]
-    fn inline_key_at(&self, offset: usize) -> InlineWord {
-        self.bytes.inline_key_at(offset)
     }
 
     /// The chunk of `bytes` at `offset`, if they have all of it.
@@ -356,13 +369,13 @@ impl<'q> SearchBytes<'q> {
         bytes.get(offset..)?.first_chunk()
     }
 
-    /// How the key orders against `stored`, a std byte string, in bytes
-    /// `start..end`, as `<[u8]>::cmp` orders those parts of the two: the
-    /// check of a search against what every key of the tree shares (D50),
-    /// whose keys all have those bytes, so a key ending inside them goes
+    /// How the key orders against `shared`, the bytes every key of the tree
+    /// starts with (D50), as `<[u8]>::cmp` orders the key's first
+    /// `shared.len()` bytes against them: a key ending inside them goes
     /// first.
     ///
-    /// The bytes are almost always equal, and may be many (paths share 64):
+    /// The bytes are almost always equal, and may be many (file-path keys
+    /// can share 64):
     /// whole 32-byte chunks test equality without ordering them, then the
     /// rest compares a zero-padded window at a time; a window at a time
     /// throughout, 64 bytes took 300 more instructions a search. Windows
@@ -370,27 +383,28 @@ impl<'q> SearchBytes<'q> {
     /// with no call: a call anywhere in the search loop made every search
     /// keep its state in stack slots.
     #[inline(always)]
-    fn cmp_span(&self, stored: &[u8], start: usize, end: usize) -> Ordering {
+    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
         let query = self.bytes;
-        let mut offset = start;
+        let end = shared.len();
+        let mut offset = 0;
         while end - offset >= SHARED_PREFIX_CHUNK_LEN
             && let Some(query_chunk) = Self::chunk_at(query, offset)
-            && Self::chunk_at(stored, offset) == Some(query_chunk)
+            && Self::chunk_at(shared, offset) == Some(query_chunk)
         {
             offset += SHARED_PREFIX_CHUNK_LEN;
         }
         while offset < end {
-            let span = end - offset;
-            let dropped_bits = 8 * WINDOW_LEN.saturating_sub(span) as u32;
+            let remaining = end - offset;
+            let dropped_bits = 8 * WINDOW_LEN.saturating_sub(remaining) as u32;
             let query_window = query.inline_key_at(offset) >> dropped_bits;
-            let stored_window = stored.inline_key_at(offset) >> dropped_bits;
-            if query_window != stored_window {
-                return query_window.cmp(&stored_window);
+            let shared_window = shared.inline_key_at(offset) >> dropped_bits;
+            if query_window != shared_window {
+                return query_window.cmp(&shared_window);
             }
             offset += WINDOW_LEN;
         }
         // Every window equal: the key has the bytes, or ends inside them
-        // with only zeros after it in `stored`.
+        // with only zeros after it in `shared`.
         if query.len() < end {
             Ordering::Less
         } else {
@@ -409,16 +423,16 @@ impl<'q> SearchBytes<'q> {
     /// the bytes left to compare: the bytes it repeats are equal.
     #[inline]
     fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
-        let search = self.bytes;
-        let both_len = search.len().min(stored.len());
+        let query = self.bytes;
+        let both_len = query.len().min(stored.len());
         if equal_len < both_len && both_len < WINDOW_LEN {
-            // A fixed array's two-byte inline key can tie with a borrowed
-            // slice shorter than a word. Zero-padded windows decide every
-            // differing byte; length breaks ties consisting only of zeros.
-            return search
+            // The word loop needs 8 bytes in both; shorter strings compare
+            // by their zero-padded first window, then by length, which
+            // breaks ties of only zeros.
+            return query
                 .inline_key_at(0)
                 .cmp(&stored.inline_key_at(0))
-                .then_with(|| search.len().cmp(&stored.len()));
+                .then_with(|| query.len().cmp(&stored.len()));
         }
         let mut compared = equal_len;
         while compared < both_len {
@@ -428,12 +442,12 @@ impl<'q> SearchBytes<'q> {
                     .last_chunk::<WINDOW_LEN>()
                     .map_or(0, |word| InlineWord::from_be_bytes(*word))
             };
-            match word(search).cmp(&word(stored)) {
+            match word(query).cmp(&word(stored)) {
                 Ordering::Equal => compared = word_end,
                 unequal => return unequal,
             }
         }
-        search.len().cmp(&stored.len())
+        query.len().cmp(&stored.len())
     }
 }
 
@@ -457,7 +471,7 @@ impl InlineTarget {
 /// A key outside the nodes, with its window for the node it goes into
 /// (D18), for a map with strategy `S`. In a map whose keys have no inline
 /// keys, the window is [`Window::NONE`], and no node stores it.
-pub(crate) struct WindowedKey<K, S> {
+pub(in crate::tree) struct WindowedKey<K, S> {
     key: K,
     window: Window,
     _strategy: PhantomData<fn() -> S>,
@@ -469,7 +483,7 @@ impl<K, S: InlineKeyStrategy<K>> WindowedKey<K, S> {
     /// before they change anything.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
-    pub(crate) fn new(key: K, prefix_len: usize) -> Self {
+    pub(in crate::tree) fn new(key: K, prefix_len: usize) -> Self {
         let window = KeyInliner::resolve::<S>().map_or(Window::NONE, |inliner| {
             Window::new(prefix_len, inliner.inline_key_at(&key, prefix_len))
         });
@@ -491,21 +505,13 @@ impl<K, S> WindowedKey<K, S> {
         (self.key, self.window)
     }
 
-    pub(super) fn window(&self) -> Window {
-        self.window
-    }
-
     /// The key with its window moved back to `fill`'s prefix length; see
     /// [`Window::moved_back_to`].
     pub(super) fn moved_back_to(self, fill: Window) -> Self {
         Self::from_parts(self.key, self.window.moved_back_to(fill))
     }
 
-    pub(crate) fn key(&self) -> &K {
-        &self.key
-    }
-
-    pub(crate) fn into_key(self) -> K {
+    pub(in crate::tree) fn into_key(self) -> K {
         self.key
     }
 }
@@ -516,7 +522,7 @@ impl<K, S> WindowedKey<K, S> {
 /// each separator key is the head of the leftmost leaf right of it (D49), it
 /// is the key's window alone, at the prefix length of the node it is for,
 /// and the key moves only with leaf entries.
-pub(crate) struct Separator<K, S> {
+pub(in crate::tree) struct Separator<K, S> {
     key: Option<K>,
     window: Window,
     _strategy: PhantomData<fn() -> S>,
@@ -564,7 +570,7 @@ impl<K, S> Separator<K, S> {
 
     /// The key, if the separator is one.
     #[cfg(test)]
-    pub(crate) fn key(&self) -> Option<&K> {
+    pub(in crate::tree) fn key(&self) -> Option<&K> {
         self.key.as_ref()
     }
 }
@@ -618,7 +624,7 @@ where
     #[inline(always)]
     pub(super) fn inline_target(&self, prefix_len: usize) -> Option<InlineTarget> {
         let inline_key = match KeyInliner::<K>::resolve::<S>()? {
-            KeyInliner::ByteString(_) => self.recognized_bytes()?.inline_key_at(prefix_len),
+            KeyInliner::ByteString(_) => self.recognized_bytes()?.bytes.inline_key_at(prefix_len),
             inliner @ KeyInliner::InlineKeyTrait { .. } => {
                 let key = SameType::<K, Q>::recognize()?.cast(self.key);
                 inliner.inline_key_at(key, prefix_len)
@@ -629,12 +635,11 @@ where
             prefix_len,
         })
     }
-}
 
-impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
-    /// The existing proofs establish byte ordering for both stored keys
-    /// and queries. A custom strategy must keep its `Ord` comparisons even
-    /// when the query itself is a recognized string type.
+    /// The proof that `Q` is a std byte string, where `K` is one the
+    /// strategy encodes by its bytes ([`Auto`](crate::Auto)): only then do
+    /// the nodes compare a query by its bytes. Keys with their own
+    /// `InlineKey` impl keep their `Ord`, whatever `Q` is.
     #[inline]
     fn query_byte_string() -> Option<ByteString<Q>> {
         let KeyInliner::ByteString(_) = KeyInliner::<K>::resolve::<S>()? else {
@@ -644,7 +649,7 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
     }
 
     #[inline]
-    fn recognized_bytes(&self) -> Option<&SearchBytes<'_>> {
+    fn recognized_bytes(&self) -> Option<&SearchBytes<'q>> {
         Self::query_byte_string()?;
         Some(&self.bytes)
     }
@@ -653,43 +658,40 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
         self.key
     }
 
-    /// Orders complete keys, without assuming any equal prefix or summary.
-    /// Only recognized built-in byte orderings use fixed-word comparison;
-    /// explicit strategies and unrecognized queries retain their `Ord`.
+    /// Orders complete keys, without assuming any equal prefix. Only
+    /// recognized built-in byte orderings use fixed-word comparison;
+    /// explicit strategies and unrecognized queries keep their `Ord`.
     #[inline]
     pub(in crate::tree) fn cmp_full(&self, stored: &K) -> Ordering
     where
-        K: Borrow<Q>,
         Q: Ord,
     {
         if let Some(KeyInliner::ByteString(byte_string)) = KeyInliner::<K>::resolve::<S>()
-            && let Some(search) = self.recognized_bytes()
+            && let Some(query) = self.recognized_bytes()
         {
-            return search.cmp_from(byte_string.bytes(stored), 0);
+            return query.cmp_from(byte_string.bytes(stored), 0);
         }
         self.key.cmp(stored.borrow())
     }
 
-    /// The query, for comparing with a key's bytes all at once: for std byte
-    /// string keys and a recognized byte query only. Keys with their own
-    /// `InlineKey` impl keep their `Ord`.
-    #[inline]
-    pub(super) fn whole_bytes_query(&self) -> Option<WholeBytesQuery<'_, K>> {
+    /// Whether the key equals `stored`, comparing their bytes all at once,
+    /// for std byte string keys and a recognized byte query; `None` for any
+    /// other: keys with their own `InlineKey` impl keep their `Ord`. An
+    /// exact-key lookup compares its one candidate this way, a fixed byte
+    /// array's in a length the compiler knows (D38).
+    #[inline(always)]
+    pub(super) fn equals_whole_bytes(&self, stored: &K) -> Option<bool> {
         let KeyInliner::ByteString(byte_string) = KeyInliner::<K>::resolve::<S>()? else {
             return None;
         };
-        Some(WholeBytesQuery {
-            query: self.recognized_bytes()?.bytes,
-            byte_string,
-        })
+        Some(self.recognized_bytes()?.bytes == byte_string.bytes(stored))
     }
 
-    /// Equality may reject a different byte length without reading the
-    /// query's contents. Truncation only creates harmless collisions.
+    /// The query's length tag, if it is a recognized byte string (D36).
     #[inline]
     pub(super) fn length_tag(&self) -> Option<u16> {
         self.recognized_bytes()
-            .map(|bytes| bytes.bytes.len() as u16)
+            .map(|query| LengthTags::tag_of(query.bytes.len()))
     }
 
     /// How this key orders against every key of a tree, all of whose
@@ -699,15 +701,9 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
     /// as a key with its own impl looked up by another type: its searches
     /// compare full keys, and need no check.
     #[inline]
-    pub(in crate::tree) fn cmp_shared_prefix(&self, shared: &[u8]) -> Option<Ordering>
-    where
-        K: Borrow<Q>,
-    {
+    pub(in crate::tree) fn cmp_shared_prefix(&self, shared: &[u8]) -> Option<Ordering> {
         match KeyInliner::<K>::resolve::<S>()? {
-            KeyInliner::ByteString(_) => {
-                let query = self.recognized_bytes()?;
-                Some(query.cmp_span(shared, 0, shared.len()))
-            }
+            KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.cmp_shared(shared)),
             inliner @ KeyInliner::InlineKeyTrait { .. } => {
                 let query = SameType::<K, Q>::recognize()?.cast(self.key);
                 let mut offset = 0;
@@ -735,65 +731,17 @@ impl<K, S: InlineKeyStrategy<K>, Q: ?Sized> SearchKey<'_, K, S, Q> {
     #[inline]
     pub(super) fn cmp_tied<Kind: NodeKind>(&self, target: InlineTarget, stored: &K) -> Ordering
     where
-        K: Borrow<Q>,
         Q: Ord,
     {
         let plan = NodePlan::<K>::of::<S, Kind>();
         if let Some(KeyInliner::ByteString(byte_string)) = plan.inliner()
             && let Some(width) = plan.inline_width()
-            && let Some(search) = self.recognized_bytes()
+            && let Some(query) = self.recognized_bytes()
         {
             let equal_len = target.prefix_len + width.byte_len();
-            return search.cmp_from(byte_string.bytes(stored), equal_len);
+            return query.cmp_from(byte_string.bytes(stored), equal_len);
         }
         self.key.cmp(stored.borrow())
-    }
-}
-
-/// The inline keys of a node's keys at a new prefix length, computed before
-/// any is written ([`Child::refit_prefix`](super::Child::refit_prefix)), kept at the node's width: as
-/// many as [`KeyArea::MAX_INLINE_KEYS_SIZE`] bytes hold, which every node's
-/// inline keys fit in (`tree/node/layout.rs`), on the stack.
-pub(super) enum RefitBuffer {
-    Two([u16; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
-    Four([u32; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
-    Eight([u64; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
-}
-
-impl RefitBuffer {
-    pub(super) fn new(width: InlineWidth) -> Self {
-        match width {
-            InlineWidth::Two => Self::Two([0; KeyArea::MAX_INLINE_KEYS_SIZE / 2]),
-            InlineWidth::Four => Self::Four([0; KeyArea::MAX_INLINE_KEYS_SIZE / 4]),
-            InlineWidth::Eight => Self::Eight([0; KeyArea::MAX_INLINE_KEYS_SIZE / 8]),
-        }
-    }
-
-    /// Keeps the first bytes of `inline_key` as inline key `index`.
-    ///
-    /// # Panics
-    ///
-    /// If `index` is past the buffer, which no node's key is.
-    pub(super) fn set(&mut self, index: usize, inline_key: InlineWord) {
-        match self {
-            Self::Two(inline_keys) => inline_keys[index] = InlineSlot::of_inline_key(inline_key),
-            Self::Four(inline_keys) => inline_keys[index] = InlineSlot::of_inline_key(inline_key),
-            Self::Eight(inline_keys) => inline_keys[index] = InlineSlot::of_inline_key(inline_key),
-        }
-    }
-
-    /// Inline key `index`, as the window it starts.
-    fn inline_key(&self, index: usize) -> InlineWord {
-        match self {
-            Self::Two(inline_keys) => inline_keys[index].inline_key(),
-            Self::Four(inline_keys) => inline_keys[index].inline_key(),
-            Self::Eight(inline_keys) => inline_keys[index].inline_key(),
-        }
-    }
-
-    /// The first `len` inline keys.
-    pub(super) fn inline_keys(&self, len: usize) -> impl ExactSizeIterator<Item = InlineWord> {
-        (0..len).map(|index| self.inline_key(index))
     }
 }
 
@@ -1014,22 +962,6 @@ mod tests {
         )
     }
 
-    /// A search's inline key at any offset is the key's.
-    #[test]
-    fn search_bytes_take_the_keys_windows() {
-        for len in [0, 1, 7, 8, 9, 15, 16, 127, 128, 129, 200] {
-            let key: Vec<u8> = (0..len).map(|index| (index * 7 + 1) as u8).collect();
-            let search = SearchBytes::new(&key);
-            for offset in 0..len + 20 {
-                assert_eq!(
-                    search.inline_key_at(offset),
-                    key.inline_key_at(offset),
-                    "{len} bytes at {offset}"
-                );
-            }
-        }
-    }
-
     /// Byte strings whose first `equal_len` bytes are equal, padded, order
     /// like slices when compared from there, whatever their lengths.
     #[test]
@@ -1207,18 +1139,19 @@ mod tests {
 
     #[test]
     fn inlined_keys_carry_their_window() {
-        let key: WindowedKey<String, Auto> = WindowedKey::new("ferris the crab".to_owned(), 7);
-        assert_eq!(
-            key.window(),
-            Window::new(7, "ferris the crab".inline_key_at(7))
-        );
-        let target = SearchKey::<String, Auto, String>::new(key.key())
+        let (key, window) =
+            WindowedKey::<String, Auto>::new("ferris the crab".to_owned(), 7).into_parts();
+        assert_eq!(window, Window::new(7, "ferris the crab".inline_key_at(7)));
+        let target = SearchKey::<String, Auto, String>::new(&key)
             .inline_target(7)
             .map(|target| target.inline_key());
-        assert_eq!(target, Some(key.window().inline_key()));
+        assert_eq!(target, Some(window.inline_key()));
 
         let integer: WindowedKey<u64, Auto> = WindowedKey::new(7, 3);
-        assert_eq!(integer.window(), Window::new(3, 7_u64.inline_key_at(3)));
+        assert_eq!(
+            integer.into_parts(),
+            (7, Window::new(3, 7_u64.inline_key_at(3)))
+        );
 
         let plain: WindowedKey<u32, Auto> = WindowedKey::new(7, 3);
         assert_eq!(plain.into_parts(), (7, Window::NONE));
@@ -1326,7 +1259,6 @@ mod tests {
                 .collect()
         };
         let with_stem = |stem: &[u8]| -> Vec<u8> { [stem, &random_bytes(6)].concat() };
-        let by_bytes = KeyInliner::<String>::resolve::<Auto>().unwrap();
         let by_trait = KeyInliner::<UserName>::resolve::<WithInlineKey>().unwrap();
         for _ in 0..if cfg!(miri) { 100 } else { 10_000 } {
             let stem = random_bytes(20);
@@ -1335,9 +1267,16 @@ mod tests {
                 continue;
             };
             let (a, b) = (String::from_utf8(a).unwrap(), String::from_utf8(b).unwrap());
-            assert_eq!(by_bytes.common_prefix_len(&a, &b), shared, "{a:?} vs {b:?}");
+            assert_eq!(
+                KeyInliner::common_prefix_len::<Auto>(&a, &b),
+                shared,
+                "{a:?} vs {b:?}"
+            );
             let (a, b) = (UserName(a), UserName(b));
-            assert_eq!(by_trait.common_prefix_len(&a, &b), shared);
+            assert_eq!(
+                KeyInliner::common_prefix_len::<WithInlineKey>(&a, &b),
+                shared
+            );
             let windows = (
                 by_trait.inline_key_at(&a, shared),
                 by_trait.inline_key_at(&b, shared),
@@ -1350,11 +1289,11 @@ mod tests {
     /// share the longest prefix a node records.
     #[test]
     fn common_prefix_len_stops_at_the_longest_prefix() {
-        let inliner = KeyInliner::<String>::resolve::<Auto>().unwrap();
         let max_len = InlineKeyNodeHeader::MAX_PREFIX_LEN;
         let (short, padded) = ("ab".to_owned(), "ab\0".to_owned());
-        assert_eq!(inliner.common_prefix_len(&short, &padded), max_len);
-        assert_eq!(inliner.common_prefix_len(&short, &short), max_len);
+        let common_prefix_len = KeyInliner::common_prefix_len::<Auto>;
+        assert_eq!(common_prefix_len(&short, &padded), max_len);
+        assert_eq!(common_prefix_len(&short, &short), max_len);
     }
 
     /// Tied byte-array keys compare word by word, and agree with their

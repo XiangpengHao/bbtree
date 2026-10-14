@@ -4,24 +4,25 @@
 //! tree's (`tree/mod.rs`), but an internal node's operations reach the
 //! children right below it, and the leaf that holds a separator's key (D49).
 //!
-//! The two kinds are different things, and each is its own type with its
-//! own operations. A leaf holds the entries, each a key and its value, and
-//! a head: the value of the separator just left of the leaf, and with
-//! inline keys, its key (D17, D49). An internal node routes: it holds its
+//! The two kinds are different things, and each is its own type with its own
+//! operations. A leaf holds the entries, each a key and its value, and a
+//! head: the value of the separator just left of the leaf, and with inline
+//! keys, its key (D17, D49). An internal node routes: it holds its
 //! separators' inline keys and its children, and keeps the separators' keys
 //! only for keys without inline keys. A leaf is a page of a
 //! `NodeLayout::<K, V>` leaf layout, sized by its keys and values, and an
-//! internal node a page of an internal layout, sized by its keys alone
-//! (D21). Every pointer to a node tells its kind, in a tag bit, and nothing
-//! else does, so that following an edge decides the child's kind before
-//! reading it ([`Node`], D52); nothing tells a node's parent: navigation
-//! uses paths instead of parent pointers. The root node is in the root
-//! page, which holds either kind, and the tree's shared prefix after it;
-//! the tree's pointer to it tells the root's kind (`root_page.rs`).
+//! internal node a page of an internal layout, sized by its inline keys and
+//! edges, and without inline keys by its keys (D21, D49). Every pointer to a
+//! node tells its kind, in a tag bit, and nothing else does, so that
+//! following an edge decides the child's kind before reading it ([`Node`],
+//! D52); nothing tells a node's parent: navigation uses paths instead of
+//! parent pointers. The root node is in the root page, which holds either
+//! kind, and the tree's shared prefix after it; the tree's pointer to it
+//! tells the root's kind (`root_page.rs`).
 //!
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
-//! before its keys, and searches run over that array first
+//! before its keys, if it keeps any, and searches run over that array first
 //! (`inline_key_search.rs`); in a leaf, each key then shares an entry with
 //! its value, so that the key a search ends at brings it along (D29), and
 //! the head shares one with its separator's key.
@@ -57,24 +58,26 @@
 //! # Safety argument
 //!
 //! This module, `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`,
-//! `root_page.rs`, `siblings.rs`, `inline_key_search.rs` and
-//! `vector_count.rs` hold all of `tree/node/`'s `unsafe` code; the other node modules are
-//! `#![forbid(unsafe_code)]`.
+//! `root_page.rs`, `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`
+//! and `type_identity.rs` hold all of `tree/node/`'s `unsafe` code; the
+//! other node modules are `#![forbid(unsafe_code)]`.
 //! Given the handles' contracts, each `// SAFETY:` comment relies on these
 //! invariants:
 //!
 //! 1. **Nodes.** A node holds a well-formed node of its kind: `len` is at
-//!    most its capacity and keys `0..len` are initialized, with their inline
-//!    keys if the node has them. A leaf's values `0..len` are initialized
-//!    too. An internal node holds no values (D17); its edges `0..=len` are
-//!    initialized.
+//!    most its capacity, and a leaf's keys and values `0..len` are
+//!    initialized, and an internal node's separators `0..len` (keys, or
+//!    windows where separator keys are heads), with their inline keys if the
+//!    node has them. An internal node holds no values (D17); its edges
+//!    `0..=len` are initialized.
 //! 2. **Edges own nodes.** Every initialized edge of a node is the only
 //!    pointer to a distinct node one level below it, and every leaf lies at
 //!    the same depth below the root. The tag of every pointer to a node,
 //!    the tree's to its root too, tells whether it is a leaf (`page.rs`).
 //!    Edges are written only from a node taken off another edge, a split,
-//!    or a new page, or moved between siblings. Only the root page (`root_page.rs`) holds a node of either
-//!    kind over its life; every other page, the kind it was allocated for.
+//!    or a new page, or moved between siblings. Only the root page
+//!    (`root_page.rs`) holds a node of either kind over its life; every
+//!    other page, the kind it was allocated for.
 //! 3. **Heads are flagged.** A leaf's head slot is initialized exactly when
 //!    its header says the leaf has a head, and so is its head key slot in a
 //!    map whose separator keys are heads; every operation that fills or
@@ -84,8 +87,9 @@
 //!    `i < len` (05-fence-key.md); an internal node's key `i` is its
 //!    separator `i`'s, the head key of the leftmost leaf right of it (D49),
 //!    which every operation that moves a head key keeps. Every operation
-//!    moves keys through `KeySlots`, which moves their inline keys with
-//!    them; a key that moves up into a node, or a node whose prefix length
+//!    moves keys through `KeySlots`, and separators through
+//!    `SeparatorSlots`, which move their inline keys with them; a key that
+//!    moves up into a node, or a node whose prefix length
 //!    shrinks, gets its window moved back with `Window::moved_back_to`, and a
 //!    node whose prefix length grows reads its keys (`tree/prefix.rs`). All
 //!    `capacity` inline-key slots are initialized, from the node's creation
@@ -96,33 +100,34 @@
 //! 5. **Length tags follow keys.** Leaves whose plan keeps length tags
 //!    (`node_plan.rs`) keep each live key's byte length modulo 65536 in the
 //!    corresponding tag slot. `KeySlots` maintains these through every
-//!    mutation. All capacity slots start initialized; a search masks out
-//!    slots outside its live primary run and always confirms each selected
-//!    candidate against the full key.
+//!    mutation. All capacity slots start initialized; a search reads only
+//!    the tags of its candidates, and always confirms each one it selects
+//!    against the full key.
 //!
 //! Inline keys and prefix lengths steer searches only: whatever they hold,
 //! every position a search returns is in bounds, so a wrong `InlineKey`, or
 //! a wrong prefix length, gives wrong answers, never undefined behavior.
 
-pub(crate) mod inline_key_search;
+pub(in crate::tree) mod inline_key_search;
 pub(crate) mod inline_keys;
-pub(crate) mod internal;
+pub(in crate::tree) mod internal;
 pub(super) mod layout;
 pub(crate) mod leaf;
 mod length_tags;
 pub(super) mod node_plan;
 pub(crate) mod page;
-pub(crate) mod root_page;
-pub(crate) mod siblings;
+pub(in crate::tree) mod root_page;
+pub(in crate::tree) mod siblings;
 mod slots;
 #[cfg(test)]
 mod tests;
+mod type_identity;
 mod vector_count;
 
 use core::ptr::NonNull;
 
 use self::inline_key_search::NodeInlineKeys;
-use self::inline_keys::{RefitBuffer, Separator, Window};
+use self::inline_keys::{Separator, Window};
 use self::internal::Internal;
 use self::leaf::Leaf;
 use self::node_plan::NodePlan;
@@ -170,7 +175,7 @@ impl<K, V, S> Node<K, V, S> {
 
     /// The number of keys, in the header both kinds share.
     #[inline(always)]
-    pub(crate) fn len(self) -> usize {
+    pub(in crate::tree) fn len(self) -> usize {
         // SAFETY: the node is allocated and initialized (invariant 1), and
         // nothing writes its header meanwhile (the handles' contract).
         unsafe { self.node_ptr().len() }
@@ -183,7 +188,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// # Safety
     ///
     /// As for [`Leaf::free`] or [`Internal::free`].
-    pub(crate) unsafe fn free(self) -> PageByType<K, V, S> {
+    pub(in crate::tree) unsafe fn free(self) -> PageByType<K, V, S> {
         // SAFETY: forwarded.
         unsafe {
             match self {
@@ -200,7 +205,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// # Panics
     ///
     /// If `right` is not of this node's kind.
-    pub(crate) fn absorb(
+    pub(in crate::tree) fn absorb(
         self,
         separator: Separator<K, S>,
         right: Self,
@@ -218,7 +223,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 
     /// How many leading bytes the node's fences share, which its inline keys
     /// skip (05-fence-key.md); 0 without inline keys.
-    pub(crate) fn prefix_len(self) -> usize {
+    pub(in crate::tree) fn prefix_len(self) -> usize {
         match self {
             Self::Leaf(leaf) => leaf.prefix_len(),
             Self::Internal(internal) => internal.prefix_len(),
@@ -233,14 +238,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 /// head of `right`'s leftmost leaf: in a leaf split, of `right` itself
 /// (D17), and so is its key where separator keys are heads (D49).
 /// `inserted` tells where the new entry went.
-pub(crate) struct Split<K, S, Kind> {
-    pub(crate) separator: Separator<K, S>,
-    pub(crate) right: Kind,
-    pub(crate) inserted: InsertionSide,
+pub(in crate::tree) struct Split<K, S, Kind> {
+    pub(in crate::tree) separator: Separator<K, S>,
+    pub(in crate::tree) right: Kind,
+    pub(in crate::tree) inserted: InsertionSide,
 }
 
 /// What inserting into one node did.
-pub(crate) enum Insertion<K, S, Kind> {
+pub(in crate::tree) enum Insertion<K, S, Kind> {
     /// The node had room; the new entry's index.
     Fit(usize),
     /// The node was full and split; the new entry is in one of the halves,
@@ -251,19 +256,19 @@ pub(crate) enum Insertion<K, S, Kind> {
 /// The half of a split that takes the new entry, and its index there: of the
 /// edge where it goes, until it is inserted, and of its key after.
 #[derive(Clone, Copy)]
-pub(crate) enum InsertionSide {
+pub(in crate::tree) enum InsertionSide {
     Left(usize),
     Right(usize),
 }
 
 impl InsertionSide {
-    pub(crate) fn index(self) -> usize {
+    pub(in crate::tree) fn index(self) -> usize {
         match self {
             Self::Left(index) | Self::Right(index) => index,
         }
     }
 
-    pub(crate) fn is_right(self) -> bool {
+    pub(in crate::tree) fn is_right(self) -> bool {
         matches!(self, Self::Right(_))
     }
 
@@ -278,7 +283,9 @@ impl InsertionSide {
     /// sides.
     ///
     /// Both sides meet `minimum` after the new entry is inserted, and the
-    /// separator's index is below `capacity`.
+    /// separator's index is below `capacity`. Always inlined: its callers
+    /// pass their kind's constants, which fold.
+    #[inline(always)]
     pub(in crate::tree) fn of_split(
         capacity: usize,
         insertion_index: usize,
@@ -315,26 +322,27 @@ pub(crate) struct EntrySlots<K, V> {
 /// (D17): the separator's value, its head, and where separator keys are
 /// heads, its key (D49); and the separator that takes its place, the leaf's
 /// first key, now its head's.
-pub(crate) struct HeadSuccession<K, V, S> {
-    pub(crate) removed_key: Option<K>,
-    pub(crate) value: V,
-    pub(crate) successor: Separator<K, S>,
+pub(in crate::tree) struct HeadSuccession<K, V, S> {
+    pub(in crate::tree) removed_key: Option<K>,
+    pub(in crate::tree) value: V,
+    pub(in crate::tree) successor: Separator<K, S>,
 }
 
 /// A node that hangs under an internal node, a leaf or an internal node:
 /// what the code that works at either level needs of it, which each kind
 /// does its own way. Balancing a node with its siblings ([`Siblings`]),
-/// joining it with another tree's root ([`Child::absorb`]), and fitting its
+/// joining it with another tree's top node ([`Child::absorb`]), and fitting its
 /// prefix to its fences (`tree/prefix.rs`) run on either kind through this.
 pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     NodeKind + Copy
 {
     /// The child at edge `index` of `parent`, whose children are of this
-    /// kind.
+    /// kind: the caller's decision ([`Internal::has_leaf_children`]), which
+    /// debug builds check.
     ///
     /// # Panics
     ///
-    /// If they are of the other kind, or `index > len`.
+    /// If `index > len`.
     fn child_of(parent: Internal<K, V, S>, index: usize) -> Self;
 
     /// The number of keys.
@@ -386,29 +394,33 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// The right child has an entry, and the left child room for one.
     unsafe fn steal_right_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window);
 
-    /// Moves `separator` to key slot `len` of `left`, and every key and
+    /// Puts the separator at position `len` of `left`, and every key and
     /// trailing slot of `right` after it, both nodes at `fill`'s prefix
     /// length already: the core of a merge and of [`Child::absorb`].
     /// Between leaves, `right`'s head, the separator's value, joins it as an
-    /// entry, with the head's key where separator keys are heads (D49),
-    /// whose window is `fill`.
+    /// entry, with the separator's key, or where separator keys are heads
+    /// (D49), the head's, whose window is `fill`; between internal nodes,
+    /// the separator joins as one. `separator`'s window should be at
+    /// `fill`'s prefix length, with every byte a leaf keeps of it (D43):
+    /// otherwise searches give wrong answers, never undefined behavior.
     ///
     /// # Safety
     ///
     /// `left`, `separator` and `right` fit in one node: `left.len() + 1 +
     /// right.len() <= capacity`. `right` is another node of this kind, its
     /// leaves as deep below it as this node's, in a tree of the same map
-    /// type, whose trailing slot 0 is
-    /// initialized, and nothing reaches its page afterwards but to free it.
-    /// `separator`'s window is at `fill`'s prefix length; `fill` holds every
-    /// byte a leaf keeps of the separator's window (D43).
+    /// type, whose trailing slot 0 is initialized, and nothing reaches its
+    /// page afterwards but to free it.
     unsafe fn append(left: Self, fill: Window, separator: Separator<K, S>, right: Self);
 
     /// Moves `separator`, and every key and trailing slot of `right` after
     /// it, to the end of this node, as a merge moves its parent's separator
     /// and right child into the left one, and returns `right`'s emptied
-    /// page: for a node and the root of another tree, which share no
-    /// parent, as when two trees join (`tree/join.rs`). For leaves, `right`'s
+    /// page: for a node and the top node of another tree, on a plain page of
+    /// its kind ([`Tree::into_node`](crate::tree::root::Tree::into_node)),
+    /// which share no parent, as when two trees join (`tree/join.rs`).
+    /// Nothing but the caller reaches `right`, whose page this frees. For
+    /// leaves, `right`'s
     /// head is the separator's value, which rejoins it as an entry (D17),
     /// and where separator keys are heads, its key (D49).
     ///
@@ -441,9 +453,10 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         right.move_prefix_back_to(fill);
         // SAFETY: checked just above: the fit, `right`'s initialized
         // trailing slot 0, and the prefix lengths, both nodes at `fill`'s
-        // now. `right` is another tree's root, so another node of this
-        // kind, with leaves as deep below it (the caller), and once appended, its page is freed
-        // with nothing left in it.
+        // now. `right` is another tree's top node on a plain page of its
+        // kind, which only the caller reaches, with leaves as deep below it
+        // (the caller), and once appended, its page is freed with nothing
+        // left in it.
         Ok(unsafe {
             Self::append(self, fill, separator, right);
             right.free_page()
@@ -452,7 +465,8 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
 
     /// Key `index`, the one its inline key is taken from: a leaf's own, or
     /// an internal node's separator key, wherever the map keeps it
-    /// ([`Internal::separator_key`]).
+    /// ([`Internal::separator_key`]): in a map with inline keys, a walk down
+    /// to the separator's head leaf.
     ///
     /// # Panics
     ///
@@ -465,12 +479,9 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// The plan of the map's nodes of this kind (`node_plan.rs`).
     fn plan() -> NodePlan<K>;
 
-    /// Key `index`'s window at the node's prefix length; see
-    /// [`Leaf::window`].
-    fn window(self, index: usize) -> Window;
-
     /// The node's keys' length tags, if its plan keeps them (D36): only a
     /// leaf's may.
+    #[cfg(any(test, fuzzing))]
     fn length_tags<'a>(self) -> Option<&'a [u16]>;
 
     /// `prefix_len`, or as far as the node's prefix may grow toward it: a
@@ -498,24 +509,19 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// Sets the node's prefix length to `prefix_len`, at most what its
     /// fences share, as far as its kind lets it grow
     /// ([`Child::allowed_prefix_len`]), and every inline key to its key's
-    /// window there, read from the key. Computes them all first, then
-    /// writes them, so that a panicking `InlineKey` leaves the node as it
-    /// was. Does nothing if the node has no inline keys.
+    /// window there, read from the key. Does nothing if the node has no
+    /// inline keys.
     fn refit_prefix(self, prefix_len: usize) {
-        let plan = Self::plan();
-        let (Some(inliner), Some(inline_width)) = (plan.inliner(), plan.inline_width()) else {
+        let Some(inliner) = Self::plan().inliner() else {
             return;
         };
         let prefix_len = self.allowed_prefix_len(prefix_len);
         if prefix_len == self.prefix_len() {
             return;
         }
-        let len = self.len();
-        let mut buffer = RefitBuffer::new(inline_width);
-        for index in 0..len {
-            buffer.set(index, inliner.inline_key_at(self.key(index), prefix_len));
-        }
-        self.set_windows(prefix_len, buffer.inline_keys(len));
+        let windows =
+            (0..self.len()).map(|index| inliner.inline_key_at(self.key(index), prefix_len));
+        self.set_windows(prefix_len, windows);
     }
 
     /// Shrinks the node's prefix length to `prefix_len` if it is longer.

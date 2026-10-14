@@ -46,7 +46,11 @@
 //!   ends meet, or at the tree's boundary when the opposite, unbounded end
 //!   has not started. An end never hands out an entry the other end has.
 //!   During a cached leaf run, its interval records the logical end while
-//!   its path lags; the path is reconciled before the other end can move.
+//!   its path lags; the path is reconciled before the other end can move;
+//! - a [`BorrowedWalk`] steps as a `RangeWalk` and takes every entry it
+//!   crosses off its count: one per step, a key run's length per run. When
+//!   it folds as a `FullWalk`, its count is the number of entries between
+//!   its reconciled ends.
 //!
 //! The count starts at the map's length, which is its number of entries
 //! whatever `Ord` does, and the positions are structural, so neither depends
@@ -74,6 +78,7 @@ use core::marker::PhantomData;
 use core::mem::needs_drop;
 
 use super::node::inline_keys::SearchKey;
+use super::node::internal::Internal;
 use super::node::leaf::{KeyRun, Leaf, LeafRun};
 use super::node::page::{NodePtr, PageByType};
 use super::node::root_page::RootPage;
@@ -175,30 +180,31 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         self.path.search_to_edge(key, side, shared);
     }
 
-    /// Starts at the `End` of the tree under `top`: its first position,
-    /// where a walk forward starts, or its last, where one backward does.
-    fn start_at_end<End: NodeEnd>(&mut self, top: WalkTop<K, V, S>) {
-        let node = top.node();
-        self.path.attach(node);
-        let edge = End::edge(node);
-        self.path.set_index(edge);
-        self.path.descend_to_leaf::<End>();
+    /// Starts at the `End` of the tree under `top`, unless the cursor has
+    /// started: its first position, where a walk forward starts, or its
+    /// last, where one backward does.
+    fn ensure_started<End: NodeEnd>(&mut self, top: WalkTop<K, V, S>) {
+        if !self.path.is_attached() {
+            self.path.attach(top.node());
+            self.path.descend_to_end::<End>();
+        }
     }
 
-    /// The leaf and the edge of it the cursor stands at. It has started.
+    /// The leaf and the edge of it the cursor stands at. Only for a cursor
+    /// that has started, which every caller is moving.
     #[inline(always)]
     fn leaf_edge(&self) -> (Leaf<K, V, S>, usize) {
-        // SAFETY: a started cursor's path is attached and ends at an edge of
-        // a leaf (type invariant).
+        // SAFETY: the cursor has started (precondition, kept by every caller
+        // by hand), so its path is attached and ends at an edge of a leaf
+        // (type invariant once started).
         unsafe { self.path.leaf_edge() }
     }
 
-    /// Moves the cursor to edge `index` of its leaf, unchecked. It has
-    /// started.
+    /// Moves the cursor to edge `index` of its leaf, unchecked. Only for a
+    /// cursor that has started, which every caller is moving.
     #[inline(always)]
     fn set_leaf_index(&mut self, index: usize) {
-        // SAFETY: a started cursor's path is attached and ends at a leaf
-        // (type invariant).
+        // SAFETY: as for `leaf_edge`.
         unsafe { self.path.set_leaf_index(index) }
     }
 
@@ -264,9 +270,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        if !self.path.is_attached() {
-            self.start_at_end::<FirstEdge>(top);
-        }
+        self.ensure_started::<FirstEdge>(top);
         let (leaf, index) = self.leaf_edge();
         if index < leaf.len() {
             self.set_leaf_index(index + 1);
@@ -291,13 +295,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        let depth = (0..self.path.depth())
-            .rev()
-            .find(|&depth| self.path.index_at(depth) < self.path.node_at(depth).len())?;
-        self.ascend_leaving(depth, leave);
-        let (node, index) = (self.path.internal_at(depth), self.path.index());
-        self.path.set_index(index + 1);
-        self.path.descend_to_leaf::<FirstEdge>();
+        let (node, index) = self.cross_to_next_leaf(leave)?;
         let (head_leaf, _) = self.leaf_edge();
         // SAFETY: separator `index` is in the node, and its entry is
         // initialized; forwarded from the caller.
@@ -326,9 +324,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        if !self.path.is_attached() {
-            self.start_at_end::<LastEdge>(top);
-        }
+        self.ensure_started::<LastEdge>(top);
         let (leaf, index) = self.leaf_edge();
         if index > 0 {
             self.set_leaf_index(index - 1);
@@ -379,20 +375,26 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         top: WalkTop<K, V, S>,
         leave: &mut impl FnMut(Node<K, V, S>),
     ) -> bool {
-        if !self.path.is_attached() {
-            self.start_at_end::<FirstEdge>(top);
-        }
-        let Some(depth) = (0..self.path.depth())
+        self.ensure_started::<FirstEdge>(top);
+        self.cross_to_next_leaf(leave).is_some()
+    }
+
+    /// Goes past the end of the cursor's leaf to the start of the next leaf,
+    /// handing `leave` each node it goes up out of, as [`Self::next`] does,
+    /// and returns the internal node and index of the separator it crossed;
+    /// `None`, staying put, at the last leaf.
+    fn cross_to_next_leaf(
+        &mut self,
+        leave: &mut impl FnMut(Node<K, V, S>),
+    ) -> Option<(Internal<K, V, S>, usize)> {
+        let depth = (0..self.path.depth())
             .rev()
-            .find(|&depth| self.path.index_at(depth) < self.path.node_at(depth).len())
-        else {
-            return false;
-        };
+            .find(|&depth| self.path.index_at(depth) < self.path.internal_at(depth).len())?;
         self.ascend_leaving(depth, leave);
-        let separator_index = self.path.index();
-        self.path.set_index(separator_index + 1);
+        let (node, index) = (self.path.internal_at(depth), self.path.index());
+        self.path.set_index(index + 1);
         self.path.descend_to_leaf::<FirstEdge>();
-        true
+        Some((node, index))
     }
 
     /// Goes up the path from the cursor's leaf to `depth`, above it,
@@ -433,7 +435,7 @@ impl<K, V, S> Clone for WalkTop<K, V, S> {
 impl<K, V, S> Copy for WalkTop<K, V, S> {}
 
 impl<K, V, S> WalkTop<K, V, S> {
-    /// The top of the tree of `root`.
+    /// The top of the tree in `root_page`: its root node.
     fn of_root_page(root_page: RootPage<K, V, S>) -> Self
     where
         S: InlineKeyStrategy<K>,
@@ -514,13 +516,13 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S
         length: 0,
     };
 
-    /// A lazy walk over the `length` entries of the tree of `root`, if
+    /// A lazy walk over the `length` entries of the tree in `root_page`, if
     /// any. It does not search for either end, so constructing it needs no
     /// `Ord` bound.
     pub(crate) fn new(root_page: Option<RootPage<K, V, S>>, length: usize) -> Self {
         Self {
             range: RangeWalk {
-                ends: root_page.map(|root| Ends::unstarted(WalkTop::of_root_page(root))),
+                ends: root_page.map(|root_page| Ends::unstarted(WalkTop::of_root_page(root_page))),
                 run: None,
             },
             length,
@@ -551,9 +553,9 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S
         self.into_full_walk().rfold(accumulator, fold)
     }
 
-    /// Restore the physical cursor position before using the remaining
-    /// count to bound the existing batched fold. Each successful range
-    /// step crossed exactly one entry and decremented that count once.
+    /// The same walk as a [`FullWalk`], its cursor reconciled with its run
+    /// and bounded by the count: each step of the range walk crossed exactly
+    /// one entry and counted it.
     fn into_full_walk(mut self) -> FullWalk<B, K, V, S> {
         self.range.finish_run();
         FullWalk {
@@ -594,18 +596,9 @@ pub(crate) struct FullWalk<B, K, V, S> {
     length: usize,
 }
 
-impl<K, V, S> Clone for FullWalk<Immut<'_>, K, V, S> {
-    fn clone(&self) -> Self {
-        Self {
-            ends: self.ends,
-            length: self.length,
-        }
-    }
-}
-
 impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
-    /// A walk over the `length` entries of the tree of `root`, if any.
-    pub(crate) fn new(root_page: Option<RootPage<K, V, S>>, length: usize) -> Self {
+    /// A walk over the `length` entries of the tree in `root_page`, if any.
+    fn new(root_page: Option<RootPage<K, V, S>>, length: usize) -> Self {
         Self::from_top(root_page.map(WalkTop::of_root_page), length)
     }
 
@@ -618,7 +611,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
     }
 
     /// The entries left between the ends.
-    pub(crate) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.length
     }
 
@@ -627,11 +620,11 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
         self.next_leaving(&mut |_| {})
     }
 
-    pub(crate) fn fold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
+    fn fold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
         self.fold_from::<FirstEdge, A>(accumulator, fold)
     }
 
-    pub(crate) fn rfold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
+    fn rfold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
         self.fold_from::<LastEdge, A>(accumulator, fold)
     }
 
@@ -651,8 +644,8 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
         } else {
             &mut ends.front
         };
-        if self.length > 0 && !cursor.path.is_attached() {
-            cursor.start_at_end::<End>(top);
+        if self.length > 0 {
+            cursor.ensure_started::<End>(top);
         }
         while self.length > 0 {
             let (leaf, index) = cursor.leaf_edge();
@@ -713,7 +706,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
 
     /// The entries left, with shared access for as long as `self` is
     /// borrowed.
-    pub(crate) fn reborrow(&self) -> FullWalk<Immut<'_>, K, V, S> {
+    fn reborrow(&self) -> FullWalk<Immut<'_>, K, V, S> {
         FullWalk {
             ends: self.ends.as_ref().map(Ends::reborrow),
             length: self.length,
@@ -727,9 +720,10 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
 pub(crate) struct RangeWalk<B, K, V, S> {
     /// `None` for a map without a tree.
     ends: Option<Ends<B, K, V, S>>,
-    /// A run bounded by both ends. Its cursor's path may lag behind its
-    /// progress within this leaf; `finish_run` reconciles them before any
-    /// operation reads that path or moves the opposite end.
+    /// The run of the end that moved last, within its leaf, bounded by the
+    /// other end where that is in the same leaf. Its cursor's path may lag
+    /// behind its progress within this leaf; `finish_run` reconciles them
+    /// before any operation reads that path or moves the opposite end.
     run: Option<RangeLeafRun<B, K, V, S>>,
 }
 
@@ -827,7 +821,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         run: None,
     };
 
-    /// A walk over the entries of the tree of `root` within the bounds,
+    /// A walk over the entries of the tree in `root_page` within the bounds,
     /// with std's panics for bounds out of order (D1).
     ///
     /// # Panics
@@ -857,27 +851,13 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
             run: None,
         };
         let ends = walk.ends.as_mut().expect("just made");
-        match start {
-            Bound::Included(key) => {
-                ends.front
-                    .start_beside_key(top, &SearchKey::new(key), KeySide::Before, shared);
-            }
-            Bound::Excluded(key) => {
-                ends.front
-                    .start_beside_key(top, &SearchKey::new(key), KeySide::After, shared);
-            }
-            Bound::Unbounded => {}
+        if let Some((key, side)) = KeySide::of_start(start) {
+            ends.front
+                .start_beside_key(top, &SearchKey::new(key), side, shared);
         }
-        match end {
-            Bound::Included(key) => {
-                ends.back
-                    .start_beside_key(top, &SearchKey::new(key), KeySide::After, shared);
-            }
-            Bound::Excluded(key) => {
-                ends.back
-                    .start_beside_key(top, &SearchKey::new(key), KeySide::Before, shared);
-            }
-            Bound::Unbounded => {}
+        if let Some((key, side)) = KeySide::of_end(end) {
+            ends.back
+                .start_beside_key(top, &SearchKey::new(key), side, shared);
         }
         if ends.front.path.is_attached()
             && ends.back.path.is_attached()
@@ -888,9 +868,10 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         walk
     }
 
-    /// Starts the end about to move before checking whether it has met the
-    /// other. This order matters when switching direction after exhausting
-    /// a range whose other end was still unbounded and unstarted.
+    /// The ends, the `End` one started, or `None` once they have met. It
+    /// starts that end before checking: the order matters when switching
+    /// direction after exhausting a range whose other end was still
+    /// unbounded and unstarted.
     fn ends_apart<End: NodeEnd>(&mut self) -> Option<&mut Ends<B, K, V, S>> {
         let ends = self.ends.as_mut()?;
         let top = ends.top;
@@ -899,14 +880,8 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         } else {
             &mut ends.front
         };
-        if !cursor.path.is_attached() {
-            cursor.start_at_end::<End>(top);
-        }
-        if ends.front.path.is_attached()
-            && ends.back.path.is_attached()
-            // SAFETY: both ends are attached, as checked above.
-            && unsafe { ends.front.path.is_at(&ends.back.path) }
-        {
+        cursor.ensure_started::<End>(top);
+        if ends.front.path.is_at(&ends.back.path) {
             None
         } else {
             Some(ends)
@@ -1000,12 +975,8 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         let Some(ends) = self.ends.as_mut() else {
             return accumulator;
         };
-        if !ends.front.path.is_attached() {
-            ends.front.start_at_end::<FirstEdge>(ends.top);
-        }
-        if !ends.back.path.is_attached() {
-            ends.back.start_at_end::<LastEdge>(ends.top);
-        }
+        ends.front.ensure_started::<FirstEdge>(ends.top);
+        ends.back.ensure_started::<LastEdge>(ends.top);
         let (cursor, other) = if End::IS_LAST {
             (&mut ends.back, &ends.front)
         } else {
@@ -1081,7 +1052,8 @@ pub(crate) struct DyingWalk<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, V, S, R> {
-    /// A walk taking apart the tree of `root`, of `length` entries, if any.
+    /// A walk taking apart the tree in `root_page`, of `length` entries, if
+    /// any.
     ///
     /// A walk that only its front moves needs no count: given `usize::MAX`,
     /// it ends where the tree does.
@@ -1095,7 +1067,7 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
 
     /// A walk taking apart the nodes under `top`, on plain pages: what is
     /// left of a tree being made (`tree/clone.rs`).
-    pub(crate) fn of_subtree(top: Node<K, V, S>, release: R) -> Self {
+    pub(in crate::tree) fn of_subtree(top: Node<K, V, S>, release: R) -> Self {
         let top = WalkTop {
             node: top.node_ptr(),
         };
@@ -1165,7 +1137,7 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByType<K, V, S>)> DyingWalk<K, 
 
     /// Frees the nodes the walk has not, once no entry is left between its
     /// ends: those on the path of an end that moved, from the bottom up, or
-    /// the root alone, if neither did.
+    /// the top alone, if neither did.
     fn free_remaining(&mut self) {
         let Some(ends) = self.walk.ends.take() else {
             return;

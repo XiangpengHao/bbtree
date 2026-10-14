@@ -4,7 +4,7 @@
 //! another borrowed form too; integers, and strings, whose nodes keep 2 or 4
 //! bytes of their inline keys; inline keys that break their contract, which
 //! may give wrong answers but never break memory safety; and an `InlineKey`
-//! that panics, which leaves the map valid.
+//! that panics, which leaves the map memory-safe (D48).
 
 #![forbid(unsafe_code)]
 
@@ -645,14 +645,14 @@ impl InlineKey for PanickingName<'_> {
 }
 
 /// An `InlineKey` that panics in the middle of inserts and removals, which
-/// split, merge and refit nodes, leaves a valid map, which agrees with std's
-/// on every key it was not changing: the map calls it only before a change,
-/// or after the entry is in or out and counted, never while keys move. A
-/// refit it stops leaves a prefix shorter than its fences share, which
-/// searches as well, so prefixes are checked only against their parents'.
+/// split, merge and refit nodes, leaves a map that is still memory-safe to
+/// search, change and drop (D48): the map calls it only before a change, or
+/// after the entry is in or out and counted, so its length still counts its
+/// entries, which its walks rely on. A refit it stops may leave a node's
+/// inline keys off its prefix, which only makes searches wrong.
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
-fn a_panicking_inline_key_leaves_a_valid_map() {
+fn a_panicking_inline_key_leaves_a_sound_map() {
     let rng = TestRng::new(96);
     let budget = Cell::new(usize::MAX);
     let (steps, key_space) = if cfg!(miri) {
@@ -664,9 +664,8 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
         name: UserName::from_number(number),
         budget: &budget,
     };
-    let mut ours: BBTreeMap<PanickingName<'_>, usize, WithInlineKey> =
+    let mut map: BBTreeMap<PanickingName<'_>, usize, WithInlineKey> =
         BBTreeMap::with_strategy(WithInlineKey);
-    let mut theirs: BTreeMap<usize, usize> = BTreeMap::new();
     let mut panics = 0;
     for step in 0..steps {
         let number = rng.below(key_space);
@@ -674,47 +673,30 @@ fn a_panicking_inline_key_leaves_a_valid_map() {
         budget.set(rng.below(40));
         let changed = catch_unwind(AssertUnwindSafe(|| {
             if insert {
-                ours.insert(key(number), step);
+                map.insert(key(number), step);
             } else {
-                ours.remove(&key(number));
+                map.remove(&key(number));
             }
         }));
         budget.set(usize::MAX);
         if changed.is_err() {
             panics += 1;
-            // The entry may or may not have gone in or out: std's map
-            // follows ours, which must hold it or not.
-            match ours.get(&key(number)) {
-                Some(&value) => theirs.insert(number, value),
-                None => theirs.remove(&number),
-            };
-        } else if insert {
-            theirs.insert(number, step);
-        } else {
-            theirs.remove(&number);
+            map.get(&key(number));
         }
-        ours.check_prefix_lens();
     }
     assert!(panics > 0);
-    assert_eq!(ours.len(), theirs.len());
-    assert!(
-        ours.keys()
-            .zip(theirs.keys())
-            .all(|(ours, &number)| ours.name == UserName::from_number(number))
-    );
-    for (&number, value) in &theirs {
-        assert_eq!(ours.get(&key(number)), Some(value));
-    }
+    assert_eq!(map.len(), map.iter().count());
+    assert_eq!(map.len(), map.iter().rev().count());
 }
 
-/// An `InlineKey` that panics while `retain`, `extract_if` or `append`
-/// builds a tree of the entries it keeps loses at most the entries it was
-/// placing: the map counts only those it holds, every value is dropped once,
-/// none leaked, and the tree's borders keep its shared prefix (D50), so that
-/// a key past the last goes in last. The panic lands on every call in turn: computing an
-/// entry's inline key, fitting the prefix of a node a new leaf closes,
-/// fitting the border when the walk or the merge finishes, joining back the
-/// entries past a bounded range, and putting back what a dropped
+/// An `InlineKey` that panics while `retain`, `extract_if` or `append` builds
+/// a tree of the entries it keeps loses at most the entries it was placing:
+/// the map counts only those it holds, every value is dropped once, none
+/// leaked, and the tree's borders keep its shared prefix (D50), so that a key
+/// past the last goes in last. The panic lands on every call in turn:
+/// computing an entry's inline key, fitting the prefix of a node a new leaf
+/// closes, fitting the border when the walk or the merge finishes, joining
+/// back the entries past a bounded range, and putting back what a dropped
 /// `extract_if` did not visit.
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]

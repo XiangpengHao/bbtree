@@ -1,6 +1,5 @@
-//! Equality filters for byte-string leaves. Length tags never order keys:
-//! up to two candidates can be checked directly, while larger collisions
-//! fall back to the existing ordered search.
+//! A leaf's length tags (D36, invariant 5): which of a lookup's candidates
+//! have the key's length, as none, one, two or many. Tags never order keys.
 
 #![forbid(unsafe_code)]
 
@@ -8,6 +7,8 @@ pub(super) use super::vector_count::SlotMatches;
 use super::vector_count::U16EqualitySearch;
 use core::ops::Range;
 
+/// A leaf's length tags, every slot up to its capacity, each live one its
+/// key's byte length truncated to 16 bits (D36).
 pub(super) struct LengthTags<'a> {
     slots: &'a [u16],
 }
@@ -17,8 +18,16 @@ impl<'a> LengthTags<'a> {
         Self { slots }
     }
 
-    /// Only `candidates`, live keys, may match. Reading the
-    /// initialized capacity gives the compiler a constant vector trip count.
+    /// The tag of a key of `len` bytes: its length, truncated to 16 bits,
+    /// which only lets keys of other lengths collide.
+    #[inline(always)]
+    pub(super) fn tag_of(len: usize) -> u16 {
+        len as u16
+    }
+
+    /// The positions among `candidates`, live keys, whose tag is `target`:
+    /// none, one, two, or more. The vector search reads every slot up to
+    /// the capacity, a constant trip count, and masks out the rest.
     #[inline]
     pub(super) fn matching(&self, candidates: Range<usize>, target: u16) -> SlotMatches {
         if let Some(matches) = U16EqualitySearch::matching(self.slots, candidates.clone(), target) {

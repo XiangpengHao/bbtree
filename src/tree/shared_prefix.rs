@@ -24,7 +24,7 @@ use crate::inline_key::{InlineKey, InlineKeyStrategy};
 /// A plain value, which the root's page holds in place: a lookup in a tree
 /// whose keys share nothing reads its length alone.
 #[derive(Clone)]
-pub(crate) struct SharedPrefix {
+pub(in crate::tree) struct SharedPrefix {
     len: u8,
     bytes: [u8; Self::MAX_LEN],
 }
@@ -35,7 +35,7 @@ impl SharedPrefix {
     const MAX_LEN: usize = 64;
 
     /// Nothing shared: what an empty tree, or a part of one, starts with.
-    pub(crate) const fn none() -> Self {
+    pub(in crate::tree) const fn none() -> Self {
         Self {
             len: 0,
             bytes: [0; Self::MAX_LEN],
@@ -43,48 +43,43 @@ impl SharedPrefix {
     }
 
     /// What a tree of `key` alone shares: its encoding's first bytes.
-    pub(crate) fn of_key<K, S: InlineKeyStrategy<K>>(key: &K) -> Self {
+    pub(in crate::tree) fn of_key<K, S: InlineKeyStrategy<K>>(key: &K) -> Self {
         let mut shared = Self::none();
-        if let Some(inliner) = KeyInliner::resolve::<S>() {
-            let len = inliner.write_leading_bytes(key, &mut shared.bytes);
-            shared.len = len as u8;
-        }
+        shared.len = KeyInliner::write_leading_bytes::<S>(key, &mut shared.bytes) as u8;
         shared
     }
 
     /// The bytes themselves.
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    pub(in crate::tree) fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
 
     /// How many bytes every key shares: the prefix length of the nodes
     /// along the borders.
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::tree) fn len(&self) -> usize {
         usize::from(self.len)
     }
 
     /// How many of these bytes `key`'s encoding starts with: what a tree
     /// that takes it shares. Calls `InlineKey` with
     /// [`WithInlineKey`](crate::WithInlineKey).
-    pub(crate) fn len_shared_with<K, S: InlineKeyStrategy<K>>(&self, key: &K) -> usize {
+    pub(in crate::tree) fn len_shared_with<K, S: InlineKeyStrategy<K>>(&self, key: &K) -> usize {
         if self.len == 0 {
             return 0;
         }
-        KeyInliner::resolve::<S>().map_or(0, |inliner| {
-            inliner.common_prefix_len_with_bytes(key, self.as_bytes())
-        })
+        KeyInliner::common_prefix_len_with_bytes::<S>(key, self.as_bytes())
     }
 
     /// Shrinks to the first `len` bytes, if there are more.
-    pub(crate) fn shrink_to(&mut self, len: usize) {
-        self.len = self.len.min(len.min(Self::MAX_LEN) as u8);
+    pub(in crate::tree) fn shrink_to(&mut self, len: usize) {
+        self.len = self.len().min(len) as u8;
     }
 
     /// The window of these bytes at `prefix_len`, at most their length:
     /// what a node whose prefix shrinks from these bytes' length to
     /// `prefix_len` fills its windows from ([`Window::moved_back_to`]), as
     /// every key of the node shares these bytes. Taken before they shrink.
-    pub(crate) fn window_at(&self, prefix_len: usize) -> Window {
+    pub(in crate::tree) fn window_at(&self, prefix_len: usize) -> Window {
         let bytes = self.as_bytes();
         debug_assert!(prefix_len <= bytes.len());
         Window::new(prefix_len, bytes.inline_key_at(prefix_len))
@@ -94,7 +89,10 @@ impl SharedPrefix {
     /// bytes: before all of them, or after. `None` if it has them, or if the
     /// nodes can't compare its encoding, whose searches compare full keys.
     #[inline]
-    pub(crate) fn place_outside<K, S, Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<Ordering>
+    pub(in crate::tree) fn place_outside<K, S, Q>(
+        &self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> Option<Ordering>
     where
         K: Borrow<Q>,
         S: InlineKeyStrategy<K>,
@@ -109,8 +107,7 @@ impl SharedPrefix {
 
     /// Whether `key`'s encoding starts with these bytes: an invariant of
     /// every key of the tree.
-    #[cfg(any(test, fuzzing))]
-    pub(crate) fn is_shared_by<K, S: InlineKeyStrategy<K>>(&self, key: &K) -> bool {
+    pub(in crate::tree) fn is_shared_by<K, S: InlineKeyStrategy<K>>(&self, key: &K) -> bool {
         self.len_shared_with::<K, S>(key) == self.len()
     }
 }

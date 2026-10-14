@@ -53,6 +53,27 @@ enum VacantPlace<'a, K, V, S> {
     NoTree(&'a mut Tree<K, V, S>),
 }
 
+impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantPlace<'a, K, V, S> {
+    /// Searches `tree` for `key`: the path to its entry, if it has one, or
+    /// else where it goes.
+    #[inline]
+    #[expect(
+        clippy::result_large_err,
+        reason = "inlined into the two callers, which move either side into an entry"
+    )]
+    fn search(tree: &'a mut Tree<K, V, S>, key: &K) -> Result<PathMut<'a, K, V, S>, Self> {
+        if !tree.has_root() {
+            return Err(Self::NoTree(tree));
+        }
+        let mut path = PathMut::new(tree);
+        if path.search(&SearchKey::new(key)) {
+            Ok(path)
+        } else {
+            Err(Self::InTree(path))
+        }
+    }
+}
+
 /// A view into an occupied entry in a `BBTreeMap`. It is part of the
 /// [`Entry`] enum.
 pub struct OccupiedEntry<'a, K, V, S: InlineKeyStrategy<K> = Auto> {
@@ -345,6 +366,7 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
                 path
             }
         };
+        path.cover_key(&key);
         path.insert(key, value, FreshPage::allocate, FreshPage::allocate, length);
         (path, length)
     }
@@ -541,22 +563,9 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Ord,
     {
         let Self { tree, length } = self;
-        if !tree.has_root() {
-            return Entry::Vacant(VacantEntry {
-                key,
-                length,
-                place: VacantPlace::NoTree(tree),
-            });
-        }
-        let mut path = PathMut::new(tree);
-        if path.search(&SearchKey::new(&key)) {
-            Entry::Occupied(OccupiedEntry { length, path })
-        } else {
-            Entry::Vacant(VacantEntry {
-                key,
-                length,
-                place: VacantPlace::InTree(path),
-            })
+        match VacantPlace::search(tree, &key) {
+            Ok(path) => Entry::Occupied(OccupiedEntry { length, path }),
+            Err(place) => Entry::Vacant(VacantEntry { key, length, place }),
         }
     }
 
@@ -574,17 +583,13 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Ord,
     {
         let Self { tree, length } = self;
-        let place = if !tree.has_root() {
-            VacantPlace::NoTree(tree)
-        } else {
-            let mut path = PathMut::new(tree);
-            if path.search(&SearchKey::new(&key)) {
-                return Some(path.replace_key(key));
+        match VacantPlace::search(tree, &key) {
+            Ok(mut path) => Some(path.replace_key(key)),
+            Err(place) => {
+                VacantEntry { key, length, place }.insert_and_count(value);
+                None
             }
-            VacantPlace::InTree(path)
-        };
-        VacantEntry { key, length, place }.insert_and_count(value);
-        None
+        }
     }
 
     /// Returns the first entry in the map for in-place manipulation. The key

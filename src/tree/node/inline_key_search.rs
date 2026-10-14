@@ -2,9 +2,8 @@
 //! a key's first bytes past the node's prefix that leaves and internal nodes
 //! keep beside their keys, and how a search finds the keys whose inline
 //! keys equal its own, by counting over the whole column or by a binary
-//! search, as the target and the width call for.
+//! search, as the build target and the width call for.
 
-use core::cmp::Ordering;
 use core::hint;
 use core::ops::Range;
 
@@ -14,10 +13,11 @@ use super::vector_count::U64EqualityMask;
 use crate::inline_key::InlineWord;
 
 /// A node's inline keys, read in place (D18): every slot up to the
-/// capacity, at this node kind's width, of which slots `0..len` hold the inline keys
-/// of keys `0..len`, and the rest stale ones, which a search reads and masks
-/// out. Its methods speak in windows: they narrow a window to the bytes the
-/// node keeps, and give an inline key back as those bytes, zeros after.
+/// capacity, at this node kind's width, of which slots `0..len` hold the
+/// inline keys of keys `0..len`, and the rest the greatest inline key
+/// (invariant 4), which a count reads and the cuts at `len` leave out. Its
+/// methods narrow an inline key to the bytes the node keeps, and give one
+/// back as those bytes, zeros after.
 ///
 /// Each typed node kind of a map has one width, so after monomorphization
 /// each method is that of one width. They are not generic, so they need
@@ -56,15 +56,18 @@ impl<'a> NodeInlineKeys<'a> {
         // SAFETY: forwarded, at the slots' width.
         unsafe {
             match slots {
-                InlineKeySlots::Two(slots) => {
-                    Self::Two(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
-                }
-                InlineKeySlots::Four(slots) => {
-                    Self::Four(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
-                }
-                InlineKeySlots::Eight(slots) => {
-                    Self::Eight(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
-                }
+                InlineKeySlots::Two(slots) => Self::Two(InlineKeysOfWidth::new(
+                    slots.slice_ptr(capacity).as_ref(),
+                    len,
+                )),
+                InlineKeySlots::Four(slots) => Self::Four(InlineKeysOfWidth::new(
+                    slots.slice_ptr(capacity).as_ref(),
+                    len,
+                )),
+                InlineKeySlots::Eight(slots) => Self::Eight(InlineKeysOfWidth::new(
+                    slots.slice_ptr(capacity).as_ref(),
+                    len,
+                )),
             }
         }
     }
@@ -80,18 +83,6 @@ impl<'a> NodeInlineKeys<'a> {
         with_inline_keys_of_width!(self, |of_width| of_width.live()[index].inline_key())
     }
 
-    /// How inline key `index` orders against the bytes the node keeps of
-    /// `inline_key`. Equal says nothing of the keys.
-    ///
-    /// # Panics
-    ///
-    /// If `index >= len`.
-    #[inline(always)]
-    pub(super) fn cmp_at(self, index: usize, inline_key: InlineWord) -> Ordering {
-        with_inline_keys_of_width!(self, |of_width| of_width
-            .cmp_at(index, InlineSlot::of_inline_key(inline_key)))
-    }
-
     /// The positions of the inline keys equal to the bytes the node keeps
     /// of `inline_key`; see [`InlineKeysOfWidth::equal_range`].
     #[inline(always)]
@@ -100,8 +91,9 @@ impl<'a> NodeInlineKeys<'a> {
             .equal_range(InlineSlot::of_inline_key(inline_key)))
     }
 
-    /// An equality mask only for widths and targets that benefit from it.
-    /// Unsupported shapes keep the original ordered range and empty check.
+    /// The slots equal to the bytes the node keeps of `inline_key`, as a bit
+    /// mask over the capacity, where the build target has vectors for it
+    /// (AVX-512F, 8-byte slots); `None` otherwise.
     #[inline(always)]
     pub(super) fn equality_mask(self, inline_key: InlineWord) -> Option<U64EqualityMask> {
         with_inline_keys_of_width!(self, |of_width| of_width
@@ -141,33 +133,23 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
         self.slots[self.len..].iter().all(|&slot| slot == greatest)
     }
 
-    /// How live slot `index` orders against `target`.
-    ///
-    /// # Panics
-    ///
-    /// If `index >= len`.
-    fn cmp_at(self, index: usize, target: W) -> Ordering {
-        self.live()[index].cmp(&target)
-    }
-
     /// The positions of the inline keys equal to `target`: exactly those
     /// for sorted inline keys, which the `InlineKey` contract gives, and a
     /// range within `0..len` for any. If none equals it, the empty range at
     /// the first inline key greater than it.
     ///
-    /// Found by a count of every slot: in explicit vectors where the target
-    /// has them for slots of this width
+    /// Found by a count of every slot: in explicit vectors where the build
+    /// target has them for slots of this width
     /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
     /// compiler vectorizes it ([`Self::equal_range_by_count`]) where it
     /// compares slots of this width in vectors
     /// ([`InlineSlot::COUNT_AUTOVECTORIZES`]); and by a binary search
     /// otherwise ([`Self::equal_range_by_search`]): without such compares,
-    /// the count is an emulated sequence that costs more than the
-    /// mispredicts it avoids. Measured on 1M-entry maps of 8-byte inline
-    /// keys (04, Q6).
+    /// the count is an emulated sequence that costs more than the mispredicts
+    /// it avoids. Measured on 1M-entry maps of 8-byte inline keys (04, Q6).
     /// Wide four-byte arrays on baseline x86-64 also use binary search:
-    /// beyond the one-word packed reduction, full-capacity counts cost
-    /// more than dependent probes in warm routing nodes.
+    /// beyond the one-word packed reduction, full-capacity counts cost more
+    /// than dependent probes in warm routing nodes.
     #[inline(always)]
     fn equal_range(self, target: W) -> Range<usize> {
         if cfg!(all(
@@ -189,8 +171,8 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
         }
     }
 
-    /// Equality-only masks are optional; ordered fallback is chosen by
-    /// the leaf without wrapping its existing range in another result.
+    /// The slots equal to `target`, as a bit mask, where the build target
+    /// has vectors for slots of this width; `None` otherwise.
     #[inline(always)]
     fn equality_mask(self, target: W) -> Option<U64EqualityMask> {
         W::equality_mask_in_vectors(self.slots, target)
@@ -212,11 +194,11 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
         below..(below + equal).min(self.len)
     }
 
-    /// A branchless binary search finds where the equal range starts, and a scan
-    /// from there finds where it ends: one compare, which inline keys that
-    /// don't tie make predictable, rather than a second search, whose exit
-    /// depends on where the first one ended. Within `0..len` for any slots:
-    /// the search and the scan stay within the live slots.
+    /// A branchless binary search finds where the equal range starts, and a
+    /// scan from there finds where it ends: one compare, which inline keys
+    /// that don't tie make predictable, rather than a second search, whose
+    /// exit depends on where the first one ended. Within `0..len` for any
+    /// slots: the search and the scan stay within the live slots.
     fn equal_range_by_search(self, target: W) -> Range<usize> {
         let live = self.live();
         let start = Self::count_below(live, target);
@@ -257,7 +239,6 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
 mod tests {
     use std::vec::Vec;
 
-    use core::cmp::Ordering;
     use core::ptr::NonNull;
     use std::vec;
 
@@ -281,8 +262,8 @@ mod tests {
         W::of_inline_key(InlineWord::MAX)
     }
 
-    /// On sorted inline keys, the equal range is exactly the equal ones, wherever
-    /// they are and however many, over several words of slots, the
+    /// On sorted inline keys, the equal range is exactly the equal ones,
+    /// wherever they are and however many, over several words of slots, the
     /// greatest too, by every way of finding it, with the slots past `len`
     /// holding the greatest (invariant 4), and by the vector count whatever
     /// they hold.
@@ -355,8 +336,8 @@ mod tests {
         assert_equal_ranges_stay_in_bounds::<u64>(56);
     }
 
-    /// A node's inline keys at each width keep the first bytes of the
-    /// windows written, compare by them, and find the equal_ranges of windows that
+    /// A node's inline keys at each width keep the first bytes of the windows
+    /// written, compare by them, and find the equal_ranges of windows that
     /// tie in them: three sorted windows that share 2 bytes, two of which
     /// share 4.
     #[test]
@@ -392,7 +373,6 @@ mod tests {
             for (index, &window) in windows.iter().enumerate() {
                 let kept = window & kept_mask;
                 assert_eq!(inline_keys.inline_key(index), kept);
-                assert_eq!(inline_keys.cmp_at(index, window), Ordering::Equal);
                 let below = windows.iter().filter(|&&other| other & kept_mask < kept);
                 let ties = windows.iter().filter(|&&other| other & kept_mask == kept);
                 let (below, ties) = (below.count(), ties.count());

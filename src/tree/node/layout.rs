@@ -44,19 +44,22 @@ use crate::inline_key::{Auto, InlineWidth, InlineWord};
 ///   nodes keep no keys, only inline keys and edges: a search reads an edge
 ///   after the inline keys, and a separator's key, a head below, only on a
 ///   tie (D49).
+/// - A leaf whose plan keeps length tags has a `u16` per key right after its
+///   inline keys, where its layout has room for them (D36).
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
 ///   own sizes, or the entries' with inline keys.
-/// - Each kind is the smallest multiple of its alignment, 1 KiB or more,
-///   that holds `MIN_CAPACITY` keys, and is aligned to it (D13, D15). A
+/// - Each kind is the smallest multiple of its alignment that holds
+///   `MIN_CAPACITY` keys, and is aligned to it: a multiple of 1 KiB, or of
+///   512 B for an internal node that keeps no keys (D13, D15, D49). A
 ///   leaf's size depends on `K` and `V`; an internal node's on `K` alone, as
 ///   it holds no values (D17, D21).
 ///
 /// The layouts are constants. Every invariant the node code relies on
 /// for one is asserted at compile time when that constant is evaluated,
 /// which happens before any page of that layout exists. A map picks the
-/// constants its node plans call for (`node_plan.rs`, `NodePtr::plan` in
-/// `page.rs`), by a choice that folds after monomorphization.
+/// constants its node plans call for (`node_plan.rs`), by a choice that
+/// folds after monomorphization.
 pub(in crate::tree) struct NodeLayout<K, V>(PhantomData<fn() -> (K, V)>);
 
 /// Where the keys of one kind of node sit, and how many fit.
@@ -78,8 +81,7 @@ pub(in crate::tree) struct KeyArea {
 impl KeyArea {
     /// The most bytes a node's inline keys take: as many as a 1 KB node has,
     /// so that only nodes whose keys and trailing slots take no room, and
-    /// which are aligned past 1 KB, have their capacity capped by it. A
-    /// node's inline keys fit in a buffer of this size (`tree/prefix.rs`).
+    /// which are aligned past 1 KB, have their capacity capped by it.
     pub(in crate::tree) const MAX_INLINE_KEYS_SIZE: usize = 1024;
 }
 
@@ -94,12 +96,20 @@ pub(in crate::tree) struct LeafLayout {
     /// Bytes from the head to value 0, and from one value to the next.
     pub(in crate::tree) value_stride: usize,
     /// Where a dense array of `u16` length tags is, for a leaf whose plan
-    /// keeps them, if they fit in the padding before its head and first key
-    /// (D36); see [`NodeLayout::leaf_layout`].
+    /// keeps them and whose layout has room: in the padding before entry 0,
+    /// or past it at the cost of an entry (D36); see
+    /// [`NodeLayout::compute_leaf`].
     pub(in crate::tree) length_tags_offset: Option<usize>,
     /// Where the head's key is, in entry 0 before the head, in a leaf with
     /// inline keys: the key of the separator left of the leaf (D49).
     pub(in crate::tree) head_key_offset: Option<usize>,
+}
+
+impl LeafLayout {
+    /// Where value 0 is: a stride past the head.
+    pub(in crate::tree) const fn values_offset(self) -> usize {
+        self.head_offset + self.value_stride
+    }
 }
 
 /// The layout of an internal node's page.
@@ -200,12 +210,6 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const EIGHT_BYTE_INLINE_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), false);
 
-    pub(super) const TWO_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Two), true);
-
-    pub(super) const FOUR_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Four), true);
-
     pub(super) const EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), true);
 
@@ -222,23 +226,27 @@ impl<K, V> NodeLayout<K, V> {
 
     /// The leaf layout without inline keys, or with inline keys of
     /// `inline_width`, with room for length tags if `length_tags` and there
-    /// is room (D36): one of the seven constants, which the node plan picks
-    /// after monomorphization.
+    /// is room (D36): one of the five constants, which the node plan picks
+    /// after monomorphization. Only leaves of eight-byte inline keys keep
+    /// length tags (`node_plan.rs`).
+    #[inline(always)]
     pub(super) fn leaf(inline_width: Option<InlineWidth>, length_tags: bool) -> LeafLayout {
         match (inline_width, length_tags) {
             (None, _) => Self::PLAIN_LEAF,
             (Some(InlineWidth::Two), false) => Self::TWO_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Four), false) => Self::FOUR_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Eight), false) => Self::EIGHT_BYTE_INLINE_LEAF,
-            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_LENGTH_TAGGED_LEAF,
-            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_LENGTH_TAGGED_LEAF,
             (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF,
+            (Some(_), true) => {
+                unreachable!("only leaves of eight-byte inline keys keep length tags")
+            }
         }
     }
 
     /// The internal layout without inline keys, or with inline keys of
     /// `inline_width`, which keeps no keys (D49): one of the four constants,
     /// which the node plan picks after monomorphization.
+    #[inline(always)]
     pub(super) fn internal(inline_width: Option<InlineWidth>) -> InternalLayout {
         match inline_width {
             None => Self::PLAIN_INTERNAL,
@@ -252,7 +260,7 @@ impl<K, V> NodeLayout<K, V> {
     ///
     /// With `length_tags`, a leaf keeps a tag per key where the tags fit in
     /// the padding before its entries, as many leaves' do (D36). Where they
-    /// fit only where the head's key now is (D49), between the padding and
+    /// fit only where the head's key is (D49), between the padding and
     /// the head's value, the leaf gives up an entry to keep them, its
     /// capacity sized with the tags beside the inline keys; anywhere else,
     /// it keeps none.
@@ -266,7 +274,7 @@ impl<K, V> NodeLayout<K, V> {
         let tags_end = tags_start + layout.keys.capacity * size_of::<u16>();
         if tags_end <= Self::entries_offset(layout) {
             Self::leaf_of(layout, Some(tags_start))
-        } else if tags_end <= layout.trailing_offset && tags_end <= layout.keys.keys_offset {
+        } else if tags_end <= layout.trailing_offset {
             let length_tagged =
                 Self::kind_layout(inline_key_size, size_of::<u16>(), Self::VALUE, true);
             Self::leaf_of(
@@ -321,10 +329,10 @@ impl<K, V> NodeLayout<K, V> {
     }
 
     /// The layout of a kind whose trailing slot is `trailing`, with inline
-    /// keys of `inline_key_size` bytes, none if 0, and `tag_size` more bytes
-    /// per key beside them, of length tags; with its keys if `keeps_keys`:
-    /// the smallest node that holds `MIN_CAPACITY` keys, and as many keys as
-    /// fit in it.
+    /// keys of `inline_key_size` bytes, none if 0, and `length_tag_size` more
+    /// bytes per key beside them, of length tags; with its keys if
+    /// `keeps_keys`: the smallest node that holds `MIN_CAPACITY` keys, and as
+    /// many keys as fit in it.
     const fn kind_layout(
         inline_key_size: usize,
         length_tag_size: usize,
@@ -389,7 +397,7 @@ impl<K, V> NodeLayout<K, V> {
         layout
     }
 
-    /// What every layout needs: whole 1 KiB steps, a capacity in bounds, the
+    /// What every layout needs: whole size steps, a capacity in bounds, the
     /// header, inline keys and length tags, keys and trailing slots in
     /// place, in that order, aligned, in the page and clear of each other.
     const fn assert_invariants(
@@ -486,8 +494,8 @@ impl<K, V> NodeLayout<K, V> {
         if a < b { a } else { b }
     }
 
-    /// A node is aligned to 1 KiB (D15), and to its keys, if it keeps them,
-    /// and trailing slots.
+    /// A node is aligned to its size step (D15, D49), and to its keys, if it
+    /// keeps them, and trailing slots.
     const fn node_align(trailing_slot_align: usize, keeps_keys: bool) -> usize {
         let key_align = if keeps_keys { align_of::<K>() } else { 1 };
         Self::max(
@@ -631,9 +639,9 @@ mod tests {
     //!   sizes at most 64 also align the start to the entry size, consuming
     //!   tail slack without changing the page size or capacity;
     //! - the node size is what 12 keys need, rounded up to the node's
-    //!   alignment and 1 KiB. Alignment is max(64, align_of K, align_of V)
-    //!   for a leaf and max(64, align_of K, 8) for an internal node, without
-    //!   `align_of K` for one that keeps no keys;
+    //!   alignment. Alignment is max(1024, align_of K, align_of V) for a
+    //!   leaf, max(1024, align_of K, 8) for an internal node that keeps keys,
+    //!   and 512 for one that keeps none (D49);
     //! - the capacity is the largest `n` that fits, at most 1023, and with
     //!   inline keys at most `1024 / w`.
 
@@ -829,8 +837,8 @@ mod tests {
         .assert_inline::<String, u64>(InlineWidth::Eight);
     }
 
-    /// Auto heap-byte internals keep four bytes, independently of their
-    /// unchanged eight-byte leaf summaries and the value type, and no keys
+    /// `Auto`'s heap byte strings keep 4-byte inline keys in internal nodes,
+    /// whatever the leaves' 8-byte ones and the value type, and no keys
     /// (D49): `(8 + 4n → 8) + 8(n + 1) ≤ 512`, n = 41, edges at 176.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
@@ -921,11 +929,11 @@ mod tests {
     }
 
     /// Length tags (D36) fit in the padding before a `String` → `u64`
-    /// leaf's entries only where its head's key now is (D49): it gives up an
+    /// leaf's entries only where its head's key is (D49): it gives up an
     /// entry to keep them, sized with 8 + 2 bytes beside each key:
     /// `(8 + 10n → 8) + 32(n + 1) ≤ 1024`, n = 23; tags at 8 + 23·8 = 192,
     /// entries at 238 rounded to 256, the head at 280, key 0 at 288. Leaves
-    /// that had no room for tags still have none, and gain no entry.
+    /// without room for tags keep none, and give up no entry.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn length_tags_give_up_an_entry_for_the_head_key() {
@@ -965,14 +973,13 @@ mod tests {
         };
         ExpectedLayout {
             leaf: expected(),
-            // No keys: the edges after the inline keys, 1 KiB aligned.
+            // No keys: the edges after the inline keys, 512 B aligned.
             internal: ExpectedNode::keyless(31, 256, 256),
         }
         .assert_inline::<CacheLineAligned, u64>(InlineWidth::Eight);
     }
 
-    /// Small keys: the inline keys outweigh them, and in an internal node
-    /// each entry pads its key to the edge's alignment.
+    /// Small keys: the inline keys outweigh them.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn set_of_bytes_with_inline_keys() {

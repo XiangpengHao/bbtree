@@ -18,11 +18,19 @@
 //! slots, packing comparison lanes to half their width keeps one mask.
 //! Multiple words would add extraction, clipping, and accumulation work;
 //! larger capacities and targets with POPCNT keep the compiler's vector
-//! count unless AVX-512 applies above.
+//! count unless AVX-512 applies above, but for 4-byte slots beyond 32
+//! without POPCNT, which search instead (`inline_key_search.rs`).
+//!
+//! Two equality searches live here too: an exact-key lookup over 8-byte
+//! slots takes an AVX-512 equality mask ([`U64EqualityMask`], D41), and a
+//! leaf's length tags, which are unsorted, are filtered in SSE2 vectors
+//! ([`U16EqualitySearch`], D36).
 
 use core::num::NonZeroU64;
 use core::ops::Range;
 
+/// Which of a lookup's candidates have its length tag: none, one, two (at
+/// these positions), or more.
 pub(super) enum SlotMatches {
     None,
     One(usize),
@@ -30,8 +38,9 @@ pub(super) enum SlotMatches {
     Many,
 }
 
-/// Equality-only slot search whose byte masks fit in one machine word.
-/// Unlike ordered inline windows, these slots need not be sorted.
+/// The length tags (D36) equal to a target among a lookup's candidates, in
+/// SSE2 vectors whose byte masks fit in one word: tags are unsorted, so this
+/// finds matches, not a range.
 pub(super) struct U16EqualitySearch;
 
 impl U16EqualitySearch {
@@ -52,7 +61,8 @@ impl U16EqualitySearch {
             }
             let mut bits = 0_u64;
             // SAFETY: SSE2 is part of every x86-64 target. Each load starts
-            // at most `len - LANES`, so all eight initialized slots fit.
+            // at most `slots.len() - LANES`, so all eight initialized slots
+            // fit.
             // The last partial chunk overlaps the preceding one; equal
             // positions produce the same bits and can be combined with OR.
             unsafe {
@@ -95,9 +105,9 @@ impl U16EqualitySearch {
 }
 
 /// Exact-key lookups over 8-byte slots need only an equality mask. An ordered
-/// search builds both comparison masks; this one can reject an empty equal range
-/// without counting the slots below the target. All supported capacities
-/// fit their equality bits in one word.
+/// search builds both comparison masks; this one can reject an empty equal
+/// range without counting the slots below the target. All supported
+/// capacities fit their equality bits in one word.
 pub(in crate::tree) struct U64EqualityMask {
     bits: u64,
 }
@@ -139,16 +149,11 @@ impl U64EqualityMask {
     }
 
     /// The live matching hull, or `None` before extracting any bounds
-    /// when no live bit matches. Sorted slots give an exact equal range; arbitrary
-    /// slots still give bounds within `0..len`.
+    /// when no live bit matches. Sorted slots give an exact equal range;
+    /// arbitrary slots still give bounds within `0..len`.
     #[inline(always)]
     pub(super) fn equal_range(self, len: usize) -> Option<Range<usize>> {
-        let live_bits = len.min(64);
-        #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
-        // SAFETY: the cfg checks BMI2 independently of vector features.
-        let bits = unsafe { core::arch::x86_64::_bzhi_u64(self.bits, live_bits as u32) };
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
-        let bits = self.bits & u64::MAX.checked_shr((64 - live_bits) as u32).unwrap_or(0);
+        let bits = Self::keep_low_bits(self.bits, len.min(64) as u32);
         let bits = NonZeroU64::new(bits)?;
         // The mask already implies these bounds. Keep them explicit so
         // safe key indexing need not rediscover the bit-position proof.
@@ -156,9 +161,21 @@ impl U64EqualityMask {
         let start = (bits.trailing_zeros() as usize).min(end);
         Some(start..end)
     }
+
+    /// `bits` with all but its `count` lowest cleared, `count <= 64`: one
+    /// `bzhi` where BMI2 is there.
+    #[inline(always)]
+    fn keep_low_bits(bits: u64, count: u32) -> u64 {
+        debug_assert!(count <= u64::BITS);
+        #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+        // SAFETY: the cfg checks BMI2.
+        return unsafe { core::arch::x86_64::_bzhi_u64(bits, count) };
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+        return bits & u64::MAX.checked_shr(u64::BITS - count).unwrap_or(0);
+    }
 }
 
-/// Inline-key slots that the target counts in explicit vectors.
+/// Inline-key slots that the build target counts in explicit vectors.
 pub(in crate::tree) trait VectorCount: Copy {
     /// An equality mask for exact-key lookup where it avoids ordered work.
     /// Narrow slots and unsupported targets retain the ordered reduction.
@@ -187,8 +204,6 @@ pub(in crate::tree) trait VectorCount: Copy {
 macro_rules! count_avx512_lanes {
     ($slots:ident, $len:ident, $target:ident, $lane:ty, $mask:ty,
      $set1:ident, $load:ident, $below:ident, $equal:ident) => {{
-        #[cfg(target_feature = "bmi2")]
-        use core::arch::x86_64::_bzhi_u64;
         use core::arch::x86_64::{$below, $equal, $load, $set1};
 
         const LANES: usize = <$mask>::BITS as usize;
@@ -196,7 +211,7 @@ macro_rules! count_avx512_lanes {
         let (mut below, mut equal) = (0, 0);
         let mut word_start = 0;
         // SAFETY: the caller checks the target features the intrinsics
-        // need; BMI2 is checked separately below. Each mask selects the
+        // need. Each mask selects the
         // lanes of `start..slots.len()`, within the slots, and a masked load
         // reads only the lanes it selects.
         unsafe {
@@ -214,18 +229,8 @@ macro_rules! count_avx512_lanes {
                     offset += LANES;
                 }
                 let live = $len.saturating_sub(word_start).min(WORD_LANES) as u32;
-                let keep_live = |bits: u64| {
-                    #[cfg(target_feature = "bmi2")]
-                    {
-                        _bzhi_u64(bits, live)
-                    }
-                    #[cfg(not(target_feature = "bmi2"))]
-                    {
-                        bits & u64::MAX.checked_shr(64 - live).unwrap_or(0)
-                    }
-                };
-                below += keep_live(below_bits).count_ones() as usize;
-                equal += keep_live(equal_bits).count_ones() as usize;
+                below += U64EqualityMask::keep_low_bits(below_bits, live).count_ones() as usize;
+                equal += U64EqualityMask::keep_low_bits(equal_bits, live).count_ones() as usize;
                 word_start += WORD_LANES;
             }
         }
@@ -265,12 +270,17 @@ macro_rules! vector_count {
 
                     const SLOT_BYTES: usize = size_of::<$slot>();
                     const LANES: usize = 16 / SLOT_BYTES;
-                    const WORD_LANES: usize = 64 / SLOT_BYTES;
+                    // The slots whose byte masks fit in one word, unpacked.
+                    const UNPACKED_MAX_SLOTS: usize = 64 / SLOT_BYTES;
                     // One packing stage doubles the slots that fit in a
                     // single mask. Leave shorter arrays unchanged; larger
                     // ones would need another packing stage or mask word.
-                    let packed = slots.len() > WORD_LANES;
-                    let max_slots = if packed { 2 * WORD_LANES } else { WORD_LANES };
+                    let packed = slots.len() > UNPACKED_MAX_SLOTS;
+                    let max_slots = if packed {
+                        2 * UNPACKED_MAX_SLOTS
+                    } else {
+                        UNPACKED_MAX_SLOTS
+                    };
                     if slots.len() < LANES || slots.len() > max_slots {
                         return None;
                     }
@@ -327,7 +337,8 @@ macro_rules! vector_count {
                     }
                     // For sorted live slots, these low-bit runs are the lower
                     // and upper bounds. For any slots, `<` implies `<=`, so
-                    // lower <= upper; clipping each to `len` keeps both in bounds.
+                    // lower <= upper; clipping each to `len` keeps both in
+                    // bounds.
                     let below = (below_bits.trailing_ones() as usize / bits_per_slot).min(len);
                     let through = (through_bits.trailing_ones() as usize / bits_per_slot).min(len);
                     Some(below..through)
@@ -372,12 +383,14 @@ vector_count!(
     _mm_packs_epi32
 );
 
-/// 8-byte slots, those of std byte strings and of 8-byte `InlineKey`
-/// impls, keep the compiler's count, which measured faster than explicit
-/// vectors on string maps (05-fence-key.md), but for 28 to 31 slots, the
-/// capacity of an internal node with 8-byte inline keys, and of a `String`
-/// set's leaf: there the compiler takes the compares' masks apart a bit at
-/// a time, and the count goes the narrow slots' way.
+/// 8-byte slots, those of std byte strings' leaves and of 8-byte `InlineKey`
+/// impls, keep the compiler's count where AVX-512F makes it vector compares,
+/// and a binary search elsewhere (`InlineSlot::COUNT_AUTOVECTORIZES`); the
+/// count measured faster than explicit vectors on string maps
+/// (05-fence-key.md), but for 28 to 31 slots, the capacity of an internal
+/// node with 8-byte inline keys, and of a `String` set's leaf: there the
+/// compiler takes the compares' masks apart a bit at a time, and the count
+/// goes the narrow slots' way.
 impl VectorCount for u64 {
     #[inline(always)]
     fn equality_mask_in_vectors(slots: &[Self], target: Self) -> Option<U64EqualityMask> {
@@ -559,8 +572,9 @@ mod tests {
                             "capacity {capacity}, live {len}, uniform {uniform:?}, target {target}"
                         );
                     }
-                    // Inconsistent encodings need not give an exact equal_range,
-                    // but neither bound may escape the live prefix.
+                    // Inconsistent encodings need not give an exact
+                    // equal_range, but neither bound may escape the live
+                    // prefix.
                     for (index, slot) in slots[..len].iter_mut().enumerate() {
                         *slot = values[(index * 5 + 2) % values.len()];
                     }
@@ -578,8 +592,9 @@ mod tests {
         }
     }
 
-    /// Equality masks need not retain an empty equal_range's insertion position, but
-    /// must retain every live match and ignore stale matching tail slots.
+    /// Equality masks need not retain an empty equal_range's insertion
+    /// position, but must retain every live match and ignore stale matching
+    /// tail slots.
     fn assert_equality_mask_boundaries<W: InlineSlot>() {
         let values = [0, 1_u64 << 48, 1 << 63, u64::MAX].map(W::of_inline_key);
         for capacity in 0..=80 {

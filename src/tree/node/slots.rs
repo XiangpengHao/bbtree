@@ -1,10 +1,12 @@
 //! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
-//! only code that moves keys, values and edges around (D9, D12, D14, D29).
+//! only code that moves keys, values and edges within and between nodes,
+//! whole pages aside (`page.rs`; D9, D12, D14, D29).
 //! [`InlineKeySlots`] are a node's inline keys at its kind's width,
 //! [`KeyColumns`] every array a node keeps beside its keys, [`KeySlots`]
 //! moves a node's keys together with them (D18), [`SeparatorSlots`] an
 //! internal node's separators, keys or windows (D49), and [`NodeKeys`]
-//! lends a node's keys in place, as a [`KeyList`].
+//! lends a node's keys in place, as a [`KeyList`], which holds the node's
+//! two binary searches (D19).
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -21,9 +23,9 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// Where `capacity` slots of `T` sit in memory: slot `i` at `stride * i`
 /// bytes past `anchor`. The slots of an array of their own sit side by
-/// side, `size_of::<T>()` apart; the keys and the trailing slots of a node
-/// of `(key, value)` or `(key, edge)` entries are fields of its entries,
-/// an entry's size apart (D29).
+/// side, `size_of::<T>()` apart; the keys and values of a leaf of
+/// `(key, value)` entries are fields of its entries, an entry's size apart
+/// (D29). Internal nodes never pair their edges with keys (D32).
 ///
 /// A `Slots` neither owns nor borrows its slots and tracks no length: which
 /// slots are initialized is the caller's business, so every operation is
@@ -111,18 +113,16 @@ impl<T> Slots<T> {
         unsafe { self.anchor.add(index) }
     }
 
-    /// Slots `start..end` of slots side by side, as one slice in index
-    /// order. With `start == 0`, this is the initialized prefix of an array
-    /// of length `end`, ready to be borrowed or dropped in place.
+    /// Slots `0..len` of slots side by side, as one slice in index order.
     ///
     /// # Safety
     ///
-    /// `start <= end <= capacity`, and the slots are side by side.
-    pub(super) unsafe fn run(self, start: usize, end: usize) -> NonNull<[T]> {
-        debug_assert!(start <= end);
+    /// `len <= capacity`, and the slots are side by side.
+    pub(super) unsafe fn slice_ptr(self, len: usize) -> NonNull<[T]> {
+        debug_assert!(len <= self.capacity);
         // SAFETY: forwarded.
-        let first = unsafe { self.contiguous_slot(start) };
-        NonNull::slice_from_raw_parts(first, end - start)
+        let first = unsafe { self.contiguous_slot(0) };
+        NonNull::slice_from_raw_parts(first, len)
     }
 
     /// Writes `value` into slot `index`, first shifting slots `index..len` up
@@ -194,7 +194,8 @@ impl<T> Slots<T> {
     ///
     /// # Safety
     ///
-    /// - `start + count <= self.capacity` and `dest_start + count <= dest.capacity`.
+    /// - `start + count <= self.capacity` and
+    ///   `dest_start + count <= dest.capacity`.
     /// - The source slots are initialized; afterwards they hold nothing.
     /// - The destination slots hold nothing that needs dropping: they are
     ///   overwritten, and are initialized afterwards.
@@ -298,8 +299,8 @@ impl<T> Slots<T> {
 
 /// A node's keys `0..len`, in order, lent for `'a`: side by side in a node
 /// whose keys are an array of their own, or each the key of an entry in a
-/// node of `(key, value)` or `(key, edge)` entries (D29).
-pub(crate) struct NodeKeys<'a, K> {
+/// leaf of `(key, value)` entries (D29).
+pub(in crate::tree) struct NodeKeys<'a, K> {
     anchor: NonNull<K>,
     /// Bytes from one key to the next.
     stride: usize,
@@ -333,7 +334,7 @@ impl<'a, K> NodeKeys<'a, K> {
         }
     }
 
-    pub(crate) fn len(self) -> usize {
+    pub(in crate::tree) fn len(self) -> usize {
         self.len
     }
 
@@ -342,19 +343,19 @@ impl<'a, K> NodeKeys<'a, K> {
     /// # Safety
     ///
     /// `index < len`.
-    pub(crate) unsafe fn get_unchecked(self, index: usize) -> &'a K {
+    pub(in crate::tree) unsafe fn get_unchecked(self, index: usize) -> &'a K {
         debug_assert!(index < self.len);
         // SAFETY: key `index` is initialized and unchanged for `'a` (`new`).
         unsafe { self.anchor.byte_add(index * self.stride).as_ref() }
     }
 
     /// Key `index`, or `None` if `index >= len`.
-    pub(crate) fn get(self, index: usize) -> Option<&'a K> {
+    pub(in crate::tree) fn get(self, index: usize) -> Option<&'a K> {
         // SAFETY: `index < len`.
         (index < self.len).then(|| unsafe { self.get_unchecked(index) })
     }
 
-    pub(crate) fn first(self) -> Option<&'a K> {
+    pub(in crate::tree) fn first(self) -> Option<&'a K> {
         self.get(0)
     }
 
@@ -363,7 +364,7 @@ impl<'a, K> NodeKeys<'a, K> {
     /// # Panics
     ///
     /// If `range` is not within `0..len`.
-    pub(crate) fn slice(self, range: Range<usize>) -> Self {
+    pub(in crate::tree) fn slice(self, range: Range<usize>) -> Self {
         assert!(
             range.start <= range.end && range.end <= self.len,
             "keys out of bounds"
@@ -378,7 +379,10 @@ impl<'a, K> NodeKeys<'a, K> {
         }
     }
 
-    pub(crate) fn iter(self) -> impl DoubleEndedIterator<Item = &'a K> + ExactSizeIterator {
+    #[cfg(any(test, fuzzing))]
+    pub(in crate::tree) fn iter(
+        self,
+    ) -> impl DoubleEndedIterator<Item = &'a K> + ExactSizeIterator {
         // SAFETY: `index < len`.
         (0..self.len).map(move |index| unsafe { self.get_unchecked(index) })
     }
@@ -421,9 +425,10 @@ pub(super) trait KeyList<'a, K: 'a>: Copy {
     /// comparison classifies it.
     ///
     /// In bounds by construction, whatever `Ord` answers: the loop keeps
-    /// `base + size <= len` and probes only `mid = base + size / 2 < base + size`,
-    /// so `base < len` at the end. `Ok(base)` is then `< len`, and
-    /// `Err(base)`/`Err(base + 1)` are `<= len`.
+    /// `base + size <= len` and probes only
+    /// `mid = base + size / 2 < base + size`, so `base < len` at the end.
+    /// `Ok(base)` is then `< len`, and `Err(base)`/`Err(base + 1)` are
+    /// `<= len`.
     fn branchless_search_index<Q>(self, key: &Q) -> Result<usize, usize>
     where
         K: Borrow<Q>,
@@ -495,10 +500,11 @@ impl<'a, K> KeyList<'a, K> for NodeKeys<'a, K> {
 }
 
 /// A node's inline-key slots (D18): `capacity` of them, side by side, each
-/// the first bytes of a window, as many as the node kind's [`InlineWidth`], stored
-/// as the [`InlineSlot`] of that width. The operations mirror those of
-/// [`Slots`], with the same contracts, and speak in windows: a write keeps a
-/// window's first bytes, and a read gives them back, zeros after.
+/// the first bytes of an inline key, as many as the node kind's
+/// [`InlineWidth`], stored as the [`InlineSlot`] of that width. The
+/// operations mirror those of [`Slots`], with the same contracts, and speak
+/// in inline keys: a write keeps an inline key's first bytes, and a read
+/// gives them back, zeros after.
 ///
 /// Every node of the same kind and map has the same width, a constant of its
 /// kind, key type and strategy, so each typed operation uses one width.
@@ -538,6 +544,7 @@ impl InlineKeySlots {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn width(self) -> InlineWidth {
         match self {
             Self::Two(_) => InlineWidth::Two,
@@ -615,8 +622,7 @@ impl InlineKeySlots {
     }
 
     /// See [`Slots::move_run_to`]. `dest` has this array's width: runs move
-    /// between nodes of the same kind. `KeySlots` checks that in debug
-    /// builds, before anything moves.
+    /// between nodes of the same kind and map.
     ///
     /// # Safety
     ///
@@ -640,17 +646,17 @@ impl InlineKeySlots {
                 (Self::Eight(source), Self::Eight(destination)) => {
                     source.move_run_to(start, count, destination, dest_start);
                 }
-                // Unreachable: whatever it left in `dest`, inline keys
-                // steer searches only (`tree/node/mod.rs`).
-                _ => {}
+                _ => unreachable!("runs move between nodes of one width"),
             }
         }
     }
 }
 
-/// What a node keeps beside its keys, one slot per key, in arrays of their
-/// own that every move of the keys moves alike: its inline keys (D18) and,
-/// in a leaf whose plan keeps them, its keys' length tags (D36). Another
+/// What a node keeps beside its keys, or in an internal node that keeps
+/// none (D49), in their place: one slot per key or separator, in arrays of
+/// their own that every move moves alike: its inline keys (D18) and, in a
+/// leaf whose plan keeps them and whose layout has room, its keys' length
+/// tags (D36). Another
 /// such array is a field here and a cell of [`KeyCells`]; the code that
 /// moves keys ([`KeySlots`]) doesn't change.
 ///
@@ -669,8 +675,8 @@ pub(super) struct KeyColumns {
 pub(super) struct KeyCells {
     /// The first bytes of the key's window, which the inline keys keep.
     inline_key: InlineWord,
-    /// The key's length tag, if the node keeps them.
-    length_tag: Option<u16>,
+    /// The key's length tag, which a node that keeps them stores.
+    length_tag: u16,
 }
 
 /// Every method is `#[inline(always)]`: which arrays a node keeps, and at
@@ -714,7 +720,7 @@ impl KeyColumns {
     ///
     /// # Safety
     ///
-    /// The node holds no keys, and its handle has exclusive access.
+    /// The node's handle has exclusive access.
     #[inline(always)]
     pub(super) unsafe fn initialize(self) {
         // SAFETY: the slots are in the page (type invariant) and hold plain
@@ -731,7 +737,8 @@ impl KeyColumns {
 
     /// Gives slots `vacated`, which a node no longer holds keys in, the
     /// greatest inline key again (invariant 4). Their length tags stay
-    /// stale: nothing reads a tag past the length.
+    /// stale: a search reads them, but masks out every slot outside its
+    /// candidates (invariant 5).
     ///
     /// # Safety
     ///
@@ -760,8 +767,8 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.write(index, cells.inline_key);
             }
-            if let (Some(tags), Some(tag)) = (self.length_tags, cells.length_tag) {
-                tags.slot(index).write(tag);
+            if let Some(tags) = self.length_tags {
+                tags.slot(index).write(cells.length_tag);
             }
         }
     }
@@ -779,8 +786,8 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.insert(index, len, cells.inline_key);
             }
-            if let (Some(tags), Some(tag)) = (self.length_tags, cells.length_tag) {
-                tags.insert(index, len, tag);
+            if let Some(tags) = self.length_tags {
+                tags.insert(index, len, cells.length_tag);
             }
         }
     }
@@ -834,13 +841,12 @@ impl KeyColumns {
 ///
 /// The node stores its keys' windows at its prefix length (05-fence-key.md):
 /// a key read out comes with its window there, and a key written in must
-/// come with its window there, which debug builds check. A node whose plan
-/// stores fewer bytes of each window than a leaf reads a window it hands out
-/// from its key again (D43). A key read out of a node without inline keys
-/// comes with [`Window::NONE`].
+/// come with its window there, which debug builds check. A key read out of
+/// a node without inline keys comes with [`Window::NONE`].
 ///
 /// Invariant: the columns have the keys' capacity, and are those of the
-/// plan of `Kind` (`node_plan.rs`). A live length tag is its key's length,
+/// plan and layout of `Kind` (`node_plan.rs`, `layout.rs`). A live length
+/// tag is its key's length,
 /// truncated to 16 bits; tags never order keys and need no prefix
 /// adjustment.
 pub(super) struct KeySlots<K, S, Kind> {
@@ -878,37 +884,18 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
         self.keys
     }
 
-    /// The inline-key slots alone, to read inline keys in place, if the node
-    /// has them.
-    pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
-        self.columns.inline_keys()
-    }
-
-    /// Key `index`'s window at the node's fence prefix, to hand out: as many
-    /// of its bytes as a leaf keeps, read from the key again where the plan
-    /// stores fewer (D43). Reading a std byte string calls no user code and
-    /// can't panic.
+    /// Key `index`'s window at the node's prefix length, as the node keeps
+    /// it.
     ///
     /// # Safety
     ///
-    /// Key `index` and its inline key are initialized, and
-    /// `index < capacity`.
+    /// `index < capacity`, and its inline key is initialized.
     pub(super) unsafe fn window(self, index: usize) -> Window {
         let Some(slots) = self.columns.inline_keys() else {
             return Window::NONE;
         };
-        let plan = NodePlan::<K>::of::<S, Kind>();
-        let inline_key = match plan.inliner() {
-            Some(inliner) if plan.rehydrates_windows() => {
-                // SAFETY: this key is initialized and unchanged during the
-                // read.
-                inliner.inline_key_at(unsafe { self.keys.slot(index).as_ref() }, self.prefix_len)
-            }
-            // SAFETY: forwarded; the inline-key slots have the keys'
-            // capacity.
-            _ => unsafe { slots.read(index) },
-        };
-        Window::new(self.prefix_len, inline_key)
+        // SAFETY: forwarded; the inline-key slots have the keys' capacity.
+        Window::new(self.prefix_len, unsafe { slots.read(index) })
     }
 
     /// `key`, and what the columns hold for it. Its window must be at this
@@ -921,10 +908,10 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
             window.prefix_len(),
             self.prefix_len
         );
-        let length_tag = self
-            .columns
-            .length_tags()
-            .and_then(|_| NodePlan::<K>::of::<S, Kind>().length_tag(&key));
+        let length_tag = match self.columns.length_tags() {
+            Some(_) => NodePlan::<K>::of::<S, Kind>().length_tag(&key).unwrap_or(0),
+            None => 0,
+        };
         let cells = KeyCells {
             inline_key: window.inline_key(),
             length_tag,
@@ -1066,9 +1053,9 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     ///
     /// # Safety
     ///
-    /// As for [`Slots::move_run_to`]. Local search windows have been
-    /// normalized, and `dest` has this node's fence prefix length, since the
-    /// inline keys move without changing their windows.
+    /// As for [`Slots::move_run_to`]. `dest` has this node's prefix length
+    /// (debug-checked), since the inline keys move unchanged; a wrong one
+    /// gives wrong answers, never undefined behavior.
     pub(super) unsafe fn move_run_to(
         self,
         start: usize,
@@ -1119,7 +1106,7 @@ impl<K, V, S> Copy for SeparatorSlots<K, V, S> {}
 /// variant a node's separators are is a constant of its map only where the
 /// method is inlined.
 impl<K, V, S: InlineKeyStrategy<K>> SeparatorSlots<K, V, S> {
-    /// Separator `index`'s window at the node's fence prefix, as kept:
+    /// Separator `index`'s window at the node's prefix length, as kept:
     /// [`Window::NONE`] in a node without inline keys.
     ///
     /// # Safety
@@ -1153,7 +1140,7 @@ impl<K, V, S: InlineKeyStrategy<K>> SeparatorSlots<K, V, S> {
         );
         KeyCells {
             inline_key: window.inline_key(),
-            length_tag: None,
+            length_tag: 0,
         }
     }
 
@@ -1393,7 +1380,7 @@ mod tests {
             if self.spacing == 1 {
                 let len = self.model.iter().take_while(|id| id.is_some()).count();
                 // SAFETY: slots `0..len` are initialized, side by side.
-                let prefix = unsafe { self.slots.run(0, len).as_ref() };
+                let prefix = unsafe { self.slots.slice_ptr(len).as_ref() };
                 let in_memory: Vec<usize> = prefix.iter().map(Tracked::id).collect();
                 let expected: Vec<usize> = self.model[..len].iter().flatten().copied().collect();
                 assert_eq!(in_memory, expected);

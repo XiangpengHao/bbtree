@@ -17,10 +17,9 @@
 //!   inline keys they search (D18).
 //! - [`root`] is the root and the tree that owns it ([`root::Tree`]): the root
 //!   page, with the root node and what the tree keeps for it in place of a
-//!   parent, its fences, as the bytes every
-//!   key shares (D50, D52, `node/root_page.rs`,
-//!   `shared_prefix.rs`), and the last leaf an append went to (D45). Every
-//!   operation on a whole tree starts there.
+//!   parent, its fences, as the bytes every key shares (D50, D52,
+//!   `node/root_page.rs`, `shared_prefix.rs`), and the last leaf an append
+//!   went to (D45). Every operation on a whole tree starts there.
 //! - The rest of this module is the tree's operations, each in its own
 //!   feature's module. Paths from the root and the iterators' walks along
 //!   them (`path.rs`, `walk.rs`), and searches that need no path
@@ -36,14 +35,14 @@
 //! types keep safety only where the code is stable: the borrow types of
 //! paths and walks, which hand out each entry once (`path.rs`, `walk.rs`),
 //! and the slot arrays and page allocation under the nodes. `unsafe` code
-//! is in the node modules that touch pages (`page.rs`, `slots.rs`,
-//! `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
-//! `inline_key_search.rs`, `vector_count.rs`), and in `root.rs`, `path.rs`,
-//! `search.rs` and `walk.rs`, where a contract the type system doesn't
-//! check is relied on.
-//! Every other module is `#![forbid(unsafe_code)]`. What of a node's API
-//! only the tree may use, such as making a handle from a pointer, is
-//! `pub(in crate::tree)`.
+//! is in the node modules that touch pages or erase types (`node/mod.rs`,
+//! `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`, `root_page.rs`,
+//! `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`,
+//! `type_identity.rs`), and in `root.rs`, `path.rs`, `search.rs` and
+//! `walk.rs`, where a contract the type system doesn't check is relied on.
+//! Every other module is `#![forbid(unsafe_code)]`. What only the tree
+//! uses, such as making a node handle from a pointer, is
+//! `pub(in crate::tree)`; the map and the set see the rest.
 
 pub(crate) mod build;
 mod clone;
@@ -56,11 +55,11 @@ mod invariants;
 pub(crate) mod join;
 pub(crate) mod node;
 pub(crate) mod path;
-pub(crate) mod prefix;
+mod prefix;
 mod remove;
 pub(crate) mod root;
 mod search;
-pub(crate) mod shared_prefix;
+mod shared_prefix;
 mod teardown;
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+use core::mem;
+
 use super::node::Node;
 use super::node::inline_keys::{Separator, WindowedKey};
 use super::node::internal::Internal;
@@ -40,7 +42,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
         match self {
             Node::Leaf(leaf) => {
                 let copy = Leaf::new(FreshPage::allocate());
-                let guard = PartialCopy::new(Node::Leaf(copy));
+                let guard = PartialCopy(Node::Leaf(copy));
                 if leaf.has_head() {
                     let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
                         .then(|| leaf.head_key().clone());
@@ -59,7 +61,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
             }
             Node::Internal(internal) => {
                 let first_child = internal.child(0).clone_nodes();
-                let guard = PartialCopy::new(first_child);
+                let guard = PartialCopy(first_child);
                 let copy = Internal::new(FreshPage::allocate(), first_child);
                 let guard = guard.with_top(Node::Internal(copy));
                 copy.set_empty_prefix_len(internal.prefix_len());
@@ -83,35 +85,26 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
     }
 }
 
-/// A copy being made: taken apart if a `clone` panics, so that nothing
-/// cloned so far leaks.
-struct PartialCopy<K, V, S: InlineKeyStrategy<K>> {
-    /// The top of what was copied so far; `None` once finished.
-    top: Option<Node<K, V, S>>,
-}
+/// A copy being made, from its top down: taken apart if a `clone` panics,
+/// so that nothing cloned so far leaks.
+struct PartialCopy<K, V, S: InlineKeyStrategy<K>>(Node<K, V, S>);
 
 impl<K, V, S: InlineKeyStrategy<K>> PartialCopy<K, V, S> {
-    fn new(top: Node<K, V, S>) -> Self {
-        Self { top: Some(top) }
-    }
-
     /// The copy, with `top` above what it held, which `top` owns now.
-    fn with_top(mut self, top: Node<K, V, S>) -> Self {
-        self.top = Some(top);
-        self
+    fn with_top(self, top: Node<K, V, S>) -> Self {
+        mem::forget(self);
+        Self(top)
     }
 
-    fn finish(mut self) -> Node<K, V, S> {
-        self.top
-            .take()
-            .expect("a copy is unfinished until `finish`")
+    fn finish(self) -> Node<K, V, S> {
+        let top = self.0;
+        mem::forget(self);
+        top
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Drop for PartialCopy<K, V, S> {
     fn drop(&mut self) {
-        if let Some(top) = self.top.take() {
-            top.destroy(PageByType::deallocate);
-        }
+        self.0.destroy(PageByType::deallocate);
     }
 }
