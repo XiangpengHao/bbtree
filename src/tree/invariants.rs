@@ -24,9 +24,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// - in order, keys strictly increase;
     /// - every key lies within the separator bounds passed down from its
     ///   parent;
-    /// - all leaves are at the same depth, and every edge's tag tells its
-    ///   node's kind, as its header does (checked as nodes are reached, in
-    ///   debug builds);
+    /// - all leaves are at the same depth, the kinds of the nodes as the
+    ///   tags of the edges to them tell (`tree/node/page.rs`);
     /// - every node below the root holds at least its `min_len` keys, which
     ///   splits and removals keep (D22);
     /// - the root of a non-empty tree holds a key, and so does an internal

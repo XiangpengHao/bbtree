@@ -75,7 +75,7 @@ use core::mem::needs_drop;
 
 use super::node::inline_keys::SearchKey;
 use super::node::leaf::{KeyRun, Leaf, LeafRun};
-use super::node::page::{PageByKind, TaggedNodePtr};
+use super::node::page::{NodePtr, PageByKind};
 use super::node::root_page::RootPage;
 use super::node::{EntrySlots, Node};
 use super::path::{
@@ -421,7 +421,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
 /// The node a walk's tree hangs from: where each end starts. 8 bytes, where
 /// the node, sorted by its kind, takes 16.
 struct WalkTop<K, V, S> {
-    node: TaggedNodePtr<K, V, S>,
+    node: NodePtr<K, V, S>,
 }
 
 impl<K, V, S> Clone for WalkTop<K, V, S> {
@@ -439,7 +439,7 @@ impl<K, V, S> WalkTop<K, V, S> {
         S: InlineKeyStrategy<K>,
     {
         Self {
-            node: root.top().tagged(),
+            node: root.top().node_ptr(),
         }
     }
 
@@ -1096,7 +1096,9 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
     /// A walk taking apart the nodes under `top`, on plain pages: what is
     /// left of a tree being made (`tree/clone.rs`).
     pub(crate) fn of_subtree(top: Node<K, V, S>, release: R) -> Self {
-        let top = WalkTop { node: top.tagged() };
+        let top = WalkTop {
+            node: top.node_ptr(),
+        };
         Self {
             walk: FullWalk::from_top(Some(top), usize::MAX),
             release,

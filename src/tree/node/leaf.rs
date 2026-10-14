@@ -58,9 +58,7 @@ impl<K, V, S> Leaf<K, V, S> {
     /// The leaf at `node`, which must hold one.
     #[inline(always)]
     pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
-        // SAFETY: the node is allocated and initialized, and nothing writes
-        // its header meanwhile (the handles' contract).
-        debug_assert!(unsafe { node.is_leaf() }, "the node is internal");
+        debug_assert!(node.is_leaf(), "the node is internal");
         Self { node }
     }
 

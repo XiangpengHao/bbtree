@@ -239,10 +239,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         new_internal_page: impl FnOnce() -> FreshPage<Internal<K, V, S>>,
     ) -> Node<K, V, S> {
         let page = self.tree();
-        match self.top_mut() {
+        let (page, child) = match self.top_mut() {
             Node::Leaf(_) => page.raise(new_leaf_page()),
             Node::Internal(_) => page.raise(new_internal_page()),
-        }
+        };
+        self.page = Some(page);
+        child
     }
 
     /// Makes the tree a level shorter ([`RootPage::lower`]): the root's only
@@ -254,7 +256,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Without a tree, or if the root is a leaf; the tree is unchanged then.
     pub(crate) fn lower(&mut self) -> PageByKind<K, V, S> {
         self.clear_insertion_hint();
-        self.tree().lower()
+        let (page, emptied) = self.tree().lower();
+        self.page = Some(page);
+        emptied
     }
 
     /// Publishes a path's proof after it relinquishes its mutation access.

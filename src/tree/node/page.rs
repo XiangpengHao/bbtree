@@ -121,7 +121,7 @@ impl<Kind> FreshPage<Kind> {
 /// or of 512 bytes for internal nodes that keep no keys (D49), and aligned
 /// to that step (D15), or more if its keys or values need it: so no node
 /// crosses a page, and the lowest bit of every node pointer is free for its
-/// kind's tag ([`TaggedNodePtr`]). A root page is aligned as the larger of
+/// kind's tag ([`NodePtr`]). A root page is aligned as the larger of
 /// the two kinds' (`root_page.rs`).
 impl<Kind: PageType> FreshPage<Kind> {
     /// A page from the global allocator.
@@ -193,11 +193,6 @@ pub(in crate::tree) struct NodeHeader {
     /// exactly when this is set, and so is its head key slot in a map whose
     /// separator keys are heads (D49). Always `false` in an internal node.
     has_head: bool,
-    /// Whether the node is a leaf: its kind, which a page that holds it
-    /// tells by itself, wherever it is reached from. Fixed for a node's
-    /// life, but on the root's page, which holds either kind
-    /// (`root_page.rs`).
-    is_leaf: bool,
 }
 
 /// The header of a node with inline keys (D18): the common header, then
@@ -220,17 +215,23 @@ impl InlineKeyNodeHeader {
 }
 
 /// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
-/// strategy `S`: the page of a former [`FreshPage`] whose header has been
-/// written.
+/// strategy `S`, that tells the node's kind in its lowest bit, which every
+/// page leaves 0, being aligned to 512 B at least (D15, D49). Internal nodes
+/// store it as edges, paths and walks as the nodes on them (`tree/path.rs`),
+/// the tree as its root (`root_page.rs`), and the node handles, [`Leaf`] and
+/// [`Internal`], wrap it: following one decides the kind of the node it leads
+/// to before reading the node. A leaf's pointer carries the tag, so that a
+/// descent uses an internal node's as it is.
 ///
-/// It does not know the node's kind, which the node's header and a
-/// [`TaggedNodePtr`] to it tell. The kinds have different layouts (D21), so
-/// every slot array it hands out needs the caller to know the kind.
-/// Everything it offers is raw: the node handles, [`Leaf`] and [`Internal`],
-/// are its users.
+/// The tag is the only record of a node's kind: the node does not keep it.
+/// A pointer gets it where its page becomes a node ([`Self::initialize`],
+/// [`Self::move_node_to`]), from the kind the page is made into, and keeps it
+/// as it is copied. The kinds have different layouts (D21), so every slot
+/// array it hands out needs the caller to know the kind. Everything it
+/// offers is raw: the node handles are its users.
 #[repr(transparent)]
 pub(crate) struct NodePtr<K, V, S> {
-    page: NonNull<u8>,
+    tagged: NonNull<u8>,
     _marker: PhantomData<*const (K, V)>,
     _strategy: PhantomData<fn() -> S>,
 }
@@ -243,42 +244,16 @@ impl<K, V, S> Clone for NodePtr<K, V, S> {
 
 impl<K, V, S> Copy for NodePtr<K, V, S> {}
 
-/// A pointer to a node that tells the node's kind in its lowest bit, which
-/// every page leaves 0, being aligned to 512 B at least (D15, D49): what
-/// internal nodes store as edges, and paths and walks as the nodes on them
-/// (`tree/path.rs`), so that following one decides the kind of the node it
-/// leads to before reading the node. A leaf's pointer carries the tag, so
-/// that a descent uses an internal node's as it is.
-///
-/// The tag says what the node's header says ([`NodePtr::is_leaf`]), which
-/// debug builds check where a handle is made from it.
-#[repr(transparent)]
-pub(crate) struct TaggedNodePtr<K, V, S> {
-    tagged: NonNull<u8>,
-    _marker: PhantomData<*const (K, V)>,
-    _strategy: PhantomData<fn() -> S>,
-}
-
-impl<K, V, S> Clone for TaggedNodePtr<K, V, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K, V, S> Copy for TaggedNodePtr<K, V, S> {}
-
-impl<K, V, S> TaggedNodePtr<K, V, S> {
+impl<K, V, S> NodePtr<K, V, S> {
     /// The bit that marks a leaf's pointer.
     const LEAF_TAG: usize = 1;
 
-    /// `node`'s pointer, tagged as a leaf's if `is_leaf`.
+    /// The node of kind `Kind` in the page at `page`, tagged with its kind.
     #[inline(always)]
-    pub(super) fn new(node: NodePtr<K, V, S>, is_leaf: bool) -> Self {
-        debug_assert_eq!(node.page.addr().get() & Self::LEAF_TAG, 0);
+    fn tagged_as<Kind: PageKind>(page: NonNull<u8>) -> Self {
+        debug_assert_eq!(page.addr().get() & Self::LEAF_TAG, 0);
         Self {
-            tagged: node
-                .page
-                .map_addr(|addr| addr | (usize::from(is_leaf) * Self::LEAF_TAG)),
+            tagged: page.map_addr(|addr| addr | (usize::from(Kind::IS_LEAF) * Self::LEAF_TAG)),
             _marker: PhantomData,
             _strategy: PhantomData,
         }
@@ -290,49 +265,26 @@ impl<K, V, S> TaggedNodePtr<K, V, S> {
         self.tagged.addr().get() & Self::LEAF_TAG != 0
     }
 
-    /// The pointer of a leaf, untagged.
+    /// The page's address: the pointer without its tag, which every access
+    /// to the node starts from.
     #[inline(always)]
-    pub(in crate::tree) fn leaf_ptr(self) -> NodePtr<K, V, S> {
-        debug_assert!(self.is_leaf());
+    pub(super) fn page(self) -> NonNull<u8> {
         // SAFETY: clearing the tag gives back the page's address, which is
         // not null.
-        NodePtr::from_raw(unsafe {
+        unsafe {
             NonNull::new_unchecked(self.tagged.as_ptr().map_addr(|addr| addr & !Self::LEAF_TAG))
-        })
-    }
-
-    /// The pointer of an internal node, which carries no tag.
-    #[inline(always)]
-    pub(in crate::tree) fn internal_ptr(self) -> NodePtr<K, V, S> {
-        debug_assert!(!self.is_leaf());
-        NodePtr::from_raw(self.tagged)
-    }
-
-    /// Whether `self` and `other` point to the same node.
-    pub(in crate::tree) fn is(self, other: Self) -> bool {
-        self.tagged == other.tagged
-    }
-}
-
-impl<K, V, S> NodePtr<K, V, S> {
-    /// The node in the page at `page`, whatever it holds.
-    pub(super) fn from_raw(page: NonNull<u8>) -> Self {
-        Self {
-            page,
-            _marker: PhantomData,
-            _strategy: PhantomData,
         }
     }
 
     /// The page's address, which tells nodes apart (`tree/inspect.rs`).
     #[cfg(any(test, feature = "inspect"))]
     pub(in crate::tree) fn addr(self) -> usize {
-        self.page.addr().get()
+        self.page().addr().get()
     }
 
     /// Whether `self` and `other` point to the same node.
     pub(in crate::tree) fn is(self, other: Self) -> bool {
-        self.page == other.page
+        self.tagged == other.tagged
     }
 
     /// Gives the page back, as a fresh page of its type.
@@ -349,7 +301,7 @@ impl<K, V, S> NodePtr<K, V, S> {
         // `FreshPage::<Kind>::layout()` and aligned, and the caller hands
         // over every use of it: it is a `FreshPage` again.
         FreshPage {
-            page: self.page,
+            page: self.page(),
             _kind: PhantomData,
         }
     }
@@ -357,7 +309,7 @@ impl<K, V, S> NodePtr<K, V, S> {
     /// The header, written by `from_fresh_page`. In a node with inline keys,
     /// it starts an [`InlineKeyNodeHeader`].
     fn header(self) -> *mut NodeHeader {
-        self.page.cast::<NodeHeader>().as_ptr()
+        self.page().cast::<NodeHeader>().as_ptr()
     }
 
     /// The `len` header field.
@@ -370,19 +322,6 @@ impl<K, V, S> NodePtr<K, V, S> {
         // SAFETY: the header was written by `from_fresh_page` and is aligned;
         // the page is allocated (caller).
         usize::from(unsafe { (*self.header()).len })
-    }
-
-    /// Whether the node is a leaf: its header's kind.
-    ///
-    /// # Safety
-    ///
-    /// The node has not been released, and nothing writes its header
-    /// concurrently.
-    #[inline(always)]
-    pub(super) unsafe fn is_leaf(self) -> bool {
-        // SAFETY: the header was written by `initialize` and is aligned; the
-        // page is allocated (caller).
-        unsafe { (*self.header()).is_leaf }
     }
 
     /// Whether a leaf's head slot, and head key slot where separator keys
@@ -484,15 +423,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// gets the greatest inline key, so that searches may count the slots
     /// past `len` (`tree/node/mod.rs`, invariant 4).
     pub(super) fn from_fresh_page<Kind: PageKind>(page: FreshPage<Kind>) -> Self {
-        let node = Self::from_raw(page.into_raw());
         // SAFETY: the page is a fresh one of kind `Kind`, which nothing else
         // uses.
-        unsafe { node.initialize::<Kind>() };
-        node
+        unsafe { Self::initialize::<Kind>(page.into_raw()) }
     }
 
-    /// Makes the page an empty node of kind `Kind`, as `from_fresh_page`
-    /// says, whatever it held: as a fresh page becomes one, and as the root's
+    /// Makes the page at `page` an empty node of kind `Kind`, as
+    /// `from_fresh_page` says, whatever it held, and returns its pointer,
+    /// tagged with `Kind`: as a fresh page becomes one, and as the root's
     /// page turns from one kind into the other (`root_page.rs`).
     ///
     /// # Safety
@@ -500,11 +438,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// The page is allocated, aligned to `Kind`'s layout and at least its
     /// size, the access is exclusive, and nothing in the page needs dropping
     /// or freeing anymore: it is overwritten.
-    pub(super) unsafe fn initialize<Kind: PageKind>(self) {
+    pub(super) unsafe fn initialize<Kind: PageKind>(page: NonNull<u8>) -> Self {
+        let node = Self::tagged_as::<Kind>(page);
         let common = NodeHeader {
             len: 0,
             has_head: false,
-            is_leaf: Kind::IS_LEAF,
         };
         // SAFETY: the page is aligned to its layout (the caller), whose
         // alignment either header's divides, and the header of its layout
@@ -512,22 +450,23 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // page, aligned (layout invariants); the access is exclusive.
         unsafe {
             if Self::has_inline_keys() {
-                self.page
-                    .cast::<InlineKeyNodeHeader>()
+                page.cast::<InlineKeyNodeHeader>()
                     .write(InlineKeyNodeHeader {
                         common,
                         prefix_len: 0,
                     });
             } else {
-                self.page.cast::<NodeHeader>().write(common);
+                page.cast::<NodeHeader>().write(common);
             }
-            self.key_columns::<Kind>().initialize();
+            node.key_columns::<Kind>().initialize();
         }
+        node
     }
 
     /// Moves the node of kind `Kind` here into the page at `dest`, a page
     /// for a node of that kind: every byte of its layout, as raw bytes,
-    /// keys, values and edges moving without being read.
+    /// keys, values and edges moving without being read. Returns the node's
+    /// pointer there, tagged with `Kind`.
     ///
     /// # Safety
     ///
@@ -535,22 +474,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// kind's size, aligned to it, which the access to is exclusive and which
     /// holds nothing that needs dropping. Afterwards, this node's contents
     /// belong to `dest`: nothing reads them here again but as raw bytes.
-    pub(super) unsafe fn move_node_to<Kind: PageKind>(self, dest: Self) {
+    pub(super) unsafe fn move_node_to<Kind: PageKind>(self, dest: NonNull<u8>) -> Self {
+        debug_assert_eq!(self.is_leaf(), Kind::IS_LEAF);
         let size = Kind::page_layout().size();
         // SAFETY: both pages are allocated with at least `size` bytes, and
         // distinct (the caller); a byte copy carries uninitialized bytes as
         // they are.
         unsafe {
-            self.page
+            self.page()
                 .as_ptr()
-                .copy_to_nonoverlapping(dest.page.as_ptr(), size);
+                .copy_to_nonoverlapping(dest.as_ptr(), size);
         }
-    }
-
-    /// The page's address, for the root area after its node
-    /// (`root_page.rs`).
-    pub(super) fn page(self) -> NonNull<u8> {
-        self.page
+        Self::tagged_as::<Kind>(dest)
     }
 
     /// The `prefix_len` of a node with inline keys (05-fence-key.md), or
@@ -562,7 +497,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// concurrently.
     pub(super) unsafe fn prefix_len(self) -> Option<usize> {
         Self::has_inline_keys().then(|| {
-            let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
+            let header = self.page().cast::<InlineKeyNodeHeader>().as_ptr();
             // SAFETY: a node with inline keys starts with an
             // `InlineKeyNodeHeader`, written by `from_fresh_page` and
             // aligned; the page is allocated (caller).
@@ -581,7 +516,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         if Self::has_inline_keys() {
             debug_assert!(prefix_len <= InlineKeyNodeHeader::MAX_PREFIX_LEN);
             let prefix_len = prefix_len.min(InlineKeyNodeHeader::MAX_PREFIX_LEN) as u16;
-            let header = self.page.cast::<InlineKeyNodeHeader>().as_ptr();
+            let header = self.page().cast::<InlineKeyNodeHeader>().as_ptr();
             // SAFETY: a node with inline keys starts with an aligned
             // `InlineKeyNodeHeader`; the caller has exclusive access.
             unsafe { (*header).prefix_len = prefix_len };
@@ -624,7 +559,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // (caller).
         unsafe {
             let keys = Slots::with_stride(
-                self.page.byte_add(area.keys_offset).cast(),
+                self.page().byte_add(area.keys_offset).cast(),
                 area.capacity,
                 area.key_stride,
             );
@@ -682,10 +617,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         unsafe {
             let inline_keys =
                 Option::zip(plan.inline_width(), area.inline_keys_offset).map(|(width, offset)| {
-                    InlineKeySlots::new(width, self.page.byte_add(offset), area.capacity)
+                    InlineKeySlots::new(width, self.page().byte_add(offset), area.capacity)
                 });
             let length_tags = length_tags_offset
-                .map(|offset| Slots::new(self.page.byte_add(offset).cast(), area.capacity));
+                .map(|offset| Slots::new(self.page().byte_add(offset).cast(), area.capacity));
             KeyColumns::new(inline_keys, length_tags, area.capacity)
         }
     }
@@ -705,7 +640,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // 0 starts with a key's place, aligned for `K` and in the page, clear
         // of every other array (layout invariants); the page is allocated
         // (caller).
-        unsafe { self.page.byte_add(offset).cast() }
+        unsafe { self.page().byte_add(offset).cast() }
     }
 
     /// A leaf's value slots: `capacity` of them, value `i` beside key `i`
@@ -724,7 +659,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // (caller).
         unsafe {
             Slots::with_stride(
-                self.page
+                self.page()
                     .byte_add(layout.head_offset + layout.value_stride)
                     .cast(),
                 layout.keys.capacity,
@@ -748,7 +683,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // page is allocated (caller).
         unsafe {
             Slots::with_stride(
-                self.page.byte_add(layout.head_offset).cast(),
+                self.page().byte_add(layout.head_offset).cast(),
                 layout.keys.capacity + 1,
                 layout.value_stride,
             )
@@ -761,16 +696,16 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// # Safety
     ///
     /// The node is an internal node that has not been released.
-    pub(super) unsafe fn edge_slots(self) -> Slots<TaggedNodePtr<K, V, S>> {
+    pub(super) unsafe fn edge_slots(self) -> Slots<NodePtr<K, V, S>> {
         let layout = Self::internal_layout();
         // SAFETY: the page is an internal node's (caller), of this layout.
         // The edges' offset and stride are aligned for an edge, a
-        // `TaggedNodePtr` whatever the strategy, and the `capacity + 1` edges stay in the
+        // `NodePtr` whatever the strategy, and the `capacity + 1` edges stay in the
         // page and clear of the keys (layout invariants); the page is
         // allocated (caller).
         unsafe {
             Slots::with_stride(
-                self.page.byte_add(layout.edges_offset).cast(),
+                self.page().byte_add(layout.edges_offset).cast(),
                 layout.keys.capacity + 1,
                 layout.edge_stride,
             )
@@ -1248,7 +1183,7 @@ mod tests {
             node: NodePtr<K, V, S>,
         ) -> Range<usize> {
             let layout = FreshPage::<Kind>::layout();
-            let start = node.page.addr().get();
+            let start = node.page().addr().get();
             assert!(start.is_multiple_of(layout.align()));
             start..start + layout.size()
         }

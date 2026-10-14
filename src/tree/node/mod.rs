@@ -12,12 +12,12 @@
 //! only for keys without inline keys. A leaf is a page of a
 //! `NodeLayout::<K, V>` leaf layout, sized by its keys and values, and an
 //! internal node a page of an internal layout, sized by its keys alone
-//! (D21). A node's header tells its kind, and so does every pointer to it,
-//! in a tag bit, so that following an edge decides the child's kind before
+//! (D21). Every pointer to a node tells its kind, in a tag bit, and nothing
+//! else does, so that following an edge decides the child's kind before
 //! reading it ([`Node`], D52); nothing tells a node's parent: navigation
 //! uses paths instead of parent pointers. The root node is in the root
-//! page, which holds either kind, and the tree's shared prefix after it
-//! (`root_page.rs`).
+//! page, which holds either kind, and the tree's shared prefix after it;
+//! the tree's pointer to it tells the root's kind (`root_page.rs`).
 //!
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
@@ -70,11 +70,10 @@
 //!    initialized.
 //! 2. **Edges own nodes.** Every initialized edge of a node is the only
 //!    pointer to a distinct node one level below it, and every leaf lies at
-//!    the same depth below the root. A node's header tells whether it is a
-//!    leaf, and so does the
-//!    tag of every pointer to it (`page.rs`). Edges are written only from a
-//!    node taken off another edge, a split, or a new page, or moved between
-//!    siblings. Only the root page (`root_page.rs`) holds a node of either
+//!    the same depth below the root. The tag of every pointer to a node,
+//!    the tree's to its root too, tells whether it is a leaf (`page.rs`).
+//!    Edges are written only from a node taken off another edge, a split,
+//!    or a new page, or moved between siblings. Only the root page (`root_page.rs`) holds a node of either
 //!    kind over its life; every other page, the kind it was allocated for.
 //! 3. **Heads are flagged.** A leaf's head slot is initialized exactly when
 //!    its header says the leaf has a head, and so is its head key slot in a
@@ -127,13 +126,14 @@ use self::inline_keys::{RefitBuffer, Separator, Window};
 use self::internal::Internal;
 use self::leaf::Leaf;
 use self::node_plan::NodePlan;
-use self::page::{NodePtr, PageByKind, PageKind, TaggedNodePtr};
+use self::page::{NodePtr, PageByKind, PageKind};
 use self::siblings::Siblings;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 pub(crate) use self::slots::KeyList;
 
-/// A node whose kind its header tells: what an edge or the root leads to.
+/// A node, of the kind its pointer's tag tells: what an edge or the root
+/// leads to.
 pub(crate) enum Node<K, V, S> {
     Leaf(Leaf<K, V, S>),
     Internal(Internal<K, V, S>),
@@ -152,41 +152,21 @@ impl<K, V, S> Node<K, V, S> {
     /// or a path's level, is followed, deciding the kind before the node is
     /// read.
     #[inline(always)]
-    pub(in crate::tree) fn at(node: TaggedNodePtr<K, V, S>) -> Self {
+    pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
         if node.is_leaf() {
-            Self::Leaf(Leaf::at(node.leaf_ptr()))
-        } else {
-            Self::Internal(Internal::at(node.internal_ptr()))
-        }
-    }
-
-    /// The node at `node`, of the kind its header tells: for the root, which
-    /// no edge leads to (`root_page.rs`).
-    #[inline(always)]
-    fn from_header(node: NodePtr<K, V, S>) -> Self {
-        // SAFETY: the node is allocated and initialized (invariant 1), and
-        // nothing writes its header meanwhile (the handles' contract).
-        if unsafe { node.is_leaf() } {
             Self::Leaf(Leaf::at(node))
         } else {
             Self::Internal(Internal::at(node))
         }
     }
 
+    /// The node's pointer, tagged with its kind: what an edge or a path
+    /// keeps.
+    #[inline(always)]
     pub(in crate::tree) fn node_ptr(self) -> NodePtr<K, V, S> {
         match self {
             Self::Leaf(leaf) => leaf.node_ptr(),
             Self::Internal(internal) => internal.node_ptr(),
-        }
-    }
-
-    /// The node's pointer, tagged with its kind: what an edge or a path
-    /// keeps.
-    #[inline(always)]
-    pub(in crate::tree) fn tagged(self) -> TaggedNodePtr<K, V, S> {
-        match self {
-            Self::Leaf(leaf) => TaggedNodePtr::new(leaf.node_ptr(), true),
-            Self::Internal(internal) => TaggedNodePtr::new(internal.node_ptr(), false),
         }
     }
 

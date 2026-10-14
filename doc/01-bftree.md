@@ -90,8 +90,8 @@ the keys, then the values (decisions D9).
 | bf-tree | bbtree |
 |---|---|
 | Metadata grows from the front, payload from the back | Keys, then values, each an array (decisions D9). |
-| Count + flags packed in one `u16`; header const-asserted | Header is `len: u16`, a head flag and the node's kind, plus prefix lengths in nodes with inline keys; layouts const-asserted. |
-| Node kind decided by the parent (`children_is_leaf`) | Same idea per edge: a pointer's lowest bit tags a leaf, so the parent's edge tells the child's kind before it is read; the root's header tells the root's (decisions D52). |
+| Count + flags packed in one `u16`; header const-asserted | Header is `len: u16` and a head flag, plus prefix lengths in nodes with inline keys; layouts const-asserted. |
+| Node kind decided by the parent (`children_is_leaf`) | Same idea per edge: a pointer's lowest bit tags a leaf, so the parent's edge tells the child's kind before it is read; the tree's pointer to the root page tells the root's (decisions D52). |
 | Root id swapped for a new root, its kind in a bit (`ROOT_IS_LEAF_MASK`) | The root page stays the root: growing or shrinking the tree moves a node into or out of it (decisions D52). |
 | Inner nodes page-aligned | All nodes aligned to their own size, 1 KB or more, so none crosses a page (decisions D15); our own allocator is planned (D8). |
 | No parent pointers | Same. Iterators, entries and cursors carry a path stack instead (decisions D11). |

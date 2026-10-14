@@ -48,7 +48,7 @@ use core::mem::MaybeUninit;
 use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, PageByKind, TaggedNodePtr};
+use super::node::page::{FreshPage, NodePtr, PageByKind};
 use super::node::{KeyList, Node};
 use super::root::Root;
 use super::shared_prefix::SharedPrefix;
@@ -147,7 +147,7 @@ impl NodeEnd for LastEdge {
 /// which every use checks against the node's length. A node holds at most
 /// 1023 keys (`tree/node/layout.rs`), so every index fits in a `u16`.
 pub(crate) struct Path<B, K, V, S> {
-    nodes: [MaybeUninit<TaggedNodePtr<K, V, S>>; MAX_DEPTH + 1],
+    nodes: [MaybeUninit<NodePtr<K, V, S>>; MAX_DEPTH + 1],
     indexes: [MaybeUninit<u16>; MAX_DEPTH + 1],
     levels: u8,
     _borrow: PhantomData<B>,
@@ -212,12 +212,12 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// `root` is the root of a well-formed tree, to which the path has the
     /// access `B` says for as long as it lives.
     pub(crate) fn attach(&mut self, root: Node<K, V, S>) {
-        self.write_level(0, root.tagged(), 0);
+        self.write_level(0, root.node_ptr(), 0);
         self.levels = 1;
     }
 
     /// Writes the level at `depth`.
-    fn write_level(&mut self, depth: usize, node: TaggedNodePtr<K, V, S>, index: usize) {
+    fn write_level(&mut self, depth: usize, node: NodePtr<K, V, S>, index: usize) {
         self.nodes[depth].write(node);
         self.write_index(depth, index);
     }
@@ -252,7 +252,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
 
     /// The node at `depth`, which must be on the path, as the path keeps
     /// it.
-    fn tagged_node(&self, depth: usize) -> TaggedNodePtr<K, V, S> {
+    fn node_ptr(&self, depth: usize) -> NodePtr<K, V, S> {
         assert!(self.is_on_path(depth), "depth {depth} is not on the path");
         // SAFETY: the levels on the path are in the array and initialized
         // (type invariant).
@@ -262,7 +262,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// The node at `depth`, which must be on the path: internal above the
     /// bottom, which debug builds check.
     pub(crate) fn node(&self, depth: usize) -> Node<K, V, S> {
-        let node = Node::at(self.tagged_node(depth));
+        let node = Node::at(self.node_ptr(depth));
         debug_assert!(
             depth == self.depth() || matches!(node, Node::Internal(_)),
             "a path's nodes above its bottom are internal"
@@ -277,7 +277,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     ///
     /// If `depth` is not on the path.
     pub(crate) fn internal(&self, depth: usize) -> Internal<K, V, S> {
-        Internal::at(self.tagged_node(depth).internal_ptr())
+        Internal::at(self.node_ptr(depth))
     }
 
     /// Whether the node the path ends at is a leaf.
@@ -286,7 +286,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     ///
     /// If the path is detached.
     pub(crate) fn ends_at_leaf(&self) -> bool {
-        self.tagged_node(self.depth()).is_leaf()
+        self.node_ptr(self.depth()).is_leaf()
     }
 
     /// The edge of a leaf the path ends at: where a walk's cursor stands
@@ -304,7 +304,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
         // and type invariant), and holds a leaf.
         unsafe {
             (
-                Leaf::at(self.nodes.get_unchecked(bottom).assume_init().leaf_ptr()),
+                Leaf::at(self.nodes.get_unchecked(bottom).assume_init()),
                 usize::from(self.indexes.get_unchecked(bottom).assume_init()),
             )
         }
@@ -432,7 +432,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         let Node::Internal(internal) = self.node(depth) else {
             panic!("descending from a leaf");
         };
-        let child = internal.child(self.index()).tagged();
+        let child = internal.child(self.index()).node_ptr();
         self.write_level(depth + 1, child, 0);
         self.levels += 1;
     }
@@ -455,7 +455,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
             node = internal.child(edge);
             depth += 1;
             edge = End::edge(node);
-            self.write_level(depth, node.tagged(), edge);
+            self.write_level(depth, node.node_ptr(), edge);
         }
         self.levels = depth as u8 + 1;
     }

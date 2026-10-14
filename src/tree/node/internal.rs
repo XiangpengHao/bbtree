@@ -10,7 +10,7 @@
 //! node: routing a key to a child, reading and replacing its separators,
 //! taking and giving children, splitting it, cutting it, and balancing it
 //! with a sibling ([`Child`]). Its children are all of one kind, which each
-//! child's header tells. The handle's contracts are the node module's
+//! edge's tag tells. The handle's contracts are the node module's
 //! (`tree/node/mod.rs`).
 
 use core::alloc::Layout;
@@ -22,7 +22,7 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Separator, Window};
 use super::leaf::Leaf;
 use super::node_plan::{KeySearch, NodePlan};
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType, TaggedNodePtr};
+use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
@@ -57,9 +57,7 @@ impl<K, V, S> Internal<K, V, S> {
     /// The internal node at `node`, which must hold one.
     #[inline(always)]
     pub(in crate::tree) fn at(node: NodePtr<K, V, S>) -> Self {
-        // SAFETY: the node is allocated and initialized, and nothing writes
-        // its header meanwhile (the handles' contract).
-        debug_assert!(!unsafe { node.is_leaf() }, "the node is a leaf");
+        debug_assert!(!node.is_leaf(), "the node is a leaf");
         Self { node }
     }
 
@@ -98,7 +96,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // SAFETY: the node is an allocated internal node, whose edge 0 holds
         // nothing to drop or free (the caller); with no keys, that is its
         // only edge, and it has no inline keys either.
-        unsafe { self.edge_slots().slot(0).write(child.tagged()) };
+        unsafe { self.edge_slots().slot(0).write(child.node_ptr()) };
     }
 
     /// Gives the node's page back.
@@ -171,7 +169,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     #[inline(always)]
-    fn edge_slots(self) -> Slots<TaggedNodePtr<K, V, S>> {
+    fn edge_slots(self) -> Slots<NodePtr<K, V, S>> {
         // SAFETY: the node is an allocated internal node (invariant 1).
         unsafe { self.node.edge_slots() }
     }
@@ -179,14 +177,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
 /// An internal node's children.
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
-    /// Whether the node's children are leaves, as its first child's header
+    /// Whether the node's children are leaves, as its first edge's tag
     /// tells for all of them: the one decision about their kind, after which
     /// code for that kind takes over.
     #[inline(always)]
     pub(crate) fn has_leaf_children(self) -> bool {
-        // SAFETY: edge 0 is initialized (invariant 1), and leads to an
-        // allocated, initialized node, whose header nothing writes meanwhile
-        // (the handles' contract).
+        // SAFETY: edge 0 is initialized (invariant 1).
         unsafe { self.edge_unchecked(0).is_leaf() }
     }
 
@@ -197,7 +193,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// `index <= len`.
     #[inline(always)]
-    pub(in crate::tree) unsafe fn edge_unchecked(self, index: usize) -> TaggedNodePtr<K, V, S> {
+    pub(in crate::tree) unsafe fn edge_unchecked(self, index: usize) -> NodePtr<K, V, S> {
         debug_assert!(index <= self.len());
         // SAFETY: `index <= len` (caller), so edge `index` is initialized
         // (invariant 1).
@@ -241,7 +237,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         );
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: checked just above.
-        Leaf::at(unsafe { self.edge_unchecked(index) }.leaf_ptr())
+        Leaf::at(unsafe { self.edge_unchecked(index) })
     }
 
     /// The child at edge `index`, an internal node, as the caller decided
@@ -258,7 +254,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         );
         assert!(index <= self.len(), "edge index out of bounds");
         // SAFETY: checked just above.
-        Self::at(unsafe { self.edge_unchecked(index) }.internal_ptr())
+        Self::at(unsafe { self.edge_unchecked(index) })
     }
 
     /// # Panics
@@ -310,7 +306,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // goes to the caller. `child`, one level down (the caller), takes its
         // place, owned by this node from now on.
         unsafe {
-            let old = self.edge_slots().slot(index).replace(child.tagged());
+            let old = self.edge_slots().slot(index).replace(child.node_ptr());
             Node::at(old)
         }
     }
@@ -747,7 +743,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         unsafe {
             self.separator_slots().insert(index, len, separator);
             self.edge_slots()
-                .insert(index + 1, len + 1, right_child.tagged());
+                .insert(index + 1, len + 1, right_child.node_ptr());
             self.grow_len(len + 1);
         }
     }

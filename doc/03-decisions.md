@@ -49,11 +49,11 @@ leaf      | header | k0 k1 … k_n | head v0 v1 … v_n |
 internal  | header | k0 k1 … k_n | e0 e1 … e_n+1     |
 ```
 
-- Without inline keys, the header is `len: u16`, a leaf's `has_head` flag
-  (D17) and the node's kind (D52). The keys are an array, and the trailing
-  slots, a leaf's head and values or an internal node's edges (D12), an
-  array right after the keys' capacity. Every pointer to a node carries
-  its kind too, in a tag bit (D52).
+- Without inline keys, the header is `len: u16` and a leaf's `has_head`
+  flag (D17). The keys are an array, and the trailing slots, a leaf's head
+  and values or an internal node's edges (D12), an array right after the
+  keys' capacity. A node's kind is not in its page: every pointer to it
+  carries it, in a tag bit (D52).
 - Trailing slot `i + 1` goes with key `i`, so splitting, stealing and
   merging move trailing slots the same way in both kinds.
 - An insert is one shift of the keys after the position and one of the
@@ -452,8 +452,8 @@ Design and measurements in 05-fence-key.md.
 
 - **The rule:** a traversal decides whether a node is a leaf or internal
   once, where it reads the node's page from an edge, a path or the root
-  (`Node::at`, the one cast, from the pointer's tag; the root's, from its
-  header, D52), and the code after it is for that kind. Likewise a choice fixed for a whole loop, such as the end a
+  (`Node::at`, the one cast, from the pointer's tag, D52), and the code
+  after it is for that kind. Likewise a choice fixed for a whole loop, such as the end a
   border is on, is made before the loop, as a type.
 - **Enforced by the types:** each kind is its own type (D51), and what
   depends on the kind, a node's capacity and where its slots are, is in
@@ -985,9 +985,8 @@ Design in 12-tree-structure.md.
 - **What:** `Leaf` and `Internal` are page handles with the operations of
   their kind, and `Root` owns the tree: its root page, with the top node
   and the fences as the shared prefix (D50, D52), and the append hint
-  (D45). `Node`, a leaf or an internal node, as an edge's tag
-  or the root's header says (D52), is what an edge, a path or the root
-  leads to, and the one place a kind is decided (D28). What both
+  (D45). `Node`, a leaf or an internal node, as the tag of the pointer to
+  it says (D52), is what an edge, a path or the root leads to, and the one place a kind is decided (D28). What both
   kinds share is composition (pages, slots, inline-key column) and `Child`,
   for code that works at either level: `Siblings` (merges and moves
   between children), joins and prefix fits.
@@ -1016,30 +1015,40 @@ Design in 12-tree-structure.md.
   walk to a found separator's head moved out of line (D41), and JSON
   inserts 40 until their leaf search was forced inline (D41).
 
-**D52. Nodes record their kind; the root page stays the root.** (2026-10-13)
+**D52. Pointers carry a node's kind; the root page stays the root.** (2026-10-13)
 Design in 12-tree-structure.md, "The root page and node kinds".
 
-- **What:** a node's header says whether it is a leaf, in a byte that was
-  padding, and so does every pointer to it, an edge or a path's level, in
-  its lowest bit, which pages aligned to 512 B or more leave 0: a leaf's
-  pointer carries the tag. Following an edge decides the child's kind
+- **What:** every pointer to a node, an edge, a path's level, a node
+  handle or the tree's to its root page, says whether the node is a leaf,
+  in its lowest bit, which pages aligned to 512 B or more leave 0: a
+  leaf's pointer carries the tag. It is the only record of the kind: the
+  node's page does not keep it, and there is one pointer type, `NodePtr`,
+  which gets its tag where a page becomes a node of a kind and masks it
+  off to reach the page. Following an edge decides the child's kind
   before the child is read (D28). The root node
   lives in the root page: room for a node of either kind, and after it the
   root area, the tree's shared prefix (D50); nothing records how tall the
   tree is (D24). A tree keeps
   its root page for life. Raising it moves the root node to a fresh page of
   its kind and makes the root internal above it; lowering it moves the
-  root's only child up and frees the child's page. `Root` holds the page
-  once the map has a tree, which its first entry allocates (D1).
-- **Why:** a node's kind is the node's, not a count the code threads down
-  from the root, which a latch taken hand over hand would have to keep
-  right too; with the kind on the pointer, a latch knows what it latches
+  root's only child up and frees the child's page; either returns the
+  root page's pointer tagged with the root's new kind, which `Root` keeps
+  in place of the old one. `Root` holds the page once the map has a tree,
+  which its first entry allocates (D1).
+- **Why:** a node's kind travels with every pointer to it, not as a count
+  the code threads down from the root, which a latch taken hand over hand
+  would have to keep right too; with the kind on the pointer, a latch knows what it latches
   before it touches the node, as bf-tree's parent flag
   (`children_is_leaf`) tells it, per edge here. The shared prefix is the
   root's fences, so it lives with the root node, not behind a pointer of
   its own. A root that never moves needs no root pointer to swap and read
-  again, which bf-tree's new roots need (01-bftree.md).
-- **Cost:** a raise or lower copies a node, a page at most. A join moves
+  again, which bf-tree's new roots need (01-bftree.md). One record of the
+  kind cannot disagree with another, and one pointer type leaves no
+  untagged copy of an address to mix up with a tagged one: untagging is
+  one `and` on the way to the page.
+- **Cost:** a raise or lower copies a node, a page at most, and retags
+  the root's pointer. Every access through a pointer masks off its tag
+  first. A join moves
   the shorter tree's root to a plain page first; a cut's new part and a
   copy move their top into a root page. The root page is the larger
   kind's page and 65 B. The map is 24 bytes, std's size, down from 40.

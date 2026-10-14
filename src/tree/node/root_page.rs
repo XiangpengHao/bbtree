@@ -8,7 +8,8 @@
 //! an internal node above it; lowering it moves the root's only child up
 //! into the root page and frees the child's page. Every other page holds
 //! the kind it was allocated for, at that kind's size (D21), and an edge's
-//! tag tells its kind (`page.rs`); the root node's header tells the root's.
+//! tag tells its kind (`page.rs`). The tree's pointer to its root page is
+//! the root's edge: its tag tells the root's kind, and changes with it.
 
 use core::alloc::Layout;
 use core::mem::size_of;
@@ -22,13 +23,17 @@ use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType};
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
-/// A tree's root page, by its address: the root node at its start, and the
+/// A tree's root page, by a pointer to it tagged with the root node's kind,
+/// as an edge to the node would be: the root node at its start, and the
 /// root area after room for a node of either kind.
 ///
 /// A handle like the node handles, with their contracts (`tree/node/mod.rs`):
-/// the tree's owner gives it its access (`tree/root.rs`).
+/// the tree's owner gives it its access (`tree/root.rs`). Changing the root's
+/// kind ([`Self::raise`], [`Self::lower`]) consumes the handle and returns
+/// the page's new one: a copy of the old one tells the old kind, and is not
+/// used again.
 pub(crate) struct RootPage<K, V, S> {
-    node: NodePtr<K, V, S>,
+    root: NodePtr<K, V, S>,
 }
 
 impl<K, V, S> Clone for RootPage<K, V, S> {
@@ -59,16 +64,13 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// A new tree's root page, in `page`: an empty leaf, whose keys share
     /// nothing yet.
     pub(crate) fn new(page: FreshPage<Self>) -> Self {
-        let root = Self {
-            node: NodePtr::from_raw(page.into_raw()),
-        };
         // SAFETY: the page is a fresh root page, aligned to and larger than
-        // a leaf's, which nothing else uses; its root area lies past the
-        // node, in the page, and needs no alignment.
-        unsafe {
-            root.node.initialize::<Leaf<K, V, S>>();
-            root.area().write(SharedPrefix::none());
-        }
+        // a leaf's, which nothing else uses.
+        let node = unsafe { NodePtr::initialize::<Leaf<K, V, S>>(page.into_raw()) };
+        let root = Self { root: node };
+        // SAFETY: the root area lies past the node, in the page, and needs no
+        // alignment.
+        unsafe { root.area().write(SharedPrefix::none()) };
         root
     }
 
@@ -81,29 +83,27 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         top: Node<K, V, S>,
         shared_prefix: SharedPrefix,
     ) -> (Self, PageByKind<K, V, S>) {
-        let root = Self {
-            node: NodePtr::from_raw(page.into_raw()),
-        };
+        let page = page.into_raw();
         // SAFETY: the page is a fresh root page, aligned to and as large as
         // a node of either kind, which nothing else uses. `top`'s contents
         // move there whole, and its page holds nothing anymore: the root
         // takes its place, as nothing points to a tree's top node but its
-        // owner. The root area lies past the node, in the page.
-        let emptied = unsafe {
-            root.area().write(shared_prefix);
+        // owner.
+        let (moved, emptied) = unsafe {
             match top {
-                Node::Leaf(leaf) => {
-                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(root.node);
-                    leaf.free().into()
-                }
-                Node::Internal(internal) => {
-                    internal
-                        .node_ptr()
-                        .move_node_to::<Internal<K, V, S>>(root.node);
-                    internal.free().into()
-                }
+                Node::Leaf(leaf) => (
+                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(page),
+                    leaf.free().into(),
+                ),
+                Node::Internal(internal) => (
+                    internal.node_ptr().move_node_to::<Internal<K, V, S>>(page),
+                    internal.free().into(),
+                ),
             }
         };
+        let root = Self { root: moved };
+        // SAFETY: the root area lies past the node, in the page.
+        unsafe { root.area().write(shared_prefix) };
         (root, emptied)
     }
 
@@ -111,7 +111,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// kept the node alone (`tree/walk.rs`).
     pub(crate) fn of_top(top: Node<K, V, S>) -> Self {
         Self {
-            node: top.node_ptr(),
+            root: top.node_ptr(),
         }
     }
 
@@ -137,7 +137,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     fn area(self) -> *mut SharedPrefix {
         // SAFETY: the root area lies within the page (`page_layout`).
         unsafe {
-            self.node
+            self.root
                 .page()
                 .byte_add(Self::area_offset())
                 .cast::<SharedPrefix>()
@@ -145,10 +145,10 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         }
     }
 
-    /// The root node, of the kind its header tells.
+    /// The root node, of the kind the tag tells.
     #[inline(always)]
     pub(crate) fn top(self) -> Node<K, V, S> {
-        Node::from_header(self.node)
+        Node::at(self.root)
     }
 
     /// What every key of the tree shares (D50).
@@ -182,37 +182,36 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
             Kind::IS_LEAF,
             "moving the root node to a page of the other kind"
         );
-        let moved = NodePtr::from_raw(page.into_raw());
         // SAFETY: the root node is of kind `Kind` (checked), and `page` a
         // fresh page of that kind, which nothing else uses: the node's
         // contents move there whole.
-        unsafe { self.node.move_node_to::<Kind>(moved) };
-        Node::from_header(moved)
+        Node::at(unsafe { self.root.move_node_to::<Kind>(page.into_raw()) })
     }
 
     /// Makes the tree a level taller: moves the root node to `page`, a fresh
     /// page of its kind, `Kind`, and makes the root an internal node with no
     /// separators above it, at the tree's shared prefix length (D50), as the
-    /// old one had, on both borders. Returns the moved node, the root's only
-    /// child now.
+    /// old one had, on both borders. Returns the page's new handle, and the
+    /// moved node, the root's only child now.
     ///
     /// # Panics
     ///
     /// If the root node is not of kind `Kind`; nothing changes then.
-    pub(crate) fn raise<Kind: PageKind>(self, page: FreshPage<Kind>) -> Node<K, V, S> {
+    pub(crate) fn raise<Kind: PageKind>(self, page: FreshPage<Kind>) -> (Self, Node<K, V, S>) {
         let child = self.move_top_to(page);
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.
-        unsafe { self.node.initialize::<Internal<K, V, S>>() };
-        let root = Internal::at(self.node);
+        let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(self.root.page()) };
+        let root = Internal::at(node);
         root.put_only_child(child);
         root.set_empty_prefix_len(self.shared_prefix().len());
-        child
+        (Self::of_top(Node::Internal(root)), child)
     }
 
     /// Makes the tree a level shorter: moves the root's only child up into
-    /// the root page, and returns the child's emptied page. The inverse of
+    /// the root page, and returns the page's new handle and the child's
+    /// emptied page. The inverse of
     /// [`Self::raise`]: the child, on both borders, has the tree's shared
     /// prefix length already.
     ///
@@ -220,31 +219,31 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     ///
     /// If the root is a leaf; and in debug builds, if it holds separators,
     /// which would be leaked with the other children. Nothing changes then.
-    pub(crate) fn lower(self) -> PageByKind<K, V, S> {
+    pub(crate) fn lower(self) -> (Self, PageByKind<K, V, S>) {
         let Node::Internal(root) = self.top() else {
             panic!("lowering a leaf root");
         };
         debug_assert_eq!(root.len(), 0, "lowering a root with separators");
         let child = root.child(0);
+        let page = self.root.page();
         // SAFETY: the root holds nothing but its edge to `child`, which it
         // owned (invariant 2): overwriting it leaks nothing. `child`'s
         // contents move up whole, of its kind, which fits in the root page,
         // and its page holds nothing afterwards: nothing pointed to it but
         // the root's edge.
-        unsafe {
+        let (moved, emptied) = unsafe {
             match child {
-                Node::Leaf(leaf) => {
-                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(self.node);
-                    leaf.free().into()
-                }
-                Node::Internal(internal) => {
-                    internal
-                        .node_ptr()
-                        .move_node_to::<Internal<K, V, S>>(self.node);
-                    internal.free().into()
-                }
+                Node::Leaf(leaf) => (
+                    leaf.node_ptr().move_node_to::<Leaf<K, V, S>>(page),
+                    leaf.free().into(),
+                ),
+                Node::Internal(internal) => (
+                    internal.node_ptr().move_node_to::<Internal<K, V, S>>(page),
+                    internal.free().into(),
+                ),
             }
-        }
+        };
+        (Self { root: moved }, emptied)
     }
 
     /// Moves the root node to `page`, a fresh page of its kind, `Kind`, for
@@ -274,6 +273,6 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     pub(crate) unsafe fn free(self) -> FreshPage<Self> {
         // SAFETY: the page was allocated as a root page (`new`, `from_node`),
         // and the caller hands over everything in it and every use of it.
-        unsafe { self.node.into_fresh_page() }
+        unsafe { self.root.into_fresh_page() }
     }
 }
