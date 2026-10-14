@@ -448,8 +448,8 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
         &mut self.root
     }
 
-    pub(super) fn height(&self) -> usize {
-        self.root().height()
+    pub(super) fn leaf_depth(&self) -> usize {
+        self.root().leaf_depth()
     }
 
     /// One `entry(key, value)` per entry, in order.
@@ -466,7 +466,7 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     pub(super) fn pop_empty_roots(&mut self) {
         let pages = self.pages;
         let root = self.root_mut();
-        while root.height() > 0 && root.top().len() == 0 {
+        while matches!(root.top(), Node::Internal(top) if top.len() == 0) {
             pages.release(root.lower());
         }
     }

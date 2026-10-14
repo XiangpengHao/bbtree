@@ -171,7 +171,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.path.attach(top.node(), top.height);
+        self.path.attach(top.node());
         self.path.search_to_edge(key, side, shared);
     }
 
@@ -179,7 +179,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// where a walk forward starts, or its last, where one backward does.
     fn start_at_end<End: NodeEnd>(&mut self, top: WalkTop<K, V, S>) {
         let root = top.node();
-        self.path.attach(root, top.height);
+        self.path.attach(root);
         let root_edge = End::edge(root);
         self.path.set_index(root_edge);
         self.path.descend_to_leaf::<End>();
@@ -191,6 +191,15 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         // SAFETY: a started cursor's path is attached and ends at an edge of
         // a leaf (type invariant).
         unsafe { self.path.leaf_edge() }
+    }
+
+    /// Moves the cursor to edge `index` of its leaf, unchecked. It has
+    /// started.
+    #[inline(always)]
+    fn set_leaf_index(&mut self, index: usize) {
+        // SAFETY: a started cursor's path is attached and ends at a leaf
+        // (type invariant).
+        unsafe { self.path.set_leaf_index(index) }
     }
 
     /// Folds `count` entries beside this cursor within its current leaf.
@@ -213,10 +222,10 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     {
         let (leaf, index) = self.leaf_edge();
         let (start, end) = if End::IS_LAST {
-            self.path.set_leaf_index(index - count);
+            self.set_leaf_index(index - count);
             (index - count, index)
         } else {
-            self.path.set_leaf_index(index + count);
+            self.set_leaf_index(index + count);
             (index, index + count)
         };
         for offset in 0..count {
@@ -260,7 +269,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         }
         let (leaf, index) = self.leaf_edge();
         if index < leaf.len() {
-            self.path.set_leaf_index(index + 1);
+            self.set_leaf_index(index + 1);
             // SAFETY: the entry is below the leaf's length; forwarded from
             // the caller.
             return Some(unsafe { B::item(leaf.entry_slots(index)) });
@@ -282,10 +291,11 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        let height = (1..=self.path.root_height())
-            .find(|&height| self.path.index_at(height) < self.path.node(height).len())?;
-        self.ascend_leaving(height, leave);
-        let (node, index) = (self.path.internal(height), self.path.index());
+        let depth = (0..self.path.depth())
+            .rev()
+            .find(|&depth| self.path.index_at(depth) < self.path.node(depth).len())?;
+        self.ascend_leaving(depth, leave);
+        let (node, index) = (self.path.internal(depth), self.path.index());
         self.path.set_index(index + 1);
         self.path.descend_to_leaf::<FirstEdge>();
         let (head, _) = self.leaf_edge();
@@ -321,7 +331,7 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         }
         let (leaf, index) = self.leaf_edge();
         if index > 0 {
-            self.path.set_leaf_index(index - 1);
+            self.set_leaf_index(index - 1);
             // SAFETY: the entry is below the leaf's length; forwarded from
             // the caller.
             return Some(unsafe { B::item(leaf.entry_slots(index - 1)) });
@@ -345,14 +355,15 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     where
         B: WalkBorrow<K, V>,
     {
-        let height =
-            (1..=self.path.root_height()).find(|&height| self.path.index_at(height) > 0)?;
+        let depth = (0..self.path.depth())
+            .rev()
+            .find(|&depth| self.path.index_at(depth) > 0)?;
         let (head, _) = self.leaf_edge();
-        let (node, separator_index) = (self.path.internal(height), self.path.index_at(height) - 1);
+        let (node, separator_index) = (self.path.internal(depth), self.path.index_at(depth) - 1);
         // SAFETY: separator `separator_index` is in the node, and its entry
         // is initialized; forwarded from the caller.
         let item = unsafe { B::item(node.separator_entry_slots(separator_index, head)) };
-        self.ascend_leaving(height, leave);
+        self.ascend_leaving(depth, leave);
         self.path.set_index(separator_index);
         self.path.descend_to_leaf::<LastEdge>();
         Some(item)
@@ -371,27 +382,28 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         if !self.path.is_attached() {
             self.start_at_end::<FirstEdge>(top);
         }
-        let Some(height) = (1..=self.path.root_height())
-            .find(|&height| self.path.index_at(height) < self.path.node(height).len())
+        let Some(depth) = (0..self.path.depth())
+            .rev()
+            .find(|&depth| self.path.index_at(depth) < self.path.node(depth).len())
         else {
             return false;
         };
-        self.ascend_leaving(height, leave);
+        self.ascend_leaving(depth, leave);
         let separator_index = self.path.index();
         self.path.set_index(separator_index + 1);
         self.path.descend_to_leaf::<FirstEdge>();
         true
     }
 
-    /// Goes up the path from the cursor's leaf to `height`, above it,
+    /// Goes up the path from the cursor's leaf to `depth`, above it,
     /// handing `leave` each node it goes up out of, once off the path: the
     /// leaf, then the internal nodes above it.
-    fn ascend_leaving(&mut self, height: usize, leave: &mut impl FnMut(Node<K, V, S>)) {
+    fn ascend_leaving(&mut self, depth: usize, leave: &mut impl FnMut(Node<K, V, S>)) {
         let (leaf, _) = self.leaf_edge();
         self.path.ascend();
         leave(Node::Leaf(leaf));
-        while self.path.height() < height {
-            let node = self.path.internal(self.path.height());
+        while self.path.depth() > depth {
+            let node = self.path.internal(self.path.depth());
             self.path.ascend();
             leave(Node::Internal(node));
         }
@@ -406,11 +418,10 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     }
 }
 
-/// The node a walk's tree hangs from, and its height: where each end starts.
-/// 16 bytes, where the node, sorted by its kind, and its height take 24.
+/// The node a walk's tree hangs from: where each end starts. 8 bytes, where
+/// the node, sorted by its kind, takes 16.
 struct WalkTop<K, V, S> {
     node: TaggedNodePtr<K, V, S>,
-    height: usize,
 }
 
 impl<K, V, S> Clone for WalkTop<K, V, S> {
@@ -429,7 +440,6 @@ impl<K, V, S> WalkTop<K, V, S> {
     {
         Self {
             node: root.top().tagged(),
-            height: root.height(),
         }
     }
 
@@ -940,7 +950,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
             // SAFETY: a cached run never changes its cursor's leaf; this
             // is the same allocation used to bound and start the run.
             let index = unsafe { run.entries.edge_index(cursor.leaf_edge().0, run.reverse) };
-            cursor.path.set_leaf_index(index);
+            cursor.set_leaf_index(index);
         }
     }
 
@@ -1083,14 +1093,10 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
         }
     }
 
-    /// A walk taking apart the nodes under `top`, `height` levels above the
-    /// leaves, on plain pages: what is left of a tree being made
-    /// (`tree/clone.rs`).
-    pub(crate) fn of_subtree(top: Node<K, V, S>, height: usize, release: R) -> Self {
-        let top = WalkTop {
-            node: top.tagged(),
-            height,
-        };
+    /// A walk taking apart the nodes under `top`, on plain pages: what is
+    /// left of a tree being made (`tree/clone.rs`).
+    pub(crate) fn of_subtree(top: Node<K, V, S>, release: R) -> Self {
+        let top = WalkTop { node: top.tagged() };
         Self {
             walk: FullWalk::from_top(Some(top), usize::MAX),
             release,
@@ -1168,17 +1174,17 @@ impl<K, V, S: InlineKeyStrategy<K>, R: FnMut(PageByKind<K, V, S>)> DyingWalk<K, 
             ends.back.path
         } else {
             let mut path = Path::detached();
-            path.attach(ends.top.node(), ends.top.height);
+            path.attach(ends.top.node());
             path
         };
-        for height in path.height()..path.root_height() {
+        for depth in (1..=path.depth()).rev() {
             // SAFETY: with no entry left between the ends, every node off this
             // path is freed, and every entry on it moved out or skipped for
             // having no drop glue (module safety argument); each node here
             // is freed once, after its children.
-            (self.release)(unsafe { path.node(height).free() });
+            (self.release)(unsafe { path.node(depth).free() });
         }
-        let top = path.node(path.root_height());
+        let top = path.node(0);
         // SAFETY: as for the nodes below; the top goes last, in its root page
         // if it has one, which nothing reaches anymore.
         (self.release)(unsafe {

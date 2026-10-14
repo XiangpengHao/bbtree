@@ -6,14 +6,15 @@
 //! so the tree keeps its fences beside it, as the bytes every key shares
 //! (D50, `shared_prefix.rs`): a search checks a query against them once,
 //! before the root, and a node with no separator above it on a side, along
-//! the tree's left or right border, takes the root's fence there. Both live
-//! in the root's page, after the root node, with the tree's height
-//! (`node/root_page.rs`). The tree also keeps the last leaf an append went
-//! to, to append there again without a search (D45).
+//! the tree's left or right border, takes the root's fence there. They live
+//! in the root's page, after the root node (`node/root_page.rs`). The tree
+//! also keeps the last leaf an append went to, to append there again without
+//! a search (D45).
 //!
-//! The root node is a leaf, in a tree of one node, or an internal node;
-//! only the root grows or shrinks the tree's height, in its page, which the
-//! tree keeps for life. A map without entries may have no tree at all, as
+//! The root node is a leaf, in a tree of one node, or an internal node; the
+//! tree grows and shrinks a level only at its root, in its page, which the
+//! tree keeps for life. Nothing records how tall the tree is: a path down
+//! counts its own steps (`path.rs`). A map without entries may have no tree at all, as
 //! std's has no root then (D1): making one allocates nothing. Every
 //! operation on a whole tree starts here, on [`Root`], each in its
 //! feature's module (`tree/mod.rs`).
@@ -126,13 +127,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         self.top()
     }
 
-    /// The root node's height.
+    /// How many edges lead down from the root to each leaf: where two trees
+    /// line up, to join them (`tree/join.rs`), or which of two is smaller.
+    /// Counted down the last edges: every leaf lies as deep, and that is the
+    /// border a join of this tree with one right of it walks anyway.
     ///
     /// # Panics
     ///
     /// Without a tree.
-    pub(crate) fn height(&self) -> usize {
-        self.tree().height()
+    pub(crate) fn leaf_depth(&self) -> usize {
+        let (mut node, mut depth) = (self.top(), 0);
+        while let Node::Internal(internal) = node {
+            node = internal.child(internal.len());
+            depth += 1;
+        }
+        depth
     }
 
     /// What every key of the tree shares (D50).
@@ -187,18 +196,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             .get_or_insert_with(|| RootPage::new(FreshPage::allocate()))
     }
 
-    /// The tree of `top`, `height` levels above the leaves, and the nodes
-    /// under it, on plain pages, whose keys all share `shared_prefix`, which
+    /// The tree of `top` and the nodes under it, on plain pages, whose keys all share `shared_prefix`, which
     /// every node along its borders must have as its prefix length (D50):
     /// `top` moves into a root page, from and back to the global allocator.
     /// The tree owns them from now on.
-    pub(in crate::tree) fn from_node(
-        top: Node<K, V, S>,
-        height: usize,
-        shared_prefix: SharedPrefix,
-    ) -> Self {
-        let (page, emptied) =
-            RootPage::from_node(FreshPage::allocate(), top, height, shared_prefix);
+    pub(in crate::tree) fn from_node(top: Node<K, V, S>, shared_prefix: SharedPrefix) -> Self {
+        let (page, emptied) = RootPage::from_node(FreshPage::allocate(), top, shared_prefix);
         emptied.deallocate();
         Self {
             page: Some(page),
@@ -206,23 +209,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         }
     }
 
-    /// The root node on a plain page of its kind, and its height, giving up
-    /// the tree, for another tree to hang under an edge (`tree/join.rs`):
+    /// The root node on a plain page of its kind, giving up the tree, for another tree to hang under an edge (`tree/join.rs`):
     /// its root page goes back to the global allocator, and the new one comes
     /// from it.
     ///
     /// # Panics
     ///
     /// Without a tree.
-    pub(in crate::tree) fn into_node(self) -> (Node<K, V, S>, usize) {
+    pub(in crate::tree) fn into_node(self) -> Node<K, V, S> {
         let page = self.tree();
-        let height = page.height();
         let (top, emptied) = match page.top() {
             Node::Leaf(_) => page.into_node::<Leaf<K, V, S>>(FreshPage::allocate()),
             Node::Internal(_) => page.into_node::<Internal<K, V, S>>(FreshPage::allocate()),
         };
         emptied.deallocate();
-        (top, height)
+        top
     }
 
     /// Makes the tree a level taller ([`RootPage::raise`]): the root node

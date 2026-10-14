@@ -1,13 +1,15 @@
 //! Joining two trees whose keys don't overlap into one, around a separator
 //! entry between them, comparing no keys: [`Root::join`]. The inverse of
 //! a cut (`cut.rs`): it touches the
-//! nodes along one border of the taller tree, down to the shorter one's
-//! height, and the two spines beside the separator, O(log n) of them.
+//! nodes along one border of the taller tree and the two spines beside the
+//! separator, O(log n) of them.
 //!
 //! The shorter tree joins the taller one's border on its side: the right
-//! border, for a shorter right tree, or the left one. At the shorter tree's
-//! height, the border node absorbs the shorter root around the separator if
-//! all of it fits in one node, as a merge would. Otherwise the shorter root
+//! border, for a shorter right tree, or the left one. Each tree's leaves are
+//! as deep as its border is long, which a walk down it counts. The border
+//! node whose leaves are as deep below it as the shorter tree's are below
+//! its root absorbs the shorter root around the separator if all of it fits
+//! in one node, as a merge would. Otherwise the shorter root
 //! hangs beside it, under the separator, in the node one level up, which
 //! splits up the border if full, as an insert's nodes do. Only roots may
 //! hold fewer keys than a node's minimum (D22), so one of the two roots now
@@ -38,11 +40,10 @@ use super::path::{FirstEdge, Immut, LastEdge, NodeEnd, Path, PathMut};
 use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
-/// Where a join left its separator: in the node at `height` on the border
-/// it joined, or, where keys moved over, in that node's child at
+/// Where a join left its separator: in the node on the border it joined
+/// that a path ends at, or, where keys moved over, in that node's child at
 /// `child_edge`, one level down; at `index` there.
 struct SeparatorPlace {
-    height: usize,
     child_edge: Option<usize>,
     index: usize,
     /// Whether the shorter root hung beside the border rather than being
@@ -64,71 +65,84 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// prefixes, once the tree is whole: a panic then leaves it valid, with
     /// this tree's owner.
     pub(crate) fn join(&mut self, separator: InlinedKey<K, S>, value: V, mut right: Self) {
-        let mut node = right.top_mut();
+        // Down `right`'s left border, the one the join walks there, counting
+        // how deep its leaves lie, to its first leaf, which takes the value.
+        let (mut node, mut right_depth) = (right.top_mut(), 0);
         let separator = loop {
             node = match node {
                 Node::Leaf(leaf) => break leaf.put_separator_head(separator, value),
-                Node::Internal(internal) => internal.child(0),
+                Node::Internal(internal) => {
+                    right_depth += 1;
+                    internal.child(0)
+                }
             };
         };
-        if self.height() >= right.height() {
-            self.join_at_border::<LastEdge>(separator, right);
+        let left_depth = self.leaf_depth();
+        if left_depth >= right_depth {
+            self.join_at_border::<LastEdge>(separator, right, right_depth);
         } else {
             let left = mem::replace(self, right);
-            self.join_at_border::<FirstEdge>(separator, left);
+            self.join_at_border::<FirstEdge>(separator, left, left_depth);
         }
     }
 
-    /// Joins `shorter`, a tree no taller than this one, beside this tree's
-    /// `End` border, with `separator` between them: after this tree's last
-    /// entry for [`LastEdge`], before its first for [`FirstEdge`]. The
-    /// separator's value is already the head of the leftmost leaf right of
-    /// it (D17).
-    fn join_at_border<End: NodeEnd>(&mut self, separator: Separator<K, S>, shorter: Self) {
+    /// Joins `shorter`, a tree whose leaves lie `shorter_depth` below its
+    /// root, no deeper than this tree's, beside this tree's `End` border,
+    /// with `separator` between them: after this tree's last entry for
+    /// [`LastEdge`], before its first for [`FirstEdge`]. The separator's
+    /// value is already the head of the leftmost leaf right of it (D17).
+    fn join_at_border<End: NodeEnd>(
+        &mut self,
+        separator: Separator<K, S>,
+        shorter: Self,
+        shorter_depth: usize,
+    ) {
         // The shorter root hangs under an edge, on a plain page.
-        let (shorter, shorter_height) = shorter.into_node();
-        let place = {
+        let shorter = shorter.into_node();
+        let hung = {
             let mut path = PathMut::new(self);
-            Self::descend_border::<End>(&mut path, shorter_height);
-            if End::IS_LAST {
-                Self::absorb_or_hang_right(&mut path, separator, shorter)
+            Self::descend_border::<End>(&mut path, shorter_depth);
+            let place = if End::IS_LAST {
+                Self::absorb_or_hang_right(&mut path, separator, shorter, shorter_depth)
             } else {
-                Self::absorb_or_hang_left(&mut path, separator, shorter)
-            }
+                Self::absorb_or_hang_left(&mut path, separator, shorter, shorter_depth)
+            };
+            Self::fit_separator_spines(&mut path, &place);
+            place.hung
         };
-        self.fit_separator_spines::<End>(&place);
-        if place.hung {
+        if hung {
             self.fit_border_siblings::<End>();
         }
     }
 
-    /// Starts `path` at the root and takes it down `End`'s border to
-    /// `height`.
-    fn descend_border<End: NodeEnd>(path: &mut PathMut<'_, K, V, S>, height: usize) {
+    /// Starts `path` at the root and takes it down `End`'s border to the
+    /// node whose leaves lie `subtree_depth` below it: down to the border's
+    /// leaf, and back up that many levels.
+    fn descend_border<End: NodeEnd>(path: &mut PathMut<'_, K, V, S>, subtree_depth: usize) {
         path.start_at_root();
-        while path.height() > height {
-            let border = End::edge(path.node());
-            path.set_index(border);
-            path.descend();
+        path.set_index(End::edge(path.node()));
+        path.descend_to_leaf::<End>();
+        for _ in 0..subtree_depth {
+            path.ascend();
         }
     }
 
-    /// At `path`'s node, on this tree's right border at `shorter`'s height:
-    /// absorbs `shorter`'s root around `separator` if they fit in one node,
-    /// or else hangs it right of the node, under the separator, one level up.
+    /// At `path`'s node, on this tree's right border, whose leaves lie as
+    /// deep below it as `shorter`'s, `shorter_depth`: absorbs `shorter`'s
+    /// root around `separator` if they fit in one node, or else hangs it
+    /// right of the node, under the separator, one level up.
     fn absorb_or_hang_right(
         path: &mut PathMut<'_, K, V, S>,
         separator: Separator<K, S>,
         shorter: Node<K, V, S>,
+        shorter_depth: usize,
     ) -> SeparatorPlace {
-        let height = path.height();
         let index = path.node().len();
         let absorbed = path.node().absorb(separator, shorter);
         let (separator, shorter) = match absorbed {
             Ok(page) => {
                 PageByKind::deallocate(page);
                 return SeparatorPlace {
-                    height,
                     child_edge: None,
                     index,
                     hung: false,
@@ -139,31 +153,30 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         Self::hang_beside(path, separator, shorter);
         // Inserted at the last edge, the separator is the last key of the
         // border node one level up, in the right half if it split.
-        Self::descend_border::<LastEdge>(path, height + 1);
+        Self::descend_border::<LastEdge>(path, shorter_depth + 1);
         let index = path.node().len() - 1;
-        Self::stock_beside_separator(path, height + 1, index)
+        Self::stock_beside_separator(path, index)
     }
 
-    /// At `path`'s node, on this tree's left border at `shorter`'s height,
-    /// below the root: puts `shorter`'s root in its place and absorbs it
-    /// into that root around `separator` if they fit in one node, or else
-    /// hangs it right of `shorter`'s root, under the separator, one level up.
+    /// At `path`'s node, on this tree's left border, whose leaves lie as
+    /// deep below it as `shorter`'s, `shorter_depth`, below the root: puts
+    /// `shorter`'s root in its place and absorbs it into that root around
+    /// `separator` if they fit in one node, or else hangs it right of
+    /// `shorter`'s root, under the separator, one level up.
     fn absorb_or_hang_left(
         path: &mut PathMut<'_, K, V, S>,
         separator: Separator<K, S>,
         shorter: Node<K, V, S>,
+        shorter_depth: usize,
     ) -> SeparatorPlace {
-        let height = path.height();
         let index = shorter.len();
-        path.ascend();
-        let displaced = path.internal().replace_child(0, shorter);
+        let displaced = path.ascend().replace_child(0, shorter);
         path.descend();
         let absorbed = path.node().absorb(separator, displaced);
         let (separator, displaced) = match absorbed {
             Ok(page) => {
                 PageByKind::deallocate(page);
                 return SeparatorPlace {
-                    height,
                     child_edge: None,
                     index,
                     hung: false,
@@ -174,11 +187,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         Self::hang_beside(path, separator, displaced);
         // Inserted at the first edge, the separator is the first key of the
         // border node one level up, in the left half if it split.
-        Self::descend_border::<FirstEdge>(path, height + 1);
-        Self::stock_beside_separator(path, height + 1, 0)
+        Self::descend_border::<FirstEdge>(path, shorter_depth + 1);
+        Self::stock_beside_separator(path, 0)
     }
 
-    /// Hangs `right`, a tree at `path`'s node's height, right of that node,
+    /// Hangs `right`, a tree as deep as `path`'s node's subtree, right of that node,
     /// under `separator`, in the node one level up: under a new root if the
     /// node is the root, which the tree raises for it; splitting up the
     /// path while full, each split's right half hung right of its left half
@@ -191,16 +204,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         let mut carried = (separator, right);
         loop {
             let (separator, right) = carried;
-            if path.height() == path.root_height() {
-                path.push_root(FreshPage::allocate, FreshPage::allocate);
-            } else {
-                path.ascend();
-            }
+            let node = path.ascend_raising(FreshPage::allocate, FreshPage::allocate);
             let index = path.index();
-            match path
-                .internal()
-                .insert(index, separator, right, FreshPage::allocate)
-            {
+            match node.insert(index, separator, right, FreshPage::allocate) {
                 Insertion::Fit(_) => return,
                 Insertion::Split(split) => {
                     carried = (split.separator, Node::Internal(split.right));
@@ -210,27 +216,22 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     }
 
     /// Brings whichever of the two children beside the separator, at
-    /// `index` in `path`'s node at `height`, holds fewer keys than its
-    /// minimum, a root before, up to it, taking keys over from the other;
-    /// returns where the separator is then. The two didn't fit in one node,
-    /// so at most one is short, and the other can spare what it needs.
-    fn stock_beside_separator(
-        path: &mut PathMut<'_, K, V, S>,
-        height: usize,
-        index: usize,
-    ) -> SeparatorPlace {
+    /// `index` in `path`'s node, holds fewer keys than its minimum, a root
+    /// before, up to it, taking keys over from the other; returns where the
+    /// separator is then. The two didn't fit in one node, so at most one is
+    /// short, and the other can spare what it needs.
+    fn stock_beside_separator(path: &mut PathMut<'_, K, V, S>, index: usize) -> SeparatorPlace {
         let node = path.internal();
         if node.has_leaf_children() {
-            Self::stock_children(node.siblings::<Leaf<K, V, S>>(index), height, index)
+            Self::stock_children(node.siblings::<Leaf<K, V, S>>(index), index)
         } else {
-            Self::stock_children(node.siblings::<Internal<K, V, S>>(index), height, index)
+            Self::stock_children(node.siblings::<Internal<K, V, S>>(index), index)
         }
     }
 
     /// [`Self::stock_beside_separator`], for children of kind `C`.
     fn stock_children<C: Child<K, V, S>>(
         mut siblings: Siblings<K, V, S, C>,
-        height: usize,
         index: usize,
     ) -> SeparatorPlace {
         let min_len = C::min_len();
@@ -244,7 +245,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             // Each move puts the parent's separator at the right child's
             // front: the joined one, moved first, ends after the others.
             return SeparatorPlace {
-                height: height - 1,
                 child_edge: Some(index + 1),
                 index: steals - 1,
                 hung: true,
@@ -259,14 +259,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             }
             // The joined separator goes to the end of the left child first.
             return SeparatorPlace {
-                height: height - 1,
                 child_edge: Some(index),
                 index: left_len,
                 hung: true,
             };
         }
         SeparatorPlace {
-            height,
             child_edge: None,
             index,
             hung: true,
@@ -277,21 +275,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// whose fences the separator joined (05-fence-key.md): the right border
     /// of the child left of it and the left border of the child right of
     /// it, from the leaves up, and then those two children: an internal
-    /// node's prefix grows no further than its children's.
-    fn fit_separator_spines<End: NodeEnd>(&mut self, place: &SeparatorPlace) {
-        if place.height == 0 {
-            return;
-        }
-        let mut path = PathMut::new(self);
-        let node_height = place.height + usize::from(place.child_edge.is_some());
-        Self::descend_border::<End>(&mut path, node_height);
+    /// node's prefix grows no further than its children's. `path` ends at
+    /// the node `place` is in, and goes to its child there if keys moved
+    /// over; a separator in a leaf has nothing below it.
+    fn fit_separator_spines(path: &mut PathMut<'_, K, V, S>, place: &SeparatorPlace) {
         if let Some(edge) = place.child_edge {
             path.set_index(edge);
             path.descend();
         }
+        if path.ends_at_leaf() {
+            return;
+        }
         let index = place.index;
-        Self::fit_spine_below::<LastEdge>(&mut path, index);
-        Self::fit_spine_below::<FirstEdge>(&mut path, index + 1);
+        Self::fit_spine_below::<LastEdge>(path, index);
+        Self::fit_spine_below::<FirstEdge>(path, index + 1);
         path.fit_children_to_fences([index, index + 1]);
     }
 
@@ -299,16 +296,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// child's `End` border, from the leaf up; the path ends at the node it
     /// started at.
     fn fit_spine_below<End: NodeEnd>(path: &mut PathMut<'_, K, V, S>, edge: usize) {
-        let top = path.height();
+        let top = path.depth();
         path.set_index(edge);
-        path.descend();
-        while path.height() > 0 {
-            let border = End::edge(path.node());
-            path.set_index(border);
-            path.descend();
-        }
+        path.descend_to_leaf::<End>();
         path.ascend();
-        while path.height() < top {
+        while path.depth() > top {
             let child = path.index();
             path.fit_children_to_fences([child]);
             path.ascend();
@@ -400,7 +392,7 @@ impl<K, V, S: InlineKeyStrategy<K>> DetachedTree<K, V, S> {
     pub(crate) fn first_entry(&self) -> Option<(&K, &V)> {
         let root = self.0.page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root.top(), root.height());
+        path.attach(root.top());
         if path.descend_to_first_key() {
             Some(path.key_value())
         } else {

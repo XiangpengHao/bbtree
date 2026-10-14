@@ -21,10 +21,14 @@ use crate::inline_key::InlineKeyStrategy;
 use crate::map::BBTreeMap;
 
 impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
-    /// The height of the root above the leaves: 0 for a map that is one leaf
+    /// How far below the root the leaves lie: 0 for a map that is one leaf
     /// or nothing.
-    fn height(&self) -> usize {
-        self.root.page().map_or(0, |root| root.height())
+    fn leaf_depth(&self) -> usize {
+        if self.root.has_tree() {
+            self.root.leaf_depth()
+        } else {
+            0
+        }
     }
 
     /// Every node's prefix length (05-fence-key.md), from the root down, each

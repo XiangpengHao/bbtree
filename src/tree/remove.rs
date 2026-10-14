@@ -16,7 +16,7 @@
 //!
 //! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes
 //! it changes their parent's prefix. Once the entry is out and counted, the
-//! nodes whose fences changed are fit to them: at each height fixed, the
+//! nodes whose fences changed are fit to them: at each node fixed, the
 //! child the path leads to and the sibling that gave it an entry, if one
 //! did; for a separator, also the nodes along the left border of the
 //! subtree right of it, whose lower fence its successor becomes. Those along
@@ -27,12 +27,12 @@
 
 use core::borrow::Borrow;
 
-use super::node::Child;
 use super::node::inline_keys::{InlinedKey, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::PageByKind;
-use super::path::{FirstEdge, MAX_HEIGHT, PathMut};
+use super::node::{Child, Node};
+use super::path::{FirstEdge, MAX_DEPTH, PathMut};
 use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -119,11 +119,11 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         mut release: impl FnMut(PageByKind<K, V, S>),
         length: &mut usize,
     ) -> (K, V) {
-        let separator_height = self.height();
+        let separator_depth = self.depth();
         let separator_index = self.index();
-        let (entry, changed) = if separator_height == 0 {
-            let entry = self.leaf().remove(separator_index);
-            (entry, self.fix_up_the_path(0, &mut release, |_| {}))
+        let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
+            let entry = leaf.remove(separator_index);
+            (entry, self.fix_up_the_path(None, &mut release, |_| {}))
         } else {
             self.fit_left_of_separator();
             // The separator's value is the head of the leftmost leaf right
@@ -136,7 +136,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has a head and keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
-            let changed = self.fix_up_the_path(separator_height, &mut release, |node| {
+            let changed = self.fix_up_the_path(Some(separator_depth), &mut release, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
                 replaced = Some(node.replace_separator(separator_index, successor));
             });
@@ -152,27 +152,27 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         entry
     }
 
-    /// Goes up the path from its bottom node, which just lost a key, and in
-    /// each node fixes the child the path came from if it is underfull, as
-    /// long as the child lost a key; at `must_reach`, it goes on regardless,
-    /// and lets `at_must_reach` change that node before it fixes its child.
-    /// Returns where the fences it changed are; every height up to
-    /// `must_reach` counts as changed.
+    /// Goes up the path from its bottom node, a leaf, which just lost a
+    /// key, and in each node fixes the child the path came from if it is
+    /// underfull, as long as the child lost a key; up to depth `must_reach`,
+    /// if given, it goes on regardless, and lets `at_must_reach` change that
+    /// node before it fixes its child. Returns where the fences it changed
+    /// are; every node from `must_reach` down counts as changed.
     fn fix_up_the_path(
         &mut self,
-        must_reach: usize,
+        must_reach: Option<usize>,
         release: &mut impl FnMut(PageByKind<K, V, S>),
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
-        let mut changed = ChangedFences::up_to(must_reach);
+        let mut changed = ChangedFences::new(self.depth(), must_reach);
         let mut child_lost_a_key = true;
-        while self.height() < self.root_height() && (child_lost_a_key || self.height() < must_reach)
+        while !self.is_at_root()
+            && (child_lost_a_key || must_reach.is_some_and(|depth| self.depth() > depth))
         {
-            self.ascend();
-            let (height, index) = (self.height(), self.index());
-            changed.indexes[height] = index;
-            let node = self.internal();
-            if height == must_reach {
+            let node = self.ascend();
+            let (depth, index) = (self.depth(), self.index());
+            changed.indexes[depth] = index;
+            if Some(depth) == must_reach {
                 at_must_reach(node);
             }
             if child_lost_a_key {
@@ -183,7 +183,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 };
                 child_lost_a_key =
                     matches!(fix, ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRight);
-                changed.record(height, fix);
+                changed.record(depth, fix);
             }
         }
         changed
@@ -191,25 +191,25 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
 
     /// Fits the prefixes of the nodes whose fences a removal changed to
     /// them, from the bottom up, as `changed` tells; the path, which ends
-    /// where the fixing stopped, ends at `changed`'s top height afterwards.
-    /// Calls `InlineKey`.
+    /// where the fixing stopped, ends at `changed`'s top afterwards. Calls
+    /// `InlineKey`.
     fn fit_changed_fences(&mut self, changed: &ChangedFences) {
-        if changed.top == 0 {
+        let Some(top) = changed.top else {
             return;
-        }
-        while self.height() > 1 {
-            self.set_index(changed.indexes[self.height()]);
+        };
+        while self.depth() + 1 < changed.leaf_depth {
+            self.set_index(changed.indexes[self.depth()]);
             self.descend();
         }
         loop {
-            let height = self.height();
-            let child = changed.indexes[height];
+            let depth = self.depth();
+            let child = changed.indexes[depth];
             self.set_index(child);
-            match changed.donors[height] {
+            match changed.donors[depth] {
                 Some(donor) => self.fit_children_to_fences([child, donor]),
                 None => self.fit_children_to_fences([child]),
             }
-            if height == changed.top {
+            if depth == top {
                 return;
             }
             self.ascend();
@@ -234,49 +234,53 @@ enum ChildFix {
 /// Where a removal's fixing changed fences, for fitting the prefixes there
 /// once the removal is done.
 struct ChangedFences {
-    /// At each height the fixing went up to, the edge to the child it came
+    /// At each depth the fixing went up to, the edge to the child it came
     /// from, kept up to date as fixes move entries between that child and
     /// its siblings: the way back down.
-    indexes: [usize; MAX_HEIGHT + 1],
-    /// At each height, the edge to the sibling that gave the child an entry,
+    indexes: [usize; MAX_DEPTH + 1],
+    /// At each depth, the edge to the sibling that gave the child an entry,
     /// if one did.
-    donors: [Option<usize>; MAX_HEIGHT + 1],
-    /// The child at every height from 1 up to `top` has new fences; none
-    /// does if 0.
-    top: usize,
+    donors: [Option<usize>; MAX_DEPTH + 1],
+    /// The depth of the leaf the fixing went up from, which it doesn't
+    /// change: the root lowers only once it is done.
+    leaf_depth: usize,
+    /// The child of every node from depth `top` down to the leaf's parent
+    /// has new fences; none does if `None`.
+    top: Option<usize>,
 }
 
 impl ChangedFences {
-    /// Nothing fixed yet, with the children up to height `top` counting as
-    /// changed.
-    fn up_to(top: usize) -> Self {
+    /// Nothing fixed yet, up from a leaf at `leaf_depth`, with the children
+    /// of the nodes from `top` down counting as changed.
+    fn new(leaf_depth: usize, top: Option<usize>) -> Self {
         Self {
-            indexes: [0; MAX_HEIGHT + 1],
-            donors: [None; MAX_HEIGHT + 1],
+            indexes: [0; MAX_DEPTH + 1],
+            donors: [None; MAX_DEPTH + 1],
+            leaf_depth,
             top,
         }
     }
 
-    /// Records what fixing the child at `height` did; `indexes[height]` is
-    /// the edge to it until then.
-    fn record(&mut self, height: usize, fix: ChildFix) {
-        let child = self.indexes[height];
+    /// Records what fixing the child of the node at `depth` did;
+    /// `indexes[depth]` is the edge to it until then.
+    fn record(&mut self, depth: usize, fix: ChildFix) {
+        let child = self.indexes[depth];
         match fix {
             ChildFix::Nothing => return,
             ChildFix::MergedIntoLeft { left_len } => {
-                self.indexes[height] = child - 1;
+                self.indexes[depth] = child - 1;
                 // The child's edges follow the left sibling's keys and the
                 // separator between them.
-                self.indexes[height - 1] += left_len + 1;
+                self.indexes[depth + 1] += left_len + 1;
             }
             ChildFix::MergedRight => {}
             ChildFix::TookFromLeft => {
-                self.indexes[height - 1] += 1;
-                self.donors[height] = Some(child - 1);
+                self.indexes[depth + 1] += 1;
+                self.donors[depth] = Some(child - 1);
             }
-            ChildFix::TookFromRight => self.donors[height] = Some(child + 1),
+            ChildFix::TookFromRight => self.donors[depth] = Some(child + 1),
         }
-        self.top = self.top.max(height);
+        self.top = Some(self.top.map_or(depth, |top| top.min(depth)));
     }
 }
 

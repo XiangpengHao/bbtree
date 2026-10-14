@@ -281,7 +281,7 @@ fn drops_match_std() {
         }
     }
     ledgers.assert_same_drops_so_far();
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     maps.ours.check_invariants();
     assert!(!maps.drop_both());
 }
@@ -315,7 +315,7 @@ fn removals_drop_like_std() {
         }
         ledgers.assert_same_drops_so_far();
     }
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     maps.ours.check_invariants();
 
     let separators: Vec<usize> = maps
@@ -352,7 +352,7 @@ fn owning_iterators_drop_like_std() {
         for order in orders {
             assert!(!maps.insert(order, PanickingPart::Neither));
         }
-        assert!(maps.ours.height() >= 2);
+        assert!(maps.ours.leaf_depth() >= 2);
         let TrackedMaps { ours, theirs, .. } = maps;
         let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
         let mut steps = (0..count / 3).map(|_| rng.below(2) == 0);
@@ -415,7 +415,7 @@ fn owning_iterators_drop_like_std() {
 fn collect_keeps_the_last_of_equal_keys_like_std() {
     let ledgers = LockstepLedgers::new();
     let rng = TestRng::new(26);
-    // Half as many keys as entries: above 194, the tree needs a height of 2.
+    // Half as many keys as entries: above 194, the leaves lie at depth 2.
     let count = if cfg!(miri) { 600 } else { 3000 };
     let mut ours_entries = Vec::new();
     let mut theirs_entries = Vec::new();
@@ -434,7 +434,7 @@ fn collect_keeps_the_last_of_equal_keys_like_std() {
     ledgers.assert_same_drops_so_far();
     let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
     assert!(maps.ours.iter().map(ids).eq(maps.theirs.iter().map(ids)));
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     maps.ours.check_invariants();
     assert!(!maps.drop_both());
 }
@@ -504,7 +504,7 @@ fn a_panicking_clone_drops_the_partial_copy() {
     for order in 0..count {
         map.insert(CloningKey::new(order, &ledger, &budget), order);
     }
-    assert!(map.height() >= 2);
+    assert!(map.leaf_depth() >= 2);
     for clones in [0, 1, count / 3, count - 1] {
         budget.set(clones);
         let copy = catch_unwind(AssertUnwindSafe(|| map.clone()));
@@ -550,7 +550,7 @@ fn entries_drop_like_std() {
         }
         ledgers.assert_same_drops_so_far();
     }
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     maps.ours.check_invariants();
     assert!(!maps.drop_both());
 }
@@ -708,7 +708,7 @@ fn replacing_separators_matches_std() {
     for &order in &orders {
         assert!(!maps.insert(order, PanickingPart::Neither));
     }
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     let separators: Vec<usize> = maps
         .ours
         .separator_keys()
@@ -760,7 +760,7 @@ fn a_panicking_drop_while_clearing_matches_std() {
         };
         assert!(!maps.insert(order, panicking));
     }
-    assert!(maps.ours.height() >= 2);
+    assert!(maps.ours.leaf_depth() >= 2);
     let ours = catch_unwind(AssertUnwindSafe(|| maps.ours.clear()));
     let theirs = catch_unwind(AssertUnwindSafe(|| maps.theirs.clear()));
     assert!(ours.is_err() && theirs.is_err());
@@ -779,8 +779,8 @@ fn a_panicking_drop_while_clearing_matches_std() {
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_drop_while_dropping_the_map_matches_std() {
-    // Above 194 entries (15 leaves of 12, plus 14 separators), the tree
-    // needs a height of at least 2.
+    // Above 194 entries (15 leaves of 12, plus 14 separators), the leaves
+    // lie at depth 2 at least.
     let count = if cfg!(miri) { 200 } else { 600 };
     let cases = [
         (0, PanickingPart::Key),
@@ -803,9 +803,9 @@ fn a_panicking_drop_while_dropping_the_map_matches_std() {
         }
         // Checked once the maps are gone: unwinding through a map with a
         // panicking entry would abort.
-        let height = maps.ours.height();
+        let leaf_depth = maps.ours.leaf_depth();
         assert!(maps.drop_both(), "both maps panic, and finish dropping");
-        assert!(height >= 2);
+        assert!(leaf_depth >= 2);
     }
 }
 
@@ -871,7 +871,7 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
         let key = BudgetedKey::new(number, &budget);
         assert_eq!(map.insert(key, number), model.insert(number, number));
     }
-    assert!(map.height() >= 2);
+    assert!(map.leaf_depth() >= 2);
 
     let (mut panicked, mut completed) = (0, 0);
     for trial in 0..trials {
@@ -954,7 +954,7 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     budget.set(usize::MAX);
     map.check_invariants();
     assert_eq!(map.len(), count as usize);
-    assert_eq!(map.height(), 0);
+    assert_eq!(map.leaf_depth(), 0);
     assert!(
         map.iter()
             .map(|(key, &value)| (key.number, value))

@@ -16,8 +16,8 @@
 //! in a tag bit, so that following an edge decides the child's kind before
 //! reading it ([`Node`], D52); nothing tells a node's parent: navigation
 //! uses paths instead of parent pointers. The root node is in the root
-//! page, which holds either kind, and the tree's height and shared prefix
-//! after it (`root_page.rs`).
+//! page, which holds either kind, and the tree's shared prefix after it
+//! (`root_page.rs`).
 //!
 //! Every node type also carries the map's inline-key strategy `S` (D18). If
 //! it gives the keys inline keys, every node stores them in a dense array
@@ -68,9 +68,10 @@
 //!    keys if the node has them. A leaf's values `0..len` are initialized
 //!    too. An internal node holds no values (D17); its edges `0..=len` are
 //!    initialized.
-//! 2. **Edges own nodes.** Every initialized edge of a node at height `h` is
-//!    the only pointer to a distinct node at height `h - 1`, leaves being at
-//!    height 0. A node's header tells whether it is a leaf, and so does the
+//! 2. **Edges own nodes.** Every initialized edge of a node is the only
+//!    pointer to a distinct node one level below it, and every leaf lies at
+//!    the same depth below the root. A node's header tells whether it is a
+//!    leaf, and so does the
 //!    tag of every pointer to it (`page.rs`). Edges are written only from a
 //!    node taken off another edge, a split, or a new page, or moved between
 //!    siblings. Only the root page (`root_page.rs`) holds a node of either
@@ -214,9 +215,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         }
     }
 
-    /// Absorbs `right`, the root of another tree at this node's height
-    /// (the caller), around `separator`, if they fit in one node; see
-    /// [`Child::absorb`].
+    /// Absorbs `right`, the root of another tree, with leaves as far below
+    /// it as this node's are below this node (the caller), around
+    /// `separator`, if they fit in one node; see [`Child::absorb`].
     ///
     /// # Panics
     ///
@@ -249,7 +250,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 
 /// A full node split in two: the node keeps its lower entries, `separator`
 /// is the separator for the parent, with the inline key it had, and `right`
-/// is a new node at the same height with the upper entries, on a page of
+/// is a new node at the same depth with the upper entries, on a page of
 /// its own that the parent's edge is to own. The separator's value is the
 /// head of `right`'s leftmost leaf: in a leaf split, of `right` itself
 /// (D17), and so is its key where separator keys are heads (D49).
@@ -417,8 +418,9 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// # Safety
     ///
     /// `left`, `separator` and `right` fit in one node: `left.len() + 1 +
-    /// right.len() <= capacity`. `right` is another node of this kind and
-    /// height, in a tree of the same map type, whose trailing slot 0 is
+    /// right.len() <= capacity`. `right` is another node of this kind, its
+    /// leaves as deep below it as this node's, in a tree of the same map
+    /// type, whose trailing slot 0 is
     /// initialized, and nothing reaches its page afterwards but to free it.
     /// `separator`'s window is at `fill`'s prefix length; `fill` holds every
     /// byte a leaf keeps of the separator's window (D43).
@@ -462,7 +464,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         // SAFETY: checked just above: the fit, `right`'s initialized
         // trailing slot 0, and the prefix lengths, both nodes at `fill`'s
         // now. `right` is another tree's root, so another node of this
-        // kind and height (the caller), and once appended, its page is freed
+        // kind, with leaves as deep below it (the caller), and once appended, its page is freed
         // with nothing left in it.
         Ok(unsafe {
             Self::append(self, fill, separator, right);

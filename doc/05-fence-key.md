@@ -185,7 +185,7 @@ An operation does its upkeep in two steps:
   has fences `low` and `s`, so its new prefix is `min(own, LCP(s, s'))`, with
   no fence read: `low ≤ s ≤ s'`. It can't be skipped: a search for a key in
   `(s, s')` goes down that border.
-- **What a removal fits:** at each height it fixed, the child the path
+- **What a removal fits:** at each node it fixed, the child the path
   leads to and the sibling that gave it an entry; for a separator, every node
   below it on the path, which goes down the second border. It keeps the
   path's indexes up to date as merges and moves shift entries, to find them
@@ -434,9 +434,17 @@ Every set ties 0% at 4 bytes.
   | explicit, each 32 slots' bits masked by `len` | 131 | 203 | 327 |
   | explicit, 64 slots' bits masked by one `bzhi` | 104 | 144 | 258 |
 
-- **8-byte slots keep LLVM's count.** The explicit one measured slower on
-  string maps: 368 against 341 ns per 10M `str-json` hit, with 56 more
-  instructions per lookup; why is open.
+- **8-byte slots keep LLVM's count, but at 28 to 31 slots.** The explicit
+  one measured slower on string maps: 368 against 341 ns per 10M
+  `str-json` hit, with 56 more instructions per lookup; why is open. At 28
+  to 31 slots, LLVM takes the compares' masks apart a bit at a time (195
+  instructions for 28 slots, above), and the 31-slot internal nodes of
+  8-byte inline keys count in explicit AVX-512 vectors instead, through the
+  narrow slots' loop. `memtable16` and `memtable24` → 100-byte values at
+  1M, one run each, ns [instructions] per op: `get_hit` 369 → 294 and 349
+  → 274 [1,102 → 393], `random_insert` 240 → 148 [1,384 → 637], `range64`
+  1,119 → 1,041 [3,119 → 2,418]; `u64` and `str-json` lookups and `String`
+  sets keep their instructions.
   `LiveSlots::equal_run` is `#[inline(always)]`: generic over the slot
   width alone, out of line it was one copy shared by every map with 8-byte
   slots, with the capacity a variable.
@@ -459,8 +467,8 @@ Every set ties 0% at 4 bytes.
   | bytes per entry, `u64` → `u64` / set | 23.5 / 11.8 | 26.4 / 14.9 |
 
   The 1 KB values gain even though their tree is a level taller: 12-entry
-  leaves and internal nodes of 56 keys rather than 63 make the 1M map 4
-  levels above its leaves against 3 (counted with the test-only height).
+  leaves and internal nodes of 56 keys rather than 63 put the 1M map's
+  leaves 4 levels below its root against 3.
 - **Std byte strings, through the same changes:** `hash32` 3–16% faster,
   `str-path` and `kernel-paths` within 3%, `str-json` within 4% at 1M and
   8% slower at 10M, and 1k `str-16` and `crate-names` lookups about 20%
@@ -488,7 +496,8 @@ Every set ties 0% at 4 bytes.
 - **1k string lookups** (see "Narrow slots"): about 20% slower after the
   narrow-slot changes, with fewer instructions; why is open.
 - **The padding past `len`** (invariant 6) is now needed only by LLVM's
-  counts: 8-byte slots, and every width without AVX-512. Explicit counts
+  counts: 8-byte slots but 28 to 31 of them, and every width without
+  AVX-512. Explicit counts
   for those, masking by `len` as the AVX-512 one does (AVX2's
   `movemask`, NEON's lane compares), would let the nodes drop it, and its
   upkeep on every shrink.

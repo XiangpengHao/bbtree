@@ -137,7 +137,9 @@ Its panic test stays, as a test of a panicking `InlineKey`
 ## Adding a specialization
 
 1. Say what it stores or how it searches as a plan field, set in the row
-   constructors of `node_plan.rs`, with its reason.
+   constructors of `node_plan.rs`, with its reason. What the key type
+   alone decides, such as the search over all of a node's keys (D19), is
+   no field: the plan answers it from `K`, the same in every row.
 2. If it stores a per-key array, add it to `KeyColumns` and `KeyCells`.
 3. If it needs page room, add it to `layout.rs` as a function of plan
    answers, not of the key type.

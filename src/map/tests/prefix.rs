@@ -57,7 +57,7 @@ fn random_inserts_give_nodes_prefixes() {
     for value in 0..key_count() {
         map.insert(shared_prefix_key(rng.below(1 << 30)), value);
     }
-    assert!(map.height() >= 2 || cfg!(miri));
+    assert!(map.leaf_depth() >= 2 || cfg!(miri));
     assert_prefixes_cover_shared_bytes(&map);
 }
 

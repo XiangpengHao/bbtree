@@ -149,9 +149,7 @@ impl NodeDetail {
         let row = self.keys.get(slot).filter(|_| used);
         let what = match contents {
             SlotContents::Header => "the node's length and prefix lengths".to_string(),
-            SlotContents::RootArea => {
-                "the tree's height, and the bytes every key shares".to_string()
-            }
+            SlotContents::RootArea => "the bytes every key of the tree shares".to_string(),
             _ if !used => "empty: room for an insert".to_string(),
             SlotContents::InlineKeys => format!(
                 "{} — the summary of key {slot}, {}",

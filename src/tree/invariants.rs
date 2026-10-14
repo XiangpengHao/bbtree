@@ -24,9 +24,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// - in order, keys strictly increase;
     /// - every key lies within the separator bounds passed down from its
     ///   parent;
-    /// - all leaves are at the same depth, the height the root page keeps,
-    ///   and every edge's tag tells its node's kind, as its header does
-    ///   (checked as nodes are reached, in debug builds);
+    /// - all leaves are at the same depth, and every edge's tag tells its
+    ///   node's kind, as its header does (checked as nodes are reached, in
+    ///   debug builds);
     /// - every node below the root holds at least its `min_len` keys, which
     ///   splits and removals keep (D22);
     /// - the root of a non-empty tree holds a key, and so does an internal
@@ -54,7 +54,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             return;
         };
         let root = page.top();
-        if length > 0 || page.height() > 0 {
+        if length > 0 || matches!(root, Node::Internal(_)) {
             assert!(root.len() > 0, "the root of a non-empty map has no keys");
         }
         let mut walk = InOrderWalk {
@@ -63,7 +63,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             entries: 0,
             leaves: 0,
             separators: 0,
-            leaf_depth: page.height(),
+            leaf_depth: None,
         };
         walk.check_nodes_under(root, KeyBounds::UNBOUNDED, 0);
         assert_eq!(
@@ -208,8 +208,8 @@ struct InOrderWalk<'a, K> {
     leaves: usize,
     /// The number of separators visited.
     separators: usize,
-    /// The depth every leaf must be at: the root's height.
-    leaf_depth: usize,
+    /// The depth the first leaf is at, which every other must be at too.
+    leaf_depth: Option<usize>,
 }
 
 impl<'a, K: Ord> InOrderWalk<'a, K> {
@@ -222,7 +222,8 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         match node {
             Node::Leaf(leaf) => {
                 let keys = self.check_node(leaf, &bounds, depth);
-                assert_eq!(depth, self.leaf_depth, "leaves at different depths");
+                let first_depth = *self.leaf_depth.get_or_insert(depth);
+                assert_eq!(depth, first_depth, "leaves at different depths");
                 let is_leftmost = self.leaves == 0;
                 assert_eq!(
                     leaf.has_head(),

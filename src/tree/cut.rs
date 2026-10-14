@@ -77,7 +77,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         let upper = path.cut();
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
-        let mut upper = Root::from_node(upper, self.height(), self.shared_prefix().clone());
+        let mut upper = Root::from_node(upper, self.shared_prefix().clone());
         let release = &mut PageByKind::deallocate;
         self.fix_border::<LastEdge>(release);
         upper.fix_border::<FirstEdge>(release);
@@ -101,13 +101,10 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     fn cut(mut self) -> Node<K, V, S> {
         let index = self.index();
         let mut right = Node::Leaf(self.leaf().cut_off_at(index, FreshPage::allocate()));
-        while self.height() < self.root_height() {
-            self.ascend();
+        while !self.is_at_root() {
+            let node = self.ascend();
             let index = self.index();
-            right = Node::Internal(
-                self.internal()
-                    .cut_off_at(index, right, FreshPage::allocate()),
-            );
+            right = Node::Internal(node.cut_off_at(index, right, FreshPage::allocate()));
         }
         right
     }
@@ -167,7 +164,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// root has some or is a leaf ([`Root::lower`]), handing each page
     /// emptied to `release`.
     fn pop_empty_roots(&mut self, release: &mut impl FnMut(PageByKind<K, V, S>)) {
-        while self.height() > 0 && self.top().len() == 0 {
+        while matches!(self.top(), Node::Internal(root) if root.len() == 0) {
             release(self.lower());
         }
     }

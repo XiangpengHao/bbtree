@@ -117,9 +117,9 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             let (key, value) = next;
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let top = Self::start_leaf(tree, InlinedKey::new(key, shared.len()), value);
+            let path = Self::start_leaf(tree, InlinedKey::new(key, shared.len()), value);
             self.length += 1;
-            Self::fit_closed_nodes(tree, top);
+            Self::fit_closed_nodes(path);
             next = match entries.next() {
                 Some(entry) => entry,
                 None => return,
@@ -161,30 +161,25 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     }
 
     /// Fits the prefixes of the nodes that a new leaf closed, which
-    /// [`Self::start_leaf`] hung after a separator in the node at height
-    /// `top`: the right border of the subtree left of that separator, full,
-    /// which no key joins again, whose upper fence the separator is from now
-    /// on. From the leaf up, so that each node's prefix sees its children's.
+    /// [`Self::start_leaf`] hung after a separator in the node `path` ends
+    /// at, at the edge left of it: the right border of the subtree there,
+    /// full, which no key joins again, whose upper fence the separator is
+    /// from now on. These are the nodes the path came up through to hang
+    /// the leaf, and it goes back down them. From the leaf up, so that each
+    /// node's prefix sees its children's.
     ///
     /// Reads keys only once the new leaf hangs beside them: until then they
     /// are on the tree's right border, where a prefix must be 0, and a
     /// panicking `InlineKey` would leave one there that searches past the
     /// last key misread. Off the border, a prefix it leaves short of the
     /// fences is one searches allow (`prefix.rs`).
-    fn fit_closed_nodes(tree: &mut Root<K, V, S>, top: usize) {
+    fn fit_closed_nodes(mut path: PathMut<'_, K, V, S>) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        let mut path = PathMut::new(tree);
-        path.start_at_root();
-        while path.height() > top {
-            path.set_index(path.node().len());
-            path.descend();
-        }
-        // The edge left of the separator, the node's last key.
-        path.set_index(path.node().len() - 1);
+        let top = path.depth();
         path.descend_to_leaf::<LastEdge>();
-        while path.height() < top {
+        while path.depth() > top {
             path.ascend();
             let edge = path.index();
             path.fit_children_to_fences([edge]);
@@ -196,9 +191,14 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// hangs it in `tree` after `separator`: in the rightmost internal node
     /// one level up if it has room; or else in a new node there, which hangs
     /// one level further up the same way; or in the root, which the tree
-    /// raises for it. Returns the height of the node that took the
-    /// separator.
-    fn start_leaf(tree: &mut Root<K, V, S>, separator: InlinedKey<K, S>, value: V) -> usize {
+    /// raises for it. Returns the path up the right border it came, ending
+    /// at the node that took the separator, at the edge left of it, which
+    /// leads down to the nodes the new leaf closed.
+    fn start_leaf(
+        tree: &mut Root<K, V, S>,
+        separator: InlinedKey<K, S>,
+        value: V,
+    ) -> PathMut<'_, K, V, S> {
         let shared_len = tree.shared_prefix().len();
         let leaf = Leaf::new(FreshPage::allocate());
         leaf.set_empty_prefix_len(shared_len);
@@ -206,13 +206,12 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         let mut child = Node::Leaf(leaf);
         let mut path = PathMut::new(tree);
         path.descend_to_last_key();
-        while path.height() < path.root_height() {
-            path.ascend();
-            let node = path.internal();
+        loop {
+            let node = path.ascend_raising(FreshPage::allocate, FreshPage::allocate);
             let len = node.len();
             if len < Internal::<K, V, S>::capacity() {
                 node.insert_fit(len, separator, child);
-                return path.height();
+                return path;
             }
             // Its new levels along the right border take what every key
             // shares.
@@ -220,9 +219,6 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             level.set_empty_prefix_len(shared_len);
             child = Node::Internal(level);
         }
-        path.push_root(FreshPage::allocate, FreshPage::allocate);
-        path.internal().insert_fit(0, separator, child);
-        path.height()
     }
 }
 

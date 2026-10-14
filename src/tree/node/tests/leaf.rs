@@ -194,7 +194,7 @@ where
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "its Miri size misses the height it asserts")]
+#[cfg_attr(miri, ignore = "its Miri size misses the depth it asserts")]
 fn a_tree_stays_memory_safe_under_any_ord() {
     tree_stays_memory_safe::<0, Auto>();
     tree_stays_memory_safe::<32, Auto>();
@@ -214,7 +214,7 @@ where
     for _ in 0..inserts {
         tree.insert(Chaotic::new(&rng), Bulky::from_tracked(ledger.track()));
     }
-    assert!(tree.height() >= 1);
+    assert!(tree.leaf_depth() >= 1);
     let ids = tree.entries(|_, value| value.tracked_id());
     assert!(!ids.is_empty() && ids.len() <= inserts);
     tree.destroy();
@@ -459,7 +459,7 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
         assert_eq!(root.len(), 0);
 
         pages.release(tree.lower());
-        assert_eq!(tree.height(), 0);
+        assert_eq!(tree.leaf_depth(), 0);
         tree
     }
 }
@@ -554,7 +554,7 @@ fn boundary_insert_remove_keeps_split_headroom() {
             || pages.fresh(),
             &mut length,
         );
-        assert_eq!(tree.height(), 1);
+        assert_eq!(tree.leaf_depth(), 1);
         let root = tree.top().node_ptr();
         let allocated = pages.allocated_count();
         let in_use = pages.in_use();
@@ -566,7 +566,7 @@ fn boundary_insert_remove_keeps_split_headroom() {
                 tree.pop_last(|page| pages.release(page), &mut length)
             };
             assert_eq!(removed, Some((boundary_key, boundary_key)));
-            assert_eq!(tree.height(), 1, "deletion must not undo the split");
+            assert_eq!(tree.leaf_depth(), 1, "deletion must not undo the split");
             assert!(tree.top().node_ptr().is(root));
             assert_eq!(pages.in_use(), in_use, "no node should be merged away");
             assert_eq!(
@@ -652,7 +652,7 @@ fn over_aligned_keys_and_values() {
         entries,
         (0..count).map(|key| (key, key * 3)).collect::<Vec<_>>()
     );
-    assert!(tree.height() >= 1);
+    assert!(tree.leaf_depth() >= 1);
     tree.destroy();
     pages.assert_all_released();
 
@@ -667,7 +667,7 @@ fn over_aligned_keys_and_values() {
         entries,
         (0..count).map(|key| (key, key + 1)).collect::<Vec<_>>()
     );
-    assert!(tree.height() >= 1);
+    assert!(tree.leaf_depth() >= 1);
     tree.destroy();
     pages.assert_all_released();
 }

@@ -555,7 +555,7 @@ where
         };
         copies.ours.check_invariants();
         assert!(copies.ours.iter().eq(&copies.theirs));
-        assert_eq!(copies.ours.height(), self.ours.height());
+        assert_eq!(copies.ours.leaf_depth(), self.ours.leaf_depth());
         assert_eq!(copies.ours.separator_keys(), self.ours.separator_keys());
         for _ in 0..64 {
             let key = K::from_number(rng.below(key_space));
@@ -635,7 +635,7 @@ where
     /// leaf's head (D17).
     fn overwrite_separators(&mut self, rng: &TestRng) {
         let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
-        assert_eq!(separators.is_empty(), self.ours.height() == 0);
+        assert_eq!(separators.is_empty(), self.ours.leaf_depth() == 0);
         for key in separators {
             let value = V::from_number(rng.below(1 << 30));
             if rng.below(2) == 0 {
@@ -672,12 +672,12 @@ where
 
     /// Removes every entry, in `order`, checking the invariants and a few
     /// ranges between keys made from `0..key_space` as the map shrinks:
-    /// whenever its height drops, and about 32 times besides.
+    /// whenever its leaves rise a level, and about 32 times besides.
     fn remove_all(&mut self, order: RemovalOrder, rng: &TestRng, key_space: usize) {
         let mut keys: Vec<K> = self.theirs.keys().cloned().collect();
         rng.shuffle(&mut keys);
         let check_every = (keys.len() / 32).max(1);
-        let mut height = self.ours.height();
+        let mut leaf_depth = self.ours.leaf_depth();
         for (step, key) in keys.iter().enumerate() {
             match order {
                 RemovalOrder::Ascending => self.pop_first(),
@@ -690,8 +690,8 @@ where
                 },
             }
             self.first_and_last();
-            if self.ours.height() != height || step % check_every == 0 {
-                height = self.ours.height();
+            if self.ours.leaf_depth() != leaf_depth || step % check_every == 0 {
+                leaf_depth = self.ours.leaf_depth();
                 self.ours.check_invariants();
                 self.assert_same_ranges(rng, 4, key_space);
             }
@@ -701,7 +701,7 @@ where
             self.pop_first();
         }
         self.assert_same_entries();
-        assert_eq!(self.ours.height(), 0);
+        assert_eq!(self.ours.leaf_depth(), 0);
     }
 
     /// Inserts the keys made from the even `numbers`, in their order, then
@@ -752,10 +752,11 @@ pub(super) struct Workload {
     pub(super) random_steps: usize,
     pub(super) key_space: usize,
     pub(super) ordered_entries: usize,
-    /// The height ascending and descending inserts must reach. They leave
-    /// larger nodes densely filled and small ones about half full. The
-    /// workloads keep enough entries to reach this height under either policy.
-    pub(super) min_sequential_height: usize,
+    /// How deep ascending and descending inserts must push the leaves. They
+    /// leave larger nodes densely filled and small ones about half full. The
+    /// workloads keep enough entries to reach this depth under either
+    /// policy.
+    pub(super) min_sequential_leaf_depth: usize,
 }
 
 impl Workload {
@@ -791,11 +792,11 @@ impl Workload {
         for (numbers, removal_order) in sequential_orders {
             let mut maps = MirroredMaps::<K, V, S>::new();
             maps.insert_evens_in_order(numbers);
-            let height = maps.ours.height();
+            let leaf_depth = maps.ours.leaf_depth();
             assert!(
-                height >= self.min_sequential_height,
-                "height {height} is below {}",
-                self.min_sequential_height
+                leaf_depth >= self.min_sequential_leaf_depth,
+                "leaves at depth {leaf_depth}, above {}",
+                self.min_sequential_leaf_depth
             );
             maps.overwrite_separators(&rng);
             self.walk(&mut maps, &rng, self.ordered_key_space());
@@ -844,14 +845,14 @@ fn u64_to_u64_matches_std() {
             random_steps: 300,
             key_space: 400,
             ordered_entries: 150,
-            min_sequential_height: 1,
+            min_sequential_leaf_depth: 1,
         }
     } else {
         Workload {
             random_steps: 500_000,
             key_space: 1 << 18,
             ordered_entries: 200_000,
-            min_sequential_height: 2,
+            min_sequential_leaf_depth: 2,
         }
     };
     workload.run::<u64, u64, Auto>(1);
@@ -865,14 +866,14 @@ fn string_to_string_matches_std() {
             random_steps: 150,
             key_space: 150,
             ordered_entries: 60,
-            min_sequential_height: 1,
+            min_sequential_leaf_depth: 1,
         }
     } else {
         Workload {
             random_steps: 100_000,
             key_space: 1 << 16,
             ordered_entries: 50_000,
-            min_sequential_height: 2,
+            min_sequential_leaf_depth: 2,
         }
     };
     workload.run::<String, String, Auto>(2);
@@ -882,21 +883,22 @@ fn string_to_string_matches_std() {
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn wide_keys_match_std() {
     let workload = if cfg!(miri) {
-        // Height 2 already has an internal node split into a parent with
-        // room; height 3 only adds depth, which the native run covers.
-        // These small nodes split evenly: height 2 needs about 130 entries.
+        // Leaves at depth 2 already have an internal node split into a
+        // parent with room; depth 3 only adds a level, which the native run
+        // covers. These small nodes split evenly: depth 2 needs about 130
+        // entries.
         Workload {
             random_steps: 300,
             key_space: 300,
             ordered_entries: 200,
-            min_sequential_height: 2,
+            min_sequential_leaf_depth: 2,
         }
     } else {
         Workload {
             random_steps: 40_000,
             key_space: 1 << 14,
             ordered_entries: 10_000,
-            min_sequential_height: 3,
+            min_sequential_leaf_depth: 3,
         }
     };
     workload.run::<WideKey, u64, Auto>(3);
@@ -1040,7 +1042,7 @@ fn zero_sized_keys_and_values_match_std() {
         key_space: 1 << 12,
         // Leaves of `u64` keys and `()` values hold 127 entries.
         ordered_entries: if cfg!(miri) { 150 } else { 5000 },
-        min_sequential_height: 1,
+        min_sequential_leaf_depth: 1,
     };
     workload.run::<u64, (), Auto>(5);
 }
@@ -1068,14 +1070,14 @@ fn over_aligned_values_match_std() {
         random_steps: if cfg!(miri) { 150 } else { 20_000 },
         key_space: 1 << 12,
         ordered_entries: if cfg!(miri) { 60 } else { 3000 },
-        min_sequential_height: 1,
+        min_sequential_leaf_depth: 1,
     }
     .run::<u64, CacheLineAligned, Auto>(7);
     Workload {
         random_steps: if cfg!(miri) { 60 } else { 2000 },
         key_space: 1 << 10,
         ordered_entries: if cfg!(miri) { 30 } else { 600 },
-        min_sequential_height: 1,
+        min_sequential_leaf_depth: 1,
     }
     .run::<u64, PageAligned, Auto>(8);
 
@@ -1097,11 +1099,11 @@ fn over_aligned_values_match_std() {
 /// tree of half-full small nodes, from ascending inserts, and in one thinned by
 /// removals toward the minimum fill, whose borders have little to spare.
 #[test]
-#[cfg_attr(miri, ignore = "its Miri size misses the height it asserts")]
+#[cfg_attr(miri, ignore = "its Miri size misses the depth it asserts")]
 fn split_off_at_every_position_matches_std() {
     // These small nodes split evenly: 1500 ascending entries make a tree
     // 3 levels tall, and the smaller CI-only Miri case reaches 2.
-    let (count, height) = if cfg!(miri) { (60, 2) } else { (1500, 3) };
+    let (count, leaf_depth) = if cfg!(miri) { (60, 2) } else { (1500, 3) };
     for thinned in [false, true] {
         let rng = TestRng::new(31);
         let mut maps = MirroredMaps::<WideKey, u64>::new();
@@ -1118,7 +1120,7 @@ fn split_off_at_every_position_matches_std() {
             }
         } else {
             assert!(
-                maps.ours.height() >= height,
+                maps.ours.leaf_depth() >= leaf_depth,
                 "the tree is a few levels tall"
             );
         }

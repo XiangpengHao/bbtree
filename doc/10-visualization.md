@@ -99,7 +99,8 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **`NodeView`** wraps a `Node`, a leaf or an internal node as the tag of
   the edge to it says, or for the root its header (D52), and answers
   through the node types' own methods:
-  - id (the page address), height, `len`, capacity, `min_len`;
+  - id (the page address), depth below the root, `len`, capacity,
+    `min_len`;
   - `prefix_len`;
   - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `length_tag(i)`
     (D36);

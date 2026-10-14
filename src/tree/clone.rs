@@ -26,11 +26,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Root<K, V, S> {
         let Some(root) = self.page() else {
             return Self::EMPTY;
         };
-        Self::from_node(
-            root.top().clone_nodes(),
-            root.height(),
-            root.shared_prefix().clone(),
-        )
+        Self::from_node(root.top().clone_nodes(), root.shared_prefix().clone())
     }
 }
 

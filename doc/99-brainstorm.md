@@ -12,8 +12,8 @@ This way, each search pay one cache line miss and linear search the group head, 
 
 - [ ] Performance infra: we want to continously monitor the performance, so something that doesn't rely on the CI machine is needed. I wonder if we can just collect the instructions, and just analyze the instruction count and their memory access pattern to get a accurate performance expectation? Basically, we still run the benchmark, but we collect every instruction get executed, measure the memory latency, and build a model to e.g., interleave memory access, model prefetching, parameterize the load/store latency, etc.
 
-- [ ] the 8-byte inline-key count still compiles to the slow bit-by-bit form at 28–31 slots. That's why a String set
-  (31-slot leaves) is at 702 instructions per lookup against 534 for String→u64.
+- [x] the 8-byte inline-key count compiled to the slow bit-by-bit form at 28–31 slots. Now counted in explicit AVX-512
+  vectors there (05-fence-key.md): memtable lookups 1,102 → 393 instructions. String sets no longer have 31-slot leaves.
 
 
 - [-] I think leaf node should not use inline key, because leaf node is to find that key, not to find the gap that contains the key. so we should do this: instead of storing the 8/4/2 bytes inline key which contains the raw values, we should store the hashed inline key, and only store 2 bytes (even 1 byte?). 

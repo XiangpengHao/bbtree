@@ -16,8 +16,8 @@
 //!   they are both made of: pages, their layouts, slot arrays, and the
 //!   inline keys they search (D18).
 //! - [`root`] is the root: the root page, with the top node and what the
-//!   tree keeps for it in place of a parent, its height and its fences, as
-//!   the bytes every key shares (D50, D52, `node/root_page.rs`,
+//!   tree keeps for it in place of a parent, its fences, as the bytes every
+//!   key shares (D50, D52, `node/root_page.rs`,
 //!   `shared_prefix.rs`), and the last leaf an append went to (D45). Every
 //!   operation on a whole tree starts there.
 //! - The rest of this module is the tree's operations, each in its own

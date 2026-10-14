@@ -263,9 +263,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
     /// # Panics
     ///
-    /// If `child` is not of the kind of this node's children. That they are
-    /// all at one height, which the kinds cannot tell apart above the
-    /// leaves, is the caller's business.
+    /// If `child` is not of the kind of this node's children. That they all
+    /// lie at one depth, which the kinds cannot tell apart above the leaves,
+    /// is the caller's business.
     fn assert_child_kind(self, child: Node<K, V, S>) {
         assert_eq!(
             matches!(child, Node::Leaf(_)),
@@ -723,7 +723,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ) {
         self.assert_child_kind(right_child);
         // SAFETY: `right_child` is of its siblings' kind, checked just above,
-        // and at their height (the caller).
+        // and at their depth (the caller).
         unsafe { self.insert_fit_unchecked(index, separator, right_child) }
     }
 
@@ -806,7 +806,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let middle = self.split_off(separator_index, right);
         // SAFETY: both halves have room (`InsertionSide::of_split`), and
         // `right_child` is of their children's kind, checked above, and at
-        // their height (the caller).
+        // their depth (the caller).
         unsafe {
             match inserted {
                 InsertionSide::Left(index) => {
@@ -910,7 +910,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // `index + 1..=len` are initialized; they move to separators
         // `0..count` and edges `1..=count` of `right`, a fresh internal node
         // of the same map, after `first_child` as its edge 0, at the other
-        // edges' height (the caller),
+        // edges' depth (the caller),
         // which `right` owns from now on (invariant 2). The access is
         // exclusive, and `right` is reached by nothing else yet. Afterwards
         // this node holds separators `0..index` and edges `0..=index`. The

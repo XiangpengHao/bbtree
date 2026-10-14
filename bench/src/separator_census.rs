@@ -1,5 +1,5 @@
 //! A census of a map's separators and of the ties its lookups meet, for
-//! `doc/11-separator-key.md`, "Measure first" (1) and (2): per height, how
+//! `doc/11-separator-key.md`, "Measure first" (1) and (2): per level, how
 //! many separators would be exact, and how often a lookup's inline key ties
 //! with a separator's, or with one that isn't exact; and how many misses
 //! the tree's shared prefix places before any node is read (D50).
@@ -83,7 +83,7 @@ impl SeparatorFit {
     }
 }
 
-/// What lookups of one kind, hits or misses, met at one height.
+/// What lookups of one kind, hits or misses, met at one level.
 #[derive(Default)]
 struct LookupCounts {
     lookups: usize,
@@ -111,12 +111,12 @@ impl LookupCounts {
     }
 }
 
-/// What the census found at one height of the tree.
+/// What the census found at one level of the tree.
 #[derive(Default)]
-struct HeightCounts {
+struct LevelCounts {
     nodes: usize,
     separators: usize,
-    /// The width the nodes at this height keep.
+    /// The width the nodes at this level keep.
     width: Option<usize>,
     /// Separators exact at each of [`WIDTHS`].
     exact: [usize; WIDTHS.len()],
@@ -181,7 +181,8 @@ struct SeparatorCensus<'a, K> {
     sorted_keys: Vec<&'a K>,
     fixed_width: bool,
     fits: HashMap<(NodeId, usize), SeparatorFit>,
-    heights: Vec<HeightCounts>,
+    /// By depth below the root; the leaves last.
+    levels: Vec<LevelCounts>,
     /// Misses the tree's shared prefix placed, reading no node (D50).
     misses_placed_by_shared_prefix: usize,
     misses: usize,
@@ -189,14 +190,12 @@ struct SeparatorCensus<'a, K> {
 
 impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
     fn new(map: &'a BBTreeMap<K, u64>, fixed_width: bool) -> Self {
-        let tree = map.inspect();
-        let height = tree.root().map_or(0, |root| root.height());
         Self {
-            tree,
+            tree: map.inspect(),
             sorted_keys: map.keys().collect(),
             fixed_width,
             fits: HashMap::new(),
-            heights: (0..=height).map(|_| HeightCounts::default()).collect(),
+            levels: Vec::new(),
             misses_placed_by_shared_prefix: 0,
             misses: 0,
         }
@@ -209,8 +208,18 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
         }
     }
 
+    /// The counts of the level `node` is at, which the survey adds as it
+    /// first reaches it.
+    fn level_of(&mut self, node: &NodeView<'a, K, u64, Auto>) -> &mut LevelCounts {
+        let depth = node.depth();
+        if self.levels.len() <= depth {
+            self.levels.resize_with(depth + 1, LevelCounts::default);
+        }
+        &mut self.levels[depth]
+    }
+
     fn survey_node(&mut self, node: NodeView<'a, K, u64, Auto>, high: Option<&'a K>) {
-        let counts = &mut self.heights[node.height()];
+        let counts = self.level_of(&node);
         counts.nodes += 1;
         if node.is_leaf() {
             return;
@@ -244,7 +253,7 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
                 .expect("a separator is a key");
             let left_max = self.sorted_keys[position - 1];
             let shared_with_predecessor = Encoding::common_prefix_len(left_max, right_min);
-            self.heights[node.height()]
+            self.level_of(&node)
                 .needs
                 .no_key_ties
                 .push((shared_with_predecessor + 1).saturating_sub(fence_prefix_len));
@@ -255,7 +264,7 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
                 prefix_len,
                 self.fixed_width,
             );
-            let counts = &mut self.heights[node.height()];
+            let counts = self.level_of(&node);
             counts.separators += 1;
             for (exact, &width) in counts.exact.iter_mut().zip(&WIDTHS) {
                 *exact += usize::from(fit.is_exact_at(width));
@@ -287,36 +296,38 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
                 continue;
             }
             let width = node.inline_key_width().unwrap_or(0);
-            let heights = &mut self.heights[node.height()];
+            let tied = step.tied().filter(|run| !run.is_empty());
+            let inexact = tied.clone().is_some_and(|mut run| {
+                run.any(|index| !self.fits[&(node.id(), index)].is_exact_at(width))
+            });
+            let level = self.level_of(&node);
             let counts = if is_hit {
-                &mut heights.hits
+                &mut level.hits
             } else {
-                &mut heights.misses
+                &mut level.misses
             };
             counts.lookups += 1;
-            let Some(run) = step.tied().filter(|run| !run.is_empty()) else {
+            let Some(run) = tied else {
                 continue;
             };
             counts.ties += 1;
             counts.tied_separators += run.len();
-            let inexact = run
-                .into_iter()
-                .any(|index| !self.fits[&(node.id(), index)].is_exact_at(width));
             counts.inexact_ties += usize::from(inexact);
         }
     }
 
-    /// The inline-key widths each condition needs, per height: quantiles over
+    /// The inline-key widths each condition needs, per level: quantiles over
     /// nodes, or separators, and the shares the bench's widths meet.
     fn width_report(&mut self) -> String {
         let mut report = String::from(
             "\n### Bytes past the fence prefix: p50 / p90 / p99 / max\n\n\
-             | height | width | (a) separators distinct | distinct at 2 / 4 / 8 B | \
+             | depth | width | (a) separators distinct | distinct at 2 / 4 / 8 B | \
              (b) no key ties a separator | no ties at 2 / 4 / 8 B | \
              (c) shared by all separators | all tie at 2 / 4 B |\n\
              |--:|--:|--|--|--|--|--|--|\n",
         );
-        for (height, counts) in self.heights.iter_mut().enumerate().skip(1).rev() {
+        let internal_levels = self.levels.len().saturating_sub(1);
+        for (depth, counts) in self.levels.iter_mut().enumerate().take(internal_levels) {
             let needs = &mut counts.needs;
             let at_most = |values: &[usize]| {
                 WIDTHS
@@ -333,7 +344,7 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
                 .join(" / ");
             let _ = writeln!(
                 report,
-                "| {height} | {} | {} | {} | {} | {} | {} | {all_tie} |",
+                "| {depth} | {} | {} | {} | {} | {} | {} | {all_tie} |",
                 counts
                     .width
                     .map_or("-".to_owned(), |width| width.to_string()),
@@ -350,19 +361,20 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
     fn report(&self, profile: &str, entries: usize) -> String {
         let mut report = format!(
             "## {profile}, {entries} entries\n\n\
-             | height | nodes | separators | width | exact at 2 / 4 / 8 B | \
+             | depth | nodes | separators | width | exact at 2 / 4 / 8 B | \
              hits: tie | sep./tie | inexact tie | \
              misses: tie | sep./tie | inexact tie |\n\
              |--:|--:|--:|--:|--|--:|--:|--:|--:|--:|--:|\n"
         );
-        for (height, counts) in self.heights.iter().enumerate().skip(1).rev() {
+        let internal_levels = self.levels.len().saturating_sub(1);
+        for (depth, counts) in self.levels.iter().enumerate().take(internal_levels) {
             let exact = counts
                 .exact
                 .map(|exact| format!("{:.1}%", LookupCounts::percent(exact, counts.separators)))
                 .join(" / ");
             let _ = writeln!(
                 report,
-                "| {height} | {} | {} | {} | {exact} | {} | {} |",
+                "| {depth} | {} | {} | {} | {exact} | {} | {} |",
                 counts.nodes,
                 counts.separators,
                 counts
@@ -372,13 +384,15 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
                 counts.misses.row(),
             );
         }
-        let per_lookup = |pick: fn(&HeightCounts) -> &LookupCounts,
+        // Over the lookups that reached the leaves' parents.
+        let leaf_parents = self.levels.len().saturating_sub(2);
+        let per_lookup = |pick: fn(&LevelCounts) -> &LookupCounts,
                           count: fn(&LookupCounts) -> usize| {
             let lookups = self
-                .heights
-                .get(1)
+                .levels
+                .get(leaf_parents)
                 .map_or(1, |counts| pick(counts).lookups.max(1));
-            let total: usize = self.heights.iter().map(|counts| count(pick(counts))).sum();
+            let total: usize = self.levels.iter().map(|counts| count(pick(counts))).sum();
             total as f64 / lookups as f64
         };
         let _ = writeln!(
@@ -390,7 +404,7 @@ impl<'a, K: BenchKey + InlineKey> SeparatorCensus<'a, K> {
             per_lookup(|counts| &counts.hits, |counts| counts.inexact_ties),
             per_lookup(|counts| &counts.misses, |counts| counts.ties),
             per_lookup(|counts| &counts.misses, |counts| counts.inexact_ties),
-            self.heights[0].nodes,
+            self.levels.last().map_or(0, |leaves| leaves.nodes),
             self.tree.shared_prefix().len(),
             LookupCounts::percent(self.misses_placed_by_shared_prefix, self.misses),
         );

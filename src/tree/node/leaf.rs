@@ -422,7 +422,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// in the bytes the leaf keeps (D18), or `None` if the leaf has no
     /// inline keys: only those can equal the key searched for. The count
     /// over the inline keys runs over the leaf's capacity, a constant, which
-    /// the compiler unrolls; over a capacity that depends on the height, it
+    /// the compiler unrolls; over a capacity chosen at run time, it
     /// compiled to a loop of several times the instructions, and over two
     /// capacities, a leaf's and an internal node's, to one that summed the
     /// compares' bits one at a time. Keep this small typed view in its

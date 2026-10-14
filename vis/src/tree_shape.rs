@@ -97,8 +97,13 @@ impl TreeShape {
         shape
     }
 
-    /// Levels above the leaves; `None` for a tree without nodes.
-    pub(crate) fn height(&self) -> Option<usize> {
+    /// How many levels the tree has, the leaves' and the root's included.
+    pub(crate) fn level_count(&self) -> usize {
+        self.levels.len()
+    }
+
+    /// The root's level, the last; `None` for a tree without nodes.
+    fn root_level(&self) -> Option<usize> {
         self.levels.len().checked_sub(1)
     }
 
@@ -122,7 +127,7 @@ impl TreeShape {
 
     /// The root, if the tree has nodes.
     pub(crate) fn root(&self) -> Option<NodeAt> {
-        self.height().map(|height| NodeAt::new(height, 0))
+        self.root_level().map(|level| NodeAt::new(level, 0))
     }
 
     /// The child at edge `edge` of the internal node at `at`.
@@ -141,7 +146,7 @@ impl TreeShape {
     /// The node's name in a sentence: "the root", "leaf 1,204", "level 2
     /// node 7".
     pub(crate) fn node_name(&self, at: NodeAt) -> String {
-        if Some(at.level) == self.height() {
+        if Some(at.level) == self.root_level() {
             "the root".to_string()
         } else if at.level == 0 {
             format!("leaf {}", Group(at.index + 1))
@@ -152,7 +157,7 @@ impl TreeShape {
 
     /// The level's name on its own: "root", "leaf", "level 2".
     pub(crate) fn level_name(&self, level: usize) -> String {
-        if Some(level) == self.height() {
+        if Some(level) == self.root_level() {
             "root".to_string()
         } else if level == 0 {
             "leaf".to_string()
@@ -241,10 +246,10 @@ mod tests {
     fn levels_hold_every_node_once_under_its_parent() {
         let map = map_of(100_000);
         let shape = TreeShape::of(&map.inspect());
-        let height = shape.height().unwrap();
-        assert!(height >= 2);
-        assert_eq!(shape.level(height).node_count(), 1);
-        let keys: usize = (0..=height)
+        let root_level = shape.root_level().unwrap();
+        assert!(root_level >= 2);
+        assert_eq!(shape.level(root_level).node_count(), 1);
+        let keys: usize = (0..=root_level)
             .map(|level| {
                 let nodes = shape.level(level);
                 (0..nodes.node_count())
@@ -253,7 +258,7 @@ mod tests {
             })
             .sum();
         assert_eq!(keys, map.len());
-        for level in 1..=height {
+        for level in 1..=root_level {
             let nodes = shape.level(level);
             let below = shape.level(level - 1);
             assert_eq!(

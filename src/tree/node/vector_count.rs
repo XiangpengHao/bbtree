@@ -1,14 +1,14 @@
 //! Search over a node's inline keys (D18) in explicit vectors, for slots of
-//! 2 and 4 bytes. AVX-512 broadcasts the search's inline key to every lane,
-//! one load and two compares per 64 bytes of slots, the compares' bits
-//! gathered 64 slots to a word, the live ones kept with one `bzhi` by `len`,
-//! and counted with one `popcnt`.
+//! 2 and 4 bytes, and for 28 to 31 slots of 8 bytes. AVX-512 broadcasts the
+//! search's inline key to every lane, one load and two compares per 64
+//! bytes of slots, the compares' bits gathered 64 slots to a word, the live
+//! ones kept with one `bzhi` by `len`, and counted with one `popcnt`.
 //!
 //! The compiler's own vectors for the same count depend on the capacity:
 //! for capacities that aren't a multiple of the vector, such as the 23
-//! slots of a `u64 → [u64; 4]` leaf, it compared in vectors but then took
-//! the mask apart a bit at a time, more than doubling the instructions of
-//! the whole lookup (05-fence-key.md).
+//! slots of a `u64 → [u64; 4]` leaf, or 28 to 31 slots of 8 bytes, it
+//! compared in vectors but then took the mask apart a bit at a time, more
+//! than doubling the instructions of the whole lookup (05-fence-key.md).
 //!
 //! On x86-64 without hardware popcount, SSE2 compares eight 2-byte or four
 //! 4-byte slots at once. Its masks have one bit per byte, so each lane
@@ -90,10 +90,10 @@ impl U16EqualityMask {
     }
 }
 
-/// Point lookups over 8-byte slots need only an equality mask. Ordered
-/// searches keep their compiler-vectorized count; unlike narrow slots,
-/// that count still constructs both comparison masks before rejecting an
-/// empty run. All supported capacities fit their equality bits in one word.
+/// Point lookups over 8-byte slots need only an equality mask. An ordered
+/// search builds both comparison masks; this one can reject an empty run
+/// without counting the slots below the target. All supported capacities
+/// fit their equality bits in one word.
 pub(in crate::tree) struct U64EqualityMask {
     bits: u64,
 }
@@ -175,6 +175,60 @@ pub(in crate::tree) trait VectorCount: Copy {
     fn equal_run_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>>;
 }
 
+/// The AVX-512 count of `$slots`' first `$len` slots below and equal to
+/// `$target`, over the capacity, `$slots.len()`, with the intrinsics for
+/// one slot width: `$lane`s under a `$mask` per vector. Its caller checks
+/// the target features those intrinsics need.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+macro_rules! count_avx512_lanes {
+    ($slots:ident, $len:ident, $target:ident, $lane:ty, $mask:ty,
+     $set1:ident, $load:ident, $below:ident, $equal:ident) => {{
+        #[cfg(target_feature = "bmi2")]
+        use core::arch::x86_64::_bzhi_u64;
+        use core::arch::x86_64::{$below, $equal, $load, $set1};
+
+        const LANES: usize = <$mask>::BITS as usize;
+        const WORD_LANES: usize = u64::BITS as usize;
+        let (mut below, mut equal) = (0, 0);
+        let mut word_start = 0;
+        // SAFETY: the caller checks the target features the intrinsics
+        // need; BMI2 is checked separately below. Each mask selects the
+        // lanes of `start..slots.len()`, within the slots, and a masked load
+        // reads only the lanes it selects.
+        unsafe {
+            let target = $set1($target as $lane);
+            while word_start < $slots.len() {
+                let (mut below_bits, mut equal_bits) = (0_u64, 0_u64);
+                let mut offset = 0;
+                while offset < WORD_LANES && word_start + offset < $slots.len() {
+                    let start = word_start + offset;
+                    let lanes = ($slots.len() - start).min(LANES);
+                    let in_slots = ((1_u64 << lanes) - 1) as $mask;
+                    let chunk = $load(in_slots, $slots.as_ptr().add(start).cast());
+                    below_bits |= u64::from($below(in_slots, chunk, target)) << offset;
+                    equal_bits |= u64::from($equal(in_slots, chunk, target)) << offset;
+                    offset += LANES;
+                }
+                let live = $len.saturating_sub(word_start).min(WORD_LANES) as u32;
+                let keep_live = |bits: u64| {
+                    #[cfg(target_feature = "bmi2")]
+                    {
+                        _bzhi_u64(bits, live)
+                    }
+                    #[cfg(not(target_feature = "bmi2"))]
+                    {
+                        bits & u64::MAX.checked_shr(64 - live).unwrap_or(0)
+                    }
+                };
+                below += keep_live(below_bits).count_ones() as usize;
+                equal += keep_live(equal_bits).count_ones() as usize;
+                word_start += WORD_LANES;
+            }
+        }
+        Some(below..below + equal)
+    }};
+}
+
 /// Implements [`VectorCount`] for slots of one width, with the AVX-512 and
 /// SSE2 intrinsics for its lanes.
 macro_rules! vector_count {
@@ -187,52 +241,12 @@ macro_rules! vector_count {
                 len: usize,
                 target: Self,
             ) -> Option<Range<usize>> {
+                // The AVX-512BW the 2- and 4-byte lanes' intrinsics need.
                 #[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
                 {
-                    #[cfg(target_feature = "bmi2")]
-                    use core::arch::x86_64::_bzhi_u64;
-                    use core::arch::x86_64::{$below, $equal, $load, $set1};
-
-                    const LANES: usize = <$mask>::BITS as usize;
-                    const WORD_LANES: usize = u64::BITS as usize;
-                    let (mut below, mut equal) = (0, 0);
-                    let mut word_start = 0;
-                    // SAFETY: the target has AVX-512BW, which the cfg
-                    // checks; BMI2 is checked separately below. Each mask
-                    // selects the lanes of `start..slots.len()`, within
-                    // `slots`, and a masked load reads only the lanes it
-                    // selects.
-                    unsafe {
-                        let target = $set1(target as $lane);
-                        while word_start < slots.len() {
-                            let (mut below_bits, mut equal_bits) = (0_u64, 0_u64);
-                            let mut offset = 0;
-                            while offset < WORD_LANES && word_start + offset < slots.len() {
-                                let start = word_start + offset;
-                                let lanes = (slots.len() - start).min(LANES);
-                                let in_slots = ((1_u64 << lanes) - 1) as $mask;
-                                let chunk = $load(in_slots, slots.as_ptr().add(start).cast());
-                                below_bits |= u64::from($below(in_slots, chunk, target)) << offset;
-                                equal_bits |= u64::from($equal(in_slots, chunk, target)) << offset;
-                                offset += LANES;
-                            }
-                            let live = len.saturating_sub(word_start).min(WORD_LANES) as u32;
-                            let keep_live = |bits: u64| {
-                                #[cfg(target_feature = "bmi2")]
-                                {
-                                    _bzhi_u64(bits, live)
-                                }
-                                #[cfg(not(target_feature = "bmi2"))]
-                                {
-                                    bits & u64::MAX.checked_shr(64 - live).unwrap_or(0)
-                                }
-                            };
-                            below += keep_live(below_bits).count_ones() as usize;
-                            equal += keep_live(equal_bits).count_ones() as usize;
-                            word_start += WORD_LANES;
-                        }
-                    }
-                    Some(below..below + equal)
+                    count_avx512_lanes!(
+                        slots, len, target, $lane, $mask, $set1, $load, $below, $equal
+                    )
                 }
                 #[cfg(all(
                     target_arch = "x86_64",
@@ -354,9 +368,12 @@ vector_count!(
     _mm_packs_epi32
 );
 
-/// 8-byte slots, those of std byte strings, keep the compiler's count: the
-/// same count in explicit vectors measured slower on 1M and 10M string maps
-/// (05-fence-key.md).
+/// 8-byte slots, those of std byte strings and of 8-byte `InlineKey`
+/// impls, keep the compiler's count, which measured faster than explicit
+/// vectors on string maps (05-fence-key.md), but for 28 to 31 slots, the
+/// capacity of an internal node with 8-byte inline keys, and of a `String`
+/// set's leaf: there the compiler takes the compares' masks apart a bit at
+/// a time, and the count goes the narrow slots' way.
 impl VectorCount for u64 {
     #[inline(always)]
     fn point_mask_in_vectors(slots: &[Self], target: Self) -> Option<U64EqualityMask> {
@@ -364,8 +381,30 @@ impl VectorCount for u64 {
     }
 
     #[inline(always)]
-    fn equal_run_in_vectors(_slots: &[Self], _len: usize, _target: Self) -> Option<Range<usize>> {
-        None
+    fn equal_run_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>> {
+        // The capacity is a constant per node kind, so the check folds.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+        {
+            if !(28..=31).contains(&slots.len()) {
+                return None;
+            }
+            count_avx512_lanes!(
+                slots,
+                len,
+                target,
+                i64,
+                u8,
+                _mm512_set1_epi64,
+                _mm512_maskz_loadu_epi64,
+                _mm512_mask_cmplt_epu64_mask,
+                _mm512_mask_cmpeq_epu64_mask
+            )
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+        {
+            let _ = (slots, len, target);
+            None
+        }
     }
 }
 
@@ -433,6 +472,24 @@ mod tests {
     fn vector_boundaries_ignore_stale_tails() {
         assert_vector_boundaries::<u16>();
         assert_vector_boundaries::<u32>();
+        assert_vector_boundaries::<u64>();
+    }
+
+    /// 8-byte slots count in explicit vectors only at the capacities whose
+    /// count the compiler takes apart bit by bit; the others keep its code.
+    #[test]
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
+    fn explicit_u64_counts_cover_only_28_to_31_slots() {
+        use super::VectorCount;
+
+        for capacity in 0..=64 {
+            let slots = std::vec![u64::MAX; capacity];
+            let run = u64::equal_run_in_vectors(&slots, capacity, u64::MAX);
+            assert_eq!(run.is_some(), (28..=31).contains(&capacity));
+            if let Some(run) = run {
+                assert_eq!(run, 0..capacity);
+            }
+        }
     }
 
     #[cfg(all(

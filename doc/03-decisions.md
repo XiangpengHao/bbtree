@@ -231,8 +231,8 @@ Design in 04-inline-key.md.
   Removing costs one shift in the leaf, as inserting does (D16).
 - **Underfull** means fewer than `max(capacity / 8, 4)` keys, for a node below
   the root, by its kind's capacity: 7 keys for a u64→u64 leaf of 63, 4 for
-  a `String`→u64 leaf of 25. The floor of 4 bounds the height: see the
-  last bullet.
+  a `String`→u64 leaf of 25. The floor of 4 bounds how deep the leaves
+  lie: see the last bullet.
 - **Bottom-up, like insert (D11).** On the way back up, each level fixes the
   child it went into if that child is underfull:
   - it merges the child with a sibling (the left one if there is one) when
@@ -253,8 +253,8 @@ Design in 04-inline-key.md.
   3/8 of a node's worth of removals to underflow.
 - Cost: after adversarial removals, nodes may be 1/8 full, up to 4× the
   memory per entry of a half-full guarantee.
-- Consequence: a non-root internal node has at least 5 children, so a tree
-  is at most 23 levels above its leaves: one level more would need
+- Consequence: a non-root internal node has at least 5 children, so the
+  leaves lie at most 23 levels below the root: one level more would need
   2·5^23 KB of leaves, more than 2^64 bytes. Every path has a slot per level
   (D24).
 
@@ -318,9 +318,9 @@ Design in 04-inline-key.md.
 
 **D24. Paths: a node pointer per level from the root, shared by every operation.** (2026-10-08)
 
-- **One type** (`tree/path.rs`): the node at each height from the root
-  down to a position in one of them, and the index taken at each, as a
-  `u16`. It stands for a borrow of the whole tree, which its borrow type
+- **One type** (`tree/path.rs`): a stack of the nodes from the root down
+  to a position in one of them, the root first, and the index taken at
+  each, as a `u16`. It stands for a borrow of the whole tree, which its borrow type
   says: shared, value-mutating and dying paths copy, and an exclusive path
   (`PathMut`) changes the tree through its bottom node, from which nothing
   leads up, and holds the `&mut` of the root to raise or lower the tree
@@ -340,11 +340,29 @@ Design in 04-inline-key.md.
     with one;
   - point lookups and inserts into a leaf with room hold only the current
     node (D32, D37).
+- **Depth, counted by the path.** Nothing records how tall a tree is. A
+  path knows how deep it went, and a node's kind comes from its tag (D52).
+  A node above a path's bottom has the edge down, so it is internal: going
+  up returns it as one, reading no tag, and going up from the root raises
+  the tree first, the one way inserts, joins and builds grow it
+  (`PathMut::ascend_raising`). Work that goes back up counts from where it
+  started: an insert's split numbers the levels it climbs from the leaf,
+  which a new root above leaves alone, and a removal's fixing goes by
+  depth, which merges keep until the root lowers, after them. Clearing
+  prefixes before a cut reads the nodes on the path, and a bulk build fits
+  the nodes a new leaf closed with the path that hung it (D25). Only a
+  join, which lines two trees up, counts how deep each one's leaves lie,
+  down the border it walks anyway (`Root::leaf_depth`). A slot read checks
+  its depth against the levels on the path, at most 24, which also keeps
+  it in bounds. Measured against D52 at 10M, one run each, in instructions
+  per operation: lookups and inserts unchanged, removal 689 → 693,
+  `range64` 1,669 → 1,632, iteration 6.2 → 5.6 per entry; times within
+  run-to-run noise.
 - **Why pointers, not indexes.** An index path is valid under the same
   condition as a pointer path, that nothing else changes the tree, which
   `&mut` already gives; it only turns a broken condition into a panic, and
   costs a walk down from the root at each use.
-- **24 slots** (`MAX_HEIGHT` 23, from D22's floor of 4), 248 B. The slots are
+- **24 slots** (`MAX_DEPTH` 23, from D22's floor of 4), 248 B. The slots are
   uninitialized until written; a path is made detached and started where it
   stays, and is never moved once written inside the tree code: moving one
   copies it with wide loads, which wait on the narrow stores that wrote it
@@ -714,14 +732,14 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
     always inlines its leaf's (`Leaf::search_inlined`): out of line, it cost
     a random JSON insert 40 instructions more (D51).
   - A lookup that ends at a separator reads its value out of line
-    (`Found::separator_key_value`): inlined, the walk down to the head made
-    LLVM keep a counter for it in every descent's loop (D51).
+    (`Found::separator_key_value`): inlined, the walk down to the head sat
+    in every descent's loop (D51).
   - The shared-prefix check (D50) on heap strings compares 32 bytes at a
     time, inline.
   - Native 8-byte leaf summaries use an equality mask.
 - **Why:** with the `Option`, an outlined helper re-tested for null and
   kept a generic `memcmp` fallback. Without forced inlining, every internal
-  level returned node, height and index through memory: about 14 memory
+  level returned its search's state through memory: about 14 memory
   operations per level for `String`.
 - **Measured** at 10M, all four together: JSON hits 343.8 → 334.4 ns,
   misses 282.3 → 249.4; path hits 601.0 → 585.0, misses 450.4 → 432.9;
@@ -965,9 +983,9 @@ Design in 05-fence-key.md, "The shared prefix".
 Design in 12-tree-structure.md.
 
 - **What:** `Leaf` and `Internal` are page handles with the operations of
-  their kind, and `Root` owns the tree: its root page, with the top node,
-  the height and the fences as the shared prefix (D50, D52), and the
-  append hint (D45). `Node`, a leaf or an internal node, as an edge's tag
+  their kind, and `Root` owns the tree: its root page, with the top node
+  and the fences as the shared prefix (D50, D52), and the append hint
+  (D45). `Node`, a leaf or an internal node, as an edge's tag
   or the root's header says (D52), is what an edge, a path or the root
   leads to, and the one place a kind is decided (D28). What both
   kinds share is composition (pages, slots, inline-key column) and `Child`,
@@ -1005,9 +1023,10 @@ Design in 12-tree-structure.md, "The root page and node kinds".
   padding, and so does every pointer to it, an edge or a path's level, in
   its lowest bit, which pages aligned to 512 B or more leave 0: a leaf's
   pointer carries the tag. Following an edge decides the child's kind
-  before the child is read (D28); no height is carried down. The root node
+  before the child is read (D28). The root node
   lives in the root page: room for a node of either kind, and after it the
-  root area, the tree's height and its shared prefix (D50). A tree keeps
+  root area, the tree's shared prefix (D50); nothing records how tall the
+  tree is (D24). A tree keeps
   its root page for life. Raising it moves the root node to a fresh page of
   its kind and makes the root internal above it; lowering it moves the
   root's only child up and frees the child's page. `Root` holds the page
@@ -1023,7 +1042,7 @@ Design in 12-tree-structure.md, "The root page and node kinds".
 - **Cost:** a raise or lower copies a node, a page at most. A join moves
   the shorter tree's root to a plain page first; a cut's new part and a
   copy move their top into a root page. The root page is the larger
-  kind's page and 66 B. The map is 24 bytes, std's size, down from 40.
+  kind's page and 65 B. The map is 24 bytes, std's size, down from 40.
 - **Measured** against D51, 10M, one run each (ns per op; instructions in
   brackets):
 
@@ -1037,8 +1056,8 @@ Design in 12-tree-structure.md, "The root page and node kinds".
 
   Times vary by about 10 ns between runs of one binary. Instructions rose
   by 2 to 6%: the root's kind is read from its header, a leaf's pointer
-  loses its tag, and balancing reads a child's tag where a height was in a
-  register.
+  loses its tag, and balancing reads a child's tag where D51 kept the
+  level in a register.
 
 ## Navigation
 

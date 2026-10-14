@@ -26,7 +26,7 @@ fn two_length_candidates_check_hits_and_misses_on_either_side() {
     {
         map.insert(String::from(key), index as u64);
     }
-    assert_eq!(map.height(), 0);
+    assert_eq!(map.leaf_depth(), 0);
     map.check_invariants();
     assert_eq!(map.get("shared-prefix/c0"), Some(&1));
     assert_eq!(map.get("shared-prefix/t0"), Some(&3));

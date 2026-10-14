@@ -377,7 +377,7 @@ mod tests {
     fn check<K: VisKey>(map: BBTreeMap<K, u64>, kind: KeyKind) {
         let tree = InspectedMap::new(map, kind);
         let shape = tree.shape();
-        for level in 0..=shape.height().unwrap() {
+        for level in 0..shape.level_count() {
             let nodes = shape.level(level).node_count();
             for index in [0, nodes / 3, nodes / 2, nodes - 1] {
                 let at = NodeAt::new(level, index);

@@ -1,6 +1,6 @@
 //! Joining trees (`tree/join.rs`), through [`Root::concat`], which puts
 //! back together the pieces `extract_if` cuts: on trees of every pair of
-//! heights up to 3, with roots and borders of every fill, so that every way
+//! leaf depths up to 3, with roots and borders of every fill, so that every way
 //! a join goes comes up. The shorter root is absorbed by the taller tree's
 //! border node, or hangs beside it, splitting the border up to a new root,
 //! and then, if short of its minimum, takes keys over from its neighbour, or
@@ -51,7 +51,7 @@ fn random_shape<K: Ord + FromNumber>(rng: &TestRng, numbers: &[usize]) -> BBTree
 }
 
 /// How many entries a piece gets: none, a few, or up to `max`, spread over
-/// the orders of magnitude, so that trees of every height up to 3 come up.
+/// the orders of magnitude, so that leaves at every depth up to 3 come up.
 fn random_len(rng: &TestRng, max: usize) -> usize {
     match rng.below(4) {
         0 => rng.below(3),

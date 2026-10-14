@@ -99,7 +99,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         self.right.move_prefix_back_to(fill);
         // SAFETY: both children and the separator fit in one node (the
         // caller). The right child is another node of kind `C`, at the left
-        // one's height, in the same map, with its trailing slot 0 initialized
+        // one's depth, in the same map, with its trailing slot 0 initialized
         // (type invariant); its edge is gone from the parent, so nothing
         // reaches its page but to free it, with nothing left in it. The
         // separator's window is at the parent's prefix length, `fill`'s, at

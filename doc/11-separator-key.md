@@ -264,7 +264,7 @@ small, the change is a simplification, judged by the code it removes.
 keys and insertion order, today's tree, its lookups traced through
 `TreeView::trace`. Not yet with choosing where to split; (3) not yet run.
 
-| keys | width | exact at height 1 | exact above | ties per hit | of which inexact |
+| keys | width | exact in the leaves' parents | exact above | ties per hit | of which inexact |
 |---|--:|--:|--:|--:|--:|
 | `u64` | 2 | 72% | about 1% | 0.18 | 0.16 |
 | `u64`, dense | 2 | 95% | about 1% | 0.26 | 0.24 |
@@ -273,10 +273,11 @@ keys and insertion order, today's tree, its lookups traced through
 | paths | 4 | 0.1% | 0–5% | 1.07 | 1.07 |
 
 - At 4 bytes, every `u64`, dense `u64` and `hash32` separator but a few
-  is exact, at every height. At their 2 bytes, most ties stay inexact.
-- JSON ties are mostly hits that equal a separator (5.6% of hits at
-  height 1), all exact.
-- Paths tie at 97% of height-1 searches, with 1.9 separators each, and
+  is exact, at every level. At their 2 bytes, most ties stay inexact.
+- JSON ties are mostly hits that equal a separator (5.6% of hits in the
+  leaves' parents), all exact.
+- Paths tie at 97% of searches in the leaves' parents, with 1.9 separators
+  each, and
   even at 8 bytes 0.1% of their separators are exact: keeping the child's
   prefix (`LCP(right min, high)`) makes them long. Misses look the same.
 - Only dense `u64` and paths checked a per-node prefix (since replaced by

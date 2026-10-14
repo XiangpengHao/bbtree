@@ -70,7 +70,7 @@ impl Concept {
                 "An internal node's child pointers. Child i holds the keys between key i − 1 and key i. A pointer to a leaf has its lowest bit set, so a lookup knows a child's kind before reading it."
             }
             Concept::Page => {
-                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's height and shared prefix. Whatever no array covers is padding."
+                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's shared prefix. Whatever no array covers is padding."
             }
             Concept::CacheLine => {
                 "The processor fetches memory 64 bytes at a time. A lookup is fast when it needs few lines of each node it passes through."

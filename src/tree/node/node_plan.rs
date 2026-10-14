@@ -66,10 +66,6 @@ pub(in crate::tree) struct NodePlan<K> {
     /// Whether the node stores each key's length, whose 2-byte tags filter a
     /// point lookup's candidates (D36).
     length_tags: bool,
-    /// How a search runs over all of a node's keys when it has no inline key
-    /// to compare with theirs: in nodes without inline keys, and for a lookup
-    /// through a borrowed form the nodes can't encode (D19).
-    full_search: KeySearch,
     /// How a search runs over the keys whose inline keys tie with its own.
     tied_search: KeySearch,
     /// Whether a point lookup confirms its one candidate by comparing all of
@@ -95,7 +91,7 @@ impl<K> NodePlan<K> {
         match inliner {
             KeyInliner::InlineKeyTrait { width, .. } => Self::with_inline_key_impl(inliner, width),
             KeyInliner::ByteString(bytes) if bytes.holds_its_bytes() => {
-                Self::for_byte_arrays::<Kind>(inliner)
+                Self::for_byte_arrays(inliner)
             }
             KeyInliner::ByteString(_) => Self::for_heap_byte_strings::<Kind>(inliner),
         }
@@ -110,7 +106,6 @@ impl<K> NodePlan<K> {
             inline_width: None,
             rehydrates_windows: false,
             length_tags: false,
-            full_search: const { KeySearch::for_key::<K>() },
             tied_search: const { KeySearch::for_key::<K>() },
             whole_key_equality: false,
         }
@@ -136,7 +131,7 @@ impl<K> NodePlan<K> {
     /// lookup's one candidate by all of them at once, a length the compiler
     /// knows (D38).
     #[inline(always)]
-    fn for_byte_arrays<Kind: PageKind>(inliner: KeyInliner<K>) -> Self {
+    fn for_byte_arrays(inliner: KeyInliner<K>) -> Self {
         Self {
             inliner: Some(inliner),
             inline_width: Some(InlineWidth::Two),
@@ -218,10 +213,12 @@ impl<K> NodePlan<K> {
     }
 
     /// How a search runs over all of a node's keys when it has no inline key
-    /// to compare with theirs (D19).
+    /// to compare with theirs: in nodes without inline keys, and for a lookup
+    /// through a borrowed form the nodes can't encode (D19). The key type
+    /// alone decides it, the same in every plan.
     #[inline(always)]
     pub(super) fn full_search(self) -> KeySearch {
-        self.full_search
+        const { KeySearch::for_key::<K>() }
     }
 
     /// How a search runs over the keys whose inline keys tie with its own.

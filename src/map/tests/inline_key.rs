@@ -199,14 +199,14 @@ fn workload(native_random_steps: usize, native_key_space: usize) -> Workload {
             random_steps: 150,
             key_space: 150,
             ordered_entries: 60,
-            min_sequential_height: 1,
+            min_sequential_leaf_depth: 1,
         }
     } else {
         Workload {
             random_steps: native_random_steps,
             key_space: native_key_space,
             ordered_entries: native_key_space / 2,
-            min_sequential_height: 2,
+            min_sequential_leaf_depth: 2,
         }
     }
 }
@@ -600,7 +600,7 @@ fn a_map_with_constant_inline_keys_keeps_its_invariants() {
         );
     }
     map.check_invariants();
-    assert!(map.height() >= 1);
+    assert!(map.leaf_depth() >= 1);
 }
 
 /// A name whose `InlineKey` panics once its shared budget of calls is spent,

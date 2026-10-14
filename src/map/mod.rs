@@ -247,7 +247,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         let root = self.root.page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root.top(), root.height());
+        path.attach(root.top());
         if path.descend_to_first_key() {
             Some(path.key_value())
         } else {
@@ -304,7 +304,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     {
         let root = self.root.page()?;
         let mut path = Path::<Immut<'_>, K, V, S>::detached();
-        path.attach(root.top(), root.height());
+        path.attach(root.top());
         if path.descend_to_last_key() {
             Some(path.key_value())
         } else {
@@ -504,7 +504,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         let length = self.length;
         let lower = &mut self.root;
         let upper = lower.split_off_at(key, KeySide::Before);
-        let (lower_length, upper_length) = if lower.height() < upper.height() {
+        let (lower_length, upper_length) = if lower.leaf_depth() < upper.leaf_depth() {
             let lower_length = lower.top().count_entries();
             (lower_length, length - lower_length)
         } else {

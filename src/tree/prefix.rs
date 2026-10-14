@@ -43,7 +43,7 @@ use super::node::inline_keys::{KeyInliner, Window};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::{Child, KeyList, Node};
-use super::path::{MAX_HEIGHT, NodeEnd, PathMut};
+use super::path::{MAX_DEPTH, NodeEnd, PathMut};
 use super::root::Root;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
@@ -53,28 +53,28 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// the leaves up, so that each node's sees its children's; the path,
     /// which ends at the new entry, ends there again afterwards.
     ///
-    /// `separators[height]`, for each height from 1 to `top`, is where the
-    /// node the path goes through there holds the separator between the
-    /// two halves of the node below it that split.
+    /// `separators[climbed]`, for each count of levels from 1 to `top` up
+    /// the path from its bottom, is where the node the path goes through
+    /// there holds the separator between the two halves of the node below
+    /// it that split.
     ///
     /// Calls `InlineKey`: an insert does this last, once its entry is in and
     /// counted, so that a panic leaves a map that has it.
-    pub(crate) fn fit_split_halves(&mut self, separators: &[usize; MAX_HEIGHT + 1], top: usize) {
+    pub(crate) fn fit_split_halves(&mut self, separators: &[usize; MAX_DEPTH + 1], top: usize) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        let bottom = self.height();
-        let mut indexes = [0; MAX_HEIGHT + 1];
-        indexes[bottom] = self.index();
-        while self.height() < top {
+        let mut indexes = [0; MAX_DEPTH + 1];
+        indexes[0] = self.index();
+        for climbed in 1..=top {
             self.ascend();
-            indexes[self.height()] = self.index();
-            let separator = separators[self.height()];
+            indexes[climbed] = self.index();
+            let separator = separators[climbed];
             self.fit_children_to_fences([separator, separator + 1]);
         }
-        while self.height() > bottom {
+        for climbed in (0..top).rev() {
             self.descend();
-            self.set_index(indexes[self.height()]);
+            self.set_index(indexes[climbed]);
         }
     }
 
@@ -185,57 +185,40 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// once the parent's is the root's too. Before a cut along the path,
     /// whose nodes become the borders of two trees, both of whose keys share
     /// what this tree's do. Reads no key; no user encoding runs. The path
-    /// ends where it did.
+    /// stays where it is.
     pub(crate) fn clear_prefixes(&mut self) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        let bottom = self.height();
-        let mut indexes = [0; MAX_HEIGHT + 1];
-        indexes[bottom] = self.index();
-        while self.height() < self.root_height() {
-            self.ascend();
-            indexes[self.height()] = self.index();
-        }
-        let shared_len = self.root().shared_prefix().len();
-        let (mut node, mut height) = (self.root().top(), self.root_height());
         debug_assert_eq!(
-            node.prefix_len(),
-            shared_len,
+            self.node_at(0).prefix_len(),
+            self.root().shared_prefix().len(),
             "the root's prefix is what every key shares"
         );
-        // Each node's kind is decided once: it takes the window its parent
-        // fills it from, then, above the bottom, fills its child's.
+        let bottom = self.depth();
+        // Each node takes the window its parent fills it from, then, above
+        // the bottom, fills its child's.
         let mut fill = None;
-        loop {
-            node = match node {
+        for depth in 0..=bottom {
+            match self.node_at(depth) {
                 Node::Leaf(leaf) => {
                     if let Some(fill) = fill {
                         leaf.move_prefix_back_to(fill);
                     }
-                    break;
                 }
                 Node::Internal(internal) => {
                     if let Some(fill) = fill {
                         internal.move_prefix_back_to(fill);
                     }
-                    if height == bottom {
-                        break;
+                    if depth < bottom {
+                        fill = Some(
+                            internal
+                                .bound_window(self.index_at(depth))
+                                .expect("a node on a path down holds a key"),
+                        );
                     }
-                    let index = indexes[height];
-                    fill = Some(
-                        internal
-                            .bound_window(index)
-                            .expect("a node on a path down holds a key"),
-                    );
-                    height -= 1;
-                    internal.child(index)
                 }
-            };
-        }
-        while self.height() > bottom {
-            self.descend();
-            self.set_index(indexes[self.height()]);
+            }
         }
     }
 }
@@ -252,7 +235,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         }
         let mut path = PathMut::new(self);
         path.start_at_root();
-        while path.height() > 0 {
+        while !path.ends_at_leaf() {
             let len = path.node().len();
             let (sibling, border) = if End::IS_LAST {
                 (len.saturating_sub(1), len)

@@ -325,9 +325,9 @@ fn push_and_pop_levels() {
     }
     let ids = tree.top().tracked_ids_under();
 
-    for height in 1..=3 {
+    for depth in 1..=3 {
         assert_eq!(tree.raise_in(&pages).len(), 0);
-        assert_eq!(tree.height(), height);
+        assert_eq!(tree.leaf_depth(), depth);
     }
     let (mut node, mut depth) = (tree.top(), 0);
     while let Node::Internal(internal) = node {
@@ -338,9 +338,9 @@ fn push_and_pop_levels() {
     assert_eq!(depth, 3);
     assert_eq!(node.tracked_ids_under(), ids);
 
-    for height in (0..3).rev() {
+    for depth in (0..3).rev() {
         pages.release(tree.lower());
-        assert_eq!(tree.height(), height);
+        assert_eq!(tree.leaf_depth(), depth);
     }
     let lowered_leaf = catch_unwind(AssertUnwindSafe(|| tree.lower()));
     assert!(lowered_leaf.is_err(), "a leaf root has no level to lower");
@@ -383,7 +383,7 @@ fn steals_and_merges_of_leaves() {
     // a separator, whose value is the right leaf's head.
     let mut tree = ascending_tree(&pages, &ledger, 13);
     let mut model = entry_ids(&tree);
-    assert_eq!(tree.height(), 1);
+    assert_eq!(tree.leaf_depth(), 1);
 
     let root = internal_root(tree.root());
     let mut siblings = root.siblings::<BulkyLeaf<'_>>(0);
@@ -413,7 +413,7 @@ fn steals_and_merges_of_leaves() {
     assert_eq!(merged_leaf.len(), 12);
     assert!(!merged_leaf.has_head(), "the leftmost leaf has no head");
     tree.pop_empty_roots();
-    assert_eq!(tree.height(), 0);
+    assert_eq!(tree.leaf_depth(), 0);
     assert_eq!(entry_ids(&tree), model);
 
     tree.destroy();
@@ -427,7 +427,7 @@ fn steals_refuse_an_empty_donor_or_a_full_receiver() {
     let pages = TestPages::new();
     // Two leaves of 6, then 6 more entries fill the right one.
     let tree = ascending_tree(&pages, &ledger, 19);
-    assert_eq!(tree.height(), 1);
+    assert_eq!(tree.leaf_depth(), 1);
     let model = entry_ids(&tree);
 
     let root = internal_root(tree.root());
@@ -464,7 +464,7 @@ fn steals_and_merges_of_internal_nodes() {
     let ledger = DropLedger::new();
     let pages = TestPages::new();
     let mut tree = ascending_tree(&pages, &ledger, 100);
-    assert_eq!(tree.height(), 2);
+    assert_eq!(tree.leaf_depth(), 2);
     let mut model = entry_ids(&tree);
 
     let root = internal_root(tree.root());

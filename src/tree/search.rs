@@ -54,10 +54,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
     /// [`Self::key_value`] of separator `index` of `internal`: its key, and
     /// its value, the head of the leftmost leaf right of it (D17).
     ///
-    /// Out of line: a search ends at a separator rarely, and inlined, the
-    /// walk down to its head, whose length the height at the end of the
-    /// descent tells, made LLVM keep a counter for it in every descent's
-    /// loop.
+    /// Out of line: a search ends at a separator rarely, and the walk down
+    /// to its head would otherwise sit in every descent's loop.
     #[inline(never)]
     fn separator_key_value<'a>(internal: Internal<K, V, S>, index: usize) -> (&'a K, &'a V) {
         // SAFETY: the index is below the node's length (type invariant).
@@ -183,7 +181,7 @@ mod tests {
     /// leaf and 14 in an internal node, so trees grow tall from few entries.
     type WideKey = [u64; 8];
 
-    /// Every separator under and at `node`, at any height, as its node and
+    /// Every separator under and at `node`, at any depth, as its node and
     /// index, and the number of leaves.
     fn separators_and_leaves<K, V>(
         node: Node<K, V, crate::inline_key::Auto>,
@@ -237,7 +235,7 @@ mod tests {
             value_ids.insert([number; 8], value.id());
             assert!(tree.insert([number; 8], value).is_none());
         }
-        assert!(tree.height() >= 2);
+        assert!(tree.leaf_depth() >= 2);
 
         let separators = separator_values(&tree);
         assert!(!separators.is_empty());

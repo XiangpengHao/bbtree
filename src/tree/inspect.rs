@@ -241,9 +241,9 @@ pub enum TraceOutcome {
 /// One node of a map's tree, read in place.
 pub struct NodeView<'a, K, V, S> {
     node: Node<K, V, S>,
-    /// How far above the leaves the node is, which the walk down from the
+    /// How far below the root the node is, which the walk down from the
     /// root counts: a node does not know it.
-    height: usize,
+    depth: usize,
     /// Whether the node is the root, in the root's page.
     is_root: bool,
     _borrow: PhantomData<&'a (K, V)>,
@@ -274,7 +274,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     fn of_root(root: RootPage<K, V, S>) -> Self {
         Self {
             node: root.top(),
-            height: root.height(),
+            depth: 0,
             is_root: true,
             _borrow: PhantomData,
         }
@@ -284,7 +284,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     fn child_below(&self, internal: Internal<K, V, S>, index: usize) -> Self {
         Self {
             node: internal.child(index),
-            height: self.height - 1,
+            depth: self.depth + 1,
             is_root: false,
             _borrow: PhantomData,
         }
@@ -296,9 +296,10 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
         NodeId(self.node.node_ptr().addr())
     }
 
-    /// How far above the leaves the node is: 0 for a leaf.
-    pub fn height(&self) -> usize {
-        self.height
+    /// How far below the root the node is: 0 for the root. Every leaf lies
+    /// as deep as every other.
+    pub fn depth(&self) -> usize {
+        self.depth
     }
 
     pub fn is_leaf(&self) -> bool {
@@ -703,8 +704,8 @@ pub enum SlotContents {
     Values,
     /// An internal node's children.
     Edges,
-    /// What the tree keeps in the root's page, after the root node: its
-    /// height, and what every key shares (D50).
+    /// What the tree keeps in the root's page, after the root node: what
+    /// every key shares (D50).
     RootArea,
 }
 
@@ -777,7 +778,7 @@ mod tests {
             assert!(node.head().is_none());
             for index in 0..=node.len() {
                 let child = node.child(index).expect("an internal node has children");
-                assert_eq!(child.height() + 1, node.height());
+                assert_eq!(child.depth(), node.depth() + 1);
                 self.visit(child, leftmost && index == 0);
                 if index < node.len() {
                     assert!(node.value(index).is_none());
@@ -909,11 +910,10 @@ mod tests {
         absent: &[K],
     ) -> usize {
         let tree = map.inspect();
-        let height = tree.root().unwrap().height();
         let mut placed_by_shared_prefix = 0;
         let check_steps = |steps: &[TraceStep<'_, K, V, S>]| {
             for (depth, step) in steps.iter().enumerate() {
-                assert_eq!(step.node().height(), height - depth);
+                assert_eq!(step.node().depth(), depth);
             }
         };
         for (key, value) in map.iter() {

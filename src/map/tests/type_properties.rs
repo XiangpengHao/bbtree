@@ -288,18 +288,18 @@ fn iterators_are_covariant_in_keys_and_values() {
 }
 
 /// Each end of a walk holds a path (`tree/path.rs`): a node pointer and a
-/// `u16` index for each of 24 levels, the most a tree can have (D22), and two
-/// one-byte heights, 248 bytes. The whole-map iterators add the root, as a
-/// handle with its height, and a count. std's, whose nodes point to their
-/// parents, need 72 bytes.
+/// `u16` index for each of 24 levels, the most a tree can have (D22), and a
+/// one-byte count of the levels in use, 248 bytes. Every walk adds the
+/// root, as a tagged pointer; the whole-map iterators a count, and ranges a
+/// leaf run. std's, whose nodes point to their parents, need 72 bytes.
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
 fn iterator_sizes() {
-    assert_eq!(size_of::<Iter<'_, u64, u64>>(), 560);
-    assert_eq!(size_of::<Keys<'_, u64, u64>>(), 560);
-    assert_eq!(size_of::<Range<'_, u64, u64>>(), 552);
-    assert_eq!(size_of::<IterMut<'_, u64, u64>>(), 560);
-    assert_eq!(size_of::<RangeMut<'_, u64, u64>>(), 552);
+    assert_eq!(size_of::<Iter<'_, u64, u64>>(), 552);
+    assert_eq!(size_of::<Keys<'_, u64, u64>>(), 552);
+    assert_eq!(size_of::<Range<'_, u64, u64>>(), 544);
+    assert_eq!(size_of::<IterMut<'_, u64, u64>>(), 552);
+    assert_eq!(size_of::<RangeMut<'_, u64, u64>>(), 544);
     assert_eq!(size_of::<btree_map::Iter<'_, u64, u64>>(), 72);
 }
 

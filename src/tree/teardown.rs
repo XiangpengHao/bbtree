@@ -46,21 +46,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// The nodes must be well-formed: every leaf right of a separator has a
     /// head (D17).
     pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
-        let height = self.height_by_descent();
         let head = self.take_leftmost_head();
-        let walk = DyingWalk::of_subtree(self, height, release);
+        let walk = DyingWalk::of_subtree(self, release);
         drop(head);
         drop(walk);
-    }
-
-    /// The node's height, counted down its first edges to a leaf.
-    fn height_by_descent(self) -> usize {
-        let (mut node, mut height) = (self, 0);
-        while let Node::Internal(internal) = node {
-            node = internal.child(0);
-            height += 1;
-        }
-        height
     }
 
     /// Takes the head out of the leftmost leaf under this node, if it has
@@ -159,7 +148,7 @@ mod tests {
         let pages = TestPages::<K, Tracked<'l>, S>::new();
         let rng = TestRng::new(10);
         let tree = random_tree(&pages, ledger, &rng, count, PanickingDrop::Nothing);
-        assert!(tree.height() >= 2);
+        assert!(tree.leaf_depth() >= 2);
         let entry_ids: Vec<usize> = tree
             .entries(|key, value| [key.tracked_id(), value.id()])
             .concat();
@@ -174,8 +163,9 @@ mod tests {
     fn destroy_drops_entries_in_ascending_order() {
         destroy_in_order::<Bulky<'_>, Auto>(&DropLedger::new(), 300);
         // 25 entries in a leaf with inline keys, and 63 children in an
-        // internal node, which keeps no keys (D49): height 2 takes more. The
-        // tree is the same under Miri, so the native run checks its height.
+        // internal node, which keeps no keys (D49): leaves at depth 2 take
+        // more. The tree is the same under Miri, so the native run checks
+        // its depth.
         destroy_in_order::<Tracked<'_>, WithInlineKey>(&DropLedger::new(), 2000);
     }
 
@@ -188,7 +178,7 @@ mod tests {
                 let ledger = DropLedger::new();
                 let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
                 let tree = random_tree(&pages, &ledger, &rng, 300, panicking);
-                assert!(tree.height() >= 2);
+                assert!(tree.leaf_depth() >= 2);
                 let entry_ids: Vec<usize> = tree
                     .entries(|key, value| [key.tracked_id(), value.id()])
                     .concat();
@@ -213,7 +203,7 @@ mod tests {
         for key in keys {
             assert!(tree.insert([key; 8], key).is_none());
         }
-        assert!(tree.height() >= 2);
+        assert!(tree.leaf_depth() >= 2);
         tree.destroy();
         pages.assert_all_released();
     }
@@ -233,7 +223,7 @@ mod tests {
                 let ledger = DropLedger::new();
                 let pages = TestPages::<Bulky<'_>, Tracked<'_>>::new();
                 let tree = random_tree(&pages, &ledger, &rng, count, panicking);
-                assert!(tree.height() >= 1);
+                assert!(tree.leaf_depth() >= 1);
                 let unwound = catch_unwind(AssertUnwindSafe(|| tree.destroy()));
                 assert!(unwound.is_err());
                 pages.assert_all_released();

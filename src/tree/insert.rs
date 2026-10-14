@@ -25,7 +25,7 @@ use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::{Insertion, Node};
-use super::path::{MAX_HEIGHT, PathMut};
+use super::path::{MAX_DEPTH, PathMut};
 use super::root::Root;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -179,41 +179,40 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
             }
             Insertion::Split(split) => split,
         };
-        // In each node that split, from the leaf up, the index that leads to
-        // the new entry in the half that took it: its key's in the leaf, and
-        // above, the edge to the child that holds it.
-        let mut indexes_in_halves = [0; MAX_HEIGHT + 1];
+        // Both arrays go by how many levels the split has climbed from the
+        // leaf, which a new root above doesn't change. In each node that
+        // split, the index that leads to the new entry in the half that took
+        // it: its key's in the leaf, and above, the edge to the child that
+        // holds it.
+        let mut indexes_in_halves = [0; MAX_DEPTH + 1];
         indexes_in_halves[0] = split.inserted.index();
         // Above each node that split, where the separator between its halves
         // went, in the node the path goes through.
-        let mut separators = [0; MAX_HEIGHT + 1];
+        let mut separators = [0; MAX_DEPTH + 1];
         let mut carried = (
             split.separator,
             Node::Leaf(split.right),
             split.inserted.is_right(),
         );
+        let mut climbed = 0;
         let top = loop {
             let (separator, right, entry_is_right) = carried;
-            if self.height() == self.root_height() {
-                self.push_root(&mut new_leaf_page, &mut new_internal_page);
-            } else {
-                self.ascend();
-            }
-            let (height, index) = (self.height(), self.index());
-            let node = self.internal();
+            let node = self.ascend_raising(&mut new_leaf_page, &mut new_internal_page);
+            climbed += 1;
+            let index = self.index();
             // The new entry is under the edge left of the separator, or right
             // of it if it went into the right half.
             let beside_separator =
                 |separator_index: usize| separator_index + usize::from(entry_is_right);
             match node.insert(index, separator, right, &mut new_internal_page) {
                 Insertion::Fit(separator_index) => {
-                    separators[height] = separator_index;
+                    separators[climbed] = separator_index;
                     self.set_index(beside_separator(separator_index));
-                    break height;
+                    break climbed;
                 }
                 Insertion::Split(split) => {
-                    separators[height] = split.inserted.index();
-                    indexes_in_halves[height] = beside_separator(split.inserted.index());
+                    separators[climbed] = split.inserted.index();
+                    indexes_in_halves[climbed] = beside_separator(split.inserted.index());
                     carried = (
                         split.separator,
                         Node::Internal(split.right),
@@ -223,9 +222,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
             }
         };
         // Back down to the new entry, through the halves that took it.
-        while self.height() > 0 {
+        for climbed in (0..top).rev() {
             self.descend();
-            self.set_index(indexes_in_halves[self.height()]);
+            self.set_index(indexes_in_halves[climbed]);
         }
         *length += 1;
         self.fit_split_halves(&separators, top);

@@ -92,7 +92,7 @@ fn full_leaf_replay_can_find_an_existing_key() {
     assert_eq!(map.insert(query, u64::MAX), Some(target));
     remaining.set(usize::MAX);
     assert_eq!(map.len(), count as usize);
-    assert_eq!(map.height(), 0);
+    assert_eq!(map.leaf_depth(), 0);
     map.check_invariants();
     assert!(map.iter().all(|(key, &value)| value
         == if key.number.get() == target {
@@ -129,7 +129,7 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     assert_eq!(map.insert(query, 1), None);
     remaining.set(usize::MAX);
     assert_eq!(map.len(), count as usize);
-    assert_eq!(map.height(), 1);
+    assert_eq!(map.leaf_depth(), 1);
     map.check_invariants();
     assert!(
         map.iter()
@@ -162,7 +162,7 @@ impl AscendingInserts {
     fn insert_next(&mut self) {
         assert_eq!(self.map.insert(self.next, self.next), None);
         self.next += 1;
-        if self.leaf_capacity == 0 && self.map.height() > 0 {
+        if self.leaf_capacity == 0 && self.map.leaf_depth() > 0 {
             self.leaf_capacity = self.map.len() - 1;
         }
     }
@@ -194,7 +194,7 @@ fn rightmost_hint_arms_after_split_and_rearms_after_full_or_miss() {
     inserts.insert_next();
     assert!(!inserts.is_armed());
     inserts.arm();
-    assert_eq!(inserts.map.height(), 1);
+    assert_eq!(inserts.map.leaf_depth(), 1);
     inserts.insert_next();
     assert!(inserts.is_armed());
     while !inserts.rightmost_full() {
