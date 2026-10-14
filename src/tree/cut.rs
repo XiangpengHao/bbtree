@@ -21,13 +21,17 @@
 //! ([`Tree::fix_border`]). A separator left at the start of the right
 //! tree, with nothing left of it, comes down along that border, by a merge
 //! or a move, into the tree's first leaf, with its value, the head of the
-//! leaf right of it (D17). Once both maps are counted, the nodes beside the
-//! borders, which entries moved over from, fit their prefixes to their new
-//! fences, reading keys.
+//! leaf right of it (D17).
+//!
+//! The nodes beside the borders, which entries moved over from, then fit
+//! their prefixes to their new fences, reading keys: once both trees are
+//! where a panic can't lose them, and counted. So the cut hands out the
+//! right tree only through [`Cut::finish`], which puts it there, and fits
+//! both.
 //!
 //! That touches the nodes along the path and the two borders: O(log n) of
 //! them. The two maps' lengths come from counting the entries of the shorter
-//! tree, a node at a time, as std's do.
+//! tree, a node at a time, as std's do ([`Cut::lengths`]).
 //!
 //! # Borders
 //!
@@ -38,8 +42,8 @@
 //! none, where every other node holds its minimum.
 //!
 //! It reads no key: the nodes beside the border that give it entries keep
-//! their prefixes, which still fit their narrower fences, until the caller
-//! fits them, once its operation is done ([`Tree::refit_border_siblings`]).
+//! their prefixes, which still fit their narrower fences, until the
+//! operation fits them, once it is done ([`Tree::refit_border_siblings`]).
 
 #![forbid(unsafe_code)]
 
@@ -59,30 +63,72 @@ use crate::inline_key::InlineKeyStrategy;
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Cuts the tree at the leaf edge on `side` of `key`: keeps what lies
     /// before it, and returns what lies after, both with their borders along
-    /// the cut brought up to their minimum ([`Self::fix_border`]). The nodes
-    /// beside those borders, which gave them entries, keep prefixes that
-    /// still fit their narrower fences: fitting them with
-    /// `refit_border_siblings`, which reads keys, is the caller's business,
-    /// once both trees are where a panic can't lose them.
+    /// the cut brought up to their minimum ([`Self::fix_border`]), in a
+    /// [`Cut`], which hands it out once it fits the nodes beside those
+    /// borders.
     ///
     /// Every `Ord` call happens first, in the search, before anything
     /// changes. Pages come from and go back to `alloc`, the map's allocator,
     /// which owns both trees' pages.
-    pub(crate) fn split_off_at<Q>(&mut self, key: &Q, side: KeySide, alloc: &impl Allocator) -> Self
+    pub(crate) fn split_off_at<Q>(
+        &mut self,
+        key: &Q,
+        side: KeySide,
+        alloc: &impl Allocator,
+    ) -> Cut<K, V, S>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
         let mut path = PathMut::new(self);
         path.search_to_edge(&SearchKey::new(key), side);
-        path.move_prefixes_back_to_root();
         let upper = path.cut(alloc);
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
         let mut upper = Tree::from_node(upper, self.shared_prefix().clone(), alloc);
         self.fix_border::<LastEdge>(alloc);
         upper.fix_border::<FirstEdge>(alloc);
-        upper
+        Cut { upper }
+    }
+}
+
+/// A tree just cut in two ([`Tree::split_off_at`]): the part after the cut,
+/// which it hands out only once the nodes beside both borders along the
+/// cut, which gave the borders entries, fit their prefixes to their new
+/// fences. Until then they keep prefixes that still fit, as searches
+/// allow, but shorter than their fences share.
+#[must_use = "the part after the cut comes out only through `finish`"]
+pub(crate) struct Cut<K, V, S> {
+    upper: Tree<K, V, S>,
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Cut<K, V, S> {
+    /// The number of entries before the cut, in `lower`, and after it, of
+    /// `length` in all: counts the entries of the shorter tree, a node at a
+    /// time, as std's map does.
+    pub(crate) fn lengths(&self, lower: &Tree<K, V, S>, length: usize) -> (usize, usize) {
+        if lower.leaf_depth() < self.upper.leaf_depth() {
+            let lower_length = lower.root().count_entries();
+            (lower_length, length - lower_length)
+        } else {
+            let upper_length = self.upper.root().count_entries();
+            (length - upper_length, upper_length)
+        }
+    }
+
+    /// Puts the part after the cut into `upper`, a tree without a root
+    /// page, and then fits the prefixes of the nodes beside the borders
+    /// along the cut, reading keys: `lower`'s, the part before it, if
+    /// given, and `upper`'s. Both trees should be where a panic can't lose
+    /// them, and counted. A `lower` that is only taken apart needs no
+    /// fitting.
+    pub(crate) fn finish(self, lower: Option<&mut Tree<K, V, S>>, upper: &mut Tree<K, V, S>) {
+        debug_assert!(!upper.has_root(), "the part after a cut replaced a tree");
+        *upper = self.upper;
+        if let Some(lower) = lower {
+            lower.refit_border_siblings::<LastEdge>();
+        }
+        upper.refit_border_siblings::<FirstEdge>();
     }
 }
 
@@ -95,10 +141,14 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// tree's root. Nodes on either side of the cut may be left with fewer
     /// keys than their minimum, down to none. Compares no keys.
     ///
+    /// The nodes on the path become the two trees' borders: first, their
+    /// prefixes move back to what every key shares (D50).
+    ///
     /// # Panics
     ///
     /// If the path ends at no leaf edge.
     fn cut(mut self, alloc: &impl Allocator) -> Node<K, V, S> {
+        self.move_prefixes_back_to_root();
         let index = self.index();
         let mut right = Node::Leaf(self.leaf().cut_off_at(index, FreshPage::allocate(alloc)));
         while !self.is_at_root() {
@@ -113,7 +163,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// The number of entries under this node, leaf entries and separators,
     /// counted a node at a time.
-    pub(crate) fn count_entries(self) -> usize {
+    fn count_entries(self) -> usize {
         match self {
             Node::Leaf(leaf) => leaf.len(),
             Node::Internal(internal) => {

@@ -31,7 +31,7 @@ impl<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>> Leaf<K, Tracked<'l>, S> {
 impl<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>> TestPages<K, Tracked<'l>, S> {
     /// A new leaf holding one tracked entry, named by the id of its key.
     fn named_leaf(&self, ledger: &'l DropLedger) -> (Leaf<K, Tracked<'l>, S>, usize) {
-        let leaf = Leaf::new(self.fresh_leaf());
+        let leaf = Leaf::new(self.fresh_leaf(), 0);
         (leaf, leaf.put_named_entry(ledger))
     }
 
@@ -253,7 +253,7 @@ fn insert_rejects_a_child_of_the_wrong_kind() {
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
     let (tree, first_name) = root_above_one_leaf(&pages, &ledger);
     let (child, _, _, separator) = pages.leaf_right_of(&ledger, ledger.track());
-    let internal = Node::Internal(Internal::new(pages.fresh(), child));
+    let internal = Node::Internal(Internal::new(pages.fresh(), child, 0));
 
     let root = tree.root().expect_internal();
     let rejected = catch_unwind(AssertUnwindSafe(|| root.insert_fit(0, separator, internal)));

@@ -47,7 +47,7 @@ use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
-use crate::tree::path::{FirstEdge, KeySide, LastEdge};
+use crate::tree::path::KeySide;
 use crate::tree::root::Tree;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
@@ -518,24 +518,15 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
         if self.is_empty() {
             return Self::empty(self.alloc.clone());
         }
-        let length = self.length;
-        let lower = &mut self.tree;
-        let upper = lower.split_off_at(key, KeySide::Before, &self.alloc);
-        let (lower_length, upper_length) = if lower.leaf_depth() < upper.leaf_depth() {
-            let lower_length = lower.root().count_entries();
-            (lower_length, length - lower_length)
-        } else {
-            let upper_length = upper.root().count_entries();
-            (length - upper_length, upper_length)
-        };
+        let cut = self.tree.split_off_at(key, KeySide::Before, &self.alloc);
+        let (lower_length, upper_length) = cut.lengths(&self.tree, self.length);
         self.length = lower_length;
         let mut upper = Self {
-            tree: upper,
+            tree: Tree::EMPTY,
             length: upper_length,
             alloc: self.alloc.clone(),
         };
-        self.tree.refit_border_siblings::<LastEdge>();
-        upper.tree.refit_border_siblings::<FirstEdge>();
+        cut.finish(Some(&mut self.tree), &mut upper.tree);
         upper
     }
 }

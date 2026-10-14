@@ -34,7 +34,7 @@ fn destroy_leaf<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, pages: &Test
 #[test]
 fn search_matches_slice_binary_search() {
     let pages = TestPages::<u64, u64>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     let keys: Vec<u64> = (0..40).map(|key| key * 2).collect();
     for &key in &keys {
         push_back(leaf, key, key + 1000);
@@ -58,7 +58,7 @@ fn string_search_matches_slice_binary_search() {
     for (prefix, width) in [("", 4), ("", 8), ("", 9), ("tied/prefix/", 4)] {
         let pages = TestPages::<String, u64>::new();
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
-        let leaf = Leaf::new(pages.fresh_leaf());
+        let leaf = Leaf::new(pages.fresh_leaf(), 0);
         let key = |number: usize| format!("{prefix}{number:0width$}");
         // A full leaf of every other number, probed with every number
         // from below its first key to past its last.
@@ -87,7 +87,7 @@ fn string_search_matches_slice_binary_search() {
 #[test]
 fn search_borrows_keys() {
     let pages = TestPages::<String, ()>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     for key in ["apple", "banana", "cherry"] {
         push_back(leaf, String::from(key), ());
     }
@@ -156,7 +156,7 @@ where
     let rng = TestRng::new(7);
     let ledger = DropLedger::new();
     let pages = TestPages::<Chaotic<'_, PADDING>, Tracked<'_>, S>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     let searches = if cfg!(miri) { 60 } else { 1000 };
     for _ in 0..searches {
         let probe = Chaotic::new(&rng);
@@ -460,7 +460,7 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     with_head: bool,
 ) {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     let mut model = LeafModel::default();
     if with_head {
         model.put_head(leaf, ledger);
@@ -558,7 +558,7 @@ fn popping_and_reinserting_at_a_border_neither_merges_nor_splits() {
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn checked_positions_reject_out_of_bounds_indices() {
     let pages = TestPages::<u32, u64>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     assert!(catch_unwind(AssertUnwindSafe(|| *leaf.key(0))).is_err());
     push_back(leaf, 1, 10);
     push_back(leaf, 2, 20);
@@ -578,7 +578,7 @@ fn checked_positions_reject_out_of_bounds_indices() {
 #[test]
 fn zero_sized_keys_and_values() {
     let pages = TestPages::<(), ()>::new();
-    let leaf = Leaf::new(pages.fresh_leaf());
+    let leaf = Leaf::new(pages.fresh_leaf(), 0);
     let mut len = 0;
     while leaf.len() < Leaf::<(), (), Auto>::capacity() {
         leaf.insert_fit(0, WindowedKey::new((), 0), ());

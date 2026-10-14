@@ -41,7 +41,7 @@ use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::join::DetachedTree;
-use crate::tree::path::{FirstEdge, KeySide};
+use crate::tree::path::KeySide;
 use crate::tree::root::Tree;
 use crate::tree::walk::DyingWalk;
 
@@ -163,31 +163,25 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>, A: Allocator + C
     /// Cuts the tree, which `after` holds, at the range's bounds: what lies
     /// before the start becomes the start of the kept tree, what lies past
     /// the end stays in `after`, and what lies between goes to the source.
-    /// Each piece is held where a panic can't lose it before the nodes
-    /// beside the cuts fit their prefixes, which reads keys.
+    /// Each piece goes where a panic can't lose it before the cut that made
+    /// it finishes, fitting the nodes beside it, which reads keys.
     fn cut_out_range(&mut self) {
         let alloc = &self.map.alloc;
-        let tree = self.after.tree_mut();
         if let Some((start, side)) = KeySide::of_start(self.range.start_bound()) {
-            let from_start = tree.split_off_at(start, side, alloc);
-            let before = mem::replace(tree, from_start);
-            self.kept = TreeBuilder::continuing(before, alloc.clone());
-            self.kept.refit_border_siblings();
-            tree.refit_border_siblings::<FirstEdge>();
+            let tree = self.after.tree_mut();
+            let cut = tree.split_off_at(start, side, alloc);
+            self.kept = TreeBuilder::continuing(tree.take(), alloc.clone());
+            cut.finish(Some(self.kept.tree_mut()), self.after.tree_mut());
         }
-        let end = KeySide::of_end(self.range.end_bound());
-        let cut_past_end = end.is_some();
-        let range_tree = match end {
-            Some((end, side)) => {
-                let past_end = tree.split_off_at(end, side, alloc);
-                mem::replace(tree, past_end)
-            }
-            None => self.after.take(),
+        let tree = self.after.tree_mut();
+        let Some((end, side)) = KeySide::of_end(self.range.end_bound()) else {
+            self.source.rest = DyingWalk::new(tree.take().root_page(), usize::MAX, alloc.clone());
+            return;
         };
-        self.source.rest = DyingWalk::new(range_tree.root_page(), usize::MAX, alloc.clone());
-        if cut_past_end {
-            self.after.tree_mut().refit_border_siblings::<FirstEdge>();
-        }
+        let cut = tree.split_off_at(end, side, alloc);
+        self.source.rest = DyingWalk::new(tree.take().root_page(), usize::MAX, alloc.clone());
+        // The range's own tree is only taken apart: it needs no fitting.
+        cut.finish(None, self.after.tree_mut());
     }
 }
 

@@ -44,7 +44,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
     fn clone_nodes(self, alloc: &impl Allocator) -> Self {
         match self {
             Node::Leaf(leaf) => {
-                let copy = Leaf::new(FreshPage::allocate(alloc));
+                let copy = Leaf::new(FreshPage::allocate(alloc), leaf.prefix_len());
                 let guard = PartialCopy {
                     top: Node::Leaf(copy),
                     alloc,
@@ -54,7 +54,6 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                         .then(|| leaf.head_key().clone());
                     copy.put_head(key, leaf.head_value().clone());
                 }
-                copy.set_empty_prefix_len(leaf.prefix_len());
                 for index in 0..leaf.len() {
                     let window = leaf.window(index);
                     let (key, value) = leaf.key_value(index);
@@ -71,9 +70,9 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                     top: first_child,
                     alloc,
                 };
-                let copy = Internal::new(FreshPage::allocate(alloc), first_child);
+                let page = FreshPage::allocate(alloc);
+                let copy = Internal::new(page, first_child, internal.prefix_len());
                 let guard = guard.with_top(Node::Internal(copy));
-                copy.set_empty_prefix_len(internal.prefix_len());
                 for index in 0..internal.len() {
                     let window = internal.window(index);
                     // Where separator keys are heads (D49), the leaf copies

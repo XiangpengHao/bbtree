@@ -61,13 +61,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
         }
     }
 
-    /// Fits the prefixes of the nodes beside the tree's right border to
-    /// their fences, reading keys: for a tree [`Self::continuing`] took
-    /// from a cut, whose border took entries from them.
-    pub(crate) fn refit_border_siblings(&mut self) {
-        if self.tree.has_root() {
-            self.tree.refit_border_siblings::<LastEdge>();
-        }
+    /// The tree being built: for a cut to finish in (`cut.rs`), when
+    /// [`Self::continuing`] took the part before it.
+    pub(crate) fn tree_mut(&mut self) -> &mut Tree<K, V, S> {
+        &mut self.tree
     }
 
     /// Appends the entries, whose keys must be greater than every key so far
@@ -173,8 +170,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         alloc: &impl Allocator,
     ) -> PathMut<'_, K, V, S> {
         let shared_len = self.shared_prefix().len();
-        let leaf = Leaf::new(FreshPage::allocate(alloc));
-        leaf.set_empty_prefix_len(shared_len);
+        let leaf = Leaf::new(FreshPage::allocate(alloc), shared_len);
         let separator = leaf.put_separator_head(separator, value);
         let mut child = Node::Leaf(leaf);
         let mut path = PathMut::new(self);
@@ -188,9 +184,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             }
             // Its new levels along the right border take what every key
             // shares.
-            let parent = Internal::new(FreshPage::allocate(alloc), child);
-            parent.set_empty_prefix_len(shared_len);
-            child = Node::Internal(parent);
+            child = Node::Internal(Internal::new(FreshPage::allocate(alloc), child, shared_len));
         }
     }
 }

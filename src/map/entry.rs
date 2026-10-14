@@ -369,7 +369,6 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> VacantEntry<'
                 path
             }
         };
-        path.shrink_shared_prefix_for(&key);
         path.insert(key, value, alloc, length);
         OccupiedEntry {
             length,

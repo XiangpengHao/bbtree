@@ -52,26 +52,32 @@ struct SeparatorPlace {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Joins this tree, the separator, its key `separator` with its window
-    /// at the trees' shared prefix and its `value`, and `right`, whose keys
-    /// ascend in that order, which both have entries, and whose keys share
-    /// the same bytes as this tree's (D50), into this tree. Compares no keys;
-    /// keys out of order make a tree whose searches give wrong answers, but
-    /// that is memory-safe. Pages come from and go back to `alloc`, the
+    /// Joins this tree, the separator `key` with its `value`, and `right`,
+    /// whose keys ascend in that order, and which both have entries, into
+    /// this tree, leaving `right` without a tree. Compares no keys; keys out
+    /// of order make a tree whose searches give wrong answers, but that is
+    /// memory-safe. Pages come from and go back to `alloc`, the
     /// allocator both trees' pages came from.
     ///
-    /// The caller computes the separator's window, which calls `InlineKey`,
-    /// while it still holds `right`: a panic then leaves both trees with
-    /// their owners. `InlineKey` is called again, last, to fit the
+    /// First, both trees' shared prefixes shrink to what they share with
+    /// `key` (D50), the separator's window there, which calls `InlineKey`
+    /// while `right` is still with its owner: a panic then leaves both trees
+    /// with their owners. `InlineKey` is called again, last, to fit the
     /// prefixes, once the tree is whole: a panic then leaves it valid, with
     /// this tree's owner.
     pub(in crate::tree) fn join(
         &mut self,
-        separator: WindowedKey<K, S>,
+        key: K,
         value: V,
-        mut right: Self,
+        right: &mut Self,
         alloc: &impl Allocator,
     ) {
+        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
+        let shared_len = shared_with_key(self).min(shared_with_key(right));
+        let separator = WindowedKey::new(key, shared_len);
+        let mut right = right.take();
+        self.shrink_shared_prefix_to(shared_len);
+        right.shrink_shared_prefix_to(shared_len);
         // Down `right`'s left border, the one the join walks there, counting
         // how deep its leaves lie, to its first leaf, which takes the value.
         let (mut node, mut right_depth) = (right.root_mut(), 0);
@@ -316,19 +322,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             let mut path = PathMut::new(&mut right.tree);
             path.start_at_root();
             path.descend_to_leaf::<FirstEdge>();
-            path.shrink_shared_prefix_for(&key);
             path.insert(key, value, alloc, &mut right_length);
             return right.take();
         }
-        // Both trees' keys, and the separator, share what both trees' keys
-        // share with the separator (D50).
-        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
-        let shared_len = shared_with_key(&left.tree).min(shared_with_key(&right.tree));
-        let separator = WindowedKey::new(key, shared_len);
-        let mut right = right.take();
-        left.tree.shrink_shared_prefix_to(shared_len);
-        right.shrink_shared_prefix_to(shared_len);
-        left.tree.join(separator, value, right, alloc);
+        left.tree.join(key, value, &mut right.tree, alloc);
         left.take()
     }
 

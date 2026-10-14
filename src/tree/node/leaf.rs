@@ -89,9 +89,13 @@ impl<K, V, S> Leaf<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// A new, empty leaf in `page`, without a head.
-    pub(in crate::tree) fn new(page: FreshPage<Self>) -> Self {
-        Self::at(NodePtr::from_fresh_page(page))
+    /// A new, empty leaf in `page`, without a head, at `prefix_len`: what
+    /// its fences share, or on the tree's border, what every key of the
+    /// tree shares (05-fence-key.md, D50).
+    pub(in crate::tree) fn new(page: FreshPage<Self>, prefix_len: usize) -> Self {
+        let leaf = Self::at(NodePtr::from_fresh_page(page));
+        leaf.set_empty_prefix_len(prefix_len);
+        leaf
     }
 
     /// Gives the leaf's page back.
@@ -821,10 +825,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         debug_assert_eq!(self.len(), Self::capacity());
         let (separator_index, inserted) =
             InsertionSide::of_split(Self::capacity(), index, Self::min_len());
-        let right = Self::new(right_page);
-        // SAFETY: `right` is a fresh leaf of the same map, reached by nothing
-        // else, at this leaf's prefix length once set here.
-        unsafe { right.node.set_prefix_len(self.prefix_len()) };
+        let right = Self::new(right_page, self.prefix_len());
         let separator = self.split_around(separator_index, right);
         // A full leaf of `capacity` entries split around one leaves
         // `separator_index < capacity` on the left and `capacity -
@@ -960,7 +961,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         let len = self.len();
         assert!(index <= len, "cutting a leaf past its last edge");
         let count = len - index;
-        let right = Self::new(page);
+        let right = Self::new(page, self.prefix_len());
         // SAFETY: `index <= len`, so keys (with their inline keys) and values
         // `index..len` are initialized; they move to `0..count` of `right`, a
         // fresh leaf of the same map, at this leaf's prefix length. The
@@ -968,7 +969,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         // Afterwards this leaf holds `0..index` and its head, and `right`
         // `0..count` and none.
         unsafe {
-            right.node.set_prefix_len(self.prefix_len());
             self.key_slots()
                 .move_run_to(index, count, right.key_slots(), 0);
             self.value_slots()

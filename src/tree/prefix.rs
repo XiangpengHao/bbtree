@@ -195,11 +195,11 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Moves the prefix of every node on the path back to the root's, what
     /// every key of the tree shares (D50), from the root down, each filled
     /// from its parent's key beside the path, which is one of its fences,
-    /// once the parent's is the root's too. Before a cut along the path,
-    /// whose nodes become the borders of two trees, both of whose keys share
-    /// what this tree's do. Reads no key; no user encoding runs. The path
-    /// stays where it is.
-    pub(in crate::tree) fn move_prefixes_back_to_root(&mut self) {
+    /// once the parent's is the root's too. For a cut along the path
+    /// (`cut.rs`), whose nodes become the borders of two trees, both of
+    /// whose keys share what this tree's do. Reads no key; no user encoding
+    /// runs. The path stays where it is.
+    pub(super) fn move_prefixes_back_to_root(&mut self) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
         }
@@ -229,7 +229,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// [`Tree::fix_border`], which moves entries over from those nodes,
     /// into the border, without reading a key. The border's own nodes keep
     /// the root's fence on that side, and so its prefix (D50).
-    pub(crate) fn refit_border_siblings<End: NodeEnd>(&mut self) {
+    pub(super) fn refit_border_siblings<End: NodeEnd>(&mut self) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
         }

@@ -70,6 +70,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             return None;
         }
         self.ensure_root_page(alloc);
+        // The search skips every node's prefix unchecked.
         self.shrink_shared_prefix_for(&key);
         match self.root_mut().search_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
@@ -112,7 +113,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             drop(key);
             Some(mem::replace(path.value_mut(), value))
         } else {
-            path.insert(key, value, alloc, length);
+            path.insert_within_shared_prefix(key, value, alloc, length);
             path.finish_insertion();
             None
         }
@@ -123,14 +124,30 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// Inserts `key` and `value` at the leaf edge the path ends at, counts
     /// the entry in `length`, fits the prefixes of the nodes that split,
     /// and moves the path to the new entry; pages come as for
-    /// [`Tree::insert`]. Compares no keys. `key` must share what every key
-    /// of the tree shares already ([`Self::shrink_shared_prefix_for`]).
+    /// [`Tree::insert`]. Compares no keys. First, what every key of the tree
+    /// shares shrinks to what `key` shares too
+    /// ([`Self::shrink_shared_prefix_for`]).
     ///
     /// # Panics
     ///
     /// If the path ends at no leaf edge.
     #[inline]
     pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
+        self.shrink_shared_prefix_for(&key);
+        self.insert_within_shared_prefix(key, value, alloc, length);
+    }
+
+    /// [`Self::insert`] of a key that shares what every key of the tree
+    /// shares already: for [`Tree::insert`], which shrank it for the key
+    /// before it searched.
+    #[inline]
+    fn insert_within_shared_prefix(
+        &mut self,
+        key: K,
+        value: V,
+        alloc: &impl Allocator,
+        length: &mut usize,
+    ) {
         let index = self.index();
         let leaf = self.leaf();
         assert!(index <= leaf.len(), "edge index out of bounds");

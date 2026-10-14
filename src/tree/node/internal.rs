@@ -80,11 +80,17 @@ impl<K, V, S> Internal<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// A new internal node in `page` with no separators and `first_child`
     /// as its only child, one level above it, which it owns from now on
-    /// (invariant 2). Its prefix length is 0 until the caller sets it
-    /// ([`Self::set_empty_prefix_len`]).
-    pub(in crate::tree) fn new(page: FreshPage<Self>, first_child: Node<K, V, S>) -> Self {
+    /// (invariant 2), at `prefix_len`: what its fences share, or on the
+    /// tree's border, what every key of the tree shares (05-fence-key.md,
+    /// D50).
+    pub(in crate::tree) fn new(
+        page: FreshPage<Self>,
+        first_child: Node<K, V, S>,
+        prefix_len: usize,
+    ) -> Self {
         let node = Self::at(NodePtr::from_fresh_page(page));
         node.put_only_child(first_child);
+        node.set_empty_prefix_len(prefix_len);
         node
     }
 
@@ -948,7 +954,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         assert!(index <= len, "cutting a node past its last edge");
         self.assert_child_kind(first_child);
         let count = len - index;
-        let right = Self::new(page, first_child);
+        let right = Self::new(page, first_child, self.prefix_len());
         // SAFETY: `index <= len`, so separators `index..len` and edges
         // `index + 1..=len` are initialized; they move to separators
         // `0..count` and edges `1..=count` of `right`, a fresh internal node
@@ -961,7 +967,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // `right` takes. Where separator keys are heads (D49), each stays in
         // the leaf right of it, below the edge that moves with it.
         unsafe {
-            right.node.set_prefix_len(self.prefix_len());
             self.separator_slots()
                 .move_run_to(index, count, right.separator_slots(), 0);
             self.edge_slots()

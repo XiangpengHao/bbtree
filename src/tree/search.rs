@@ -76,6 +76,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// endpoints use `Path::search`; an exact-key lookup only needs the
     /// position where it ends.
     ///
+    /// Every node skips its prefix unchecked: `key` must share what every
+    /// key of the tree shares (D50), which [`Tree::find`] checks first.
+    ///
     /// It and [`Self::search_for_insert`] each keep their own descent: one
     /// shared, returning where it stopped as a `ControlFlow`, hid the leaf's
     /// kind from the value read after it, which then cleared the pointer's
@@ -105,7 +108,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// where it belongs. Unlike [`Self::find`]'s equality filter, the leaf
     /// search must establish where an absent key belongs. A fitting
     /// insertion needs no ancestors; a full leaf can be searched again with
-    /// a path for splitting.
+    /// a path for splitting. As for [`Self::find`], `key` must share what
+    /// every key of the tree shares, which [`Tree::insert`] shrinks to first.
     pub(crate) fn search_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
     where
         K: Borrow<Q>,
@@ -297,7 +301,7 @@ mod tests {
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
         let mut tree = Tree::new(pages.fresh());
         let root = tree.raise_in(&pages);
-        let headless = Leaf::new(pages.fresh_leaf());
+        let headless = Leaf::new(pages.fresh_leaf(), 0);
         root.insert_fit(
             0,
             Separator::with_key(WindowedKey::new(ledger.track(), 0)),
