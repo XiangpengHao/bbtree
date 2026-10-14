@@ -187,6 +187,7 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// two constants per map, the compiler unrolls it into a few vector
     /// compares whose masks it counts. Within `0..len` for any slots, by the
     /// cuts.
+    #[inline(always)]
     fn equal_range_by_count(self, target: W) -> Range<usize> {
         let below = self.slots.iter().filter(|&&slot| slot < target).count();
         let equal = self.slots.iter().filter(|&&slot| slot == target).count();
@@ -199,6 +200,7 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// that don't tie make predictable, rather than a second search, whose
     /// exit depends on where the first one ended. Within `0..len` for any
     /// slots: the search and the scan stay within the live slots.
+    #[inline(always)]
     fn equal_range_by_search(self, target: W) -> Range<usize> {
         let live = self.live();
         let start = Self::count_below(live, target);
@@ -214,6 +216,7 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// in `0..=len` for any inline keys, by construction: the loop keeps
     /// `base + size <= len`, and probes only `mid = base + size / 2 < base +
     /// size`.
+    #[inline(always)]
     fn count_below(inline_keys: &[W], target: W) -> usize {
         let mut size = inline_keys.len();
         if size == 0 {

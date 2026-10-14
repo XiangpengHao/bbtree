@@ -1,18 +1,58 @@
-//! A comparator may change its mind between the two searches of an insert.
-//! Replaying must handle both an existing key and a different fitting leaf.
+//! Inserts (`tree/insert.rs`) where the map's API alone cannot say what
+//! happened. A comparator may change its mind between the two searches of
+//! an insert into a full leaf: the replay must handle both an existing key
+//! and a different leaf with room, and a comparator that panics in it.
+//! Ascending inserts remember the rightmost leaf after a split, and append
+//! to it (D45): what remembers it, what forgets it, and an append that never
+//! happens.
 
 #![forbid(unsafe_code)]
 
 use core::cell::Cell;
 use core::cmp::Ordering;
+use core::panic::AssertUnwindSafe;
+use std::panic::catch_unwind;
 
-use crate::map::BBTreeMap;
+use super::drops::BudgetedKey;
+use crate::inline_key::Auto;
+use crate::map::{BBTreeMap, Entry};
 use crate::tree::node::Node;
 use crate::tree::node::inline_keys::SearchKey;
 use crate::tree::node::leaf::Leaf;
 
-/// Changes the query's number after one search's comparisons. Its size
-/// selects ordinary binary search, which calls the query's comparator.
+impl<K: Ord> BBTreeMap<K, u64> {
+    /// Inserts the keys `key` makes from 0, 1, 2 and on, each with its
+    /// number as its value, until the root leaf is full; returns how many.
+    fn fill_root_leaf(&mut self, key: impl Fn(u64) -> K) -> u64 {
+        let mut count = 0;
+        loop {
+            self.insert(key(count), count);
+            count += 1;
+            if self.tree.root().expect_leaf().len() == Leaf::<K, u64, Auto>::capacity() {
+                return count;
+            }
+        }
+    }
+
+    /// How many comparisons the search for `query`'s insert makes, which
+    /// `query`'s `Ord` counts down from a full `budget`: the search must end
+    /// in a full leaf, finding no equal key.
+    fn comparisons_to_a_full_leaf(&self, query: &K, budget: &Cell<usize>) -> usize {
+        budget.set(usize::MAX);
+        let Err((leaf, _)) = self.tree.root().search_for_insert(&SearchKey::new(query)) else {
+            panic!("the search finds no equal key");
+        };
+        assert_eq!(leaf.len(), Leaf::<K, u64, Auto>::capacity());
+        let comparisons = usize::MAX - budget.get();
+        assert!(comparisons > 0);
+        comparisons
+    }
+}
+
+/// A key whose number changes to `replay_number` once comparisons have spent
+/// `remaining`. Its 24 bytes select the early-exit search
+/// (`KeySearch::EarlyExit`), which calls the query's `cmp`, not the stored
+/// keys'.
 struct RedirectedKey<'a> {
     number: Cell<u64>,
     remaining: &'a Cell<usize>,
@@ -28,18 +68,11 @@ impl<'a> RedirectedKey<'a> {
         }
     }
 
-    fn after_first_search(mut self, map: &mut BBTreeMap<Self, u64>, number: u64) -> Self {
-        self.remaining.set(usize::MAX);
-        let root = map.tree.root_mut();
-        let Err((leaf, _)) = root.search_for_insert(&SearchKey::new(&self)) else {
-            panic!("the first search must be vacant");
-        };
-        assert_eq!(
-            leaf.len(),
-            Leaf::<Self, u64, crate::inline_key::Auto>::capacity()
-        );
-        let comparisons = usize::MAX - self.remaining.get();
-        assert!(comparisons > 0);
+    /// This query, which turns into `number` once it has made as many
+    /// comparisons as one search for its insert into `map`: the insert's
+    /// second search, its replay, goes elsewhere.
+    fn redirected_after_one_search(mut self, map: &BBTreeMap<Self, u64>, number: u64) -> Self {
+        let comparisons = map.comparisons_to_a_full_leaf(&self, self.remaining);
         self.remaining.set(comparisons);
         self.replay_number = number;
         self
@@ -76,19 +109,9 @@ impl Ord for RedirectedKey<'_> {
 fn full_leaf_replay_can_find_an_existing_key() {
     let remaining = Cell::new(usize::MAX);
     let mut map = BBTreeMap::new();
-    let mut count = 0;
-    loop {
-        map.insert(RedirectedKey::new(count, &remaining), count);
-        count += 1;
-        let Node::Leaf(leaf) = map.tree.root() else {
-            panic!("stop before the first split");
-        };
-        if leaf.len() == Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
-            break;
-        }
-    }
+    let count = map.fill_root_leaf(|number| RedirectedKey::new(number, &remaining));
     let target = count / 2;
-    let query = RedirectedKey::new(count, &remaining).after_first_search(&mut map, target);
+    let query = RedirectedKey::new(count, &remaining).redirected_after_one_search(&map, target);
     assert_eq!(map.insert(query, u64::MAX), Some(target));
     remaining.set(usize::MAX);
     assert_eq!(map.len(), count as usize);
@@ -111,25 +134,19 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
         map.insert(RedirectedKey::new(2 * count, &remaining), 2 * count);
         count += 1;
         if let Node::Internal(root) = map.tree.root() {
-            let Node::Leaf(right) = root.child(root.len()) else {
-                panic!("stop before a second level grows");
-            };
-            if right.len() == Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
+            let right = root.child(root.len()).expect_leaf();
+            if right.len() == Leaf::<RedirectedKey<'_>, u64, Auto>::capacity() {
                 break;
             }
         }
     }
     assert_eq!(map.remove(&RedirectedKey::new(0, &remaining)), Some(0));
     let target = RedirectedKey::new(1, &remaining);
-    let Err((leaf, _)) = map
-        .tree
-        .root_mut()
-        .search_for_insert(&SearchKey::new(&target))
-    else {
+    let Err((leaf, _)) = map.tree.root().search_for_insert(&SearchKey::new(&target)) else {
         panic!("the replay destination must be vacant");
     };
-    assert!(leaf.len() < Leaf::<RedirectedKey<'_>, u64, crate::inline_key::Auto>::capacity());
-    let query = RedirectedKey::new(2 * count, &remaining).after_first_search(&mut map, 1);
+    assert!(leaf.len() < Leaf::<RedirectedKey<'_>, u64, Auto>::capacity());
+    let query = RedirectedKey::new(2 * count, &remaining).redirected_after_one_search(&map, 1);
     assert_eq!(map.insert(query, 1), None);
     remaining.set(usize::MAX);
     assert_eq!(map.len(), count as usize);
@@ -142,12 +159,32 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     );
 }
 
-/// Builds through public insertion, so every armed hint comes from a real
-/// rightmost split rather than a test-only setter.
+#[test]
+#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
+fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
+    let budget = Cell::new(usize::MAX);
+    let mut map = BBTreeMap::new();
+    let count = map.fill_root_leaf(|number| BudgetedKey::new(number, &budget));
+    let query = BudgetedKey::new(count, &budget);
+    budget.set(map.comparisons_to_a_full_leaf(&query, &budget));
+    assert!(catch_unwind(AssertUnwindSafe(|| map.insert(query, count))).is_err());
+    assert_eq!(budget.get(), 0, "the second search must have started");
+    budget.set(usize::MAX);
+    map.check_invariants();
+    assert_eq!(map.len(), count as usize);
+    assert_eq!(map.leaf_depth(), 0);
+    assert!(
+        map.iter()
+            .map(|(key, &value)| (key.number(), value))
+            .eq((0..count).map(|number| (number, number)))
+    );
+}
+
+/// A map that ascending inserts fill through the public API, so that every
+/// rightmost leaf it remembers comes from a real split (D45).
 struct AscendingInserts {
     map: BBTreeMap<u64, u64>,
     next: u64,
-    leaf_capacity: usize,
 }
 
 impl AscendingInserts {
@@ -155,25 +192,22 @@ impl AscendingInserts {
         Self {
             map: BBTreeMap::new(),
             next: 0,
-            leaf_capacity: 0,
         }
     }
 
-    fn is_armed(&self) -> bool {
+    fn remembers_rightmost_leaf(&self) -> bool {
         self.map.tree.remembers_rightmost_leaf()
     }
 
     fn insert_next(&mut self) {
         assert_eq!(self.map.insert(self.next, self.next), None);
         self.next += 1;
-        if self.leaf_capacity == 0 && self.map.leaf_depth() > 0 {
-            self.leaf_capacity = self.map.len() - 1;
-        }
     }
 
-    fn arm(&mut self) {
+    /// Inserts the next keys until the map remembers its rightmost leaf.
+    fn insert_until_rightmost_leaf_remembered(&mut self) {
         for _ in 0..128 {
-            if self.is_armed() {
+            if self.remembers_rightmost_leaf() {
                 return;
             }
             self.insert_next();
@@ -185,54 +219,56 @@ impl AscendingInserts {
         let mut node = self.map.tree.root();
         loop {
             match node {
-                Node::Leaf(leaf) => return leaf.len() == self.leaf_capacity,
+                Node::Leaf(leaf) => return leaf.len() == Leaf::<u64, u64, Auto>::capacity(),
                 Node::Internal(internal) => node = internal.child(internal.len()),
             }
         }
     }
 }
 
+/// A split at the right end remembers the new rightmost leaf, even after
+/// filling the one remembered before; a key not past the last forgets it.
 #[test]
-fn rightmost_hint_arms_after_split_and_rearms_after_full_or_miss() {
+fn rightmost_splits_remember_the_leaf_and_keys_not_past_the_last_forget_it() {
     let mut inserts = AscendingInserts::new();
     inserts.insert_next();
-    assert!(!inserts.is_armed());
-    inserts.arm();
+    assert!(!inserts.remembers_rightmost_leaf());
+    inserts.insert_until_rightmost_leaf_remembered();
     assert_eq!(inserts.map.leaf_depth(), 1);
     inserts.insert_next();
-    assert!(inserts.is_armed());
+    assert!(inserts.remembers_rightmost_leaf());
     while !inserts.is_rightmost_leaf_full() {
         inserts.insert_next();
     }
     inserts.insert_next();
-    assert!(inserts.is_armed());
+    assert!(inserts.remembers_rightmost_leaf());
     assert!(!inserts.is_rightmost_leaf_full());
-    // Equality and a smaller key both use ordinary replacement semantics.
+    // An equal key and a smaller one go the ordinary way, replacing values.
     assert_eq!(
         inserts.map.insert(inserts.next - 1, 99),
         Some(inserts.next - 1)
     );
-    assert!(!inserts.is_armed());
-    inserts.arm();
+    assert!(!inserts.remembers_rightmost_leaf());
+    inserts.insert_until_rightmost_leaf_remembered();
     assert_eq!(inserts.map.insert(0, 100), Some(0));
-    assert!(!inserts.is_armed());
-    inserts.arm();
+    assert!(!inserts.remembers_rightmost_leaf());
+    inserts.insert_until_rightmost_leaf_remembered();
     inserts.map.check_invariants();
 }
 
 #[test]
-fn an_unused_rightmost_append_token_leaves_the_tree_unchanged() {
+fn a_dropped_rightmost_append_forgets_the_leaf_and_changes_nothing() {
     let mut inserts = AscendingInserts::new();
-    inserts.arm();
+    inserts.insert_until_rightmost_leaf_remembered();
     let len = inserts.map.len();
     {
         let _append = inserts
             .map
             .tree
             .rightmost_append(&inserts.next)
-            .expect("the armed leaf has room for the next key");
+            .expect("the remembered leaf has room for the next key");
     }
-    assert!(!inserts.is_armed());
+    assert!(!inserts.remembers_rightmost_leaf());
     assert_eq!(inserts.map.len(), len);
     assert!(inserts.map.iter().all(|(&key, &value)| key == value));
     inserts.map.check_invariants();
@@ -242,10 +278,10 @@ fn an_unused_rightmost_append_token_leaves_the_tree_unchanged() {
 }
 
 #[test]
-fn rightmost_hint_is_cleared_before_general_mutation_access() {
+fn mutable_access_forgets_the_rightmost_leaf() {
     for operation in 0..7 {
         let mut inserts = AscendingInserts::new();
-        inserts.arm();
+        inserts.insert_until_rightmost_leaf_remembered();
         match operation {
             0 => *inserts.map.get_mut(&0).unwrap() += 1,
             1 => *inserts.map.iter_mut().next_back().unwrap().1 += 1,
@@ -256,34 +292,32 @@ fn rightmost_hint_is_cleared_before_general_mutation_access() {
             4 => {
                 assert_eq!(inserts.map.last_entry().unwrap().remove(), inserts.next - 1);
             }
-            5 => {
-                let upper = inserts.map.split_off(&(inserts.next / 2));
-                drop(upper); // The remembered rightmost allocation is gone.
-            }
+            // The remembered leaf goes with the part cut off, and is freed.
+            5 => drop(inserts.map.split_off(&(inserts.next / 2))),
             6 => inserts.map.clear(),
             _ => unreachable!(),
         }
-        assert!(!inserts.is_armed());
+        assert!(!inserts.remembers_rightmost_leaf());
         inserts.insert_next();
         inserts.map.check_invariants();
     }
 }
 
 #[test]
-fn an_entry_that_splits_never_publishes_a_rightmost_hint() {
+fn an_insert_through_an_entry_never_remembers_the_rightmost_leaf() {
     let mut inserts = AscendingInserts::new();
-    inserts.arm();
+    inserts.insert_until_rightmost_leaf_remembered();
     while !inserts.is_rightmost_leaf_full() {
         inserts.insert_next();
     }
-    let crate::map::Entry::Vacant(entry) = inserts.map.entry(inserts.next) else {
+    let Entry::Vacant(entry) = inserts.map.entry(inserts.next) else {
         panic!("the next key is absent");
     };
-    // This retained path can remove the inserted key immediately, and may
-    // merge/release nodes. Only plain insertion consumes it to publish.
+    // The entry it hands back can take the key out again, which may merge
+    // nodes and free pages: only a plain insert remembers the leaf.
     let occupied = entry.insert_entry(inserts.next);
     assert_eq!(occupied.remove_entry(), (inserts.next, inserts.next));
-    assert!(!inserts.is_armed());
+    assert!(!inserts.remembers_rightmost_leaf());
     for _ in 0..64 {
         inserts.map.pop_last();
     }
@@ -291,32 +325,37 @@ fn an_entry_that_splits_never_publishes_a_rightmost_hint() {
     inserts.map.check_invariants();
 }
 
+/// A clone starts without the remembered leaf. A move keeps it: an append
+/// into an empty map, which swaps the trees. An append into a map with
+/// entries forgets both maps' leaves.
 #[test]
-fn rightmost_hints_follow_whole_owners_but_not_clones_or_cut_subtrees() {
+fn clones_forget_and_moves_keep_the_rightmost_leaf() {
     let mut inserts = AscendingInserts::new();
-    inserts.arm();
+    inserts.insert_until_rightmost_leaf_remembered();
     let mut cloned = inserts.map.clone();
     assert!(!cloned.tree.remembers_rightmost_leaf());
     let mut moved = BBTreeMap::new();
-    moved.append(&mut inserts.map); // Empty-destination append swaps owners.
+    moved.append(&mut inserts.map);
     assert!(moved.tree.remembers_rightmost_leaf());
     drop(moved);
     assert_eq!(cloned.insert(inserts.next, inserts.next), None);
     let mut other = AscendingInserts::new();
-    other.arm();
+    other.insert_until_rightmost_leaf_remembered();
     cloned.append(&mut other.map);
+    assert!(!cloned.tree.remembers_rightmost_leaf());
+    assert!(!other.remembers_rightmost_leaf());
     cloned.insert(inserts.next + 1, inserts.next + 1);
     cloned.check_invariants();
     assert!(other.map.is_empty());
 }
 
 #[test]
-fn interior_splits_do_not_arm_a_local_last_leaf() {
+fn splits_inside_the_tree_never_remember_a_leaf() {
     let mut map = BBTreeMap::new();
     for key in (0..4000).step_by(2) {
         map.insert(key, key);
     }
-    // Entry acquisition disarms the earlier ascending build.
+    // Taking an entry forgets the leaf the ascending inserts remembered.
     map.entry(0).and_modify(|value| *value = 0);
     for key in (1..2000).step_by(2) {
         map.insert(key, key);
@@ -366,7 +405,7 @@ impl Ord for AppendPanicKey<'_> {
 impl crate::InlineKey for AppendPanicKey<'_> {
     const WIDTH: crate::InlineWidth = crate::InlineWidth::Two;
     fn inline_key_at(&self, offset: usize) -> crate::InlineWord {
-        assert!(!self.control.inline.get(), "summary panic");
+        assert!(!self.control.inline.get(), "inline key panic");
         self.number.inline_key_at(offset)
     }
 }
@@ -379,9 +418,6 @@ impl Drop for AppendPanicKey<'_> {
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn cached_append_clears_before_callbacks_and_preserves_drop_order() {
-    use core::panic::AssertUnwindSafe;
-    use std::panic::catch_unwind;
-
     let control = AppendPanicControl {
         compare: Cell::new(false),
         inline: Cell::new(false),

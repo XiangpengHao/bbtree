@@ -28,7 +28,7 @@ impl<'a> LengthTags<'a> {
     /// The positions among `candidates`, live keys, whose tag is `target`:
     /// none, one, two, or more. The vector search reads every slot up to
     /// the capacity, a constant trip count, and masks out the rest.
-    #[inline]
+    #[inline(always)]
     pub(super) fn matching(&self, candidates: Range<usize>, target: u16) -> SlotMatches {
         if let Some(matches) = U16EqualitySearch::matching(self.slots, candidates.clone(), target) {
             return matches;

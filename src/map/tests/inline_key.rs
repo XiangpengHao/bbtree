@@ -1,10 +1,11 @@
 //! Inline keys (D18) against std's `BTreeMap`: std byte-string keys with the
-//! default strategy, looked up by every borrowed form; keys whose inline
-//! keys tie, or hold the whole key; a newtype that opts in, looked up through
-//! another borrowed form too; integers, and strings, whose nodes keep 2 or 4
-//! bytes of their inline keys; inline keys that break their contract, which
-//! may give wrong answers but never break memory safety; and an `InlineKey`
-//! that panics, which leaves the map memory-safe (D48).
+//! default strategy, looked up by every borrowed form; keys behind a long
+//! shared prefix (D50), whose inline keys tie where the tree keeps none, and
+//! keys that their inline keys hold whole; a newtype that opts in, looked up
+//! through another borrowed form too; integers, and strings, whose nodes
+//! keep 2 or 4 bytes of their inline keys; inline keys that break their
+//! contract, which may give wrong answers but never break memory safety; and
+//! an `InlineKey` that panics, which leaves the map memory-safe (D48).
 
 #![forbid(unsafe_code)]
 
@@ -21,15 +22,10 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::differential::{MirroredMaps, Workload};
+use super::prefix::shared_prefix_key;
 use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
 use crate::map::BBTreeMap;
 use crate::tree::test_support::{DropLedger, FromNumber, TestRng, Tracked};
-
-/// Ten digits: keys of up to 100 consecutive numbers tie on their first 8
-/// bytes, so searches go through runs of equal inline keys.
-fn ten_digits(number: usize) -> String {
-    format!("{number:010}")
-}
 
 /// A built-in stored key can be borrowed through an unknown query type.
 /// Its full ordering must remain available in every node.
@@ -111,15 +107,18 @@ impl FromNumber for Vec<u8> {
     }
 }
 
-/// Every key shares a 27-byte prefix: all inline keys tie.
+/// A 27-byte head, then eight digits ([`shared_prefix_key`]): the tree keeps
+/// the head, and the leading zeros of the digits, as its shared prefix
+/// (D50), and its nodes take their windows past it.
 impl FromNumber for Box<str> {
     fn from_number(number: usize) -> Self {
-        format!("shared/prefix/of/many/keys/{number:08}").into_boxed_str()
+        shared_prefix_key(number).into_boxed_str()
     }
 }
 
-/// Sixteen bytes whose first eight are zero for every number: all inline
-/// keys tie, and the bytes are the array itself.
+/// Sixteen bytes, the array itself, of which the workloads' numbers leave
+/// the first fourteen zero: the tree keeps them as its shared prefix (D50),
+/// and its nodes take their windows past them.
 impl FromNumber for [u8; 16] {
     fn from_number(number: usize) -> Self {
         (number as u128).to_be_bytes()
@@ -145,28 +144,31 @@ impl Borrow<str> for UserName {
 
 impl FromNumber for UserName {
     fn from_number(number: usize) -> Self {
-        Self(ten_digits(number))
+        Self(String::from_number(number))
     }
 }
 
-/// Half below zero: the sign flip in the encoding puts them first.
+/// Half of the workloads' numbers below zero: the sign flip in the encoding
+/// puts them first.
 impl FromNumber for i64 {
     fn from_number(number: usize) -> Self {
-        number as i64 - (1 << 17)
+        number as i64 - (1 << 15)
     }
 }
 
-/// Spread over the high half and into the low one: neighbours share 8 bytes
-/// or more, so windows cross the halves.
+/// Spread over the high half and into the low one: neighbours share the
+/// high half, mostly, and differ in the low one, so windows cross the
+/// halves.
 impl FromNumber for u128 {
     fn from_number(number: usize) -> Self {
-        (number as u128) << 40 | 0xabcd
+        (number as u128) << 56 | 0xabcd
     }
 }
 
+/// Half of the workloads' numbers below zero, as `i64`'s.
 impl FromNumber for i128 {
     fn from_number(number: usize) -> Self {
-        (number as i128 - (1 << 17)) << 40
+        (number as i128 - (1 << 15)) << 40
     }
 }
 
@@ -189,25 +191,7 @@ impl<const BYTES: usize> InlineKey for NarrowName<BYTES> {
 
 impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
     fn from_number(number: usize) -> Self {
-        Self(ten_digits(number))
-    }
-}
-
-fn workload(native_random_steps: usize, native_key_space: usize) -> Workload {
-    if cfg!(miri) {
-        Workload {
-            random_steps: 150,
-            key_space: 150,
-            ordered_entries: 60,
-            min_sequential_leaf_depth: 1,
-        }
-    } else {
-        Workload {
-            random_steps: native_random_steps,
-            key_space: native_key_space,
-            ordered_entries: native_key_space / 2,
-            min_sequential_leaf_depth: 2,
-        }
+        Self(String::from_number(number))
     }
 }
 
@@ -216,24 +200,26 @@ fn workload(native_random_steps: usize, native_key_space: usize) -> Workload {
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn string_keys_match_std_by_string_and_by_str() {
-    let workload = workload(100_000, 1 << 16);
+    let workload = Workload::new(100_000, 1 << 16);
     workload.run::<String, u64, Auto>(61);
 
     let rng = TestRng::new(62);
     let mut maps = MirroredMaps::<String, u64>::new();
     maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
     for number in 0..workload.key_space + 2 {
-        let key = ten_digits(number);
+        let key = String::from_number(number);
         maps.get_borrowed(key.as_str());
         maps.get_borrowed(&key);
-        // Shorter and longer keys with the same inline key.
+        // The key cut short, and the key with a NUL after it, whose inline
+        // key, zero-padded, is the key's own: only the length tells them
+        // apart.
         maps.get_borrowed(&key[..9]);
         maps.get_borrowed(format!("{key}\0").as_str());
     }
-    // Ranges by `str`, between bounds that tie with stored keys on their
-    // inline keys.
+    // Ranges by `str`, between the key, the key cut short, and the key with
+    // a NUL after it.
     for number in (0..workload.key_space + 2).step_by(97) {
-        let key = ten_digits(number);
+        let key = String::from_number(number);
         let (shorter, longer) = (&key[..9], format!("{key}\0"));
         maps.range_borrowed(
             &rng,
@@ -246,7 +232,7 @@ fn string_keys_match_std_by_string_and_by_str() {
         maps.range_borrowed(&rng, (Bound::Excluded(key.as_str()), Bound::Unbounded));
     }
     for number in 0..workload.key_space + 2 {
-        let key = ten_digits(number);
+        let key = String::from_number(number);
         maps.remove_borrowed(&key[..9]);
         maps.remove_borrowed(key.as_str());
     }
@@ -256,7 +242,7 @@ fn string_keys_match_std_by_string_and_by_str() {
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_vec_keys_match_std_by_vec_and_by_slice() {
-    let workload = workload(100_000, 1 << 16);
+    let workload = Workload::new(100_000, 1 << 16);
     workload.run::<Vec<u8>, u64, Auto>(63);
 
     let rng = TestRng::new(64);
@@ -289,23 +275,35 @@ fn byte_vec_keys_match_std_by_vec_and_by_slice() {
     maps.assert_same_entries();
 }
 
-/// Every key ties on its inline key with every other: the search over inline
-/// keys finds one run, the whole node, and the full keys decide.
+/// Keys behind a long shared head, which the tree keeps as its shared prefix
+/// (D50). Then one key outside the head leaves the tree no shared prefix:
+/// along its borders, where nodes take their windows from the keys' first
+/// byte, every inline key ties, the search over them finds one run, the whole
+/// node, and the full keys decide.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn keys_sharing_long_prefixes_match_std() {
-    let workload = workload(40_000, 1 << 14);
+    let workload = Workload::new(40_000, 1 << 14);
     workload.run::<Box<str>, u64, Auto>(65);
+    workload.run::<[u8; 16], u64, Auto>(67);
 
     let rng = TestRng::new(66);
     let mut maps = MirroredMaps::<Box<str>, u64>::new();
     maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
+    maps.insert(Box::from("z"), 0);
     let keys: Vec<Box<str>> = maps.keys().cloned().collect();
+    assert!(maps.ours().leaf_depth() >= 2);
+    for step in maps.ours().inspect().trace(&*keys[0]) {
+        assert_eq!(
+            step.tied(),
+            Some(0..step.node().len()),
+            "the left border ties"
+        );
+    }
     for key in keys {
         maps.get_borrowed(&*key);
         maps.get_borrowed(&key[..key.len() - 1]);
     }
-    workload.run::<[u8; 16], u64, Auto>(67);
 }
 
 /// A random string of up to 14 bytes over a few characters, a NUL among
@@ -362,7 +360,7 @@ fn short_keys_match_std() {
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
-    let workload = workload(100_000, 1 << 16);
+    let workload = Workload::new(100_000, 1 << 16);
     workload.run::<UserName, u64, WithInlineKey>(69);
     workload.run::<UserName, u64, Auto>(70);
 
@@ -377,20 +375,22 @@ fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
 }
 
 /// Integers opt in, and their nodes keep 2 bytes of their inline keys:
-/// unsigned and signed, 8 and 16 bytes, maps and sets.
+/// unsigned and signed, 8 and 16 bytes, the last with zero-sized values, as
+/// in a set.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn integer_keys_match_std() {
-    let workload = workload(100_000, 1 << 16);
+    let workload = Workload::new(100_000, 1 << 16);
     workload.run::<u64, u64, WithInlineKey>(76);
     workload.run::<i64, u64, WithInlineKey>(77);
     workload.run::<u128, u64, WithInlineKey>(78);
     workload.run::<i128, (), WithInlineKey>(79);
 }
 
-/// Array exact-key lookup may use equality after its summary finds one
-/// candidate. Borrowed slices still distinguish proper zero-padded
-/// prefixes, and differences anywhere in the full array must be checked.
+/// An array's exact-key lookup may confirm its one candidate, the key whose
+/// inline key is the query's, by equality alone (D38). Borrowed slices still
+/// tell apart the key's prefixes, which pad to its inline key with zeros, and
+/// a difference anywhere in the array counts.
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn fixed_array_exact_key_lookups_match_std() {
@@ -438,7 +438,7 @@ fn fixed_array_exact_key_lookups_match_std() {
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn narrow_inline_keys_match_std() {
-    let workload = workload(100_000, 1 << 16);
+    let workload = Workload::new(100_000, 1 << 16);
     workload.run::<NarrowName<2>, u64, WithInlineKey>(80);
     workload.run::<NarrowName<4>, String, WithInlineKey>(81);
 }
@@ -495,7 +495,8 @@ impl InlineKey for LyingKey<'_> {
 /// Inserts, looks up, removes and ranges over keys whose inline keys lie,
 /// checking only what any map must do whatever its answers: every value
 /// inserted is dropped once, and the map never holds more entries than were
-/// inserted. Returns whether every answer matched std's.
+/// inserted. Inline keys that tie everywhere ([`Lie::Constant`]) must also
+/// leave a well-formed tree. Returns whether every answer matched std's.
 fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
     let rng = TestRng::new(seed);
     let ledger = DropLedger::new();
@@ -523,7 +524,7 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
                 all_right &= replaced == theirs.insert(number as u32, ()).is_some();
             }
             2 => {
-                let found = ours.get(&key(number)).map(Tracked::id).is_some();
+                let found = ours.get(&key(number)).is_some();
                 all_right &= found == theirs.contains_key(&(number as u32));
             }
             3 => {
@@ -554,19 +555,21 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
             }
         }
         assert!(ours.len() <= inserts);
-        // A split-armed append changed this reversed-encoding history and
-        // exposed a refit that shortened a leaf below its parent. Check
-        // every edge after every operation, without calling the lying
-        // encoding or assuming the keys are sorted. The ledger below also
-        // verifies that later promotions/removals keep ownership intact.
+        // Lying inline keys may leave the keys unordered: check what holds
+        // anyway, each node's prefix length against its parent's, which
+        // calls no `InlineKey`.
         ours.check_prefix_lens();
     }
     assert!(ours.len() <= inserts);
+    if matches!(lie, Lie::Constant) {
+        ours.check_invariants();
+    }
     drop(ours);
     ledger.assert_all_dropped_once();
     all_right
 }
 
+/// Inline keys that tie everywhere: right answers, and a well-formed tree.
 #[test]
 fn inline_keys_that_tie_everywhere_give_right_answers() {
     assert!(run_with_lying_keys(Lie::Constant, 72));
@@ -579,28 +582,6 @@ fn inline_keys_that_tie_everywhere_give_right_answers() {
 fn wrong_inline_keys_stay_memory_safe() {
     let _ = run_with_lying_keys(Lie::Reversed, 73);
     let _ = run_with_lying_keys(Lie::Random, 74);
-}
-
-/// Inline keys that tie everywhere still build a well-formed tree, whose
-/// inline keys are its keys'.
-#[test]
-fn a_map_with_constant_inline_keys_keeps_its_invariants() {
-    let rng = TestRng::new(75);
-    let mut map = BBTreeMap::with_strategy(WithInlineKey);
-    let count = if cfg!(miri) { 200 } else { 3000 };
-    for _ in 0..count {
-        let number = rng.below(10 * count);
-        map.insert(
-            LyingKey {
-                number: number as u32,
-                lie: Lie::Constant,
-                rng: &rng,
-            },
-            number,
-        );
-    }
-    map.check_invariants();
-    assert!(map.leaf_depth() >= 1);
 }
 
 /// A name whose `InlineKey` panics once its shared budget of calls is spent,

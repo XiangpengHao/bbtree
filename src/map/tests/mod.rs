@@ -1,7 +1,9 @@
-//! The map's tests, through its API and against std's `BTreeMap`: the
-//! harness that feeds both the same operations (`differential.rs`), and on
-//! it, inline keys, prefixes and length tags; drops and panics; inserts that
-//! replay their search; iterator folds; joined trees; and type properties.
+//! The map's tests, against std's `BTreeMap` or a model, through the map's
+//! API and, where the API cannot reach, its tree: the harness that feeds
+//! both maps the same operations (`differential.rs`), and on it, inline
+//! keys; prefixes and length tags; drops and panics; inserts that replay
+//! their search or append to the remembered rightmost leaf; iterator folds;
+//! joined trees; and type properties.
 
 #![forbid(unsafe_code)]
 
@@ -41,8 +43,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         }
     }
 
-    /// The keys that live in internal nodes, in order: each one's value is a
-    /// leaf's head (D17).
+    /// The separator keys, in order: each one's value is a leaf's head
+    /// (D17), and with inline keys, so is its key (D49).
     fn separator_keys(&self) -> Vec<&K> {
         if self.tree.has_root() {
             self.tree.separator_keys()

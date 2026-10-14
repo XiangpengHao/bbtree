@@ -1,6 +1,6 @@
 //! Joining trees (`tree/join.rs`), through [`Tree::concat`], which puts
 //! back together the pieces `extract_if` cuts: on trees of every pair of
-//! leaf depths up to 3, with roots and borders of every fill, so that every way
+//! leaf depths up to 2, with roots and borders of every fill, so that every way
 //! a join goes comes up. The shorter root is absorbed by the taller tree's
 //! border node, or hangs beside it, splitting the border up to a new root,
 //! and then, if short of its minimum, takes keys over from its neighbour, or
@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt::Debug;
+use std::collections::BTreeSet;
 use std::string::String;
 use std::vec::Vec;
 
@@ -51,7 +52,7 @@ fn random_shape<K: Ord + FromNumber>(rng: &TestRng, numbers: &[usize]) -> BBTree
 }
 
 /// How many entries a piece gets: none, a few, or up to `max`, spread over
-/// the orders of magnitude, so that leaves at every depth up to 3 come up.
+/// the orders of magnitude, so that leaves at every depth up to 2 come up.
 fn random_len(rng: &TestRng, max: usize) -> usize {
     match rng.below(4) {
         0 => rng.below(3),
@@ -63,13 +64,16 @@ fn random_len(rng: &TestRng, max: usize) -> usize {
 }
 
 /// Joins two random pieces, the left one's numbers all below the right
-/// one's, `trials` times, checking each result against the numbers.
+/// one's, `trials` times, checking each result against the numbers; and,
+/// with the sizes of a native run, that every pair of leaf depths up to 2
+/// came up.
 fn concat_random_pieces<K>(seed: u64, trials: usize, max_len: usize)
 where
     K: Ord + Clone + Debug + FromNumber,
     Auto: InlineKeyStrategy<K>,
 {
     let rng = TestRng::new(seed);
+    let mut leaf_depths = BTreeSet::new();
     for _ in 0..trials {
         let left_numbers: Vec<usize> = (0..random_len(&rng, max_len)).map(|i| 2 * i).collect();
         let right_start = 2 * left_numbers.len() + 2;
@@ -79,6 +83,7 @@ where
         let mut left = random_shape::<K>(&rng, &left_numbers);
         let mut right = random_shape::<K>(&rng, &right_numbers);
         let expected: Vec<usize> = left.values().chain(right.values()).copied().collect();
+        leaf_depths.insert((left.leaf_depth(), right.leaf_depth()));
         let joined = BBTreeMap {
             tree: Tree::concat(left.tree.take(), right.tree.take()),
             length: expected.len(),
@@ -88,6 +93,14 @@ where
         assert!(joined.values().copied().eq(expected.iter().copied()));
         let keys = expected.iter().map(|&number| K::from_number(number));
         assert!(joined.keys().cloned().eq(keys));
+    }
+    if !cfg!(miri) {
+        for pair in (0..=2).flat_map(|left| (0..=2).map(move |right| (left, right))) {
+            assert!(
+                leaf_depths.contains(&pair),
+                "no join of leaf depths {pair:?}"
+            );
+        }
     }
 }
 

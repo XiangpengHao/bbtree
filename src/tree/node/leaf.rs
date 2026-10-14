@@ -303,6 +303,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
     /// The keys' length tags, if the plan and layout keep them (D36): all
     /// `capacity` slots, tag `i` key `i`'s for `i < len`.
+    #[inline(always)]
     pub(in crate::tree) fn length_tags<'a>(self) -> Option<&'a [u16]> {
         let tags = self.columns().length_tags()?;
         // SAFETY: every tag was initialized when the leaf was made and can
@@ -401,6 +402,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if let Some(target) = self.inline_target(key)
             && let Some(candidates) = self.candidates(target)
         {
+            // A key the leaf lacks, as most an insert searches for, mostly
+            // has none: it goes no further than the inline keys, nor into a
+            // call.
+            if candidates.is_empty() {
+                return Err(candidates.start);
+            }
             return self.search_candidates(candidates, key, target);
         }
         Self::plan()
@@ -527,7 +534,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 self.search_candidates(candidates, key, target).ok()
             }
         } else {
-            self.search_maybe_inlined(key).ok()
+            self.search(key).ok()
         }
     }
 }

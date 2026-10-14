@@ -12,7 +12,7 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::inline_key::WithInlineKey;
+use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::map::BBTreeMap;
 use crate::tree::test_support::TestRng;
 
@@ -20,7 +20,7 @@ use crate::tree::test_support::TestRng;
 const SHARED: &str = "shared/prefix/of/many/keys/";
 
 /// A key that starts with [`SHARED`], then eight digits.
-fn shared_prefix_key(number: usize) -> String {
+pub(super) fn shared_prefix_key(number: usize) -> String {
     format!("{SHARED}{number:08}")
 }
 
@@ -31,7 +31,7 @@ fn key_count() -> usize {
 
 /// Panics unless the map is valid and every node, along the borders too
 /// (D50), skips at least the bytes all its keys share.
-fn assert_prefixes_cover_shared_bytes<S: crate::InlineKeyStrategy<String>>(
+fn assert_prefixes_cover_shared_bytes<S: InlineKeyStrategy<String>>(
     map: &BBTreeMap<String, usize, S>,
 ) {
     map.check_invariants();
@@ -50,10 +50,10 @@ fn assert_prefixes_cover_shared_bytes<S: crate::InlineKeyStrategy<String>>(
     );
 }
 
-#[test]
-fn random_inserts_give_nodes_prefixes() {
-    let rng = TestRng::new(81);
-    let mut map = BBTreeMap::new();
+/// Random inserts into a map with strategy `strategy`, seeded with `seed`.
+fn random_inserts_give_nodes_prefixes_with<S: InlineKeyStrategy<String>>(strategy: S, seed: u64) {
+    let rng = TestRng::new(seed);
+    let mut map = BBTreeMap::with_strategy(strategy);
     for value in 0..key_count() {
         map.insert(shared_prefix_key(rng.below(1 << 30)), value);
     }
@@ -61,10 +61,19 @@ fn random_inserts_give_nodes_prefixes() {
     assert_prefixes_cover_shared_bytes(&map);
 }
 
+/// With the default strategy, and with keys that opt in through their own
+/// `InlineKey` impl.
+#[test]
+fn random_inserts_give_nodes_prefixes() {
+    random_inserts_give_nodes_prefixes_with(Auto, 81);
+    random_inserts_give_nodes_prefixes_with(WithInlineKey, 82);
+}
+
 /// Ascending inserts split the rightmost node every time, and leave its
 /// left half behind for good: it gets its prefix as it splits off.
+/// Descending inserts do the same at the left end.
 #[test]
-fn ascending_inserts_give_nodes_prefixes() {
+fn sequential_inserts_give_nodes_prefixes() {
     let mut map = BBTreeMap::new();
     for number in 0..key_count() {
         map.insert(shared_prefix_key(number), number);
@@ -90,17 +99,6 @@ fn built_and_cloned_trees_have_prefixes() {
     assert_eq!(copy.node_prefix_lens(), map.node_prefix_lens());
 }
 
-/// Keys with their own `InlineKey` impl get prefixes through it.
-#[test]
-fn opted_in_keys_get_prefixes() {
-    let rng = TestRng::new(82);
-    let mut map: BBTreeMap<String, usize, WithInlineKey> = BBTreeMap::with_strategy(WithInlineKey);
-    for value in 0..key_count() {
-        map.insert(shared_prefix_key(rng.below(1 << 30)), value);
-    }
-    assert_prefixes_cover_shared_bytes(&map);
-}
-
 /// Integers get prefixes through their big-endian bytes: keys below 2^24
 /// share their first 5 bytes, and every node skips them.
 #[test]
@@ -122,8 +120,9 @@ fn integer_keys_get_prefixes() {
     );
 }
 
-/// Removals refit prefixes where fences move, and cuts clear them along
-/// the cut: the trees stay valid, and lookups right, throughout.
+/// Removals refit prefixes where fences move, and cuts give the nodes along
+/// the cut the tree's shared prefix (D50): the trees stay valid, and lookups
+/// right, throughout.
 #[test]
 fn removals_and_cuts_keep_prefixes_valid() {
     // Distinct numbers in a scattered order: an odd multiplier is a
@@ -281,18 +280,22 @@ fn queries_outside_the_shared_prefix_match_std() {
     }
 }
 
-/// Keys that share seven bytes, a whole window but one byte: a narrow
-/// parent must still export bytes four through seven when a separator moves
-/// down or fills the window of a leaf whose fence shrinks.
+/// Heap strings keep 4 bytes of their windows in internal nodes, and 8 in
+/// leaves (D43): a window an internal node hands out, as a separator comes
+/// down into a leaf or a leaf's fence moves, is read again from its key, for
+/// all 8 bytes. The keys share seven bytes, so that only the eighth sets
+/// their windows apart at prefix 0, where the nodes along the borders take
+/// them: one key shares none, which leaves the tree no shared prefix (D50).
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-fn narrow_parent_windows_survive_demotion_and_fence_changes() {
+fn windows_internal_nodes_hand_out_are_read_again_from_their_keys() {
     use std::collections::BTreeMap;
 
     let mut actual = BBTreeMap::new();
     let mut expected = BTreeMap::new();
     let mut keys = (0..2048)
         .map(|index| format!("abc/def{:04x}/tail\0", (index * 40503) % 65536))
+        .chain([String::from("z")])
         .collect::<Vec<_>>();
     TestRng::new(93).shuffle(&mut keys);
     for (index, key) in keys.iter().enumerate() {
@@ -300,6 +303,14 @@ fn narrow_parent_windows_survive_demotion_and_fence_changes() {
         expected.insert(key.clone(), index);
     }
     actual.check_invariants();
+    let root = actual.inspect().root().expect("the map has a root");
+    let mut leftmost_leaf = root;
+    while let Some(child) = leftmost_leaf.child(0) {
+        leftmost_leaf = child;
+    }
+    assert_eq!((root.prefix_len(), root.inline_key_width()), (0, Some(4)));
+    let leaf_window = (leftmost_leaf.prefix_len(), leftmost_leaf.inline_key_width());
+    assert_eq!(leaf_window, (0, Some(8)));
     let separators = actual
         .separator_keys()
         .into_iter()

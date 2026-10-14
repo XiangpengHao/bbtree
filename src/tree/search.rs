@@ -7,7 +7,6 @@
 //! search found at a separator goes down its right edge.
 
 use core::borrow::Borrow;
-use core::ops::ControlFlow;
 
 use super::node::Node;
 use super::node::inline_keys::SearchKey;
@@ -76,15 +75,30 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// retaining only the current node. Updates that need ancestors and range
     /// endpoints use `Path::search`; an exact-key lookup only needs the
     /// position where it ends.
+    ///
+    /// It and [`Self::search_for_insert`] each keep their own descent: one
+    /// shared, returning where it stopped as a `ControlFlow`, hid the leaf's
+    /// kind from the value read after it, which then cleared the pointer's
+    /// tag, an instruction more per hit.
     pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.descend(key) {
-            ControlFlow::Break(separator) => Some(separator),
-            ControlFlow::Continue(leaf) => leaf.find(key).map(|index| Found::InLeaf(leaf, index)),
-        }
+        let leaf = match self {
+            Node::Leaf(leaf) => leaf,
+            Node::Internal(mut internal) => loop {
+                match internal.search(key) {
+                    Ok(index) => return Some(Found::Separator(internal, index)),
+                    // SAFETY: a search returns an edge `<= len`.
+                    Err(edge) => match unsafe { internal.child_unchecked(edge) } {
+                        Node::Leaf(leaf) => break leaf,
+                        Node::Internal(child) => internal = child,
+                    },
+                }
+            },
+        };
+        leaf.find(key).map(|index| Found::InLeaf(leaf, index))
     }
 
     /// Searches in key order, returning an existing key or the leaf and edge
@@ -97,38 +111,22 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let leaf = match self.descend(key) {
-            ControlFlow::Break(separator) => return Ok(separator),
-            ControlFlow::Continue(leaf) => leaf,
+        let leaf = match self {
+            Node::Leaf(leaf) => leaf,
+            Node::Internal(mut internal) => loop {
+                match internal.search(key) {
+                    Ok(index) => return Ok(Found::Separator(internal, index)),
+                    // SAFETY: a search returns an edge `<= len`.
+                    Err(edge) => match unsafe { internal.child_unchecked(edge) } {
+                        Node::Leaf(leaf) => break leaf,
+                        Node::Internal(child) => internal = child,
+                    },
+                }
+            },
         };
         match leaf.search_always_inlined(key) {
             Ok(index) => Ok(Found::InLeaf(leaf, index)),
             Err(edge) => Err((leaf, edge)),
-        }
-    }
-
-    /// Goes down from this node toward `key`, routing through each internal
-    /// node: stops at the separator it equals, or goes on at the leaf it
-    /// belongs in. Always inlined: it is every lookup's loop.
-    #[inline(always)]
-    fn descend<Q>(self, key: &SearchKey<'_, K, S, Q>) -> ControlFlow<Found<K, V, S>, Leaf<K, V, S>>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let mut internal = match self {
-            Node::Leaf(leaf) => return ControlFlow::Continue(leaf),
-            Node::Internal(internal) => internal,
-        };
-        loop {
-            match internal.search(key) {
-                Ok(index) => return ControlFlow::Break(Found::Separator(internal, index)),
-                // SAFETY: a search returns an edge `<= len`.
-                Err(edge) => match unsafe { internal.child_unchecked(edge) } {
-                    Node::Leaf(leaf) => return ControlFlow::Continue(leaf),
-                    Node::Internal(child) => internal = child,
-                },
-            }
         }
     }
 }

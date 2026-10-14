@@ -1,15 +1,20 @@
 //! Test-only helpers: a deterministic PRNG, which also walks two iterators
-//! alike from random ends, keys and values made from numbers, drop tracking,
-//! padded and over-aligned test types, trees built through the node API, and
-//! a check of inline keys. The map's and the set's tests use the first
-//! four.
+//! alike from random ends and makes random range bounds; steps from either
+//! end of an iterator; hashes; keys and values made from numbers; drop
+//! tracking; padded and over-aligned test types; nodes of a known kind,
+//! trees built through the node API, and a check of inline keys. The map's
+//! and the set's tests use the first seven.
 
 #![forbid(unsafe_code)]
 
 use core::cell::{Cell, RefCell};
 use core::cmp::Ordering;
 use core::fmt::Debug;
+use core::hash::{Hash, Hasher};
+use core::mem;
+use core::ops::Bound;
 use std::format;
+use std::hash::DefaultHasher;
 use std::string::String;
 use std::vec::Vec;
 
@@ -49,6 +54,51 @@ impl TestRng {
         }
     }
 
+    /// `len` distinct numbers of `0..universe`, in random order.
+    pub(crate) fn distinct_numbers(&self, len: usize, universe: usize) -> Vec<usize> {
+        let mut numbers: Vec<usize> = (0..universe).collect();
+        self.shuffle(&mut numbers);
+        numbers.truncate(len);
+        numbers
+    }
+
+    /// Random bounds in order, of every kind, at keys that `key` makes from
+    /// numbers of `0..key_space`: half of them narrow, so that a walk
+    /// between them meets its other end.
+    pub(crate) fn range_bounds<K: Ord + Clone>(
+        &self,
+        key_space: usize,
+        mut key: impl FnMut(usize) -> K,
+    ) -> (Bound<K>, Bound<K>) {
+        let low_number = self.below(key_space);
+        let high_number = if self.below(2) == 0 {
+            low_number + self.below(48)
+        } else {
+            self.below(key_space)
+        };
+        let (mut low, mut high) = (key(low_number), key(high_number));
+        if low > high {
+            mem::swap(&mut low, &mut high);
+        }
+        let mut start = self.bound(low);
+        let end = self.bound(high);
+        if let (Bound::Excluded(start_key), Bound::Excluded(end_key)) = (&start, &end)
+            && start_key == end_key
+        {
+            start = Bound::Included(start_key.clone());
+        }
+        (start, end)
+    }
+
+    /// A bound at `key` of a random kind, or none.
+    fn bound<K>(&self, key: K) -> Bound<K> {
+        match self.below(5) {
+            0 => Bound::Unbounded,
+            1 | 2 => Bound::Included(key),
+            _ => Bound::Excluded(key),
+        }
+    }
+
     /// Takes up to `steps` items from `ours` and `theirs` alike, each from
     /// the front or the back at random, checking that they match, and so do
     /// the size hints before each; once both are done, that they stay done.
@@ -60,11 +110,8 @@ impl TestRng {
     ) {
         for _ in 0..steps {
             assert_eq!(ours.size_hint(), theirs.size_hint());
-            let (ours_item, theirs_item) = if self.below(2) == 0 {
-                (ours.next(), theirs.next())
-            } else {
-                (ours.next_back(), theirs.next_back())
-            };
+            let back = self.below(2) != 0;
+            let (ours_item, theirs_item) = (ours.step(back), theirs.step(back));
             let done = theirs_item.is_none();
             assert_eq!(ours_item, theirs_item);
             if done {
@@ -74,6 +121,23 @@ impl TestRng {
             }
         }
     }
+}
+
+/// Steps a double-ended iterator from either end.
+pub(crate) trait StepEitherEnd: DoubleEndedIterator {
+    /// The next item from the back if `back`, otherwise from the front.
+    fn step(&mut self, back: bool) -> Option<Self::Item> {
+        if back { self.next_back() } else { self.next() }
+    }
+}
+
+impl<I: DoubleEndedIterator> StepEitherEnd for I {}
+
+/// `value`'s hash, by std's default hasher.
+pub(crate) fn hash_of(value: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A key or value made from a number. Different numbers make different
@@ -338,6 +402,32 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K
     }
 }
 
+impl<K, V, S> Node<K, V, S> {
+    /// The leaf this node is.
+    ///
+    /// # Panics
+    ///
+    /// If the node is internal.
+    pub(crate) fn expect_leaf(self) -> Leaf<K, V, S> {
+        match self {
+            Node::Leaf(leaf) => leaf,
+            Node::Internal(_) => panic!("the node is internal, not a leaf"),
+        }
+    }
+
+    /// The internal node this node is.
+    ///
+    /// # Panics
+    ///
+    /// If the node is a leaf.
+    pub(crate) fn expect_internal(self) -> Internal<K, V, S> {
+        match self {
+            Node::Internal(internal) => internal,
+            Node::Leaf(_) => panic!("the node is a leaf, not internal"),
+        }
+    }
+}
+
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// Panics unless every node under and at this one has its keys'
     /// windows at its prefix length as its inline keys, or, without inline
@@ -473,10 +563,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// page from `pages`, and returns the root, internal now.
     pub(super) fn raise_in(&mut self, pages: &TestPages<K, V, S>) -> Internal<K, V, S> {
         self.raise(|| pages.fresh(), || pages.fresh());
-        let Node::Internal(root) = self.root() else {
-            unreachable!("a raised root is internal");
-        };
-        root
+        self.root().expect_internal()
     }
 }
 

@@ -527,12 +527,15 @@ macro_rules! with_slots_of_width {
     };
 }
 
+/// Every method is `#[inline(always)]`, as [`KeyColumns`]' are: the width
+/// is a constant of the node's plan, which a call would test at run time.
 impl InlineKeySlots {
     /// `capacity` slots of `width` side by side from `anchor`.
     ///
     /// # Safety
     ///
     /// As for [`Slots::new`], for slots of `width` bytes.
+    #[inline(always)]
     pub(super) unsafe fn new(width: InlineWidth, anchor: NonNull<u8>, capacity: usize) -> Self {
         // SAFETY: forwarded, for the slot type of `width`.
         unsafe {
@@ -553,6 +556,7 @@ impl InlineKeySlots {
         }
     }
 
+    #[inline(always)]
     pub(super) fn capacity(self) -> usize {
         with_slots_of_width!(self, |slots| slots.capacity)
     }
@@ -563,6 +567,7 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` is initialized.
+    #[inline(always)]
     pub(super) unsafe fn read(self, index: usize) -> InlineWord {
         // SAFETY: forwarded.
         unsafe { with_slots_of_width!(self, |slots| slots.slot(index).read().inline_key()) }
@@ -574,6 +579,7 @@ impl InlineKeySlots {
     ///
     /// As for [`Slots::fill_bytes`]: inline keys are plain data, and any
     /// bytes are a valid one.
+    #[inline(always)]
     pub(super) unsafe fn fill_with_greatest(self) {
         // SAFETY: forwarded.
         unsafe { with_slots_of_width!(self, |slots| slots.fill_bytes(u8::MAX)) }
@@ -585,6 +591,7 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// `index < capacity`.
+    #[inline(always)]
     pub(super) unsafe fn write(self, index: usize, inline_key: InlineWord) {
         // SAFETY: forwarded.
         unsafe {
@@ -601,6 +608,7 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// As for [`Slots::insert`].
+    #[inline(always)]
     pub(super) unsafe fn insert(self, index: usize, len: usize, inline_key: InlineWord) {
         // SAFETY: forwarded.
         unsafe {
@@ -616,6 +624,7 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// As for [`Slots::remove`].
+    #[inline(always)]
     pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlineWord {
         // SAFETY: forwarded.
         unsafe { with_slots_of_width!(self, |slots| slots.remove(index, len).inline_key()) }
@@ -627,6 +636,7 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// As for [`Slots::move_run_to`].
+    #[inline(always)]
     pub(super) unsafe fn move_run_to(
         self,
         start: usize,
@@ -865,11 +875,14 @@ impl<K, S, Kind> Clone for KeySlots<K, S, Kind> {
 
 impl<K, S, Kind> Copy for KeySlots<K, S, Kind> {}
 
+/// Every method is `#[inline(always)]`, as [`KeyColumns`]' are: the
+/// columns it holds are constants of the node's plan only where inlined.
 impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// The columns have the keys' capacity, and are those of the plan of
     /// `Kind`.
+    #[inline(always)]
     pub(super) unsafe fn new(keys: Slots<K>, columns: KeyColumns, prefix_len: usize) -> Self {
         Self {
             keys,
@@ -880,6 +893,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     }
 
     /// The key slots alone, to read keys in place.
+    #[inline(always)]
     pub(super) fn keys(self) -> Slots<K> {
         self.keys
     }
@@ -890,6 +904,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// `index < capacity`, and its inline key is initialized.
+    #[inline(always)]
     pub(super) unsafe fn window(self, index: usize) -> Window {
         let Some(slots) = self.columns.inline_keys() else {
             return Window::NONE;
@@ -900,6 +915,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
 
     /// `key`, and what the columns hold for it. Its window must be at this
     /// node's prefix length.
+    #[inline(always)]
     fn cells_of(self, key: WindowedKey<K, S>) -> (K, KeyCells) {
         let (key, window) = key.into_parts();
         debug_assert!(
@@ -925,6 +941,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` is initialized.
+    #[inline(always)]
     pub(super) unsafe fn read(self, index: usize) -> WindowedKey<K, S> {
         // SAFETY: forwarded.
         unsafe {
@@ -940,6 +957,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     ///
     /// `index < capacity`, and slot `index` holds nothing that needs
     /// dropping: it is overwritten, and is initialized afterwards.
+    #[inline(always)]
     pub(super) unsafe fn write(self, index: usize, key: WindowedKey<K, S>) {
         let (key, cells) = self.cells_of(key);
         // SAFETY: forwarded; the columns have the keys' capacity (type
@@ -955,6 +973,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` is initialized.
+    #[inline(always)]
     pub(super) unsafe fn replace(self, index: usize, key: WindowedKey<K, S>) -> WindowedKey<K, S> {
         // SAFETY: forwarded: slot `index` is read out, then written again.
         unsafe {
@@ -969,6 +988,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// As for [`Slots::insert`].
+    #[inline(always)]
     pub(super) unsafe fn insert(self, index: usize, len: usize, key: WindowedKey<K, S>) {
         let (key, cells) = self.cells_of(key);
         // SAFETY: forwarded; the columns have the keys' capacity and are
@@ -989,6 +1009,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// As for [`Self::insert`], and as for [`Slots::shift_strides_up`] for
     /// the keys: the strides of keys `index..len + 1`, their entries, lie in
     /// the node.
+    #[inline(always)]
     pub(super) unsafe fn insert_shifting_entries(
         self,
         index: usize,
@@ -1010,6 +1031,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// As for [`Slots::remove`].
+    #[inline(always)]
     pub(super) unsafe fn remove(self, index: usize, len: usize) -> WindowedKey<K, S> {
         // SAFETY: forwarded; the columns have the keys' capacity and are
         // initialized like them (type invariant).
@@ -1032,6 +1054,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// the keys: the strides of keys `index..len`, their entries, lie in the
     /// node, and what pairs with key `index` holds nothing that needs
     /// dropping.
+    #[inline(always)]
     pub(super) unsafe fn remove_shifting_entries(
         self,
         index: usize,
@@ -1056,6 +1079,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// As for [`Slots::move_run_to`]. `dest` has this node's prefix length
     /// (debug-checked), since the inline keys move unchanged; a wrong one
     /// gives wrong answers, never undefined behavior.
+    #[inline(always)]
     pub(super) unsafe fn move_run_to(
         self,
         start: usize,

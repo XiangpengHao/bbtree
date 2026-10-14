@@ -1,18 +1,16 @@
 //! Differential tests: the map against std's `BTreeMap`, fed the same
 //! operations, for ordinary, heap-owning, wide, zero-sized and over-aligned
-//! keys and values, including every key that ends up as a separator in an
-//! internal node, with its value in a leaf's head (D17), and removals down to
-//! an empty map, which merge nodes and move entries between them (D22).
-//! Iterators and ranges walk the maps from both ends at once (D23), with
-//! bounds at separators too. The tests of inline keys
-//! (`inline_key.rs`) use the same harness.
+//! keys and values, including every separator key, whose value is a leaf's
+//! head (D17), and removals down to an empty map, which merge nodes and move
+//! entries between them (D22). Iterators and ranges walk the maps from both
+//! ends at once (D23), with bounds at separators too. The tests of inline
+//! keys (`inline_key.rs`) use the same harness.
 
 #![forbid(unsafe_code)]
 
 use core::any::Any;
 use core::borrow::Borrow;
 use core::fmt::Debug;
-use core::hash::{Hash, Hasher};
 use core::mem;
 use core::ops::Bound;
 use core::panic::AssertUnwindSafe;
@@ -20,19 +18,19 @@ use core::ptr;
 use std::boxed::Box;
 use std::collections::{BTreeMap, btree_map};
 use std::format;
-use std::hash::DefaultHasher;
 use std::panic::catch_unwind;
 use std::string::String;
 use std::vec::Vec;
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::{BBTreeMap, Entry, OccupiedEntry};
-use crate::tree::test_support::{CacheLineAligned, FromNumber, PageAligned, TestRng};
+use crate::tree::test_support::{
+    CacheLineAligned, FromNumber, PageAligned, StepEitherEnd, TestRng, hash_of,
+};
 
 /// With `u64` values, 64-byte keys fill a 1 KB node with 14 entries in both
-/// kinds (D13, D15, D17): tall trees from a few hundred entries, with little
-/// data per entry for Miri to track. Arrays order lexicographically, so keys
-/// ascend with their first element.
+/// kinds (D13, D15, D17): tall trees from a few hundred entries. Arrays order
+/// lexicographically, so keys ascend with their first element.
 type WideKey = [u64; 8];
 
 impl FromNumber for WideKey {
@@ -73,6 +71,11 @@ where
         }
     }
 
+    /// Our map.
+    pub(super) fn ours(&self) -> &BBTreeMap<K, V, S> {
+        &self.ours
+    }
+
     /// Looks `key` up by a borrowed form of the keys in both maps.
     pub(super) fn get_borrowed<Q>(&self, key: &Q)
     where
@@ -111,7 +114,7 @@ where
                 }
             }
             (Err(ours), Err(theirs)) => {
-                assert_eq!(Self::panic_message(&ours), Self::panic_message(&theirs));
+                assert_eq!(panic_message(&ours), panic_message(&theirs));
             }
             (ours, theirs) => panic!(
                 "one range panicked, not the other: ours {}, std's {}",
@@ -124,24 +127,6 @@ where
     /// The keys in both maps, in order.
     pub(super) fn keys(&self) -> impl Iterator<Item = &K> {
         self.theirs.keys()
-    }
-
-    /// The message of a panic from `panic!` with a literal or a format.
-    fn panic_message(payload: &Box<dyn Any + Send>) -> &str {
-        payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .expect("a panic with a message")
-    }
-
-    /// A bound at `key` of a random kind, or none.
-    fn random_bound<T>(rng: &TestRng, key: T) -> Bound<T> {
-        match rng.below(5) {
-            0 => Bound::Unbounded,
-            1 | 2 => Bound::Included(key),
-            _ => Bound::Excluded(key),
-        }
     }
 
     /// Walks the whole maps from both ends at random, step by step, until
@@ -158,8 +143,7 @@ where
     }
 
     /// Checks `count` ranges against std's, between random bounds in order
-    /// ([`Self::random_range_bounds`]): [`Self::range_borrowed`] checks std's
-    /// panics for those that are not.
+    /// ([`Self::random_range_bounds`]).
     fn assert_same_ranges(&self, rng: &TestRng, count: usize, key_space: usize) {
         let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
         for _ in 0..count {
@@ -168,36 +152,17 @@ where
         }
     }
 
-    /// Random bounds in order, at keys made from `0..key_space` or at
-    /// `separators` (D17), of every kind; half of them narrow, so that a walk
-    /// between them meets its other end.
+    /// Random bounds in order ([`TestRng::range_bounds`]), at keys made from
+    /// `0..key_space` or, a third of them, at `separators` (D17).
     fn random_range_bounds(
         rng: &TestRng,
         separators: &[K],
         key_space: usize,
     ) -> (Bound<K>, Bound<K>) {
-        let random_key = |number| match separators.len() {
+        rng.range_bounds(key_space, |number| match separators.len() {
             len if len > 0 && rng.below(3) == 0 => separators[rng.below(len)].clone(),
             _ => K::from_number(number),
-        };
-        let low_number = rng.below(key_space);
-        let high_number = if rng.below(2) == 0 {
-            low_number + rng.below(48)
-        } else {
-            rng.below(key_space)
-        };
-        let (mut low, mut high) = (random_key(low_number), random_key(high_number));
-        if low > high {
-            (low, high) = (high, low);
-        }
-        let mut start = Self::random_bound(rng, low);
-        let end = Self::random_bound(rng, high);
-        if let (Bound::Excluded(start_key), Bound::Excluded(end_key)) = (&start, &end)
-            && start_key == end_key
-        {
-            start = Bound::Included(start_key.clone());
-        }
-        (start, end)
+        })
     }
 
     /// Takes both maps by value and walks them from both ends at random, by
@@ -232,43 +197,53 @@ where
             if theirs.len() <= 8 {
                 assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
             }
-            let entries = if rng.below(2) == 0 {
-                (ours.next(), theirs.next())
-            } else {
-                (ours.next_back(), theirs.next_back())
-            };
-            let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
-                assert!(entries.0.is_none() && entries.1.is_none());
+            if !Self::mutate_at_random_end(rng, &mut ours, &mut theirs) {
                 break;
-            };
-            assert_eq!((our_key, &*our_value), (their_key, &*their_value));
-            let value = V::from_number(rng.below(1 << 30));
-            *our_value = value.clone();
-            *their_value = value;
+            }
         }
+    }
+
+    /// Takes the next entry of `ours` and `theirs` alike, from the front or
+    /// the back at random: the same entry, which then gets the same new value
+    /// in both. Returns whether there was one.
+    fn mutate_at_random_end<'a>(
+        rng: &TestRng,
+        ours: &mut impl DoubleEndedIterator<Item = (&'a K, &'a mut V)>,
+        theirs: &mut impl DoubleEndedIterator<Item = (&'a K, &'a mut V)>,
+    ) -> bool
+    where
+        K: 'a,
+        V: 'a,
+    {
+        let back = rng.below(2) != 0;
+        let entries = (ours.step(back), theirs.step(back));
+        let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
+            assert!(entries.0.is_none() && entries.1.is_none());
+            return false;
+        };
+        assert_eq!((our_key, &*our_value), (their_key, &*their_value));
+        let value = V::from_number(rng.below(1 << 30));
+        *our_value = value.clone();
+        *their_value = value;
+        true
     }
 
     /// Takes every value out of `values_mut`, from both ends at random,
     /// before writing to any, so that all are borrowed at once: the walk hands
-    /// out each value once, and no two alias, which Miri checks.
+    /// out each value once, and no two alias, which Miri checks
+    /// (`mutable_walks_of_a_small_tree_match_std`).
     fn mutate_all_at_once(&mut self, rng: &TestRng) {
         let from_back: Vec<bool> = (0..self.theirs.len()).map(|_| rng.below(2) == 0).collect();
         let mut ours = self.ours.values_mut();
         let ours: Vec<&mut V> = from_back
             .iter()
-            .map(|&back| if back { ours.next_back() } else { ours.next() })
+            .map(|&back| ours.step(back))
             .collect::<Option<_>>()
             .expect("as many values as std's");
         let mut theirs = self.theirs.values_mut();
         let theirs: Vec<&mut V> = from_back
             .iter()
-            .map(|&back| {
-                if back {
-                    theirs.next_back()
-                } else {
-                    theirs.next()
-                }
-            })
+            .map(|&back| theirs.step(back))
             .collect::<Option<_>>()
             .expect("as many values as the map holds");
         for (our_value, their_value) in ours.into_iter().zip(theirs) {
@@ -289,33 +264,23 @@ where
             let mut ours = self.ours.range_mut::<K, _>(bounds);
             let mut theirs = self.theirs.range_mut::<K, _>(bounds);
             for _ in 0..64 {
-                let entries = if rng.below(2) == 0 {
-                    (ours.next(), theirs.next())
-                } else {
-                    (ours.next_back(), theirs.next_back())
-                };
-                let (Some((our_key, our_value)), Some((their_key, their_value))) = entries else {
-                    assert!(entries.0.is_none() && entries.1.is_none());
+                if !Self::mutate_at_random_end(rng, &mut ours, &mut theirs) {
                     break;
-                };
-                assert_eq!((our_key, &*our_value), (their_key, &*their_value));
-                let value = V::from_number(rng.below(1 << 30));
-                *our_value = value.clone();
-                *their_value = value;
+                }
             }
         }
     }
 
-    fn insert(&mut self, key: K, value: V) {
+    pub(super) fn insert(&mut self, key: K, value: V) {
         let ours = self.ours.insert(key.clone(), value.clone());
         assert_eq!(ours, self.theirs.insert(key, value));
         self.assert_same_len();
     }
 
+    /// Looks `key` up in both maps, as [`Self::get_borrowed`] does, and by
+    /// `Index` if it is there.
     fn get(&self, key: &K) {
-        assert_eq!(self.ours.get(key), self.theirs.get(key));
-        assert_eq!(self.ours.get_key_value(key), self.theirs.get_key_value(key));
-        assert_eq!(self.ours.contains_key(key), self.theirs.contains_key(key));
+        self.get_borrowed(key);
         if self.theirs.contains_key(key) {
             assert_eq!(&self.ours[key], &self.theirs[key]);
         }
@@ -521,9 +486,8 @@ where
         }
     }
 
-    /// Checks the map's invariants, and that it holds std's entries, by
-    /// iterating both ways: [`Self::assert_same_entries`] without a lookup
-    /// per entry.
+    /// Checks the map's invariants, and that it holds exactly std's entries,
+    /// by iterating both ways.
     fn assert_same_contents(&self) {
         self.ours.check_invariants();
         self.assert_same_len();
@@ -553,8 +517,7 @@ where
             ours: self.ours.clone(),
             theirs: self.theirs.clone(),
         };
-        copies.ours.check_invariants();
-        assert!(copies.ours.iter().eq(&copies.theirs));
+        copies.assert_same_contents();
         assert_eq!(copies.ours.leaf_depth(), self.ours.leaf_depth());
         assert_eq!(copies.ours.separator_keys(), self.ours.separator_keys());
         for _ in 0..64 {
@@ -563,8 +526,7 @@ where
             copies.remove(&K::from_number(rng.below(key_space)));
             copies.pop_first();
         }
-        assert!(self.ours.iter().eq(&self.theirs));
-        assert!(self.ours.iter().rev().eq(self.theirs.iter().rev()));
+        self.assert_same_contents();
     }
 
     /// Replaces the value of `key` through `get_mut`, if the key is there.
@@ -581,11 +543,6 @@ where
 
     fn remove(&mut self, key: &K) {
         assert_eq!(self.ours.remove(key), self.theirs.remove(key));
-        self.assert_same_len();
-    }
-
-    fn remove_entry(&mut self, key: &K) {
-        assert_eq!(self.ours.remove_entry(key), self.theirs.remove_entry(key));
         self.assert_same_len();
     }
 
@@ -615,24 +572,20 @@ where
         assert_eq!(self.ours.is_empty(), self.theirs.is_empty());
     }
 
-    /// Checks the map's invariants, and that it holds exactly std's entries,
-    /// by lookups and by iteration both ways; a small map prints the same.
+    /// [`Self::assert_same_contents`], and a lookup of each of std's
+    /// entries; a small map prints the same.
     pub(super) fn assert_same_entries(&self) {
-        self.ours.check_invariants();
-        self.assert_same_len();
+        self.assert_same_contents();
         for (key, value) in &self.theirs {
             assert_eq!(self.ours.get_key_value(key), Some((key, value)));
         }
-        assert!(self.ours.iter().eq(&self.theirs));
-        assert!(self.ours.iter().rev().eq(self.theirs.iter().rev()));
         if self.theirs.len() <= 64 {
             assert_eq!(format!("{:?}", self.ours), format!("{:?}", self.theirs));
         }
     }
 
-    /// Gives every key that lives in an internal node a new value, through
-    /// `insert` or `get_mut` at random: each time, the value replaced is a
-    /// leaf's head (D17).
+    /// Gives every separator key a new value, through `insert` or `get_mut`
+    /// at random: each time, the value replaced is a leaf's head (D17).
     fn overwrite_separators(&mut self, rng: &TestRng) {
         let separators: Vec<K> = self.ours.separator_keys().into_iter().cloned().collect();
         assert_eq!(separators.is_empty(), self.ours.leaf_depth() == 0);
@@ -661,7 +614,7 @@ where
                 11 | 12 => self.get(&key),
                 13 => self.update(&key, V::from_number(rng.below(1 << 30))),
                 14 | 15 => self.remove(&key),
-                16 => self.remove_entry(&key),
+                16 => self.remove_borrowed(&key),
                 17 => self.pop_first(),
                 18 => self.pop_last(),
                 _ => self.first_and_last(),
@@ -685,7 +638,7 @@ where
                 RemovalOrder::Random => match rng.below(8) {
                     0 => self.pop_first(),
                     1 => self.pop_last(),
-                    2 => self.remove_entry(key),
+                    2 => self.remove_borrowed(key),
                     _ => self.remove(key),
                 },
             }
@@ -702,6 +655,18 @@ where
         }
         self.assert_same_entries();
         assert_eq!(self.ours.leaf_depth(), 0);
+    }
+
+    /// Iterates over both maps, shared and mutably, and checks `ranges`
+    /// ranges between keys made from `0..key_space`, shared and mutably.
+    fn walk(&mut self, rng: &TestRng, key_space: usize, ranges: usize) {
+        self.assert_same_iteration(rng);
+        self.assert_clones_match(rng, key_space);
+        self.mutate_by_iter_mut(rng);
+        self.mutate_all_at_once(rng);
+        self.assert_same_ranges(rng, ranges, key_space);
+        self.mutate_ranges(rng, ranges, key_space);
+        self.assert_same_entries();
     }
 
     /// Inserts the keys made from the even `numbers`, in their order, then
@@ -746,8 +711,16 @@ enum RemovalOrder {
     Random,
 }
 
-/// How much work one key and value type gets: large natively, small under
-/// Miri.
+/// The message of a panic from `panic!` with a literal or a format.
+fn panic_message(payload: &Box<dyn Any + Send>) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .expect("a panic with a message")
+}
+
+/// How much work one key and value type gets.
 pub(super) struct Workload {
     pub(super) random_steps: usize,
     pub(super) key_space: usize,
@@ -760,6 +733,18 @@ pub(super) struct Workload {
 }
 
 impl Workload {
+    /// `random_steps` random operations on keys made from `0..key_space`,
+    /// and ordered inserts of half as many keys, which push the leaves 2
+    /// below the root.
+    pub(super) fn new(random_steps: usize, key_space: usize) -> Self {
+        Self {
+            random_steps,
+            key_space,
+            ordered_entries: key_space / 2,
+            min_sequential_leaf_depth: 2,
+        }
+    }
+
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
     /// followed by overwriting every separator's value, iterating and
@@ -778,7 +763,7 @@ impl Workload {
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.run_random_operations(&rng, self.random_steps, self.key_space);
         maps.overwrite_separators(&rng);
-        self.walk(&mut maps, &rng, self.key_space);
+        maps.walk(&rng, self.key_space, self.ranges());
         maps.bulk_changes(&rng, self.key_space);
         maps.remove_all(RemovalOrder::Random, &rng, self.key_space);
         maps.run_random_operations(&rng, self.random_steps / 4, self.key_space);
@@ -799,7 +784,7 @@ impl Workload {
                 self.min_sequential_leaf_depth
             );
             maps.overwrite_separators(&rng);
-            self.walk(&mut maps, &rng, self.ordered_key_space());
+            maps.walk(&rng, self.ordered_key_space(), self.ranges());
             maps.remove_all(removal_order, &rng, self.ordered_key_space());
         }
         let mut shuffled: Vec<usize> = evens().collect();
@@ -807,7 +792,7 @@ impl Workload {
         let mut maps = MirroredMaps::<K, V, S>::new();
         maps.insert_evens_in_order(shuffled);
         maps.overwrite_separators(&rng);
-        self.walk(&mut maps, &rng, self.ordered_key_space());
+        maps.walk(&rng, self.ordered_key_space(), self.ranges());
         maps.bulk_changes(&rng, self.ordered_key_space());
         maps.consume(&rng);
     }
@@ -817,91 +802,64 @@ impl Workload {
         2 * self.ordered_entries + 2
     }
 
-    /// Iterates over `maps`, shared and mutably, and checks ranges between
-    /// keys made from `0..key_space`, shared and mutably, as many as the
-    /// workload's size affords.
-    fn walk<K, V, S>(&self, maps: &mut MirroredMaps<K, V, S>, rng: &TestRng, key_space: usize)
-    where
-        K: Ord + Clone + Debug + FromNumber,
-        V: Clone + PartialEq + Debug + FromNumber,
-        S: InlineKeyStrategy<K> + Default,
-    {
-        maps.assert_same_iteration(rng);
-        maps.assert_clones_match(rng, key_space);
-        maps.mutate_by_iter_mut(rng);
-        maps.mutate_all_at_once(rng);
-        let ranges = (self.random_steps / 2000).clamp(16, 256);
-        maps.assert_same_ranges(rng, ranges, key_space);
-        maps.mutate_ranges(rng, ranges, key_space);
-        maps.assert_same_entries();
+    /// How many ranges each walk checks: as many as the workload's size
+    /// affords.
+    fn ranges(&self) -> usize {
+        (self.random_steps / 2000).clamp(16, 256)
     }
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn u64_to_u64_matches_std() {
-    let workload = if cfg!(miri) {
-        Workload {
-            random_steps: 300,
-            key_space: 400,
-            ordered_entries: 150,
-            min_sequential_leaf_depth: 1,
-        }
-    } else {
-        Workload {
-            random_steps: 500_000,
-            key_space: 1 << 18,
-            ordered_entries: 200_000,
-            min_sequential_leaf_depth: 2,
-        }
-    };
-    workload.run::<u64, u64, Auto>(1);
+    Workload {
+        random_steps: 500_000,
+        key_space: 1 << 18,
+        ordered_entries: 200_000,
+        min_sequential_leaf_depth: 2,
+    }
+    .run::<u64, u64, Auto>(1);
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn string_to_string_matches_std() {
-    let workload = if cfg!(miri) {
-        Workload {
-            random_steps: 150,
-            key_space: 150,
-            ordered_entries: 60,
-            min_sequential_leaf_depth: 1,
-        }
-    } else {
-        Workload {
-            random_steps: 100_000,
-            key_space: 1 << 16,
-            ordered_entries: 50_000,
-            min_sequential_leaf_depth: 2,
-        }
-    };
-    workload.run::<String, String, Auto>(2);
+    Workload {
+        random_steps: 100_000,
+        key_space: 1 << 16,
+        ordered_entries: 50_000,
+        min_sequential_leaf_depth: 2,
+    }
+    .run::<String, String, Auto>(2);
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn wide_keys_match_std() {
-    let workload = if cfg!(miri) {
-        // Leaves at depth 2 already have an internal node split into a
-        // parent with room; depth 3 only adds a level, which the native run
-        // covers. These small nodes split evenly: depth 2 needs about 130
-        // entries.
-        Workload {
-            random_steps: 300,
-            key_space: 300,
-            ordered_entries: 200,
-            min_sequential_leaf_depth: 2,
-        }
-    } else {
-        Workload {
-            random_steps: 40_000,
-            key_space: 1 << 14,
-            ordered_entries: 10_000,
-            min_sequential_leaf_depth: 3,
-        }
-    };
-    workload.run::<WideKey, u64, Auto>(3);
+    Workload {
+        random_steps: 40_000,
+        key_space: 1 << 14,
+        ordered_entries: 10_000,
+        min_sequential_leaf_depth: 3,
+    }
+    .run::<WideKey, u64, Auto>(3);
+}
+
+/// The mutable walks of a tree two levels tall, small enough for Miri, which
+/// checks that they hand out each value once, and no two references that
+/// alias.
+#[test]
+fn mutable_walks_of_a_small_tree_match_std() {
+    let rng = TestRng::new(13);
+    let mut maps = MirroredMaps::<u64, u64>::new();
+    for number in 0..60 {
+        maps.insert(number, number);
+    }
+    assert_eq!(maps.ours.leaf_depth(), 1);
+    maps.mutate_by_iter_mut(&rng);
+    maps.mutate_all_at_once(&rng);
+    maps.mutate_ranges(&rng, 8, 60);
+    maps.assert_same_contents();
 }
 
 /// Bounds out of order panic with std's messages, unless the map has never
@@ -968,7 +926,7 @@ fn collecting_and_indexing_match_std() {
 
     let missing = catch_unwind(AssertUnwindSafe(|| ours[&4]));
     let std_missing = catch_unwind(AssertUnwindSafe(|| BTreeMap::from(array)[&4]));
-    let message = |payload| String::from(MirroredMaps::<u64, u64>::panic_message(&payload));
+    let message = |payload| String::from(panic_message(&payload));
     assert_eq!(missing.map_err(message), std_missing.map_err(message));
 }
 
@@ -978,11 +936,6 @@ fn collecting_and_indexing_match_std() {
 fn comparisons_and_hashes_match_std() {
     let rng = TestRng::new(11);
     let (trials, max_len) = if cfg!(miri) { (20, 80) } else { (400, 2000) };
-    let hash = |map: &dyn Fn(&mut DefaultHasher)| {
-        let mut hasher = DefaultHasher::new();
-        map(&mut hasher);
-        hasher.finish()
-    };
     for _ in 0..trials {
         let len = rng.below(max_len);
         let entries: Vec<(u64, u64)> = (0..len)
@@ -1012,10 +965,7 @@ fn comparisons_and_hashes_match_std() {
             theirs.partial_cmp(&other_theirs)
         );
         assert_eq!(ours.cmp(&other_ours), theirs.cmp(&other_theirs));
-        assert_eq!(
-            hash(&|hasher| ours.hash(hasher)),
-            hash(&|hasher| theirs.hash(hasher))
-        );
+        assert_eq!(hash_of(&ours), hash_of(&theirs));
         assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
     }
 }
@@ -1037,14 +987,13 @@ fn zero_sized_keys_and_values_match_std() {
     let rng = TestRng::new(4);
     MirroredMaps::<(), ()>::new().run_random_operations(&rng, 100, 1);
     MirroredMaps::<(), u64>::new().run_random_operations(&rng, 100, 1);
-    let workload = Workload {
-        random_steps: if cfg!(miri) { 200 } else { 20_000 },
+    Workload {
+        random_steps: 20_000,
         key_space: 1 << 12,
-        // Leaves of `u64` keys and `()` values hold 127 entries.
-        ordered_entries: if cfg!(miri) { 150 } else { 5000 },
+        ordered_entries: 5000,
         min_sequential_leaf_depth: 1,
-    };
-    workload.run::<u64, (), Auto>(5);
+    }
+    .run::<u64, (), Auto>(5);
 }
 
 #[test]
@@ -1067,21 +1016,21 @@ fn byte_keys_with_zero_sized_values_match_std() {
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn over_aligned_values_match_std() {
     Workload {
-        random_steps: if cfg!(miri) { 150 } else { 20_000 },
+        random_steps: 20_000,
         key_space: 1 << 12,
-        ordered_entries: if cfg!(miri) { 60 } else { 3000 },
+        ordered_entries: 3000,
         min_sequential_leaf_depth: 1,
     }
     .run::<u64, CacheLineAligned, Auto>(7);
     Workload {
-        random_steps: if cfg!(miri) { 60 } else { 2000 },
+        random_steps: 2000,
         key_space: 1 << 10,
-        ordered_entries: if cfg!(miri) { 30 } else { 600 },
+        ordered_entries: 600,
         min_sequential_leaf_depth: 1,
     }
     .run::<u64, PageAligned, Auto>(8);
 
-    let count = if cfg!(miri) { 30 } else { 100 };
+    let count = 100;
     let mut map = BBTreeMap::new();
     for key in 0..count {
         map.insert(key, PageAligned::new(key));
@@ -1099,11 +1048,11 @@ fn over_aligned_values_match_std() {
 /// tree of half-full small nodes, from ascending inserts, and in one thinned by
 /// removals toward the minimum fill, whose borders have little to spare.
 #[test]
-#[cfg_attr(miri, ignore = "its Miri size misses the depth it asserts")]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn split_off_at_every_position_matches_std() {
-    // These small nodes split evenly: 1500 ascending entries make a tree
-    // 3 levels tall, and the smaller CI-only Miri case reaches 2.
-    let (count, leaf_depth) = if cfg!(miri) { (60, 2) } else { (1500, 3) };
+    // Ascending inserts leave these small nodes about half full: 1500 entries
+    // put the leaves 3 below the root.
+    let (count, leaf_depth) = (1500, 3);
     for thinned in [false, true] {
         let rng = TestRng::new(31);
         let mut maps = MirroredMaps::<WideKey, u64>::new();

@@ -290,8 +290,9 @@ fn iterators_are_covariant_in_keys_and_values() {
 /// Each end of a walk holds a path (`tree/path.rs`): a node pointer and a
 /// `u16` index for each of 24 levels, the most a tree can have (D22), and a
 /// one-byte count of the levels in use, 248 bytes. Every walk adds the
-/// root, as a tagged pointer; the whole-map iterators a count, and ranges a
-/// leaf run. std's, whose nodes point to their parents, need 72 bytes.
+/// root, as a tagged pointer; ranges add a leaf run, and the whole-map
+/// iterators, which walk as ranges, a count besides. std's, whose nodes
+/// point to their parents, need 72 bytes.
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
 fn iterator_sizes() {

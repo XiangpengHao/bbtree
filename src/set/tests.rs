@@ -15,19 +15,17 @@
 
 use core::cmp::Ordering;
 use core::fmt::Debug;
-use core::hash::{Hash, Hasher};
+use core::hash::Hash;
 use core::mem;
-use core::ops::Bound;
 use std::collections::BTreeSet;
 use std::format;
-use std::hash::DefaultHasher;
 use std::string::String;
 use std::vec::Vec;
 
 use super::{BBTreeSet, IntoIter, Iter, Range};
 use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::map::BBTreeMap;
-use crate::tree::test_support::{FromNumber, TestRng};
+use crate::tree::test_support::{FromNumber, TestRng, hash_of};
 
 /// Sets of at most this many elements, and iterators with at most this many
 /// left, are printed and the prints compared.
@@ -150,7 +148,7 @@ where
     /// ones.
     fn assert_same_ranges(&self, rng: &TestRng, count: usize, key_space: usize) {
         for _ in 0..count {
-            let bounds = Self::random_range_bounds(rng, key_space);
+            let bounds = rng.range_bounds(key_space, T::from_number);
             let bounds = (bounds.0.as_ref(), bounds.1.as_ref());
             let ours = self.ours.range::<T, _>(bounds);
             let theirs = self.theirs.range::<T, _>(bounds);
@@ -165,34 +163,6 @@ where
         }
     }
 
-    /// Random bounds in order, at elements made from `0..key_space`, of
-    /// every kind; half of them narrow.
-    fn random_range_bounds(rng: &TestRng, key_space: usize) -> (Bound<T>, Bound<T>) {
-        let low_number = rng.below(key_space);
-        let high_number = if rng.below(2) == 0 {
-            low_number + rng.below(48)
-        } else {
-            rng.below(key_space)
-        };
-        let (mut low, mut high) = (T::from_number(low_number), T::from_number(high_number));
-        if low > high {
-            mem::swap(&mut low, &mut high);
-        }
-        let random_bound = |value| match rng.below(5) {
-            0 => Bound::Unbounded,
-            1 | 2 => Bound::Included(value),
-            _ => Bound::Excluded(value),
-        };
-        let mut start = random_bound(low);
-        let end = random_bound(high);
-        if let (Bound::Excluded(start_value), Bound::Excluded(end_value)) = (&start, &end)
-            && start_value == end_value
-        {
-            start = Bound::Included(start_value.clone());
-        }
-        (start, end)
-    }
-
     /// `retain`, and `extract_if` over a random range stopped partway, by
     /// the same random choices; a split at a random element and an `append`
     /// that puts the halves back together; and an `append` of a random set
@@ -204,7 +174,7 @@ where
         self.theirs.retain(|_| theirs_choices.below(8) != 0);
         self.assert_same_contents();
 
-        let bounds = Self::random_range_bounds(rng, key_space);
+        let bounds = rng.range_bounds(key_space, T::from_number);
         let mut ours = self
             .ours
             .extract_if(bounds.clone(), |_| ours_choices.below(4) == 0);
@@ -261,21 +231,13 @@ where
             1 => assert_eq!(ours_clone.remove(&value), theirs_clone.remove(&value)),
             _ => {}
         }
-        let hash = |set: &dyn Fn(&mut DefaultHasher)| {
-            let mut hasher = DefaultHasher::new();
-            set(&mut hasher);
-            hasher.finish()
-        };
         assert_eq!(self.ours == ours_clone, self.theirs == theirs_clone);
         assert_eq!(
             self.ours.partial_cmp(&ours_clone),
             self.theirs.partial_cmp(&theirs_clone)
         );
         assert_eq!(self.ours.cmp(&ours_clone), self.theirs.cmp(&theirs_clone));
-        assert_eq!(
-            hash(&|hasher| ours_clone.hash(hasher)),
-            hash(&|hasher| theirs_clone.hash(hasher))
-        );
+        assert_eq!(hash_of(&ours_clone), hash_of(&theirs_clone));
     }
 
     /// Sets of the elements made from `numbers`.
@@ -286,7 +248,7 @@ where
         sets
     }
 
-    /// Combines these sets with `other`, both ways and each with itself, by
+    /// Combines these sets with `other`, both ways, and with themselves, by
     /// every operation on two sets, lazy and building a set, against std's.
     fn assert_same_set_operations(&self, other: &Self, rng: &TestRng) {
         let printed = self.theirs.len().max(other.theirs.len()) <= PRINTED_LEN;
@@ -380,12 +342,7 @@ where
 #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn u64_set_matches_std() {
     let rng = TestRng::new(21);
-    let (steps, key_space) = if cfg!(miri) {
-        (400, 600)
-    } else {
-        (100_000, 1 << 14)
-    };
-    MirroredSets::<u64>::new().run(&rng, steps, key_space);
+    MirroredSets::<u64>::new().run(&rng, 100_000, 1 << 14);
     // Small sets, whose sets and iterators are printed.
     MirroredSets::<u64>::new().run(&rng, 200, 100);
 }
@@ -431,14 +388,6 @@ const PAIR_LENS: [(usize, usize); 13] = [
     (20, 6000),
 ];
 
-/// The numbers of `len` elements of `0..universe`, distinct, in random order.
-fn distinct_numbers(rng: &TestRng, len: usize, universe: usize) -> Vec<usize> {
-    let mut numbers: Vec<usize> = (0..universe).collect();
-    rng.shuffle(&mut numbers);
-    numbers.truncate(len);
-    numbers
-}
-
 /// Every operation on two sets, on pairs of each length in [`PAIR_LENS`],
 /// and of each shape: overlapping, apart, touching at one end, and one
 /// inside the other with or without its ends.
@@ -448,9 +397,9 @@ fn set_operations_match_std() {
     let rng = TestRng::new(25);
     for (a_len, b_len) in PAIR_LENS {
         let universe = 2 * (a_len + b_len) + 2;
-        let b_numbers = distinct_numbers(&rng, b_len, universe);
+        let b_numbers = rng.distinct_numbers(b_len, universe);
         let b = MirroredSets::<u64>::from_numbers(b_numbers.iter().copied());
-        let overlapping = distinct_numbers(&rng, a_len, universe);
+        let overlapping = rng.distinct_numbers(a_len, universe);
         let apart = overlapping.iter().map(|number| number + universe);
         // Below `b` but for its first element, which is the top of these.
         let b_min = b_numbers.iter().copied().min().unwrap_or(0);
@@ -478,8 +427,8 @@ fn set_operations_match_std() {
         }
     }
     // Strings, with inline keys of another width.
-    let a = MirroredSets::<String>::from_numbers(distinct_numbers(&rng, 300, 1000).into_iter());
-    let b = MirroredSets::<String>::from_numbers(distinct_numbers(&rng, 600, 1000).into_iter());
+    let a = MirroredSets::<String>::from_numbers(rng.distinct_numbers(300, 1000).into_iter());
+    let b = MirroredSets::<String>::from_numbers(rng.distinct_numbers(600, 1000).into_iter());
     a.assert_same_set_operations(&b, &rng);
 }
 

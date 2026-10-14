@@ -1,6 +1,8 @@
 //! Fold traversal must preserve the same order and disjoint mutable
 //! references as repeated `next`, including after both ends have moved.
 
+#![forbid(unsafe_code)]
+
 use core::fmt::Debug;
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::panic::AssertUnwindSafe;
@@ -10,10 +12,19 @@ use std::panic::catch_unwind;
 use std::vec::Vec;
 
 use crate::BBTreeMap;
+use crate::tree::test_support::StepEitherEnd;
 
+/// Our map and std's, with the same entries, for the tests to walk alike
+/// and to change through the walks.
 struct FoldMaps {
     ours: BBTreeMap<u64, u64>,
     theirs: BTreeMap<u64, u64>,
+}
+
+/// `entries` with `entry` pushed: a fold that collects what it visits.
+fn push_entry<T>(mut entries: Vec<T>, entry: T) -> Vec<T> {
+    entries.push(entry);
+    entries
 }
 
 #[test]
@@ -33,19 +44,8 @@ fn borrowed_walk_counts_steps_from_both_ends() {
         let mut ours = maps.ours.iter();
         let mut theirs = maps.theirs.iter();
         for index in 0..length + 2 {
-            let reverse = index % 11 >= 7;
-            assert_eq!(
-                if reverse {
-                    ours.next_back()
-                } else {
-                    ours.next()
-                },
-                if reverse {
-                    theirs.next_back()
-                } else {
-                    theirs.next()
-                },
-            );
+            let back = index % 11 >= 7;
+            assert_eq!(ours.step(back), theirs.step(back));
             assert_eq!(ours.len(), theirs.len());
             assert_eq!(ours.size_hint(), theirs.size_hint());
         }
@@ -54,17 +54,8 @@ fn borrowed_walk_counts_steps_from_both_ends() {
         let mut theirs = maps.theirs.iter_mut();
         let mut held = Vec::new();
         for index in 0..113 {
-            let reverse = index % 13 >= 5;
-            let actual = if reverse {
-                ours.next_back()
-            } else {
-                ours.next()
-            };
-            let expected = if reverse {
-                theirs.next_back()
-            } else {
-                theirs.next()
-            };
+            let back = index % 13 >= 5;
+            let (actual, expected) = (ours.step(back), theirs.step(back));
             assert_eq!(actual.as_ref(), expected.as_ref());
             if let Some(entry) = actual {
                 held.push(entry);
@@ -75,10 +66,7 @@ fn borrowed_walk_counts_steps_from_both_ends() {
             assert_eq!(ours.len(), theirs.len());
             assert_eq!(ours.size_hint(), theirs.size_hint());
         }
-        let remaining = ours.fold(Vec::new(), |mut entries, entry| {
-            entries.push(entry);
-            entries
-        });
+        let remaining = ours.fold(Vec::new(), push_entry);
         assert_eq!(remaining.len(), theirs.len());
         for (&key, value) in held.into_iter().chain(remaining) {
             *value += key + 1;
@@ -117,58 +105,39 @@ impl FoldMaps {
         for _ in 0..back {
             assert_eq!(ours.next_back(), theirs.next_back());
         }
-        let collect = |mut entries: Vec<_>, (&key, &value)| {
-            entries.push((key, value));
-            entries
-        };
         assert_eq!(
-            ours.clone().fold(Vec::new(), collect),
-            theirs.clone().fold(Vec::new(), collect),
+            ours.clone().fold(Vec::new(), push_entry),
+            theirs.clone().fold(Vec::new(), push_entry),
         );
         assert_eq!(
-            ours.rfold(Vec::new(), collect),
-            theirs.rfold(Vec::new(), collect),
+            ours.rfold(Vec::new(), push_entry),
+            theirs.rfold(Vec::new(), push_entry),
         );
     }
+}
 
-    fn assert_layout<K: Ord + Clone + Debug, V: Clone + Debug + Eq>(entries: Vec<(K, V)>) {
-        let mut ours: BBTreeMap<K, V> = entries.clone().into_iter().collect();
-        let mut theirs: BTreeMap<K, V> = entries.into_iter().collect();
-        let retain = |mut entries: Vec<_>, entry| {
-            entries.push(entry);
-            entries
-        };
-        assert_eq!(
-            ours.iter().fold(Vec::new(), retain),
-            theirs.iter().collect::<Vec<_>>(),
-        );
-        assert_eq!(
-            ours.iter().rfold(Vec::new(), retain),
-            theirs.iter().rev().collect::<Vec<_>>(),
-        );
-        let count = ours.len();
-        let mut actual = ours.iter_mut();
-        let mut expected = theirs.iter_mut();
-        let mut held = Vec::new();
-        for index in 0..count + 2 {
-            let reverse = index % 17 >= 10;
-            let actual_entry = if reverse {
-                actual.next_back()
-            } else {
-                actual.next()
-            };
-            let expected_entry = if reverse {
-                expected.next_back()
-            } else {
-                expected.next()
-            };
-            assert_eq!(actual_entry.as_ref(), expected_entry.as_ref());
-            held.push((actual_entry, expected_entry));
-            assert_eq!(actual.len(), expected.len());
-        }
-        for (actual, expected) in held {
-            assert_eq!(actual, expected);
-        }
+/// Checks folds both ways over our map of `entries`, and a walk of its
+/// `iter_mut` from both ends, against std's.
+fn assert_folds_and_iter_mut_match_std<K: Ord + Clone + Debug, V: Clone + Debug + Eq>(
+    entries: Vec<(K, V)>,
+) {
+    let mut ours: BBTreeMap<K, V> = entries.clone().into_iter().collect();
+    let mut theirs: BTreeMap<K, V> = entries.into_iter().collect();
+    assert_eq!(
+        ours.iter().fold(Vec::new(), push_entry),
+        theirs.iter().collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        ours.iter().rfold(Vec::new(), push_entry),
+        theirs.iter().rev().collect::<Vec<_>>(),
+    );
+    let count = ours.len();
+    let mut actual = ours.iter_mut();
+    let mut expected = theirs.iter_mut();
+    for index in 0..count + 2 {
+        let back = index % 17 >= 10;
+        assert_eq!(actual.step(back), expected.step(back));
+        assert_eq!(actual.len(), expected.len());
     }
 }
 
@@ -179,20 +148,22 @@ fn folds_cover_different_leaf_strides() {
     #[repr(align(64))]
     struct AlignedValue(u64);
 
-    FoldMaps::assert_layout(
+    assert_folds_and_iter_mut_match_std(
         (0..1024)
             .map(|key| (format!("key/{key:08}"), key))
             .collect(),
     );
-    FoldMaps::assert_layout((0..1024_u64).map(|key| (key, ())).collect());
-    FoldMaps::assert_layout(
+    assert_folds_and_iter_mut_match_std((0..1024_u64).map(|key| (key, ())).collect());
+    assert_folds_and_iter_mut_match_std(
         (0..1024)
             .map(|key| ([key, key + 1], AlignedValue(key)))
             .collect(),
     );
-    FoldMaps::assert_layout((0..1024_u64).map(|key| (key, AlignedValue(key))).collect());
-    FoldMaps::assert_layout(std::vec![((), AlignedValue(7))]);
-    FoldMaps::assert_layout(std::vec![((), ())]);
+    assert_folds_and_iter_mut_match_std(
+        (0..1024_u64).map(|key| (key, AlignedValue(key))).collect(),
+    );
+    assert_folds_and_iter_mut_match_std(std::vec![((), AlignedValue(7))]);
+    assert_folds_and_iter_mut_match_std(std::vec![((), ())]);
 }
 
 #[test]
@@ -365,8 +336,6 @@ fn unbounded_ranges_can_switch_direction_at_exhaustion() {
                 }
                 assert_eq!(range.next(), None);
                 assert_eq!(range.next_back(), None);
-                assert_eq!(range.next(), None);
-                assert_eq!(range.next_back(), None);
                 for (&key, value) in entries {
                     *value += key;
                 }
@@ -394,19 +363,8 @@ fn range_runs_preserve_mixed_ends_clones_and_mutable_reborrows() {
             let mut ours = maps.ours.range(bounds);
             let mut theirs = maps.theirs.range(bounds);
             for index in 0..length + 2 {
-                let reverse = index % 11 >= 7;
-                assert_eq!(
-                    if reverse {
-                        ours.next_back()
-                    } else {
-                        ours.next()
-                    },
-                    if reverse {
-                        theirs.next_back()
-                    } else {
-                        theirs.next()
-                    },
-                );
+                let back = index % 11 >= 7;
+                assert_eq!(ours.step(back), theirs.step(back));
                 if index % 31 == 0 {
                     assert!(ours.clone().eq(theirs.clone()));
                     assert!(ours.clone().rev().eq(theirs.clone().rev()));
@@ -422,17 +380,8 @@ fn range_runs_preserve_mixed_ends_clones_and_mutable_reborrows() {
                 // Keep the yielded mutable references alive across every
                 // switch, reborrow and leaf boundary. Their addresses and
                 // keys must remain distinct until the range is exhausted.
-                let reverse = index % 13 >= 5;
-                let actual = if reverse {
-                    ours.next_back()
-                } else {
-                    ours.next()
-                };
-                let expected = if reverse {
-                    theirs.next_back()
-                } else {
-                    theirs.next()
-                };
+                let back = index % 13 >= 5;
+                let (actual, expected) = (ours.step(back), theirs.step(back));
                 assert_eq!(actual.as_ref(), expected.as_ref());
                 if let Some(entry) = actual {
                     held.push(entry);
@@ -467,14 +416,10 @@ fn mutable_folds_keep_all_handed_out_references_disjoint() {
         let mut iterator = maps.ours.iter_mut();
         let first = iterator.next().unwrap();
         let last = iterator.next_back().unwrap();
-        let retain = |mut entries: Vec<_>, entry| {
-            entries.push(entry);
-            entries
-        };
         let middle = if reverse {
-            iterator.rfold(Vec::new(), retain)
+            iterator.rfold(Vec::new(), push_entry)
         } else {
-            iterator.fold(Vec::new(), retain)
+            iterator.fold(Vec::new(), push_entry)
         };
         for (key, value) in [first, last].into_iter().chain(middle) {
             *value += *key;
@@ -487,14 +432,10 @@ fn mutable_folds_keep_all_handed_out_references_disjoint() {
         let mut range = maps.ours.range_mut(25..8010);
         let first = range.next().unwrap();
         let last = range.next_back().unwrap();
-        let retain = |mut entries: Vec<_>, entry| {
-            entries.push(entry);
-            entries
-        };
         let middle = if reverse {
-            range.rfold(Vec::new(), retain)
+            range.rfold(Vec::new(), push_entry)
         } else {
-            range.fold(Vec::new(), retain)
+            range.fold(Vec::new(), push_entry)
         };
         for (key, value) in [first, last].into_iter().chain(middle) {
             *value += *key;

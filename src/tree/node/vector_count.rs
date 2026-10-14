@@ -44,7 +44,7 @@ pub(super) enum SlotMatches {
 pub(super) struct U16EqualitySearch;
 
 impl U16EqualitySearch {
-    #[inline]
+    #[inline(always)]
     pub(super) fn matching(
         slots: &[u16],
         candidates: Range<usize>,

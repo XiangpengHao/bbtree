@@ -8,13 +8,14 @@
 use core::borrow::Borrow;
 use core::cell::Cell;
 use core::cmp::Ordering;
+use core::fmt::Debug;
 use core::panic::AssertUnwindSafe;
 use std::collections::{BTreeMap, btree_map};
 use std::panic::catch_unwind;
 use std::vec::Vec;
 
 use crate::map::{BBTreeMap, Entry};
-use crate::tree::test_support::{DropLedger, TestRng, Tracked};
+use crate::tree::test_support::{DropLedger, StepEitherEnd, TestRng, Tracked};
 
 /// A drop-tracked key ordered by `order` alone: keys of the same order
 /// collide in a map but stay apart in the ledger.
@@ -68,6 +69,25 @@ impl Borrow<usize> for CollidingKey<'_> {
     }
 }
 
+/// An entry of a [`TrackedMap`], owned or borrowed.
+trait TrackedEntry {
+    /// The ids of the entry's key and value; an owned entry is dropped.
+    fn ids(self) -> (usize, usize);
+}
+
+impl TrackedEntry for (CollidingKey<'_>, Tracked<'_>) {
+    fn ids(self) -> (usize, usize) {
+        let (key, value) = self;
+        (key.id(), value.id())
+    }
+}
+
+impl TrackedEntry for (&CollidingKey<'_>, &Tracked<'_>) {
+    fn ids(self) -> (usize, usize) {
+        (self.0.id(), self.1.id())
+    }
+}
+
 /// Two drop ledgers fed in lockstep, one for what goes into our map and one
 /// for std's: the same calls hand out the same ids, so the same drop
 /// behavior records the same drop order.
@@ -98,6 +118,23 @@ impl LockstepLedgers {
 
     fn assert_same_drops_so_far(&self) {
         assert_eq!(self.ours.drop_order(), self.theirs.drop_order());
+    }
+
+    /// Takes an item from `ours` and `theirs` alike for each of `from_back`,
+    /// from the back where it says so, checking that the items match and
+    /// that the same values were dropped so far; then drops both iterators.
+    fn assert_same_steps<T: PartialEq + Debug>(
+        &self,
+        mut ours: impl DoubleEndedIterator<Item = T>,
+        mut theirs: impl DoubleEndedIterator<Item = T>,
+        from_back: impl Iterator<Item = bool>,
+    ) {
+        for back in from_back {
+            assert_eq!(ours.step(back), theirs.step(back));
+            self.assert_same_drops_so_far();
+        }
+        drop(ours);
+        drop(theirs);
     }
 }
 
@@ -169,9 +206,11 @@ impl<'l> TrackedMaps<'l> {
     /// The caller gets the same entry from both, and drops it.
     fn remove(&mut self, order: usize, with_key: bool) {
         if with_key {
-            let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
-            let ours = self.ours.remove_entry(&order).map(ids);
-            assert_eq!(ours, self.theirs.remove_entry(&order).map(ids));
+            let ours = self.ours.remove_entry(&order).map(TrackedEntry::ids);
+            assert_eq!(
+                ours,
+                self.theirs.remove_entry(&order).map(TrackedEntry::ids)
+            );
         } else {
             let ours = self.ours.remove(&order).map(|value| value.id());
             assert_eq!(ours, self.theirs.remove(&order).map(|value| value.id()));
@@ -181,13 +220,12 @@ impl<'l> TrackedMaps<'l> {
 
     /// Removes the first entry, or the last if `last`, from both maps.
     fn pop(&mut self, last: bool) {
-        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
         let (ours, theirs) = if last {
             (self.ours.pop_last(), self.theirs.pop_last())
         } else {
             (self.ours.pop_first(), self.theirs.pop_first())
         };
-        assert_eq!(ours.map(ids), theirs.map(ids));
+        assert_eq!(ours.map(TrackedEntry::ids), theirs.map(TrackedEntry::ids));
         assert_eq!(self.ours.len(), self.theirs.len());
     }
 
@@ -199,7 +237,6 @@ impl<'l> TrackedMaps<'l> {
         let (our_value, their_value) = self.ledgers.track(false);
         let ours = self.ours.entry(CollidingKey::new(order, our_key));
         let theirs = self.theirs.entry(CollidingKey::new(order, their_key));
-        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
         match (ours, theirs, choice % 4) {
             (ours, theirs, 0) => {
                 assert_eq!(
@@ -208,7 +245,7 @@ impl<'l> TrackedMaps<'l> {
                 );
             }
             (Entry::Occupied(ours), btree_map::Entry::Occupied(theirs), 1) => {
-                assert_eq!(ids(ours.remove_entry()), ids(theirs.remove_entry()));
+                assert_eq!(ours.remove_entry().ids(), theirs.remove_entry().ids());
             }
             (Entry::Occupied(mut ours), btree_map::Entry::Occupied(mut theirs), _) => {
                 assert_eq!(ours.insert(our_value).id(), theirs.insert(their_value).id());
@@ -234,13 +271,21 @@ impl<'l> TrackedMaps<'l> {
     fn get(&self, order: usize) {
         let ours = self.ours.get(&order).map(Tracked::id);
         assert_eq!(ours, self.theirs.get(&order).map(Tracked::id));
-        let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
-        let ours = self.ours.get_key_value(&order).map(ids);
-        assert_eq!(ours, self.theirs.get_key_value(&order).map(ids));
+        let ours = self.ours.get_key_value(&order).map(TrackedEntry::ids);
+        assert_eq!(
+            ours,
+            self.theirs.get_key_value(&order).map(TrackedEntry::ids)
+        );
         assert_eq!(
             self.ours.contains_key(&order),
             self.theirs.contains_key(&order)
         );
+    }
+
+    /// Checks that both maps hold the same entries, by tracked ids, in order.
+    fn assert_same_entries(&self) {
+        let ours = self.ours.iter().map(TrackedEntry::ids);
+        assert!(ours.eq(self.theirs.iter().map(TrackedEntry::ids)));
     }
 
     /// Drops both maps, each catching a panic, and checks that they dropped
@@ -354,54 +399,23 @@ fn owning_iterators_drop_like_std() {
         }
         assert!(maps.ours.leaf_depth() >= 2);
         let TrackedMaps { ours, theirs, .. } = maps;
-        let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
-        let mut steps = (0..count / 3).map(|_| rng.below(2) == 0);
+        let from_back = (0..count / 3).map(|_| rng.below(2) == 0);
         match kind {
-            0 => {
-                let (mut ours, mut theirs) = (ours.into_iter(), theirs.into_iter());
-                for back in steps.by_ref() {
-                    let (our_entry, their_entry) = if back {
-                        (ours.next_back(), theirs.next_back())
-                    } else {
-                        (ours.next(), theirs.next())
-                    };
-                    assert_eq!(our_entry.map(ids), their_entry.map(ids));
-                    ledgers.assert_same_drops_so_far();
-                }
-                drop(ours);
-                drop(theirs);
-            }
-            1 => {
-                let (mut ours, mut theirs) = (ours.into_keys(), theirs.into_keys());
-                for back in steps.by_ref() {
-                    let (our_key, their_key) = if back {
-                        (ours.next_back(), theirs.next_back())
-                    } else {
-                        (ours.next(), theirs.next())
-                    };
-                    assert_eq!(our_key.map(|key| key.id()), their_key.map(|key| key.id()));
-                    ledgers.assert_same_drops_so_far();
-                }
-                drop(ours);
-                drop(theirs);
-            }
-            _ => {
-                let (mut ours, mut theirs) = (ours.into_values(), theirs.into_values());
-                for back in steps.by_ref() {
-                    let (our_value, their_value) = if back {
-                        (ours.next_back(), theirs.next_back())
-                    } else {
-                        (ours.next(), theirs.next())
-                    };
-                    assert_eq!(
-                        our_value.map(|value| value.id()),
-                        their_value.map(|value| value.id())
-                    );
-                    ledgers.assert_same_drops_so_far();
-                }
-                drop(ours);
-                drop(theirs);
-            }
+            0 => ledgers.assert_same_steps(
+                ours.into_iter().map(TrackedEntry::ids),
+                theirs.into_iter().map(TrackedEntry::ids),
+                from_back,
+            ),
+            1 => ledgers.assert_same_steps(
+                ours.into_keys().map(|key| key.id()),
+                theirs.into_keys().map(|key| key.id()),
+                from_back,
+            ),
+            _ => ledgers.assert_same_steps(
+                ours.into_values().map(|value| value.id()),
+                theirs.into_values().map(|value| value.id()),
+                from_back,
+            ),
         }
         ledgers.assert_same_drops_so_far();
     }
@@ -432,8 +446,7 @@ fn collect_keeps_the_last_of_equal_keys_like_std() {
         theirs: theirs_entries.into_iter().collect(),
     };
     ledgers.assert_same_drops_so_far();
-    let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
-    assert!(maps.ours.iter().map(ids).eq(maps.theirs.iter().map(ids)));
+    maps.assert_same_entries();
     assert!(maps.ours.leaf_depth() >= 2);
     maps.ours.check_invariants();
     assert!(!maps.drop_both());
@@ -569,7 +582,6 @@ fn retain_and_extract_if_drop_like_std() {
     for order in 0..count {
         assert!(!maps.insert(order, PanickingPart::Neither));
     }
-    let ids = |(key, value): (CollidingKey<'_>, Tracked<'_>)| (key.id(), value.id());
     for round in 0..6 {
         let decisions: Vec<bool> = (0..count).map(|_| rng.below(4) == 0).collect();
         let panic_at = if round % 3 == 2 {
@@ -599,7 +611,7 @@ fn retain_and_extract_if_drop_like_std() {
                         range.contains(&key.order) && pick(&mut calls, key)
                     })
                     .take(count / 8)
-                    .map(ids)
+                    .map(TrackedEntry::ids)
                     .collect();
                 let mut calls = 0;
                 let theirs: Vec<_> = maps
@@ -608,7 +620,7 @@ fn retain_and_extract_if_drop_like_std() {
                         range.contains(&key.order) && pick(&mut calls, key)
                     })
                     .take(count / 8)
-                    .map(ids)
+                    .map(TrackedEntry::ids)
                     .collect();
                 assert_eq!(ours, theirs);
             }
@@ -625,13 +637,7 @@ fn retain_and_extract_if_drop_like_std() {
             }
         }
         ledgers.assert_same_drops_so_far();
-        let entry_ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
-        assert!(
-            maps.ours
-                .iter()
-                .map(entry_ids)
-                .eq(maps.theirs.iter().map(entry_ids))
-        );
+        maps.assert_same_entries();
         maps.ours.check_invariants();
     }
     assert!(!maps.drop_both());
@@ -653,8 +659,7 @@ fn append_drops_like_std() {
     maps.ours.append(&mut others.ours);
     maps.theirs.append(&mut others.theirs);
     ledgers.assert_same_drops_so_far();
-    let ids = |(key, value): (&CollidingKey<'_>, &Tracked<'_>)| (key.id(), value.id());
-    assert!(maps.ours.iter().map(ids).eq(maps.theirs.iter().map(ids)));
+    maps.assert_same_entries();
     assert!(others.ours.is_empty() && others.theirs.is_empty());
     maps.ours.check_invariants();
     drop(others);
@@ -681,9 +686,7 @@ fn replacing_keeps_the_old_key_and_drops_each_once() {
         "only the new key is gone"
     );
     assert_eq!(map.get(&7_usize).map(Tracked::id), Some(new_value_id));
-    let ids = map
-        .get_key_value(&7_usize)
-        .map(|(key, value)| (key.id(), value.id()));
+    let ids = map.get_key_value(&7_usize).map(TrackedEntry::ids);
     assert_eq!(ids, Some((old_key_id, new_value_id)));
     assert_eq!(map.len(), 1);
 
@@ -813,19 +816,23 @@ fn a_panicking_drop_while_dropping_the_map_matches_std() {
 ///
 /// Padded to 72 bytes so that, with `u64` values, a 1 KB node holds 12
 /// entries in both kinds (D13, D15, D17): tall trees from few entries.
-struct BudgetedKey<'b> {
+pub(super) struct BudgetedKey<'b> {
     number: u64,
     budget: &'b Cell<usize>,
     _padding: [u8; 56],
 }
 
 impl<'b> BudgetedKey<'b> {
-    fn new(number: u64, budget: &'b Cell<usize>) -> Self {
+    pub(super) fn new(number: u64, budget: &'b Cell<usize>) -> Self {
         Self {
             number,
             budget,
             _padding: [0; 56],
         }
+    }
+
+    pub(super) fn number(&self) -> u64 {
+        self.number
     }
 }
 
@@ -915,49 +922,5 @@ fn a_panicking_ord_leaves_the_map_unchanged() {
     assert!(
         panicked > 0 && completed > 0,
         "{panicked} panicked, {completed} completed"
-    );
-}
-
-#[test]
-#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
-fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
-    use crate::tree::node::Node;
-    use crate::tree::node::inline_keys::SearchKey;
-    use crate::tree::node::leaf::Leaf;
-
-    let budget = Cell::new(usize::MAX);
-    let mut map = BBTreeMap::new();
-    let mut count = 0_u64;
-    loop {
-        map.insert(BudgetedKey::new(count, &budget), count);
-        count += 1;
-        let Node::Leaf(leaf) = map.tree.root() else {
-            panic!("stop before the first split");
-        };
-        if leaf.len() == Leaf::<BudgetedKey<'_>, u64, crate::inline_key::Auto>::capacity() {
-            break;
-        }
-    }
-    let query = BudgetedKey::new(count, &budget);
-    budget.set(usize::MAX);
-    assert!(
-        map.tree
-            .root()
-            .search_for_insert(&SearchKey::new(&query))
-            .is_err()
-    );
-    let first_search_comparisons = usize::MAX - budget.get();
-    assert!(first_search_comparisons > 0);
-    budget.set(first_search_comparisons);
-    assert!(catch_unwind(AssertUnwindSafe(|| map.insert(query, count))).is_err());
-    assert_eq!(budget.get(), 0, "the second search must have started");
-    budget.set(usize::MAX);
-    map.check_invariants();
-    assert_eq!(map.len(), count as usize);
-    assert_eq!(map.leaf_depth(), 0);
-    assert!(
-        map.iter()
-            .map(|(key, &value)| (key.number, value))
-            .eq((0..count).map(|number| (number, number)))
     );
 }
