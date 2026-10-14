@@ -19,18 +19,18 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::node::inline_keys::{InlinedKey, KeyInliner};
+use super::node::inline_keys::{KeyInliner, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, PageByKind};
+use super::node::page::{FreshPage, PageByType};
 use super::path::{LastEdge, PathMut};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order.
 pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
     /// No tree until the first entry.
-    tree: Root<K, V, S>,
+    tree: Tree<K, V, S>,
     /// The entries pushed so far.
     length: usize,
     /// The entries `extend` has taken from its iterators: those pushed, and
@@ -41,7 +41,7 @@ pub(crate) struct TreeBuilder<K, V, S: InlineKeyStrategy<K>> {
 impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     pub(crate) const fn new() -> Self {
         Self {
-            tree: Root::EMPTY,
+            tree: Tree::EMPTY,
             length: 0,
             taken: 0,
         }
@@ -52,7 +52,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// along its right border, whose prefixes are what every key of the
     /// tree shares, in any tree (D50). It counts only the entries it
     /// appends.
-    pub(crate) fn continuing(tree: Root<K, V, S>) -> Self {
+    pub(crate) fn continuing(tree: Tree<K, V, S>) -> Self {
         Self {
             tree,
             length: 0,
@@ -63,9 +63,9 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// Fits the prefixes of the nodes beside the tree's right border to
     /// their fences, reading keys: for a tree [`Self::continuing`] took
     /// from a cut, whose border took entries from them.
-    pub(crate) fn fit_border_siblings(&mut self) {
-        if self.tree.has_tree() {
-            self.tree.fit_border_siblings::<LastEdge>();
+    pub(crate) fn refit_border_siblings(&mut self) {
+        if self.tree.has_root() {
+            self.tree.refit_border_siblings::<LastEdge>();
         }
     }
 
@@ -88,12 +88,12 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
         };
         loop {
             let tree = &mut self.tree;
-            tree.page_or_new();
+            tree.ensure_root_page();
             tree.cover_key(&next.0);
             // To tell a key that shares less without the tree, whose
             // rightmost leaf is changed below.
             let shared = tree.shared_prefix().clone();
-            let leaf = Self::rightmost_leaf(tree.top_mut());
+            let leaf = Self::rightmost_leaf(tree.root_mut());
             let prefix_len = leaf.prefix_len();
             let leaf_is_full = loop {
                 let len = leaf.len();
@@ -101,7 +101,7 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
                     break true;
                 }
                 let (key, value) = next;
-                leaf.insert_fit(len, InlinedKey::new(key, prefix_len), value);
+                leaf.insert_fit(len, WindowedKey::new(key, prefix_len), value);
                 self.length += 1;
                 next = match entries.next() {
                     Some(entry) => entry,
@@ -117,9 +117,9 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             let (key, value) = next;
             // It goes up into the right border, whose prefix is what every
             // key shares.
-            let path = Self::start_leaf(tree, InlinedKey::new(key, shared.len()), value);
+            let path = Self::start_leaf(tree, WindowedKey::new(key, shared.len()), value);
             self.length += 1;
-            Self::fit_closed_nodes(path);
+            Self::refit_closed_nodes(path);
             next = match entries.next() {
                 Some(entry) => entry,
                 None => return,
@@ -141,11 +141,11 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// Fitting reads keys while the builder still holds the tree: a
     /// panicking `InlineKey` takes it apart, as it does any tree not
     /// finished, where a tree held anywhere else would leak.
-    pub(crate) fn finish(mut self) -> (Root<K, V, S>, usize) {
-        if self.tree.has_tree() {
+    pub(crate) fn finish(mut self) -> (Tree<K, V, S>, usize) {
+        if self.tree.has_root() {
             self.tree
-                .fix_border::<LastEdge>(&mut PageByKind::deallocate);
-            self.tree.fit_border_siblings::<LastEdge>();
+                .fix_border::<LastEdge>(&mut PageByType::deallocate);
+            self.tree.refit_border_siblings::<LastEdge>();
         }
         (self.tree.take(), self.length)
     }
@@ -173,16 +173,16 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// panicking `InlineKey` would leave one there that searches past the
     /// last key misread. Off the border, a prefix it leaves short of the
     /// fences is one searches allow (`prefix.rs`).
-    fn fit_closed_nodes(mut path: PathMut<'_, K, V, S>) {
+    fn refit_closed_nodes(mut path: PathMut<'_, K, V, S>) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        let top = path.depth();
+        let start_depth = path.depth();
         path.descend_to_leaf::<LastEdge>();
-        while path.depth() > top {
+        while path.depth() > start_depth {
             path.ascend();
             let edge = path.index();
-            path.fit_children_to_fences([edge]);
+            path.refit_children_to_fences([edge]);
         }
     }
 
@@ -195,8 +195,8 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
     /// at the node that took the separator, at the edge left of it, which
     /// leads down to the nodes the new leaf closed.
     fn start_leaf(
-        tree: &mut Root<K, V, S>,
-        separator: InlinedKey<K, S>,
+        tree: &mut Tree<K, V, S>,
+        separator: WindowedKey<K, S>,
         value: V,
     ) -> PathMut<'_, K, V, S> {
         let shared_len = tree.shared_prefix().len();
@@ -215,9 +215,9 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
             }
             // Its new levels along the right border take what every key
             // shares.
-            let level = Internal::new(FreshPage::allocate(), child);
-            level.set_empty_prefix_len(shared_len);
-            child = Node::Internal(level);
+            let parent = Internal::new(FreshPage::allocate(), child);
+            parent.set_empty_prefix_len(shared_len);
+            child = Node::Internal(parent);
         }
     }
 }
@@ -225,6 +225,6 @@ impl<K, V, S: InlineKeyStrategy<K>> TreeBuilder<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Drop for TreeBuilder<K, V, S> {
     /// Takes apart a tree that was not finished.
     fn drop(&mut self) {
-        self.tree.take().destroy(PageByKind::deallocate);
+        self.tree.take().destroy(PageByType::deallocate);
     }
 }

@@ -6,7 +6,7 @@
 
 use super::Child;
 use super::internal::Internal;
-use super::page::PageByKind;
+use super::page::PageByType;
 use crate::inline_key::InlineKeyStrategy;
 
 /// Separator `index` of `parent` and the children at the edges left and
@@ -91,7 +91,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// move back to it, filled from the separator's, a fence of both, reading
     /// no key. Fitting the merged child's prefix to its fences, which reads
     /// keys, is the caller's business, as for [`Self::steal_left`].
-    pub(crate) fn merge(self) -> PageByKind<K, V, S> {
+    pub(crate) fn merge(self) -> PageByType<K, V, S> {
         debug_assert!(self.can_merge());
         let fill = self.parent.window(self.index);
         let (separator, _) = self.parent.remove_with_right_child(self.index);
@@ -113,7 +113,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// Rotates one entry rightwards: the left child's last key goes up into
     /// the parent, and the parent's separator comes down to the front of the
     /// right child, each with its inline key; the left child's last trailing
-    /// slot becomes the right child's first ([`Child::rotate_right`]).
+    /// slot becomes the right child's first ([`Child::steal_left_unchecked`]).
     ///
     /// Between leaves, the value rotates through the right child's head: the
     /// left child's last value becomes the head, and the old head joins the
@@ -140,14 +140,14 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         // SAFETY: checked just above: the left child has an entry to give,
         // and the right child room for one; the right child is at `fill`'s
         // prefix length.
-        unsafe { C::rotate_right(self, fill) };
+        unsafe { C::steal_left_unchecked(self, fill) };
         Ok(())
     }
 
     /// Rotates one entry leftwards: the right child's first key goes up into
     /// the parent, and the parent's separator comes down to the end of the
     /// left child, each with its inline key; the right child's first
-    /// trailing slot becomes the left child's last ([`Child::rotate_left`]).
+    /// trailing slot becomes the left child's last ([`Child::steal_right_unchecked`]).
     /// The left child takes the parent's prefix length, as in
     /// [`Self::steal_left`].
     ///
@@ -168,7 +168,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         // SAFETY: checked just above: the right child has an entry to give,
         // and the left child room for one; the left child is at `fill`'s
         // prefix length.
-        unsafe { C::rotate_left(self, fill) };
+        unsafe { C::steal_right_unchecked(self, fill) };
         Ok(())
     }
 }

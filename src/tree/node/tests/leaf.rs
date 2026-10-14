@@ -10,11 +10,11 @@ use std::vec::Vec;
 
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
 use crate::tree::invariants::NodeChecks;
-use crate::tree::node::inline_keys::{InlinedKey, SearchKey, Separator};
+use crate::tree::node::inline_keys::{SearchKey, Separator, WindowedKey};
 use crate::tree::node::leaf::Leaf;
 use crate::tree::node::page::{NodePtr, TestPages};
 use crate::tree::node::{Insertion, Node, Split};
-use crate::tree::root::Root;
+use crate::tree::root::Tree;
 use crate::tree::test_support::{
     Bulky, CacheLineAligned, DropLedger, FromTracked, PageAligned, TestRng, TestTree, Tracked,
 };
@@ -22,12 +22,12 @@ use crate::tree::test_support::{
 /// Appends an entry to a leaf that has room.
 fn push_back<K, V, S: InlineKeyStrategy<K>>(leaf: Leaf<K, V, S>, key: K, value: V) {
     assert!(leaf.len() < Leaf::<K, V, S>::capacity(), "the leaf is full");
-    leaf.insert_fit(leaf.len(), InlinedKey::new(key, 0), value);
+    leaf.insert_fit(leaf.len(), WindowedKey::new(key, 0), value);
 }
 
 /// The root of a tree that must be a leaf.
-fn root_leaf<K, V, S: InlineKeyStrategy<K>>(tree: &Root<K, V, S>) -> Leaf<K, V, S> {
-    match tree.top() {
+fn root_leaf<K, V, S: InlineKeyStrategy<K>>(tree: &Tree<K, V, S>) -> Leaf<K, V, S> {
+    match tree.root() {
         Node::Leaf(leaf) => leaf,
         Node::Internal(_) => panic!("the root is internal"),
     }
@@ -185,7 +185,11 @@ where
         };
         assert!(edge <= leaf.len());
         if leaf.len() < Leaf::<Chaotic<'_, PADDING>, Tracked<'_>, S>::capacity() {
-            leaf.insert_fit(edge, InlinedKey::new(Chaotic::new(&rng), 0), ledger.track());
+            leaf.insert_fit(
+                edge,
+                WindowedKey::new(Chaotic::new(&rng), 0),
+                ledger.track(),
+            );
         }
     }
     destroy_leaf(leaf, &pages);
@@ -284,7 +288,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
 ) -> usize {
     let pages = TestPages::<Tracked<'l>, V, S>::new();
     let rng = TestRng::new(1);
-    let mut tree = Root::new(pages.fresh());
+    let mut tree = Tree::new(pages.fresh());
     let mut model = LeafModel {
         entries: Vec::new(),
         head: None,
@@ -300,7 +304,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 model.entries.insert(index, (key.id(), value.tracked_id()));
                 let leaf = root_leaf(&tree);
-                match leaf.insert(index, InlinedKey::new(key, 0), value, || pages.fresh()) {
+                match leaf.insert(index, WindowedKey::new(key, 0), value, || pages.fresh()) {
                     Insertion::Fit(fitted) => assert_eq!(fitted, index),
                     Insertion::Split(split) => {
                         model.assert_split_halves(leaf, &split);
@@ -324,7 +328,7 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                 let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
                 let new_ids = (key.id(), value.tracked_id());
                 let (old_key, old_value) =
-                    root_leaf(&tree).replace_key_value(index, InlinedKey::new(key, 0), value);
+                    root_leaf(&tree).replace_key_value(index, WindowedKey::new(key, 0), value);
                 assert_eq!((old_key.id(), old_value.tracked_id()), model.entries[index]);
                 model.entries[index] = new_ids;
             }
@@ -426,11 +430,11 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>> SplitLeaf<Tracke
     /// loses the removed entry.
     fn reassemble(
         self,
-        mut tree: Root<Tracked<'l>, V, S>,
+        mut tree: Tree<Tracked<'l>, V, S>,
         pages: &TestPages<Tracked<'l>, V, S>,
         rng: &TestRng,
         entries: &mut Vec<(usize, usize)>,
-    ) -> Root<Tracked<'l>, V, S> {
+    ) -> Tree<Tracked<'l>, V, S> {
         let root = tree.raise_in(pages);
         assert_eq!(root.len(), 0);
         root.insert_fit(0, self.separator, Node::Leaf(self.right));
@@ -490,14 +494,14 @@ fn split_at<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
     while leaf.len() < Leaf::<Tracked<'l>, V, S>::capacity() {
         let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
         model.entries.push((key.id(), value.tracked_id()));
-        leaf.insert_fit(leaf.len(), InlinedKey::new(key, 0), value);
+        leaf.insert_fit(leaf.len(), WindowedKey::new(key, 0), value);
     }
     let (key, value) = (ledger.track(), V::from_tracked(ledger.track()));
     model
         .entries
         .insert(position, (key.id(), value.tracked_id()));
     let Insertion::Split(split) =
-        leaf.insert(position, InlinedKey::new(key, 0), value, || pages.fresh())
+        leaf.insert(position, WindowedKey::new(key, 0), value, || pages.fresh())
     else {
         panic!("a full leaf splits");
     };
@@ -540,7 +544,7 @@ fn split_and_insert_at_every_position() {
 fn boundary_insert_remove_keeps_split_headroom() {
     for at_front in [false, true] {
         let pages = TestPages::<u64, u64>::new();
-        let mut tree = Root::new(pages.fresh());
+        let mut tree = Tree::new(pages.fresh());
         let mut length = 0;
         let capacity = Leaf::<u64, u64, Auto>::capacity() as u64;
         for key in 1..=capacity {
@@ -555,9 +559,9 @@ fn boundary_insert_remove_keeps_split_headroom() {
             &mut length,
         );
         assert_eq!(tree.leaf_depth(), 1);
-        let root = tree.top().node_ptr();
+        let root = tree.root().node_ptr();
         let allocated = pages.allocated_count();
-        let in_use = pages.in_use();
+        let in_use = pages.in_use_count();
 
         for _ in 0..16 {
             let removed = if at_front {
@@ -567,8 +571,12 @@ fn boundary_insert_remove_keeps_split_headroom() {
             };
             assert_eq!(removed, Some((boundary_key, boundary_key)));
             assert_eq!(tree.leaf_depth(), 1, "deletion must not undo the split");
-            assert!(tree.top().node_ptr().is(root));
-            assert_eq!(pages.in_use(), in_use, "no node should be merged away");
+            assert!(tree.root().node_ptr().is(root));
+            assert_eq!(
+                pages.in_use_count(),
+                in_use,
+                "no node should be merged away"
+            );
             assert_eq!(
                 tree.insert(
                     boundary_key,
@@ -598,7 +606,7 @@ fn checked_positions_reject_out_of_bounds_indices() {
     assert!(catch_unwind(AssertUnwindSafe(|| *leaf.key_value(2).1)).is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(
-            || leaf.replace_key(2, InlinedKey::new(3, 0))
+            || leaf.replace_key(2, WindowedKey::new(3, 0))
         ))
         .is_err()
     );
@@ -614,12 +622,12 @@ fn zero_sized_keys_and_values() {
     let leaf = Leaf::new(pages.fresh_leaf());
     let mut len = 0;
     while leaf.len() < Leaf::<(), (), Auto>::capacity() {
-        leaf.insert_fit(0, InlinedKey::new((), 0), ());
+        leaf.insert_fit(0, WindowedKey::new((), 0), ());
         len += 1;
     }
     assert_eq!(len, 1023);
     let Insertion::Split(split) =
-        leaf.insert(len / 2, InlinedKey::new((), 0), (), || pages.fresh())
+        leaf.insert(len / 2, WindowedKey::new((), 0), (), || pages.fresh())
     else {
         panic!("a full leaf splits");
     };

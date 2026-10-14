@@ -80,17 +80,8 @@ impl<T, S> Clone for SymmetricDifference<'_, T, S> {
 impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SymmetricDifference")
-            .field(&PrintedMerge(self))
+            .field(&self.sides.printed_as_merge_iter(self.held))
             .finish()
-    }
-}
-
-/// A symmetric difference's merge, printed as std's `MergeIterInner`.
-struct PrintedMerge<'d, 'a, T, S>(&'d SymmetricDifference<'a, T, S>);
-
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.sides.print_as_std(f, self.0.held)
     }
 }
 

@@ -318,7 +318,7 @@ fn three_words_like_std() {
 fn new_is_const_and_allocates_nothing() {
     const EMPTY: BBTreeMap<String, String> = BBTreeMap::new();
     let map = EMPTY;
-    assert!(!map.root.has_tree());
+    assert!(!map.tree.has_root());
     assert!(map.is_empty());
     assert_eq!(map.len(), 0);
     assert_eq!(map.get("absent"), None);
@@ -326,6 +326,6 @@ fn new_is_const_and_allocates_nothing() {
     map.check_invariants();
 
     let mut map: BBTreeMap<u64, u64> = BBTreeMap::default();
-    assert!(!map.root.has_tree());
+    assert!(!map.tree.has_root());
     assert_eq!(map.get_mut(&1), None);
 }

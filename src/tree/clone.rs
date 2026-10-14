@@ -1,4 +1,4 @@
-//! Copying an owned tree: [`Root::clone_tree`], node by node, so that the
+//! Copying an owned tree: [`Tree::clone_tree`], node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
 //! `Ord` and no `InlineKey`: every inline key is copied (D18), every node's
 //! prefix length (05-fence-key.md), and what every key shares (D50).
@@ -6,14 +6,14 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::node::inline_keys::{InlinedKey, Separator};
+use super::node::inline_keys::{Separator, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByKind};
-use super::root::Root;
+use super::node::page::{FreshPage, NodePtr, PageByType};
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// A copy of the tree, with every key and value cloned in key order,
     /// each separator's value right after its key (D17), its head's own
     /// where separator keys are heads (D49), on pages from the global
@@ -23,10 +23,13 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// released, before the panic goes on: nothing leaks, and the tree is
     /// unchanged.
     pub(crate) fn clone_tree(&self) -> Self {
-        let Some(root) = self.page() else {
+        let Some(root_page) = self.root_page() else {
             return Self::EMPTY;
         };
-        Self::from_node(root.top().clone_nodes(), root.shared_prefix().clone())
+        Self::from_node(
+            root_page.root().clone_nodes(),
+            root_page.shared_prefix().clone(),
+        )
     }
 }
 
@@ -47,7 +50,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 for index in 0..leaf.len() {
                     let window = leaf.window(index);
                     let (key, value) = leaf.key_value(index);
-                    let key = InlinedKey::from_parts(key.clone(), window);
+                    let key = WindowedKey::from_parts(key.clone(), window);
                     let value = value.clone();
                     // A leaf's entries fit in a leaf of its kind.
                     copy.insert_fit(index, key, value);
@@ -58,7 +61,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 let first_child = internal.child(0).clone_nodes();
                 let guard = PartialCopy::new(first_child);
                 let copy = Internal::new(FreshPage::allocate(), first_child);
-                let guard = guard.grown(Node::Internal(copy));
+                let guard = guard.with_top(Node::Internal(copy));
                 copy.set_empty_prefix_len(internal.prefix_len());
                 for index in 0..internal.len() {
                     let window = internal.window(index);
@@ -68,7 +71,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                         Separator::without_key(window)
                     } else {
                         let key = internal.key(index).clone();
-                        Separator::with_key(InlinedKey::from_parts(key, window))
+                        Separator::with_key(WindowedKey::from_parts(key, window))
                     };
                     let child = internal.child(index + 1).clone_nodes();
                     // A node's separators fit in a node of its kind.
@@ -93,7 +96,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PartialCopy<K, V, S> {
     }
 
     /// The copy, with `top` above what it held, which `top` owns now.
-    fn grown(mut self, top: Node<K, V, S>) -> Self {
+    fn with_top(mut self, top: Node<K, V, S>) -> Self {
         self.top = Some(top);
         self
     }
@@ -108,7 +111,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PartialCopy<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Drop for PartialCopy<K, V, S> {
     fn drop(&mut self) {
         if let Some(top) = self.top.take() {
-            top.destroy(PageByKind::deallocate);
+            top.destroy(PageByType::deallocate);
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Cutting a tree in two at a key: [`Root::split_off_at`], for the map's
+//! Cutting a tree in two at a key: [`Tree::split_off_at`], for the map's
 //! `split_off` and `extract_if`.
 //!
 //! A search finds the leaf edge just before the key, where the cut goes; for
@@ -18,7 +18,7 @@
 //! Along the cut, nodes on both sides may hold fewer keys than their
 //! minimum, down to none. Fixing the left tree's right border and the right
 //! tree's left border, from the top down, brings them back
-//! ([`Root::fix_border`]). A separator left at the start of the right
+//! ([`Tree::fix_border`]). A separator left at the start of the right
 //! tree, with nothing left of it, comes down along that border, by a merge
 //! or a move, into the tree's first leaf, with its value, the head of the
 //! leaf right of it (D17). Once both maps are counted, the nodes beside the
@@ -32,14 +32,14 @@
 //! # Borders
 //!
 //! Bringing the nodes along one edge of a tree up to their minimum (D22),
-//! from the top down: [`Root::fix_border`]. A tree cut in two needs it
+//! from the top down: [`Tree::fix_border`]. A tree cut in two needs it
 //! along both sides of the cut, and a tree built from the left (`build.rs`)
 //! along its right edge: there, nodes may hold any number of keys, down to
 //! none, where every other node holds its minimum.
 //!
 //! It reads no key: the nodes beside the border that give it entries keep
 //! their prefixes, which still fit their narrower fences, until the caller
-//! fits them, once its operation is done ([`Root::fit_border_siblings`]).
+//! fits them, once its operation is done ([`Tree::refit_border_siblings`]).
 
 #![forbid(unsafe_code)]
 
@@ -48,20 +48,20 @@ use core::borrow::Borrow;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, PageByKind};
+use super::node::page::{FreshPage, PageByType};
 use super::node::siblings::Siblings;
 use super::node::{Child, Node};
 use super::path::{FirstEdge, KeySide, LastEdge, NodeEnd, PathMut};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Cuts the tree at the leaf edge on `side` of `key`: keeps what lies
     /// before it, and returns what lies after, both with their borders along
     /// the cut brought up to their minimum ([`Self::fix_border`]). The nodes
     /// beside those borders, which gave them entries, keep prefixes that
     /// still fit their narrower fences: fitting them with
-    /// `fit_border_siblings`, which reads keys, is the caller's business,
+    /// `refit_border_siblings`, which reads keys, is the caller's business,
     /// once both trees are where a panic can't lose them.
     ///
     /// Every `Ord` call happens first, in the search, before anything
@@ -73,12 +73,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     {
         let mut path = PathMut::new(self);
         path.search_to_edge(&SearchKey::new(key), side);
-        path.clear_prefixes();
+        path.move_prefixes_back_to_root();
         let upper = path.cut();
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
-        let mut upper = Root::from_node(upper, self.shared_prefix().clone());
-        let release = &mut PageByKind::deallocate;
+        let mut upper = Tree::from_node(upper, self.shared_prefix().clone());
+        let release = &mut PageByType::deallocate;
         self.fix_border::<LastEdge>(release);
         upper.fix_border::<FirstEdge>(release);
         upper
@@ -126,7 +126,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Makes every node along the tree's `End` edge, its last children for
     /// [`LastEdge`] or its first for [`FirstEdge`], hold at least
     /// its minimum, by merging it with its sibling or moving keys over from
@@ -139,10 +139,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// leaves it at its minimum still.
     pub(crate) fn fix_border<End: NodeEnd>(
         &mut self,
-        release: &mut impl FnMut(PageByKind<K, V, S>),
+        release: &mut impl FnMut(PageByType<K, V, S>),
     ) {
-        self.pop_empty_roots(release);
-        if let Node::Internal(mut node) = self.top_mut() {
+        self.lower_while_root_empty(release);
+        if let Node::Internal(mut node) = self.root_mut() {
             loop {
                 let len = node.len();
                 assert!(len > 0, "a node on the border holds a key once stocked");
@@ -157,14 +157,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
                     .stock_border_child::<End>(release);
             }
         }
-        self.pop_empty_roots(release);
+        self.lower_while_root_empty(release);
     }
 
     /// Lowers the tree while its root is internal without keys, until the
-    /// root has some or is a leaf ([`Root::lower`]), handing each page
+    /// root has some or is a leaf ([`Tree::lower`]), handing each page
     /// emptied to `release`.
-    fn pop_empty_roots(&mut self, release: &mut impl FnMut(PageByKind<K, V, S>)) {
-        while matches!(self.top(), Node::Internal(root) if root.len() == 0) {
+    fn lower_while_root_empty(&mut self, release: &mut impl FnMut(PageByType<K, V, S>)) {
+        while matches!(self.root(), Node::Internal(root) if root.len() == 0) {
             release(self.lower());
         }
     }
@@ -179,7 +179,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// `End` side, merged or not.
     fn stock_border_child<End: NodeEnd>(
         mut self,
-        release: &mut impl FnMut(PageByKind<K, V, S>),
+        release: &mut impl FnMut(PageByType<K, V, S>),
     ) -> C {
         let target = C::min_len() + 1;
         let border_len = |siblings: &Self| {

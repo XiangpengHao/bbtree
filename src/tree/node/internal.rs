@@ -19,10 +19,10 @@ use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
 use super::inline_key_search::NodeInlineKeys;
-use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Separator, Window};
+use super::inline_keys::{InlineTarget, SearchKey, Separator, Window, WindowedKey};
 use super::leaf::Leaf;
 use super::node_plan::{KeySearch, NodePlan};
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType};
+use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
@@ -49,7 +49,7 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
 }
 
 // SAFETY: as for `PageType`; internal nodes are not leaves.
-unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Internal<K, V, S> {
+unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Internal<K, V, S> {
     const IS_LEAF: bool = false;
 }
 
@@ -326,7 +326,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         assert!(index < self.len(), "separator index out of bounds");
         let (left, right) = (C::child_of(self, index), C::child_of(self, index + 1));
         assert!(
-            right.has_first_slot(),
+            right.has_first_trailing_slot(),
             "the leaf right of a separator has no head"
         );
         Siblings::new(self, index, left, right)
@@ -419,9 +419,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     pub(in crate::tree) fn separator_entry_slots(
         self,
         index: usize,
-        head: Leaf<K, V, S>,
+        head_leaf: Leaf<K, V, S>,
     ) -> EntrySlots<K, V> {
-        let (key, value) = head.head_slots();
+        let (key, value) = head_leaf.head_slots();
         EntrySlots {
             key: key.unwrap_or_else(|| self.key_slot(index)),
             value,
@@ -455,13 +455,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let Some(inline_keys) = self.inline_keys() else {
             return Window::NONE;
         };
-        let window = match plan.inliner() {
+        let inline_key = match plan.inliner() {
             Some(inliner) if plan.rehydrates_windows() => {
                 inliner.inline_key_at(self.key(index), self.prefix_len())
             }
             _ => inline_keys.inline_key(index),
         };
-        Window::new(self.prefix_len(), window)
+        Window::new(self.prefix_len(), inline_key)
     }
 
     /// The window of a separator beside edge `index`, the one left of it if
@@ -472,7 +472,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// # Panics
     ///
     /// If `index > len`.
-    pub(in crate::tree) fn bound_window(self, index: usize) -> Option<Window> {
+    pub(in crate::tree) fn fence_window(self, index: usize) -> Option<Window> {
         let len = self.len();
         assert!(index <= len, "edge index out of bounds");
         let beside = index.checked_sub(1).or((index < len).then_some(index))?;
@@ -481,11 +481,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
     /// `separator`, from the child at edge `index` (from its split), with
     /// its window moved back to this node's prefix length, filled from
-    /// [`Self::bound_window`]. A node without separators is a new root,
+    /// [`Self::fence_window`]. A node without separators is a new root,
     /// whose only child, the old root, has the tree's shared prefix, as it
     /// does (D50).
-    fn window_from_child(self, index: usize, separator: Separator<K, S>) -> Separator<K, S> {
-        match self.bound_window(index) {
+    fn separator_from_child(self, index: usize, separator: Separator<K, S>) -> Separator<K, S> {
+        match self.fence_window(index) {
             Some(fill) => separator.moved_back_to(fill),
             None => {
                 debug_assert_eq!(separator.window().prefix_len(), self.prefix_len());
@@ -502,7 +502,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// # Panics
     ///
     /// If `index >= len`.
-    pub(in crate::tree) fn swap_separator(
+    pub(in crate::tree) fn replace_separator(
         self,
         index: usize,
         separator: Separator<K, S>,
@@ -522,29 +522,29 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// comes from a node below it whose bounds it is, such as the leaf right
     /// of it: it moves back to this node's, filled from the window the node
     /// hands out for the separator there now.
-    pub(crate) fn replace_separator(
+    pub(crate) fn replace_separator_from_below(
         self,
         index: usize,
         separator: Separator<K, S>,
     ) -> Separator<K, S> {
         let separator = separator.moved_back_to(self.window(index));
-        self.swap_separator(index, separator)
+        self.replace_separator(index, separator)
     }
 
     /// Replaces separator `index`'s key and its inline key, returning the
     /// old key: in this node, or where separator keys are heads, in the
     /// leaf right of it (D49). Keeping the keys in order is the caller's
     /// business.
-    pub(crate) fn replace_key(self, index: usize, key: InlinedKey<K, S>) -> K {
+    pub(crate) fn replace_key(self, index: usize, key: WindowedKey<K, S>) -> K {
         if !NodePtr::<K, V, S>::has_separator_keys_in_heads() {
-            let old = self.replace_separator(index, Separator::with_key(key));
-            return (old.into_inlined_key())
+            let old = self.replace_separator_from_below(index, Separator::with_key(key));
+            return (old.into_windowed_key())
                 .expect("a separator of a node that keeps keys is a key")
                 .into_key();
         }
         let (key, window) = key.into_parts();
         let old = self.head_leaf(index).replace_head_key(key);
-        self.replace_separator(index, Separator::without_key(window));
+        self.replace_separator_from_below(index, Separator::without_key(window));
         old
     }
 }
@@ -586,20 +586,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         Q: Ord + ?Sized,
     {
         if Self::plan().inlines_node_search() {
-            self.search_inlined(key)
+            self.search_always_inlined(key)
         } else {
-            self.search_outlined(key)
+            self.search_maybe_inlined(key)
         }
     }
 
-    /// [`Self::search_inlined`], inlined or not as LLVM decides at each
+    /// [`Self::search_always_inlined`], inlined or not as LLVM decides at each
     /// caller (`NodePlan::inlines_node_search`).
-    fn search_outlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    fn search_maybe_inlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.search_inlined(key)
+        self.search_always_inlined(key)
     }
 
     /// If the node has inline keys and `key` has one to compare (D18), taken
@@ -609,7 +609,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// within what every key of the tree shares, which a search checks at
     /// the top (D50).
     #[inline(always)]
-    fn search_inlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    fn search_always_inlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -734,7 +734,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ) {
         let len = self.len();
         debug_assert!(index <= len && len < Self::capacity());
-        let separator = self.window_from_child(index, separator);
+        let separator = self.separator_from_child(index, separator);
         // SAFETY: `index <= len < capacity` (the caller), so `index + 1 <=
         // len + 1 < capacity + 1`; separators `0..len` and edges `0..=len`
         // are initialized, and one more of each afterwards. The new edge
@@ -799,7 +799,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // SAFETY: `right` is a fresh internal node of the same map, reached
         // by nothing else, at this node's prefix length once set here.
         unsafe { right.node.set_prefix_len(self.prefix_len()) };
-        let middle = self.split_off(separator_index, right);
+        let middle = self.split_around(separator_index, right);
         // SAFETY: both halves have room (`InsertionSide::of_split`), and
         // `right_child` is of their children's kind, checked above, and at
         // their depth (the caller).
@@ -824,7 +824,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// of it, into `right`, a fresh internal node at this node's prefix
     /// length, and takes out separator `separator_index`, for the
     /// parent; returns it.
-    fn split_off(self, separator_index: usize, right: Self) -> Separator<K, S> {
+    fn split_around(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
@@ -1020,7 +1020,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         Internal::prefix_len(self)
     }
 
-    fn has_first_slot(self) -> bool {
+    fn has_first_trailing_slot(self) -> bool {
         true
     }
 
@@ -1028,12 +1028,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         Internal::move_prefix_back_to(self, fill);
     }
 
-    unsafe fn free_page(self) -> PageByKind<K, V, S> {
+    unsafe fn free_page(self) -> PageByType<K, V, S> {
         // SAFETY: forwarded.
         unsafe { self.free() }.into()
     }
 
-    unsafe fn rotate_right(siblings: &Siblings<K, V, S, Self>, fill: Window) {
+    unsafe fn steal_left_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
@@ -1048,7 +1048,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         // the one coming down the right child's old first.
         unsafe {
             let separator = left.separator_slots().remove(left_len - 1, left_len);
-            let old = parent.swap_separator(index, separator.moved_back_to(fill));
+            let old = parent.replace_separator(index, separator.moved_back_to(fill));
             right.separator_slots().insert(0, right_len, old);
             let edge = left.edge_slots().remove(left_len, left_len + 1);
             right.edge_slots().insert(0, right_len + 1, edge);
@@ -1057,16 +1057,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         }
     }
 
-    unsafe fn rotate_left(siblings: &Siblings<K, V, S, Self>, fill: Window) {
+    unsafe fn steal_right_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
-        // SAFETY: as in `rotate_right`, mirrored: the right child gives
+        // SAFETY: as in `steal_left_unchecked`, mirrored: the right child gives
         // separator 0 and edge 0, shifting the rest down, and the left child
         // has room at separator `left_len` and edge `left_len + 1`.
         unsafe {
             let separator = right.separator_slots().remove(0, right_len);
-            let old = parent.swap_separator(index, separator.moved_back_to(fill));
+            let old = parent.replace_separator(index, separator.moved_back_to(fill));
             left.separator_slots().insert(left_len, left_len, old);
             let edge = right.edge_slots().remove(0, right_len + 1);
             left.edge_slots().insert(left_len + 1, left_len + 1, edge);
@@ -1114,7 +1114,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
     /// No further than its children's prefixes: a prefix that fits its
     /// fences never passes them, but a panic may have left one of the
     /// children's short of their fences.
-    fn grown_prefix_len(self, prefix_len: usize) -> usize {
+    fn allowed_prefix_len(self, prefix_len: usize) -> usize {
         if prefix_len <= self.prefix_len() {
             return prefix_len;
         }

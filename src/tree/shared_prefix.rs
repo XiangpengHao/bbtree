@@ -46,13 +46,14 @@ impl SharedPrefix {
     pub(crate) fn of_key<K, S: InlineKeyStrategy<K>>(key: &K) -> Self {
         let mut shared = Self::none();
         if let Some(inliner) = KeyInliner::resolve::<S>() {
-            let len = inliner.leading_bytes(key, &mut shared.bytes);
+            let len = inliner.write_leading_bytes(key, &mut shared.bytes);
             shared.len = len as u8;
         }
         shared
     }
 
-    fn as_slice(&self) -> &[u8] {
+    /// The bytes themselves.
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
 
@@ -70,7 +71,7 @@ impl SharedPrefix {
             return 0;
         }
         KeyInliner::resolve::<S>().map_or(0, |inliner| {
-            inliner.common_prefix_len_with_bytes(key, self.as_slice())
+            inliner.common_prefix_len_with_bytes(key, self.as_bytes())
         })
     }
 
@@ -84,7 +85,7 @@ impl SharedPrefix {
     /// `prefix_len` fills its windows from ([`Window::moved_back_to`]), as
     /// every key of the node shares these bytes. Taken before they shrink.
     pub(crate) fn window_at(&self, prefix_len: usize) -> Window {
-        let bytes = self.as_slice();
+        let bytes = self.as_bytes();
         debug_assert!(prefix_len <= bytes.len());
         Window::new(prefix_len, bytes.inline_key_at(prefix_len))
     }
@@ -93,7 +94,7 @@ impl SharedPrefix {
     /// bytes: before all of them, or after. `None` if it has them, or if the
     /// nodes can't compare its encoding, whose searches compare full keys.
     #[inline]
-    pub(crate) fn place<K, S, Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<Ordering>
+    pub(crate) fn place_outside<K, S, Q>(&self, key: &SearchKey<'_, K, S, Q>) -> Option<Ordering>
     where
         K: Borrow<Q>,
         S: InlineKeyStrategy<K>,
@@ -102,14 +103,8 @@ impl SharedPrefix {
         if self.len == 0 {
             return None;
         }
-        key.cmp_shared_prefix(self.as_slice())
+        key.cmp_shared_prefix(self.as_bytes())
             .filter(|&order| order != Ordering::Equal)
-    }
-
-    /// The bytes themselves, for the visualizer (`vis/`).
-    #[cfg(any(test, feature = "inspect"))]
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.as_slice()
     }
 
     /// Whether `key`'s encoding starts with these bytes: an invariant of

@@ -32,9 +32,9 @@ pub(super) enum SlotMatches {
 
 /// Equality-only slot search whose byte masks fit in one machine word.
 /// Unlike ordered inline windows, these slots need not be sorted.
-pub(super) struct U16EqualityMask;
+pub(super) struct U16EqualitySearch;
 
-impl U16EqualityMask {
+impl U16EqualitySearch {
     #[inline]
     pub(super) fn matching(slots: &[u16], run: Range<usize>, target: u16) -> Option<SlotMatches> {
         #[cfg(target_arch = "x86_64")]
@@ -159,7 +159,7 @@ pub(in crate::tree) trait VectorCount: Copy {
     /// An equality mask for point lookup where it avoids ordered work.
     /// Narrow slots and unsupported targets retain the ordered reduction.
     #[inline(always)]
-    fn point_mask_in_vectors(_slots: &[Self], _target: Self) -> Option<U64EqualityMask> {
+    fn equality_mask_in_vectors(_slots: &[Self], _target: Self) -> Option<U64EqualityMask> {
         None
     }
 
@@ -376,7 +376,7 @@ vector_count!(
 /// a time, and the count goes the narrow slots' way.
 impl VectorCount for u64 {
     #[inline(always)]
-    fn point_mask_in_vectors(slots: &[Self], target: Self) -> Option<U64EqualityMask> {
+    fn equality_mask_in_vectors(slots: &[Self], target: Self) -> Option<U64EqualityMask> {
         U64EqualityMask::matching(slots, target)
     }
 
@@ -426,7 +426,7 @@ mod tests {
             0xfffe_0000_0000_0000,
             u64::MAX,
         ]
-        .map(W::of_window);
+        .map(W::of_inline_key);
         for capacity in 0..=80 {
             for len in 0..=capacity {
                 let mut slots: Vec<W> = (0..capacity)
@@ -577,7 +577,7 @@ mod tests {
     /// Point masks need not retain an empty run's insertion position, but
     /// must retain every live match and ignore stale matching tail slots.
     fn assert_point_boundaries<W: InlineSlot>() {
-        let values = [0, 1_u64 << 48, 1 << 63, u64::MAX].map(W::of_window);
+        let values = [0, 1_u64 << 48, 1 << 63, u64::MAX].map(W::of_inline_key);
         for capacity in 0..=80 {
             let supported = size_of::<W>() == 8
                 && cfg!(all(target_arch = "x86_64", target_feature = "avx512f"))
@@ -600,7 +600,7 @@ mod tests {
                         slots[..len].rotate_left(len / 2);
                     }
                     for target in values {
-                        let result = W::point_mask_in_vectors(&slots, target);
+                        let result = W::equality_mask_in_vectors(&slots, target);
                         assert_eq!(result.is_some(), supported, "capacity {capacity}");
                         if let Some(mask) = result {
                             let run = mask.run(len).unwrap_or(0..0);

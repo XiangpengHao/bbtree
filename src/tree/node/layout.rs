@@ -148,15 +148,15 @@ struct KindLayout {
 }
 
 impl<K, V> NodeLayout<K, V> {
-    /// Every node allocation is a multiple of this size, and aligned to it
-    /// or more (D15).
-    const BASE_NODE_SIZE: usize = 1024;
+    /// Every node that keeps keys is a multiple of this size, and aligned to
+    /// it or more (D15).
+    const KEYED_NODE_SIZE_STEP: usize = 1024;
 
     /// Every internal node with inline keys, which keeps no keys (D49), is a
     /// multiple of this size, and aligned to it: as many children as 1 KiB
     /// holds with keys, or more, in half the bytes, whose inline keys a
     /// search scans whole (06, lesson 1).
-    const KEYLESS_NODE_SIZE: usize = 512;
+    const KEYLESS_NODE_SIZE_STEP: usize = 512;
 
     /// Entries up to this size start at a multiple of it, so that none
     /// crosses a cache line (D34).
@@ -189,36 +189,36 @@ impl<K, V> NodeLayout<K, V> {
         pair_with_key: false,
     };
 
-    pub(in crate::tree) const PLAIN_LEAF: LeafLayout = Self::leaf_layout(None, false);
+    pub(in crate::tree) const PLAIN_LEAF: LeafLayout = Self::compute_leaf(None, false);
 
     pub(super) const TWO_BYTE_INLINE_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Two), false);
+        Self::compute_leaf(Some(InlineWidth::Two), false);
 
     pub(super) const FOUR_BYTE_INLINE_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Four), false);
+        Self::compute_leaf(Some(InlineWidth::Four), false);
 
     pub(super) const EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Eight), false);
+        Self::compute_leaf(Some(InlineWidth::Eight), false);
 
-    pub(super) const TWO_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Two), true);
+    pub(super) const TWO_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Two), true);
 
-    pub(super) const FOUR_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Four), true);
+    pub(super) const FOUR_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Four), true);
 
-    pub(super) const EIGHT_BYTE_INLINE_TAGGED_LEAF: LeafLayout =
-        Self::leaf_layout(Some(InlineWidth::Eight), true);
+    pub(super) const EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Eight), true);
 
-    pub(in crate::tree) const PLAIN_INTERNAL: InternalLayout = Self::internal_layout(None);
+    pub(in crate::tree) const PLAIN_INTERNAL: InternalLayout = Self::compute_internal(None);
 
     pub(super) const TWO_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::internal_layout(Some(InlineWidth::Two));
+        Self::compute_internal(Some(InlineWidth::Two));
 
     pub(super) const FOUR_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::internal_layout(Some(InlineWidth::Four));
+        Self::compute_internal(Some(InlineWidth::Four));
 
     pub(super) const EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::internal_layout(Some(InlineWidth::Eight));
+        Self::compute_internal(Some(InlineWidth::Eight));
 
     /// The leaf layout without inline keys, or with inline keys of
     /// `inline_width`, with room for length tags if `length_tags` and there
@@ -230,9 +230,9 @@ impl<K, V> NodeLayout<K, V> {
             (Some(InlineWidth::Two), false) => Self::TWO_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Four), false) => Self::FOUR_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Eight), false) => Self::EIGHT_BYTE_INLINE_LEAF,
-            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_TAGGED_LEAF,
-            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_TAGGED_LEAF,
-            (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_TAGGED_LEAF,
+            (Some(InlineWidth::Two), true) => Self::TWO_BYTE_INLINE_LENGTH_TAGGED_LEAF,
+            (Some(InlineWidth::Four), true) => Self::FOUR_BYTE_INLINE_LENGTH_TAGGED_LEAF,
+            (Some(InlineWidth::Eight), true) => Self::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF,
         }
     }
 
@@ -256,7 +256,7 @@ impl<K, V> NodeLayout<K, V> {
     /// the head's value, the leaf gives up an entry to keep them, its
     /// capacity sized with the tags beside the inline keys; anywhere else,
     /// it keeps none.
-    const fn leaf_layout(inline_width: Option<InlineWidth>, length_tags: bool) -> LeafLayout {
+    const fn compute_leaf(inline_width: Option<InlineWidth>, length_tags: bool) -> LeafLayout {
         let inline_key_size = Self::inline_key_size(inline_width);
         let layout = Self::kind_layout(inline_key_size, 0, Self::VALUE, true);
         if inline_key_size == 0 || !length_tags {
@@ -267,10 +267,14 @@ impl<K, V> NodeLayout<K, V> {
         if tags_end <= Self::entries_offset(layout) {
             Self::leaf_of(layout, Some(tags_start))
         } else if tags_end <= layout.trailing_offset && tags_end <= layout.keys.keys_offset {
-            let tagged = Self::kind_layout(inline_key_size, size_of::<u16>(), Self::VALUE, true);
+            let length_tagged =
+                Self::kind_layout(inline_key_size, size_of::<u16>(), Self::VALUE, true);
             Self::leaf_of(
-                tagged,
-                Some(Self::columns_end(inline_key_size, tagged.keys.capacity)),
+                length_tagged,
+                Some(Self::columns_end(
+                    inline_key_size,
+                    length_tagged.keys.capacity,
+                )),
             )
         } else {
             Self::leaf_of(layout, None)
@@ -305,7 +309,7 @@ impl<K, V> NodeLayout<K, V> {
 
     /// Internal nodes are sized by their keys, if they keep them, and one
     /// more edge: with inline keys, they keep none (D49).
-    const fn internal_layout(inline_width: Option<InlineWidth>) -> InternalLayout {
+    const fn compute_internal(inline_width: Option<InlineWidth>) -> InternalLayout {
         let inline_key_size = Self::inline_key_size(inline_width);
         let layout = Self::kind_layout(inline_key_size, 0, Self::EDGE, inline_key_size == 0);
         InternalLayout {
@@ -323,11 +327,11 @@ impl<K, V> NodeLayout<K, V> {
     /// fit in it.
     const fn kind_layout(
         inline_key_size: usize,
-        tag_size: usize,
+        length_tag_size: usize,
         trailing: TrailingSlot,
         keeps_keys: bool,
     ) -> KindLayout {
-        let column_size = inline_key_size + tag_size;
+        let column_size = inline_key_size + length_tag_size;
         let align = Self::node_align(trailing.align, keeps_keys);
         let size = Self::bytes_needed(column_size, trailing, keeps_keys, Self::MIN_CAPACITY)
             .next_multiple_of(align);
@@ -495,9 +499,9 @@ impl<K, V> NodeLayout<K, V> {
     /// Every node is a multiple of this size, and aligned to it.
     const fn node_size_step(keeps_keys: bool) -> usize {
         if keeps_keys {
-            Self::BASE_NODE_SIZE
+            Self::KEYED_NODE_SIZE_STEP
         } else {
-            Self::KEYLESS_NODE_SIZE
+            Self::KEYLESS_NODE_SIZE_STEP
         }
     }
 
@@ -505,7 +509,7 @@ impl<K, V> NodeLayout<K, V> {
     /// `inline_width` stores; 0 for a node without.
     const fn inline_key_size(inline_width: Option<InlineWidth>) -> usize {
         match inline_width {
-            Some(width) => width.bytes(),
+            Some(width) => width.byte_len(),
             None => 0,
         }
     }
@@ -928,7 +932,7 @@ mod tests {
         let tagged = NodePtr::<String, u64, Auto>::leaf_layout();
         assert_eq!(
             tagged,
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_TAGGED_LEAF
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF
         );
         ExpectedNode::one_page(23, 288, 280).assert_leaf(tagged, (32, 32), true);
         assert_eq!(tagged.length_tags_offset, Some(192));

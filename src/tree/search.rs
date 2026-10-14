@@ -12,7 +12,7 @@ use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
 /// Where a search found a key: in a leaf, beside its value, or a separator
@@ -121,14 +121,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 }
             },
         };
-        match leaf.search_inlined(key) {
+        match leaf.search_always_inlined(key) {
             Ok(index) => Ok(Found::InLeaf(leaf, index)),
             Err(edge) => Err((leaf, edge)),
         }
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// The entry whose key equals `key`, if the tree holds one. A key that
     /// lacks what every key of the tree shares (D50) is in none of its
     /// nodes, and needs no search.
@@ -137,12 +137,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let root = self.page()?;
+        let root_page = self.root_page()?;
         let key = SearchKey::new(key);
-        if root.shared_prefix().place(&key).is_some() {
+        if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root.top().find_point(&key).map(Found::key_value)
+        root_page.root().find_point(&key).map(Found::key_value)
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
@@ -152,12 +152,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let root = self.page_mut()?;
+        let root_page = self.root_page_mut()?;
         let key = SearchKey::new(key);
-        if root.shared_prefix().place(&key).is_some() {
+        if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root.top().find_point(&key).map(Found::value_mut)
+        root_page.root().find_point(&key).map(Found::value_mut)
     }
 }
 
@@ -170,11 +170,11 @@ mod tests {
 
     use super::Found;
     use crate::tree::node::Node;
-    use crate::tree::node::inline_keys::{InlinedKey, SearchKey, Separator};
+    use crate::tree::node::inline_keys::{SearchKey, Separator, WindowedKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
     use crate::tree::node::page::TestPages;
-    use crate::tree::root::Root;
+    use crate::tree::root::Tree;
     use crate::tree::test_support::{DropLedger, TestRng, TestTree, Tracked};
 
     /// 64-byte keys: with `Tracked` values, 1 KB nodes hold 12 entries in a
@@ -206,7 +206,7 @@ mod tests {
     /// through its head, and checks that there is one fewer than leaves.
     fn separator_values(tree: &TestTree<'_, WideKey, Tracked<'_>>) -> Vec<(WideKey, usize)> {
         let mut separators = Vec::new();
-        let leaves = separators_and_leaves(tree.root().top(), &mut separators);
+        let leaves = separators_and_leaves(tree.root(), &mut separators);
         assert_eq!(
             separators.len() + 1,
             leaves,
@@ -241,7 +241,7 @@ mod tests {
         assert!(!separators.is_empty());
         for &(key, value_id) in &separators {
             assert_eq!(value_id, value_ids[&key]);
-            let found = tree.root().top().find_point(&SearchKey::new(&key));
+            let found = tree.root().find_point(&SearchKey::new(&key));
             let Some(found @ Found::Separator(..)) = found else {
                 panic!("a separator is found where it lives, above the leaves");
             };
@@ -273,12 +273,12 @@ mod tests {
     fn a_separator_over_a_headless_leaf_panics() {
         let ledger = DropLedger::new();
         let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
-        let mut tree = Root::new(pages.fresh());
+        let mut tree = Tree::new(pages.fresh());
         let root = tree.raise_in(&pages);
         let headless = Leaf::new(pages.fresh_leaf());
         root.insert_fit(
             0,
-            Separator::with_key(InlinedKey::new(ledger.track(), 0)),
+            Separator::with_key(WindowedKey::new(ledger.track(), 0)),
             Node::Leaf(headless),
         );
         let found = Found::Separator(root, 0);

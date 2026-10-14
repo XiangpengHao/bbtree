@@ -27,19 +27,19 @@ use crate::inline_key::InlineWord;
 /// a match on every level of every insert.
 #[derive(Clone, Copy)]
 pub(in crate::tree) enum NodeInlineKeys<'a> {
-    Two(LiveSlots<'a, u16>),
-    Four(LiveSlots<'a, u32>),
-    Eight(LiveSlots<'a, u64>),
+    Two(InlineKeysOfWidth<'a, u16>),
+    Four(InlineKeysOfWidth<'a, u32>),
+    Eight(InlineKeysOfWidth<'a, u64>),
 }
 
-/// `$body`, with `$live` bound to the slots of `$inline_keys`, whichever
+/// `$body`, with `$of_width` bound to the slots of `$inline_keys`, whichever
 /// their width.
-macro_rules! with_live_slots {
-    ($inline_keys:expr, |$live:ident| $body:expr) => {
+macro_rules! with_inline_keys_of_width {
+    ($inline_keys:expr, |$of_width:ident| $body:expr) => {
         match $inline_keys {
-            NodeInlineKeys::Two($live) => $body,
-            NodeInlineKeys::Four($live) => $body,
-            NodeInlineKeys::Eight($live) => $body,
+            NodeInlineKeys::Two($of_width) => $body,
+            NodeInlineKeys::Four($of_width) => $body,
+            NodeInlineKeys::Eight($of_width) => $body,
         }
     };
 }
@@ -57,13 +57,13 @@ impl<'a> NodeInlineKeys<'a> {
         unsafe {
             match slots {
                 InlineKeySlots::Two(slots) => {
-                    Self::Two(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                    Self::Two(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
                 }
                 InlineKeySlots::Four(slots) => {
-                    Self::Four(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                    Self::Four(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
                 }
                 InlineKeySlots::Eight(slots) => {
-                    Self::Eight(LiveSlots::new(slots.run(0, capacity).as_ref(), len))
+                    Self::Eight(InlineKeysOfWidth::new(slots.run(0, capacity).as_ref(), len))
                 }
             }
         }
@@ -77,52 +77,54 @@ impl<'a> NodeInlineKeys<'a> {
     /// If `index >= len`.
     #[inline(always)]
     pub(in crate::tree) fn inline_key(self, index: usize) -> InlineWord {
-        with_live_slots!(self, |live| live.live()[index].window())
+        with_inline_keys_of_width!(self, |of_width| of_width.live()[index].inline_key())
     }
 
     /// How inline key `index` orders against the bytes the node keeps of
-    /// `window`. Equal says nothing of the keys.
+    /// `inline_key`. Equal says nothing of the keys.
     ///
     /// # Panics
     ///
     /// If `index >= len`.
     #[inline(always)]
-    pub(super) fn cmp_at(self, index: usize, window: InlineWord) -> Ordering {
-        with_live_slots!(self, |live| live
-            .cmp_at(index, InlineSlot::of_window(window)))
+    pub(super) fn cmp_at(self, index: usize, inline_key: InlineWord) -> Ordering {
+        with_inline_keys_of_width!(self, |of_width| of_width
+            .cmp_at(index, InlineSlot::of_inline_key(inline_key)))
     }
 
     /// The positions of the inline keys equal to the bytes the node keeps
-    /// of `window`; see [`LiveSlots::equal_run`].
+    /// of `inline_key`; see [`InlineKeysOfWidth::equal_run`].
     #[inline(always)]
-    pub(in crate::tree) fn equal_run(self, window: InlineWord) -> Range<usize> {
-        with_live_slots!(self, |live| live.equal_run(InlineSlot::of_window(window)))
+    pub(in crate::tree) fn equal_run(self, inline_key: InlineWord) -> Range<usize> {
+        with_inline_keys_of_width!(self, |of_width| of_width
+            .equal_run(InlineSlot::of_inline_key(inline_key)))
     }
 
     /// An equality mask only for widths and targets that benefit from it.
     /// Unsupported shapes keep the original ordered range and empty check.
     #[inline(always)]
-    pub(super) fn point_mask(self, window: InlineWord) -> Option<U64EqualityMask> {
-        with_live_slots!(self, |live| live.point_mask(InlineSlot::of_window(window)))
+    pub(super) fn equality_mask(self, inline_key: InlineWord) -> Option<U64EqualityMask> {
+        with_inline_keys_of_width!(self, |of_width| of_width
+            .equality_mask(InlineSlot::of_inline_key(inline_key)))
     }
 
     /// Whether every slot past `len` holds the greatest inline key
     /// (invariant 4).
     #[cfg(any(test, fuzzing))]
     pub(in crate::tree) fn pads_with_greatest(self) -> bool {
-        with_live_slots!(self, |live| live.pads_with_greatest())
+        with_inline_keys_of_width!(self, |of_width| of_width.pads_with_greatest())
     }
 }
 
 /// A node's inline keys at one width, as [`NodeInlineKeys`] reads them:
 /// `slots` up to the capacity, of which the first `len` are live.
 #[derive(Clone, Copy)]
-pub(in crate::tree) struct LiveSlots<'a, W> {
+pub(in crate::tree) struct InlineKeysOfWidth<'a, W> {
     slots: &'a [W],
     len: usize,
 }
 
-impl<'a, W: InlineSlot> LiveSlots<'a, W> {
+impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     fn new(slots: &'a [W], len: usize) -> Self {
         debug_assert!(len <= slots.len());
         Self { slots, len }
@@ -135,7 +137,7 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
 
     #[cfg(any(test, fuzzing))]
     fn pads_with_greatest(self) -> bool {
-        let greatest = W::of_window(InlineWord::MAX);
+        let greatest = W::of_inline_key(InlineWord::MAX);
         self.slots[self.len..].iter().all(|&slot| slot == greatest)
     }
 
@@ -158,7 +160,7 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
     /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
     /// compiler vectorizes it ([`Self::equal_run_by_count`]) where it
     /// compares slots of this width in vectors
-    /// ([`InlineSlot::COUNTS_IN_VECTORS`]); and by a binary search
+    /// ([`InlineSlot::COUNT_AUTOVECTORIZES`]); and by a binary search
     /// otherwise ([`Self::equal_run_by_search`]): without such compares,
     /// the count is an emulated sequence that costs more than the
     /// mispredicts it avoids. Measured on 1M-entry maps of 8-byte inline
@@ -180,7 +182,7 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
         if let Some(run) = W::equal_run_in_vectors(self.slots, self.len, target) {
             return run;
         }
-        if W::COUNTS_IN_VECTORS {
+        if W::COUNT_AUTOVECTORIZES {
             self.equal_run_by_count(target)
         } else {
             self.equal_run_by_search(target)
@@ -190,8 +192,8 @@ impl<'a, W: InlineSlot> LiveSlots<'a, W> {
     /// Equality-only masks are optional; ordered fallback is chosen by
     /// the leaf without wrapping its existing range in another result.
     #[inline(always)]
-    fn point_mask(self, target: W) -> Option<U64EqualityMask> {
-        W::point_mask_in_vectors(self.slots, target)
+    fn equality_mask(self, target: W) -> Option<U64EqualityMask> {
+        W::equality_mask_in_vectors(self.slots, target)
     }
 
     /// One pass over every slot up to the capacity counts the inline keys
@@ -259,7 +261,7 @@ mod tests {
     use core::ptr::NonNull;
     use std::vec;
 
-    use super::{InlineKeySlots, InlineSlot, LiveSlots, NodeInlineKeys};
+    use super::{InlineKeySlots, InlineKeysOfWidth, InlineSlot, NodeInlineKeys};
     use crate::inline_key::{InlineWidth, InlineWord};
     use crate::tree::test_support::TestRng;
 
@@ -276,7 +278,7 @@ mod tests {
 
     /// The greatest inline key, which slots past a node's length hold.
     fn greatest<W: InlineSlot>() -> W {
-        W::of_window(InlineWord::MAX)
+        W::of_inline_key(InlineWord::MAX)
     }
 
     /// On sorted inline keys, the run is exactly the equal ones, wherever
@@ -297,7 +299,7 @@ mod tests {
             inline_keys.sort_unstable();
             let stale = core::iter::repeat_n(greatest(), rng.below(8));
             let slots: Vec<W> = inline_keys.iter().copied().chain(stale).collect();
-            let node = LiveSlots::new(&slots, len);
+            let node = InlineKeysOfWidth::new(&slots, len);
             let unpadded = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
             for target in (0..18).map(W::from).chain([greatest()]) {
                 let start = inline_keys.partition_point(|&probe| probe < target);
@@ -329,7 +331,7 @@ mod tests {
             let len = rng.below(40);
             let inline_keys: Vec<W> = (0..len).map(|_| W::from(rng.below(4) as u8)).collect();
             let slots = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
-            let node = LiveSlots::new(&slots, len);
+            let node = InlineKeysOfWidth::new(&slots, len);
             for target in (0..5).map(W::from) {
                 let runs = [
                     node.equal_run(target),

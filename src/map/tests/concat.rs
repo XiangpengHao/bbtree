@@ -1,4 +1,4 @@
-//! Joining trees (`tree/join.rs`), through [`Root::concat`], which puts
+//! Joining trees (`tree/join.rs`), through [`Tree::concat`], which puts
 //! back together the pieces `extract_if` cuts: on trees of every pair of
 //! leaf depths up to 3, with roots and borders of every fill, so that every way
 //! a join goes comes up. The shorter root is absorbed by the taller tree's
@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::map::BBTreeMap;
-use crate::tree::root::Root;
+use crate::tree::root::Tree;
 use crate::tree::test_support::{FromNumber, TestRng};
 
 /// A map of the keys made from `numbers`, which ascend, each with its number
@@ -64,7 +64,7 @@ fn random_len(rng: &TestRng, max: usize) -> usize {
 
 /// Joins two random pieces, the left one's numbers all below the right
 /// one's, `trials` times, checking each result against the numbers.
-fn join_random_pieces<K>(seed: u64, trials: usize, max_len: usize)
+fn concat_random_pieces<K>(seed: u64, trials: usize, max_len: usize)
 where
     K: Ord + Clone + Debug + FromNumber,
     Auto: InlineKeyStrategy<K>,
@@ -80,7 +80,7 @@ where
         let mut right = random_shape::<K>(&rng, &right_numbers);
         let expected: Vec<usize> = left.values().chain(right.values()).copied().collect();
         let joined = BBTreeMap {
-            root: Root::concat(left.root.take(), right.root.take()),
+            tree: Tree::concat(left.tree.take(), right.tree.take()),
             length: expected.len(),
         };
         (left.length, right.length) = (0, 0);
@@ -98,7 +98,7 @@ fn concat_joins_u64_trees_of_every_shape() {
     } else {
         (1000, 20_000)
     };
-    join_random_pieces::<u64>(31, trials, max_len);
+    concat_random_pieces::<u64>(31, trials, max_len);
 }
 
 /// String keys, with prefixes along their fences, and shared prefixes
@@ -110,5 +110,5 @@ fn concat_joins_string_trees_of_every_shape() {
     } else {
         (1000, 20_000)
     };
-    join_random_pieces::<String>(32, trials, max_len);
+    concat_random_pieces::<String>(32, trials, max_len);
 }

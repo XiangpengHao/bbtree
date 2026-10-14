@@ -47,7 +47,7 @@
 use core::mem;
 
 use super::inline_keys::KeyInliner;
-use super::page::{ByteString, PageKind};
+use super::page::{ByteString, NodeKind};
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
@@ -84,7 +84,7 @@ impl<K> Copy for NodePlan<K> {}
 impl<K> NodePlan<K> {
     /// The plan of the nodes of kind `Kind` in a map with strategy `S`.
     #[inline(always)]
-    pub(in crate::tree) fn of<S: InlineKeyStrategy<K>, Kind: PageKind>() -> Self {
+    pub(in crate::tree) fn of<S: InlineKeyStrategy<K>, Kind: NodeKind>() -> Self {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
             return Self::without_inline_keys();
         };
@@ -149,7 +149,7 @@ impl<K> NodePlan<K> {
     /// key when they hand it out (D43). Keys whose inline keys tie compare
     /// by their bytes past the tie.
     #[inline(always)]
-    fn for_heap_byte_strings<Kind: PageKind>(inliner: KeyInliner<K>) -> Self {
+    fn for_heap_byte_strings<Kind: NodeKind>(inliner: KeyInliner<K>) -> Self {
         let leaf = Kind::IS_LEAF;
         Self {
             inliner: Some(inliner),
@@ -196,10 +196,10 @@ impl<K> NodePlan<K> {
     #[inline(always)]
     pub(in crate::tree) fn length_tag(self, key: &K) -> Option<u16> {
         self.length_tags.then(|| {
-            let bytes = self
+            let byte_string = self
                 .byte_string()
                 .expect("only std byte strings have length tags");
-            bytes.bytes(key).len() as u16
+            byte_string.bytes(key).len() as u16
         })
     }
 
@@ -300,7 +300,7 @@ mod tests {
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
-    use crate::tree::node::page::PageKind;
+    use crate::tree::node::page::NodeKind;
     use crate::tree::test_support::Tracked;
 
     /// A plan's answers, for comparing whole rows of the table at once.
@@ -315,7 +315,7 @@ mod tests {
     }
 
     impl PlanRow {
-        fn of<K, S: InlineKeyStrategy<K>, Kind: PageKind>() -> Self {
+        fn of<K, S: InlineKeyStrategy<K>, Kind: NodeKind>() -> Self {
             let plan = NodePlan::<K>::of::<S, Kind>();
             Self {
                 inline_width: plan.inline_width(),

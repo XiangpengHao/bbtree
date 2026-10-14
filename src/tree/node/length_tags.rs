@@ -4,8 +4,8 @@
 
 #![forbid(unsafe_code)]
 
-pub(super) use super::vector_count::SlotMatches as LengthMatch;
-use super::vector_count::U16EqualityMask;
+pub(super) use super::vector_count::SlotMatches;
+use super::vector_count::U16EqualitySearch;
 use core::ops::Range;
 
 pub(super) struct LengthTags<'a> {
@@ -20,8 +20,8 @@ impl<'a> LengthTags<'a> {
     /// Only live keys in the primary ordered run may match. Reading the
     /// initialized capacity gives the compiler a constant vector trip count.
     #[inline]
-    pub(super) fn matching(&self, run: Range<usize>, target: u16) -> LengthMatch {
-        if let Some(matches) = U16EqualityMask::matching(self.slots, run.clone(), target) {
+    pub(super) fn matching(&self, run: Range<usize>, target: u16) -> SlotMatches {
+        if let Some(matches) = U16EqualitySearch::matching(self.slots, run.clone(), target) {
             return matches;
         }
         let mut matches = self.slots[run.clone()]
@@ -29,15 +29,15 @@ impl<'a> LengthTags<'a> {
             .enumerate()
             .filter(|(_, tag)| **tag == target);
         let Some((lower, _)) = matches.next() else {
-            return LengthMatch::None;
+            return SlotMatches::None;
         };
         let Some((upper, _)) = matches.next() else {
-            return LengthMatch::One(run.start + lower);
+            return SlotMatches::One(run.start + lower);
         };
         if matches.next().is_some() {
-            LengthMatch::Many
+            SlotMatches::Many
         } else {
-            LengthMatch::Two {
+            SlotMatches::Two {
                 lower: run.start + lower,
                 upper: run.start + upper,
             }
@@ -49,7 +49,7 @@ impl<'a> LengthTags<'a> {
 mod tests {
     use std::vec;
 
-    use super::{LengthMatch, LengthTags};
+    use super::{LengthTags, SlotMatches};
 
     #[test]
     fn length_filter_checks_only_the_primary_live_run() {
@@ -59,19 +59,19 @@ mod tests {
                 slots[target_index] = 65535;
                 let tags = LengthTags::new(&slots);
                 assert!(
-                    matches!(tags.matching(0..capacity, 65535), LengthMatch::One(index) if index == target_index)
+                    matches!(tags.matching(0..capacity, 65535), SlotMatches::One(index) if index == target_index)
                 );
                 assert!(matches!(
                     tags.matching(0..target_index, 65535),
-                    LengthMatch::None
+                    SlotMatches::None
                 ));
                 assert!(matches!(
                     tags.matching(target_index + 1..capacity, 65535),
-                    LengthMatch::None
+                    SlotMatches::None
                 ));
-                assert!(matches!(tags.matching(0..0, 7), LengthMatch::None));
+                assert!(matches!(tags.matching(0..0, 7), SlotMatches::None));
                 if capacity > 3 {
-                    assert!(matches!(tags.matching(0..capacity, 7), LengthMatch::Many));
+                    assert!(matches!(tags.matching(0..capacity, 7), SlotMatches::Many));
                 }
                 slots[target_index] = 7;
             }
@@ -85,7 +85,7 @@ mod tests {
             let mut slots = vec![7; capacity];
             assert!(matches!(
                 LengthTags::new(&slots).matching(0..0, 7),
-                LengthMatch::None
+                SlotMatches::None
             ));
             for lower in 0..capacity {
                 slots[lower] = 65535;
@@ -94,16 +94,16 @@ mod tests {
                     let tags = LengthTags::new(&slots);
                     assert!(matches!(
                         tags.matching(0..capacity, 65535),
-                        LengthMatch::Two { lower: first, upper: second }
+                        SlotMatches::Two { lower: first, upper: second }
                             if (first, second) == (lower, upper)
                     ));
                     assert!(matches!(
                         tags.matching(lower..upper, 65535),
-                        LengthMatch::One(index) if index == lower
+                        SlotMatches::One(index) if index == lower
                     ));
                     assert!(matches!(
                         tags.matching(lower + 1..upper + 1, 65535),
-                        LengthMatch::One(index) if index == upper
+                        SlotMatches::One(index) if index == upper
                     ));
                     slots[upper] = 7;
                 }
@@ -117,7 +117,7 @@ mod tests {
         slots[65536] = 65535;
         assert!(matches!(
             LengthTags::new(&slots).matching(0..slots.len(), 65535),
-            LengthMatch::Two {
+            SlotMatches::Two {
                 lower: 17,
                 upper: 65536
             }
@@ -125,7 +125,7 @@ mod tests {
         slots[65535] = 65535;
         assert!(matches!(
             LengthTags::new(&slots).matching(0..slots.len(), 65535),
-            LengthMatch::Many
+            SlotMatches::Many
         ));
     }
 }

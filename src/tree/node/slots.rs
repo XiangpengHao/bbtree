@@ -13,10 +13,10 @@ use core::marker::PhantomData;
 use core::ops::{Index, Range};
 use core::ptr::NonNull;
 
-use super::inline_keys::{InlineSlot, InlinedKey, Separator, Window};
+use super::inline_keys::{InlineSlot, Separator, Window, WindowedKey};
 use super::internal::Internal;
 use super::node_plan::NodePlan;
-use super::page::PageKind;
+use super::page::NodeKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
 /// Where `capacity` slots of `T` sit in memory: slot `i` at `stride * i`
@@ -300,7 +300,7 @@ impl<T> Slots<T> {
 /// whose keys are an array of their own, or each the key of an entry in a
 /// node of `(key, value)` or `(key, edge)` entries (D29).
 pub(crate) struct NodeKeys<'a, K> {
-    first: NonNull<K>,
+    anchor: NonNull<K>,
     /// Bytes from one key to the next.
     stride: usize,
     len: usize,
@@ -326,7 +326,7 @@ impl<'a, K> NodeKeys<'a, K> {
     pub(super) unsafe fn new(keys: Slots<K>, len: usize) -> Self {
         debug_assert!(len <= keys.capacity);
         Self {
-            first: keys.anchor,
+            anchor: keys.anchor,
             stride: keys.stride,
             len,
             _keys: PhantomData,
@@ -345,7 +345,7 @@ impl<'a, K> NodeKeys<'a, K> {
     pub(crate) unsafe fn get_unchecked(self, index: usize) -> &'a K {
         debug_assert!(index < self.len);
         // SAFETY: key `index` is initialized and unchanged for `'a` (`new`).
-        unsafe { self.first.byte_add(index * self.stride).as_ref() }
+        unsafe { self.anchor.byte_add(index * self.stride).as_ref() }
     }
 
     /// Key `index`, or `None` if `index >= len`.
@@ -372,7 +372,7 @@ impl<'a, K> NodeKeys<'a, K> {
             // SAFETY: `range.start <= len`: a key's slot, or the end of the
             // last key's stride, within the allocation or one past it
             // (`new`).
-            first: unsafe { self.first.byte_add(range.start * self.stride) },
+            anchor: unsafe { self.anchor.byte_add(range.start * self.stride) },
             len: range.end - range.start,
             ..self
         }
@@ -569,7 +569,7 @@ impl InlineKeySlots {
     /// `index < capacity`, and slot `index` is initialized.
     pub(super) unsafe fn read(self, index: usize) -> InlineWord {
         // SAFETY: forwarded.
-        unsafe { with_slots_of_width!(self, |slots| slots.slot(index).read().window()) }
+        unsafe { with_slots_of_width!(self, |slots| slots.slot(index).read().inline_key()) }
     }
 
     /// Fills every slot with the greatest inline key, all ones.
@@ -583,17 +583,19 @@ impl InlineKeySlots {
         unsafe { with_slots_of_width!(self, |slots| slots.fill_bytes(u8::MAX)) }
     }
 
-    /// Writes the first bytes of `window` into slot `index`, which is
+    /// Writes the first bytes of `inline_key` into slot `index`, which is
     /// initialized afterwards. Inline keys need no dropping.
     ///
     /// # Safety
     ///
     /// `index < capacity`.
-    pub(super) unsafe fn write(self, index: usize, window: InlineWord) {
+    pub(super) unsafe fn write(self, index: usize, inline_key: InlineWord) {
         // SAFETY: forwarded.
         unsafe {
             with_slots_of_width!(self, |slots| {
-                slots.slot(index).write(InlineSlot::of_window(window));
+                slots
+                    .slot(index)
+                    .write(InlineSlot::of_inline_key(inline_key));
             });
         }
     }
@@ -603,11 +605,11 @@ impl InlineKeySlots {
     /// # Safety
     ///
     /// As for [`Slots::insert`].
-    pub(super) unsafe fn insert(self, index: usize, len: usize, window: InlineWord) {
+    pub(super) unsafe fn insert(self, index: usize, len: usize, inline_key: InlineWord) {
         // SAFETY: forwarded.
         unsafe {
             with_slots_of_width!(self, |slots| {
-                slots.insert(index, len, InlineSlot::of_window(window));
+                slots.insert(index, len, InlineSlot::of_inline_key(inline_key));
             });
         }
     }
@@ -620,7 +622,7 @@ impl InlineKeySlots {
     /// As for [`Slots::remove`].
     pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlineWord {
         // SAFETY: forwarded.
-        unsafe { with_slots_of_width!(self, |slots| slots.remove(index, len).window()) }
+        unsafe { with_slots_of_width!(self, |slots| slots.remove(index, len).inline_key()) }
     }
 
     /// See [`Slots::move_run_to`]. `dest` has this array's width: runs move
@@ -868,7 +870,7 @@ impl<K, S, Kind> Clone for KeySlots<K, S, Kind> {
 
 impl<K, S, Kind> Copy for KeySlots<K, S, Kind> {}
 
-impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
+impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// The columns have the keys' capacity, and are those of the plan of
@@ -907,7 +909,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
             return Window::NONE;
         };
         let plan = NodePlan::<K>::of::<S, Kind>();
-        let word = match plan.inliner() {
+        let inline_key = match plan.inliner() {
             Some(inliner) if plan.rehydrates_windows() => {
                 // SAFETY: this key is initialized and unchanged during the
                 // read.
@@ -917,12 +919,12 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
             // capacity.
             _ => unsafe { slots.read(index) },
         };
-        Window::new(self.prefix_len, word)
+        Window::new(self.prefix_len, inline_key)
     }
 
     /// `key`, and what the columns hold for it. Its window must be at this
     /// node's prefix length.
-    fn cells_of(self, key: InlinedKey<K, S>) -> (K, KeyCells) {
+    fn cells_of(self, key: WindowedKey<K, S>) -> (K, KeyCells) {
         let (key, window) = key.into_parts();
         debug_assert!(
             self.columns.inline_keys().is_none() || window.prefix_len() == self.prefix_len,
@@ -947,13 +949,12 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` is initialized.
-    /// Any local search windows have been normalized to the fence prefix.
-    pub(super) unsafe fn read(self, index: usize) -> InlinedKey<K, S> {
+    pub(super) unsafe fn read(self, index: usize) -> WindowedKey<K, S> {
         // SAFETY: forwarded.
         unsafe {
             let window = self.window(index);
             let key = self.keys.slot(index).read();
-            InlinedKey::from_parts(key, window)
+            WindowedKey::from_parts(key, window)
         }
     }
 
@@ -963,7 +964,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     ///
     /// `index < capacity`, and slot `index` holds nothing that needs
     /// dropping: it is overwritten, and is initialized afterwards.
-    pub(super) unsafe fn write(self, index: usize, key: InlinedKey<K, S>) {
+    pub(super) unsafe fn write(self, index: usize, key: WindowedKey<K, S>) {
         let (key, cells) = self.cells_of(key);
         // SAFETY: forwarded; the columns have the keys' capacity (type
         // invariant).
@@ -978,8 +979,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// `index < capacity`, and slot `index` is initialized.
-    /// Any local search windows have been normalized to the fence prefix.
-    pub(super) unsafe fn replace(self, index: usize, key: InlinedKey<K, S>) -> InlinedKey<K, S> {
+    pub(super) unsafe fn replace(self, index: usize, key: WindowedKey<K, S>) -> WindowedKey<K, S> {
         // SAFETY: forwarded: slot `index` is read out, then written again.
         unsafe {
             let old_key = self.read(index);
@@ -993,7 +993,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     /// # Safety
     ///
     /// As for [`Slots::insert`].
-    pub(super) unsafe fn insert(self, index: usize, len: usize, key: InlinedKey<K, S>) {
+    pub(super) unsafe fn insert(self, index: usize, len: usize, key: WindowedKey<K, S>) {
         let (key, cells) = self.cells_of(key);
         // SAFETY: forwarded; the columns have the keys' capacity and are
         // initialized like them (type invariant).
@@ -1017,7 +1017,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
         self,
         index: usize,
         len: usize,
-        key: InlinedKey<K, S>,
+        key: WindowedKey<K, S>,
     ) {
         let (key, cells) = self.cells_of(key);
         // SAFETY: forwarded; the columns have the keys' capacity and are
@@ -1033,16 +1033,15 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
     ///
     /// # Safety
     ///
-    /// As for [`Slots::remove`], with any local search windows normalized
-    /// to the fence prefix.
-    pub(super) unsafe fn remove(self, index: usize, len: usize) -> InlinedKey<K, S> {
+    /// As for [`Slots::remove`].
+    pub(super) unsafe fn remove(self, index: usize, len: usize) -> WindowedKey<K, S> {
         // SAFETY: forwarded; the columns have the keys' capacity and are
         // initialized like them (type invariant).
         unsafe {
             let window = self.window(index);
             let key = self.keys.remove(index, len);
             self.columns.remove(index, len);
-            InlinedKey::from_parts(key, window)
+            WindowedKey::from_parts(key, window)
         }
     }
 
@@ -1061,7 +1060,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
         self,
         index: usize,
         len: usize,
-    ) -> InlinedKey<K, S> {
+    ) -> WindowedKey<K, S> {
         // SAFETY: forwarded; the columns have the keys' capacity and are
         // initialized like them (type invariant).
         unsafe {
@@ -1069,7 +1068,7 @@ impl<K, S: InlineKeyStrategy<K>, Kind: PageKind> KeySlots<K, S, Kind> {
             let key = self.keys.slot(index).read();
             self.columns.remove(index, len);
             self.keys.shift_strides_down(index, len);
-            InlinedKey::from_parts(key, window)
+            WindowedKey::from_parts(key, window)
         }
     }
 
@@ -1171,9 +1170,9 @@ impl<K, V, S: InlineKeyStrategy<K>> SeparatorSlots<K, V, S> {
 
     /// The key a separator going into a node that keeps keys is.
     #[inline(always)]
-    fn key_of(separator: Separator<K, S>) -> InlinedKey<K, S> {
+    fn key_of(separator: Separator<K, S>) -> WindowedKey<K, S> {
         separator
-            .into_inlined_key()
+            .into_windowed_key()
             .expect("a separator into a node that keeps keys is a key")
     }
 

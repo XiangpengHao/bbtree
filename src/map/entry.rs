@@ -16,9 +16,9 @@ use core::fmt;
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::inline_keys::SearchKey;
-use crate::tree::node::page::{FreshPage, PageByKind};
+use crate::tree::node::page::{FreshPage, PageByType};
 use crate::tree::path::PathMut;
-use crate::tree::root::Root;
+use crate::tree::root::Tree;
 
 /// A view into a single entry in a map, which may either be vacant or
 /// occupied.
@@ -50,7 +50,7 @@ enum VacantPlace<'a, K, V, S> {
     /// Into the leaf edge the path ends at.
     InTree(PathMut<'a, K, V, S>),
     /// Into a new tree, a leaf, for the map that has none.
-    NoTree(&'a mut Root<K, V, S>),
+    NoTree(&'a mut Tree<K, V, S>),
 }
 
 /// A view into an occupied entry in a `BBTreeMap`. It is part of the
@@ -338,9 +338,9 @@ impl<'a, K: Ord, V, S: InlineKeyStrategy<K>> VacantEntry<'a, K, V, S> {
         let Self { key, length, place } = self;
         let mut path = match place {
             VacantPlace::InTree(path) => path,
-            VacantPlace::NoTree(root) => {
-                root.page_or_new();
-                let mut path = PathMut::new(root);
+            VacantPlace::NoTree(tree) => {
+                tree.ensure_root_page();
+                let mut path = PathMut::new(tree);
                 path.start_at_root();
                 path
             }
@@ -387,7 +387,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> OccupiedEntry<'a, K, V, S> {
     /// assert!(map.is_empty());
     /// ```
     pub fn remove_entry(mut self) -> (K, V) {
-        self.path.remove(PageByKind::deallocate, self.length)
+        self.path.remove(PageByType::deallocate, self.length)
     }
 
     /// Gets a reference to the value in the entry.
@@ -540,15 +540,15 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { root, length } = self;
-        if !root.has_tree() {
+        let Self { tree, length } = self;
+        if !tree.has_root() {
             return Entry::Vacant(VacantEntry {
                 key,
                 length,
-                place: VacantPlace::NoTree(root),
+                place: VacantPlace::NoTree(tree),
             });
         }
-        let mut path = PathMut::new(root);
+        let mut path = PathMut::new(tree);
         if path.search(&SearchKey::new(&key)) {
             Entry::Occupied(OccupiedEntry { length, path })
         } else {
@@ -573,11 +573,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { root, length } = self;
-        let place = if !root.has_tree() {
-            VacantPlace::NoTree(root)
+        let Self { tree, length } = self;
+        let place = if !tree.has_root() {
+            VacantPlace::NoTree(tree)
         } else {
-            let mut path = PathMut::new(root);
+            let mut path = PathMut::new(tree);
             if path.search(&SearchKey::new(&key)) {
                 return Some(path.replace_key(key));
             }
@@ -610,11 +610,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { root, length } = self;
-        if !root.has_tree() {
+        let Self { tree, length } = self;
+        if !tree.has_root() {
             return None;
         }
-        let mut path = PathMut::new(root);
+        let mut path = PathMut::new(tree);
         if path.descend_to_first_key() {
             Some(OccupiedEntry { length, path })
         } else {
@@ -645,11 +645,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     where
         K: Ord,
     {
-        let Self { root, length } = self;
-        if !root.has_tree() {
+        let Self { tree, length } = self;
+        if !tree.has_root() {
             return None;
         }
-        let mut path = PathMut::new(root);
+        let mut path = PathMut::new(tree);
         if path.descend_to_last_key() {
             Some(OccupiedEntry { length, path })
         } else {

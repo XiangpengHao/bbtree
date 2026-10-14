@@ -72,16 +72,9 @@ impl<T, S> Clone for Union<'_, T, S> {
 /// Prints as std's does: `Union(MergeIterInner(..))`.
 impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Union").field(&PrintedMerge(self)).finish()
-    }
-}
-
-/// A union's merge, printed as std's `MergeIterInner`.
-struct PrintedMerge<'u, 'a, T, S>(&'u Union<'a, T, S>);
-
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.sides.print_as_std(f, self.0.held)
+        f.debug_tuple("Union")
+            .field(&self.sides.printed_as_merge_iter(self.held))
+            .finish()
     }
 }
 

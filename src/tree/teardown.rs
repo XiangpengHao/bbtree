@@ -1,4 +1,4 @@
-//! Taking an owned tree apart: [`Root::destroy`], a walk that moves every
+//! Taking an owned tree apart: [`Tree::destroy`], a walk that moves every
 //! entry out from the front and frees each node once past it
 //! ([`DyingWalk`]), dropped at once; and [`Node::destroy`], the same for
 //! nodes on plain pages, under no root page.
@@ -6,12 +6,12 @@
 #![forbid(unsafe_code)]
 
 use super::node::Node;
-use super::node::page::PageByKind;
-use super::root::Root;
+use super::node::page::PageByType;
+use super::root::Tree;
 use super::walk::DyingWalk;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Takes the tree apart, if there is one: drops every key and value in
     /// ascending key order, each key before its value, as std's `BTreeMap`
     /// does (D1), and hands every page to `release`, sorted by its type. A
@@ -23,14 +23,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// either way, every key and value is dropped once and every page
     /// released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
-    pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
-        let Some(root) = self.page() else {
+    pub(crate) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
+        let Some(root_page) = self.root_page() else {
             return;
         };
-        let head = root.top().take_leftmost_head();
+        let head = root_page.root().take_leftmost_head();
         // Without a count of the entries, the walk ends where the tree does:
         // only its front moves.
-        let walk = DyingWalk::new(Some(root), usize::MAX, release);
+        let walk = DyingWalk::new(Some(root_page), usize::MAX, release);
         drop(head);
         drop(walk);
     }
@@ -38,14 +38,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// Takes apart this node and every node under it, on plain pages, which
-    /// the caller owns, as [`Root::destroy`] does a tree. A head on the
+    /// the caller owns, as [`Tree::destroy`] does a tree. A head on the
     /// leftmost leaf, the value of a separator kept elsewhere, as a split's
     /// right half has, goes first, its key, where separator keys are heads
     /// (D49), before it.
     ///
     /// The nodes must be well-formed: every leaf right of a separator has a
     /// head (D17).
-    pub(crate) fn destroy(self, release: impl FnMut(PageByKind<K, V, S>)) {
+    pub(crate) fn destroy(self, release: impl FnMut(PageByType<K, V, S>)) {
         let head = self.take_leftmost_head();
         let walk = DyingWalk::of_subtree(self, release);
         drop(head);
@@ -123,7 +123,7 @@ mod tests {
         let pages = TestPages::<K, Tracked<'l>, S>::new();
         let tree = random_tree(&pages, ledger, rng, count, PanickingDrop::Nothing);
         assert_eq!(tree.entries(|_, _| ()).len(), count);
-        assert!(pages.in_use() >= 1);
+        assert!(pages.in_use_count() >= 1);
         tree.destroy();
         pages.assert_all_released();
         ledger.assert_all_dropped_once();
@@ -240,11 +240,11 @@ mod tests {
         let tree = random_tree(&pages, &ledger, &rng, 100, PanickingDrop::Nothing);
         let allocated = pages.allocated_count();
         tree.destroy();
-        assert_eq!(pages.in_use(), 0);
+        assert_eq!(pages.in_use_count(), 0);
 
         let tree = random_tree(&pages, &ledger, &rng, 100, PanickingDrop::Nothing);
         assert!(pages.allocated_count() <= allocated + 2);
-        assert!(pages.in_use() >= allocated / 2);
+        assert!(pages.in_use_count() >= allocated / 2);
         tree.destroy();
         pages.assert_all_released();
         ledger.assert_all_dropped_once();

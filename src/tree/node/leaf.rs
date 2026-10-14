@@ -19,11 +19,11 @@ use core::ops::Range;
 use core::ptr::NonNull;
 
 use super::inline_key_search::NodeInlineKeys;
-use super::inline_keys::{InlineTarget, InlinedKey, SearchKey, Separator, Window};
+use super::inline_keys::{InlineTarget, SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
-use super::length_tags::{LengthMatch, LengthTags};
+use super::length_tags::{LengthTags, SlotMatches};
 use super::node_plan::{KeySearch, NodePlan};
-use super::page::{FreshPage, NodePtr, PageByKind, PageKind, PageType};
+use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, Insertion, InsertionSide, Split};
@@ -50,7 +50,7 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Leaf<K, V, S> {
 }
 
 // SAFETY: as for `PageType`; leaves are leaves.
-unsafe impl<K, V, S: InlineKeyStrategy<K>> PageKind for Leaf<K, V, S> {
+unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Leaf<K, V, S> {
     const IS_LEAF: bool = true;
 }
 
@@ -368,20 +368,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         Q: Ord + ?Sized,
     {
         if Self::plan().inlines_node_search() {
-            self.search_inlined(key)
+            self.search_always_inlined(key)
         } else {
-            self.search_outlined(key)
+            self.search_maybe_inlined(key)
         }
     }
 
-    /// [`Self::search_inlined`], inlined or not as LLVM decides at each
+    /// [`Self::search_always_inlined`], inlined or not as LLVM decides at each
     /// caller (`NodePlan::inlines_node_search`).
-    fn search_outlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    fn search_maybe_inlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.search_inlined(key)
+        self.search_always_inlined(key)
     }
 
     /// [`Self::search`], always inlined, whatever the plan says: for an
@@ -397,7 +397,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// of the tree shares, which a search checks at the top (D50). After
     /// monomorphization, a map without inline keys has only the latter.
     #[inline(always)]
-    pub(crate) fn search_inlined<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Result<usize, usize>
+    pub(crate) fn search_always_inlined<Q>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> Result<usize, usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -483,7 +486,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             // This typed view keeps the leaf's capacity constant, as for the
             // ordered `inline_equal_run`. Empty masks need no bound
             // extraction.
-            let run = if let Some(mask) = inline_keys.point_mask(target.inline_key()) {
+            let run = if let Some(mask) = inline_keys.equality_mask(target.inline_key()) {
                 mask.run(self.len())?
             } else {
                 inline_keys.equal_run(target.inline_key())
@@ -506,14 +509,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 && let Some(tags) = self.length_tags()
             {
                 match LengthTags::new(tags).matching(run.clone(), tag) {
-                    LengthMatch::None => None,
-                    LengthMatch::One(index) => {
+                    SlotMatches::None => None,
+                    SlotMatches::One(index) => {
                         // The mask only includes indexes in the live run;
                         // indexing keeps this fact checked locally too.
                         (key.cmp_tied::<Self>(target, &self.keys()[index]) == Ordering::Equal)
                             .then_some(index)
                     }
-                    LengthMatch::Two { lower, upper } => {
+                    SlotMatches::Two { lower, upper } => {
                         // Binary search over the two filtered keys: the
                         // upper key is the midpoint. This avoids reading
                         // unrelated strings in the original primary run.
@@ -526,13 +529,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                             Ordering::Greater => None,
                         }
                     }
-                    LengthMatch::Many => self.search_run(run, key, target).ok(),
+                    SlotMatches::Many => self.search_run(run, key, target).ok(),
                 }
             } else {
                 self.search_run(run, key, target).ok()
             }
         } else {
-            self.search_outlined(key).ok()
+            self.search_maybe_inlined(key).ok()
         }
     }
 }
@@ -632,7 +635,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// If the leaf has a head; it is unchanged then.
     pub(crate) fn put_separator_head(
         self,
-        separator: InlinedKey<K, S>,
+        separator: WindowedKey<K, S>,
         value: V,
     ) -> Separator<K, S> {
         if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
@@ -763,7 +766,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// shifting later entries right. The leaf has room: `len < capacity`,
     /// and `index <= len`.
     #[inline]
-    pub(crate) fn insert_fit(self, index: usize, key: InlinedKey<K, S>, value: V) {
+    pub(crate) fn insert_fit(self, index: usize, key: WindowedKey<K, S>, value: V) {
         let len = self.len();
         debug_assert!(index <= len && len < Self::capacity());
         // SAFETY: `index <= len < capacity` (the caller); keys (with their
@@ -789,7 +792,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     pub(crate) fn insert(
         self,
         index: usize,
-        key: InlinedKey<K, S>,
+        key: WindowedKey<K, S>,
         value: V,
         new_page: impl FnOnce() -> FreshPage<Self>,
     ) -> Insertion<K, S, Self> {
@@ -809,7 +812,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     pub(crate) fn split_insert(
         self,
         index: usize,
-        key: InlinedKey<K, S>,
+        key: WindowedKey<K, S>,
         value: V,
         right_page: FreshPage<Self>,
     ) -> Split<K, S, Self> {
@@ -820,7 +823,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         // SAFETY: `right` is a fresh leaf of the same map, reached by nothing
         // else, at this leaf's prefix length once set here.
         unsafe { right.node.set_prefix_len(self.prefix_len()) };
-        let separator = self.split_off(separator_index, right);
+        let separator = self.split_around(separator_index, right);
         // A full leaf of `capacity` entries split around one leaves
         // `separator_index < capacity` on the left and `capacity -
         // separator_index - 1 < capacity` on the right, so both have room,
@@ -840,7 +843,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// leaf at this leaf's prefix length, and takes out key
     /// `separator_index`, for the parent; returns it. Its value becomes
     /// `right`'s head, with its key where separator keys are heads (D49).
-    fn split_off(self, separator_index: usize, right: Self) -> Separator<K, S> {
+    fn split_around(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
@@ -911,7 +914,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// # Panics
     ///
     /// If `index >= len`.
-    pub(crate) fn replace_key(self, index: usize, key: InlinedKey<K, S>) -> K {
+    pub(crate) fn replace_key(self, index: usize, key: WindowedKey<K, S>) -> K {
         assert!(index < self.len(), "key index out of bounds");
         // SAFETY: `index < len`, so key `index` is initialized, with its
         // inline key, and the access is exclusive.
@@ -925,7 +928,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// # Panics
     ///
     /// If `index >= len`.
-    pub(crate) fn replace_key_value(self, index: usize, key: InlinedKey<K, S>, value: V) -> (K, V) {
+    pub(crate) fn replace_key_value(
+        self,
+        index: usize,
+        key: WindowedKey<K, S>,
+        value: V,
+    ) -> (K, V) {
         assert!(index < self.len(), "key index out of bounds");
         // SAFETY: `index < len`, so key and value `index` are initialized,
         // with the key's inline key, and the access is exclusive.
@@ -1069,7 +1077,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         Leaf::prefix_len(self)
     }
 
-    fn has_first_slot(self) -> bool {
+    fn has_first_trailing_slot(self) -> bool {
         self.has_head()
     }
 
@@ -1077,12 +1085,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         Leaf::move_prefix_back_to(self, fill);
     }
 
-    unsafe fn free_page(self) -> PageByKind<K, V, S> {
+    unsafe fn free_page(self) -> PageByType<K, V, S> {
         // SAFETY: forwarded.
         unsafe { self.free() }.into()
     }
 
-    unsafe fn rotate_right(siblings: &Siblings<K, V, S, Self>, fill: Window) {
+    unsafe fn steal_left_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
@@ -1104,12 +1112,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
             let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
                 let (key, window) = key.into_parts();
                 let old_head_key = right.head_key_slot().replace(key);
-                parent.swap_separator(index, Separator::without_key(window.moved_back_to(fill)));
-                InlinedKey::from_parts(old_head_key, fill)
+                parent.replace_separator(index, Separator::without_key(window.moved_back_to(fill)));
+                WindowedKey::from_parts(old_head_key, fill)
             } else {
                 let old =
-                    parent.swap_separator(index, Separator::with_key(key.moved_back_to(fill)));
-                old.into_inlined_key()
+                    parent.replace_separator(index, Separator::with_key(key.moved_back_to(fill)));
+                old.into_windowed_key()
                     .expect("a separator of a node that keeps keys is a key")
             };
             right.key_slots().insert(0, right_len, separator);
@@ -1118,11 +1126,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         }
     }
 
-    unsafe fn rotate_left(siblings: &Siblings<K, V, S, Self>, fill: Window) {
+    unsafe fn steal_right_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
-        // SAFETY: as in `rotate_right`, mirrored: the right leaf gives key 0
+        // SAFETY: as in `steal_left_unchecked`, mirrored: the right leaf gives key 0
         // and head-and-value slot 0 (its head, after which value 0 shifts
         // into the head), and the left leaf has room at key `left_len` and
         // head-and-value slot `left_len + 1`. The key going there is the old
@@ -1137,12 +1145,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
             let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
                 let (key, window) = key.into_parts();
                 let old_head_key = right.head_key_slot().replace(key);
-                parent.swap_separator(index, Separator::without_key(window.moved_back_to(fill)));
-                InlinedKey::from_parts(old_head_key, fill)
+                parent.replace_separator(index, Separator::without_key(window.moved_back_to(fill)));
+                WindowedKey::from_parts(old_head_key, fill)
             } else {
                 let old =
-                    parent.swap_separator(index, Separator::with_key(key.moved_back_to(fill)));
-                old.into_inlined_key()
+                    parent.replace_separator(index, Separator::with_key(key.moved_back_to(fill)));
+                old.into_windowed_key()
                     .expect("a separator of a node that keeps keys is a key")
             };
             left.key_slots().insert(left_len, left_len, separator);
@@ -1164,10 +1172,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         // head is untouched.
         unsafe {
             let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
-                InlinedKey::from_parts(right.head_key_slot().read(), fill)
+                WindowedKey::from_parts(right.head_key_slot().read(), fill)
             } else {
                 separator
-                    .into_inlined_key()
+                    .into_windowed_key()
                     .expect("a separator into a node that keeps keys is a key")
             };
             left.key_slots().write(left_len, separator);
@@ -1201,7 +1209,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     }
 
     /// As far as its fences share: nothing below a leaf bounds it.
-    fn grown_prefix_len(self, prefix_len: usize) -> usize {
+    fn allowed_prefix_len(self, prefix_len: usize) -> usize {
         prefix_len
     }
 
@@ -1289,7 +1297,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
             // key pointer is at most the validated end of the run.
             unsafe {
                 self.front = key.byte_add(NodePtr::<K, V, S>::leaf_layout().keys.key_stride);
-                return Some(self.entry(key, 0));
+                return Some(self.entry_slots(key, 0));
             }
         }
         if self.start == self.end {
@@ -1298,7 +1306,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
         let index = self.start;
         self.start += 1;
         // SAFETY: the nonempty, validated interval contains this index.
-        Some(unsafe { self.entry(self.front, index) })
+        Some(unsafe { self.entry_slots(self.front, index) })
     }
 
     pub(in crate::tree) fn next_back(&mut self) -> Option<EntrySlots<K, V>> {
@@ -1311,7 +1319,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
                 self.back = self
                     .back
                     .byte_sub(NodePtr::<K, V, S>::leaf_layout().keys.key_stride);
-                return Some(self.entry(self.back, 0));
+                return Some(self.entry_slots(self.back, 0));
             }
         }
         if self.start == self.end {
@@ -1319,12 +1327,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
         }
         self.end -= 1;
         // SAFETY: the nonempty, validated interval contains this index.
-        Some(unsafe { self.entry(self.front, self.end) })
+        Some(unsafe { self.entry_slots(self.front, self.end) })
     }
 
     /// An initialized entry: `origin` is either this entry's key in paired
     /// mode (with index 0), or the leaf's first key in indexed mode.
-    unsafe fn entry(&self, origin: NonNull<K>, index: usize) -> EntrySlots<K, V> {
+    unsafe fn entry_slots(&self, origin: NonNull<K>, index: usize) -> EntrySlots<K, V> {
         let layout = NodePtr::<K, V, S>::leaf_layout();
         let value_offset = layout.head_offset + layout.value_stride - layout.keys.keys_offset;
         // SAFETY: the caller supplies a live slot. Keys and values follow
@@ -1410,7 +1418,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
 pub(crate) struct KeyRun<'a, K> {
     next: *const K,
     stride: usize,
-    left: usize,
+    remaining: usize,
     _borrow: PhantomData<&'a K>,
 }
 
@@ -1427,7 +1435,7 @@ impl<'a, K> KeyRun<'a, K> {
     pub(crate) const EMPTY: Self = Self {
         next: core::ptr::null(),
         stride: 0,
-        left: 0,
+        remaining: 0,
         _borrow: PhantomData,
     };
 
@@ -1438,7 +1446,7 @@ impl<'a, K> KeyRun<'a, K> {
         Self {
             next: next.as_ptr(),
             stride,
-            left: len,
+            remaining: len,
             _borrow: PhantomData,
         }
     }
@@ -1451,21 +1459,21 @@ impl<'a, K> KeyRun<'a, K> {
 
     /// How many keys are left.
     pub(crate) fn len(&self) -> usize {
-        self.left
+        self.remaining
     }
 
     /// The next key, staying before it.
     #[inline]
     pub(crate) fn peek(&self) -> Option<&'a K> {
         // SAFETY: with a key left, `next` is that key (type invariant).
-        (self.left > 0).then(|| unsafe { &*self.next })
+        (self.remaining > 0).then(|| unsafe { &*self.next })
     }
 
     /// Moves past the next key, if any.
     #[inline]
     pub(crate) fn advance(&mut self) {
-        if self.left > 0 {
-            self.left -= 1;
+        if self.remaining > 0 {
+            self.remaining -= 1;
             // Past the last key, the pointer is never read.
             self.next = self.next.wrapping_byte_add(self.stride);
         }
@@ -1483,6 +1491,6 @@ impl<'a, K> Iterator for KeyRun<'a, K> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.left, Some(self.left))
+        (self.remaining, Some(self.remaining))
     }
 }

@@ -2,7 +2,7 @@
 //! tests and in fuzzing builds (`--cfg fuzzing`, which `cargo fuzz` sets),
 //! where the fuzz targets (`fuzz/`) call them through the map's
 //! `check_invariants`: the whole tree's shape, order and counts
-//! ([`Root::check_invariants`]), and on every node, that its inline
+//! ([`Tree::check_invariants`]), and on every node, that its inline
 //! keys and length tags match its keys, and its prefix length is what its
 //! fences share, or along the borders, what every key shares (D50).
 #![forbid(unsafe_code)]
@@ -12,12 +12,12 @@ use alloc::vec::Vec;
 use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
 use super::node::{Child, KeyList, Node};
-use super::root::Root;
+use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Panics unless this is a well-formed B+-tree of `length` entries
     /// (D17):
     ///
@@ -48,16 +48,16 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// Calls `Ord` and the strategy's inline-key encoding: a tree whose keys
     /// break their contracts fails it.
     pub(crate) fn check_invariants(&self, length: usize) {
-        let Some(page) = self.page() else {
+        let Some(root_page) = self.root_page() else {
             assert_eq!(length, 0, "a map without a tree has entries");
             return;
         };
-        let root = page.top();
+        let root = root_page.root();
         if length > 0 || matches!(root, Node::Internal(_)) {
             assert!(root.len() > 0, "the root of a non-empty map has no keys");
         }
         let mut walk = InOrderWalk {
-            shared_prefix: page.shared_prefix(),
+            shared_prefix: root_page.shared_prefix(),
             previous_key: None,
             entries: 0,
             leaves: 0,
@@ -74,7 +74,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Panics unless no node's prefix length is shorter than its parent's
     /// (D44), and every node along the tree's left and right borders, which
     /// lacks a fence, has the tree's shared prefix (D50): a search for a key
@@ -83,28 +83,28 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// encoding: it holds even for keys that panic or break their
     /// contracts, whose maps give wrong answers.
     pub(crate) fn check_prefix_lens(&self) {
-        let Some(page) = self.page() else {
+        let Some(root_page) = self.root_page() else {
             return;
         };
-        let shared_len = page.shared_prefix().len();
-        Self::check_prefix_lens_in(page.top(), shared_len, shared_len, true, true);
+        let shared_len = root_page.shared_prefix().len();
+        Self::check_prefix_lens_in(root_page.root(), shared_len, shared_len, true, true);
     }
 
     fn check_prefix_lens_in(
         node: Node<K, V, S>,
         shared_len: usize,
-        parent_prefix: usize,
+        parent_prefix_len: usize,
         on_left_border: bool,
         on_right_border: bool,
     ) {
-        let prefix = node.prefix_len();
+        let prefix_len = node.prefix_len();
         assert!(
-            prefix >= parent_prefix,
-            "child prefix {prefix} < parent {parent_prefix}"
+            prefix_len >= parent_prefix_len,
+            "child prefix {prefix_len} < parent {parent_prefix_len}"
         );
         assert!(
-            prefix == shared_len || !(on_left_border || on_right_border),
-            "prefix {prefix} on the tree's border, where every key shares {shared_len}"
+            prefix_len == shared_len || !(on_left_border || on_right_border),
+            "prefix {prefix_len} on the tree's border, where every key shares {shared_len}"
         );
         if let Node::Internal(internal) = node {
             let len = internal.len();
@@ -112,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
                 Self::check_prefix_lens_in(
                     internal.child(index),
                     shared_len,
-                    prefix,
+                    prefix_len,
                     on_left_border && index == 0,
                     on_right_border && index == len,
                 );
@@ -122,12 +122,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
 }
 
 #[cfg(test)]
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Every node's prefix length (05-fence-key.md), from the root down, each
     /// node before its children.
     pub(crate) fn node_prefix_lens(&self) -> Vec<usize> {
         let mut prefix_lens = Vec::new();
-        Self::collect_prefix_lens(self.top(), &mut prefix_lens);
+        Self::collect_prefix_lens(self.root(), &mut prefix_lens);
         prefix_lens
     }
 
@@ -144,7 +144,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// (D17), and where separator keys are heads, so is the key (D49).
     pub(crate) fn separator_keys(&self) -> Vec<&K> {
         let mut keys = Vec::new();
-        Self::collect_separator_keys(self.top(), &mut keys);
+        Self::collect_separator_keys(self.root(), &mut keys);
         keys
     }
 
@@ -319,7 +319,8 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
         }
         let expected: Option<Vec<InlineWord>> = Option::zip(plan.inliner(), plan.inline_width())
             .map(|(inliner, inline_width)| {
-                let dropped_bits = 8 * (InlineWidth::Eight.bytes() - inline_width.bytes()) as u32;
+                let dropped_bits =
+                    8 * (InlineWidth::Eight.byte_len() - inline_width.byte_len()) as u32;
                 (self.keys().iter())
                     .map(|key| {
                         inliner.inline_key_at(key, prefix_len) >> dropped_bits << dropped_bits
@@ -348,12 +349,12 @@ pub(crate) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>: Child<K, V, S> {
     /// and `upper`, share (05-fence-key.md), or `shared_len`, what every key
     /// shares, if either is missing (D50).
     fn assert_prefix_fits_fences(self, lower: Option<&K>, upper: Option<&K>, shared_len: usize) {
-        let shared = KeyInliner::<K>::resolve::<S>().map_or(0, |inliner| {
+        let fence_prefix_len = KeyInliner::<K>::resolve::<S>().map_or(0, |inliner| {
             inliner.fence_prefix_len(lower, upper, shared_len)
         });
         assert_eq!(
             self.prefix_len(),
-            shared,
+            fence_prefix_len,
             "a node's prefix length is not what its fences share"
         );
     }

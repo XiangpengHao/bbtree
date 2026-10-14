@@ -49,7 +49,7 @@ pub enum InlineWidth {
 
 impl InlineWidth {
     /// How many bytes the nodes keep.
-    pub(crate) const fn bytes(self) -> usize {
+    pub(crate) const fn byte_len(self) -> usize {
         match self {
             Self::Two => 2,
             Self::Four => 4,

@@ -27,16 +27,16 @@
 
 use core::borrow::Borrow;
 
-use super::node::inline_keys::{InlinedKey, SearchKey};
+use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::PageByKind;
+use super::node::page::PageByType;
 use super::node::{Child, Node};
 use super::path::{FirstEdge, MAX_DEPTH, PathMut};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Removes the entry whose key equals `key` and returns it, with the key
     /// as stored, counting it out of `length`; or `None` if there is none.
     ///
@@ -49,14 +49,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     pub(crate) fn remove_entry<Q>(
         &mut self,
         key: &Q,
-        release: impl FnMut(PageByKind<K, V, S>),
+        release: impl FnMut(PageByType<K, V, S>),
         length: &mut usize,
     ) -> Option<(K, V)>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        if !self.has_tree() {
+        if !self.has_root() {
             return None;
         }
         let mut path = PathMut::new(self);
@@ -72,10 +72,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_first(
         &mut self,
-        release: impl FnMut(PageByKind<K, V, S>),
+        release: impl FnMut(PageByType<K, V, S>),
         length: &mut usize,
     ) -> Option<(K, V)> {
-        if !self.has_tree() {
+        if !self.has_root() {
             return None;
         }
         let mut path = PathMut::new(self);
@@ -91,10 +91,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_last(
         &mut self,
-        release: impl FnMut(PageByKind<K, V, S>),
+        release: impl FnMut(PageByType<K, V, S>),
         length: &mut usize,
     ) -> Option<(K, V)> {
-        if !self.has_tree() {
+        if !self.has_root() {
             return None;
         }
         let mut path = PathMut::new(self);
@@ -109,26 +109,26 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// Removes the entry the path ends at and returns it, counting it out of
     /// `length`, fixing the nodes up the path, and leaves the path detached;
-    /// frees pages as [`Root::remove_entry`] does. Compares no keys.
+    /// frees pages as [`Tree::remove_entry`] does. Compares no keys.
     ///
     /// # Panics
     ///
     /// If the path ends at no key.
     pub(crate) fn remove(
         &mut self,
-        mut release: impl FnMut(PageByKind<K, V, S>),
+        mut release: impl FnMut(PageByType<K, V, S>),
         length: &mut usize,
     ) -> (K, V) {
-        let separator_depth = self.depth();
-        let separator_index = self.index();
+        let entry_depth = self.depth();
+        let entry_index = self.index();
         let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
-            let entry = leaf.remove(separator_index);
+            let entry = leaf.remove(entry_index);
             (entry, self.fix_up_the_path(None, &mut release, |_| {}))
         } else {
-            self.fit_left_of_separator();
+            self.refit_left_of_separator();
             // The separator's value is the head of the leftmost leaf right
             // of it.
-            self.set_index(separator_index + 1);
+            self.set_index(entry_index + 1);
             self.descend_to_leaf::<FirstEdge>();
             let succession = self
                 .leaf()
@@ -136,19 +136,19 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has a head and keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
-            let changed = self.fix_up_the_path(Some(separator_depth), &mut release, |node| {
+            let changed = self.fix_up_the_path(Some(entry_depth), &mut release, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
-                replaced = Some(node.replace_separator(separator_index, successor));
+                replaced = Some(node.replace_separator_from_below(entry_index, successor));
             });
             let replaced = replaced.expect("the path goes up past the separator");
             let key = (succession.removed_key)
-                .or_else(|| replaced.into_inlined_key().map(InlinedKey::into_key))
+                .or_else(|| replaced.into_windowed_key().map(WindowedKey::into_key))
                 .expect("a removed separator's key is in its head or its node");
             ((key, succession.value), changed)
         };
         *length -= 1;
-        self.fit_changed_fences(&changed);
-        self.detach_popping_an_empty_root(&mut release);
+        self.refit_changed_fences(&changed);
+        self.detach_lowering_an_empty_root(&mut release);
         entry
     }
 
@@ -161,7 +161,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     fn fix_up_the_path(
         &mut self,
         must_reach: Option<usize>,
-        release: &mut impl FnMut(PageByKind<K, V, S>),
+        release: &mut impl FnMut(PageByType<K, V, S>),
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
         let mut changed = ChangedFences::new(self.depth(), must_reach);
@@ -181,8 +181,10 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                 } else {
                     node.fix_underfull_child::<Internal<K, V, S>>(index, release)
                 };
-                child_lost_a_key =
-                    matches!(fix, ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRight);
+                child_lost_a_key = matches!(
+                    fix,
+                    ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRightIn
+                );
                 changed.record(depth, fix);
             }
         }
@@ -193,8 +195,8 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// them, from the bottom up, as `changed` tells; the path, which ends
     /// where the fixing stopped, ends at `changed`'s top afterwards. Calls
     /// `InlineKey`.
-    fn fit_changed_fences(&mut self, changed: &ChangedFences) {
-        let Some(top) = changed.top else {
+    fn refit_changed_fences(&mut self, changed: &ChangedFences) {
+        let Some(top_depth) = changed.top_depth else {
             return;
         };
         while self.depth() + 1 < changed.leaf_depth {
@@ -206,10 +208,10 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
             let child = changed.indexes[depth];
             self.set_index(child);
             match changed.donors[depth] {
-                Some(donor) => self.fit_children_to_fences([child, donor]),
-                None => self.fit_children_to_fences([child]),
+                Some(donor) => self.refit_children_to_fences([child, donor]),
+                None => self.refit_children_to_fences([child]),
             }
-            if depth == top {
+            if depth == top_depth {
                 return;
             }
             self.ascend();
@@ -224,7 +226,7 @@ enum ChildFix {
     /// It merged into its left sibling, which held `left_len` keys.
     MergedIntoLeft { left_len: usize },
     /// Its right sibling merged into it.
-    MergedRight,
+    MergedRightIn,
     /// It took an entry from its left sibling, at its front.
     TookFromLeft,
     /// It took an entry from its right sibling, at its end.
@@ -246,18 +248,18 @@ struct ChangedFences {
     leaf_depth: usize,
     /// The child of every node from depth `top` down to the leaf's parent
     /// has new fences; none does if `None`.
-    top: Option<usize>,
+    top_depth: Option<usize>,
 }
 
 impl ChangedFences {
     /// Nothing fixed yet, up from a leaf at `leaf_depth`, with the children
     /// of the nodes from `top` down counting as changed.
-    fn new(leaf_depth: usize, top: Option<usize>) -> Self {
+    fn new(leaf_depth: usize, top_depth: Option<usize>) -> Self {
         Self {
             indexes: [0; MAX_DEPTH + 1],
             donors: [None; MAX_DEPTH + 1],
             leaf_depth,
-            top,
+            top_depth,
         }
     }
 
@@ -273,14 +275,17 @@ impl ChangedFences {
                 // separator between them.
                 self.indexes[depth + 1] += left_len + 1;
             }
-            ChildFix::MergedRight => {}
+            ChildFix::MergedRightIn => {}
             ChildFix::TookFromLeft => {
                 self.indexes[depth + 1] += 1;
                 self.donors[depth] = Some(child - 1);
             }
             ChildFix::TookFromRight => self.donors[depth] = Some(child + 1),
         }
-        self.top = Some(self.top.map_or(depth, |top| top.min(depth)));
+        self.top_depth = Some(
+            self.top_depth
+                .map_or(depth, |top_depth| top_depth.min(depth)),
+        );
     }
 }
 
@@ -307,7 +312,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     fn fix_underfull_child<C: Child<K, V, S>>(
         self,
         index: usize,
-        release: &mut impl FnMut(PageByKind<K, V, S>),
+        release: &mut impl FnMut(PageByType<K, V, S>),
     ) -> ChildFix {
         if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;
@@ -326,7 +331,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             return if child_is_right {
                 ChildFix::MergedIntoLeft { left_len }
             } else {
-                ChildFix::MergedRight
+                ChildFix::MergedRightIn
             };
         }
         let stolen = if child_is_right {

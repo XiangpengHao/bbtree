@@ -16,7 +16,7 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use super::BBTreeMap;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::node::page::PageByKind;
+use crate::tree::node::page::PageByType;
 use crate::tree::walk::DyingWalk;
 
 /// An owning iterator over the entries of a `BBTreeMap`, sorted by key.
@@ -31,7 +31,7 @@ pub struct IntoIter<K, V, S: InlineKeyStrategy<K> = Auto> {
 }
 
 /// Where an owning walk's freed pages go: back to the global allocator.
-pub(super) type Deallocate<K, V, S> = fn(PageByKind<K, V, S>);
+pub(super) type Deallocate<K, V, S> = fn(PageByType<K, V, S>);
 
 impl<K, V, S: InlineKeyStrategy<K>> IntoIter<K, V, S> {
     /// The entries left, by reference, in ascending order.
@@ -97,7 +97,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for IntoIter<K, V, S> {
     /// ```
     fn default() -> Self {
         Self {
-            walk: DyingWalk::new(None, 0, PageByKind::deallocate),
+            walk: DyingWalk::new(None, 0, PageByType::deallocate),
         }
     }
 }
@@ -313,10 +313,10 @@ impl<K, V, S: InlineKeyStrategy<K>> IntoIterator for BBTreeMap<K, V, S> {
     /// }
     /// ```
     fn into_iter(mut self) -> IntoIter<K, V, S> {
-        let tree = self.root.take();
+        let tree = self.tree.take();
         let length = mem::take(&mut self.length);
         IntoIter {
-            walk: DyingWalk::new(tree.page(), length, PageByKind::deallocate),
+            walk: DyingWalk::new(tree.root_page(), length, PageByType::deallocate),
         }
     }
 }

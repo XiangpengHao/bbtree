@@ -99,7 +99,7 @@ key.
   than the leftmost: its keys are at least the separator, and smaller keys
   go left. That is why today's head stays at the front of its leaf.
   Removing that key is a separator change, as removing a separator is
-  today (`fit_left_of_separator` in `tree/remove.rs`).
+  today (`refit_left_of_separator` in `tree/prefix.rs`).
 - **Cost.** Above a leaf, a tie reads one leaf line, often of the leaf the
   query goes to next anyway. In a node `h` levels above the leaves, it
   costs `h` hops, and the path down need not be cached. About

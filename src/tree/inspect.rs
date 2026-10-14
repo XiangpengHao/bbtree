@@ -23,22 +23,22 @@ use super::node::inline_key_search::NodeInlineKeys;
 use super::node::inline_keys::{InlineTarget, SearchKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodePtr, PageKind, PageType};
+use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodeKind, NodePtr, PageType};
 use super::node::root_page::RootPage;
 use super::node::{Child, Node};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 /// A map's tree, read in place: see [`crate::BBTreeMap::inspect`].
 pub struct TreeView<'a, K, V, S> {
-    tree: Option<RootPage<K, V, S>>,
-    _borrow: PhantomData<&'a Root<K, V, S>>,
+    root_page: Option<RootPage<K, V, S>>,
+    _borrow: PhantomData<&'a Tree<K, V, S>>,
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
-    pub(crate) fn new(tree: &'a Root<K, V, S>) -> Self {
+    pub(crate) fn new(tree: &'a Tree<K, V, S>) -> Self {
         Self {
-            tree: tree.page(),
+            root_page: tree.root_page(),
             _borrow: PhantomData,
         }
     }
@@ -46,7 +46,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// The root node, or `None` if the map has never held an entry. A map
     /// whose entries were all removed may keep an empty root leaf.
     pub fn root(&self) -> Option<NodeView<'a, K, V, S>> {
-        self.tree.map(NodeView::of_root)
+        self.root_page.map(NodeView::of_root_page)
     }
 
     /// The leading bytes of the encoding of every key of the map, as many
@@ -54,7 +54,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// borders. Empty if the map has never held a key, or its keys have no
     /// inline keys.
     pub fn shared_prefix(&self) -> &'a [u8] {
-        self.tree
+        self.root_page
             .map_or(&[], |tree| tree.shared_prefix().as_bytes())
     }
 }
@@ -77,13 +77,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     {
         let search = SearchKey::<K, S, Q>::new(key);
         let mut steps = Vec::new();
-        let Some(tree) = self.tree else {
+        let Some(root_page) = self.root_page else {
             return steps;
         };
-        if tree.shared_prefix().place(&search).is_some() {
+        if root_page.shared_prefix().place_outside(&search).is_some() {
             return steps;
         }
-        let mut view = NodeView::of_root(tree);
+        let mut view = NodeView::of_root_page(root_page);
         loop {
             match view.node {
                 Node::Leaf(leaf) => {
@@ -144,7 +144,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         Q: Ord + ?Sized,
     {
         let search = SearchKey::<K, S, Q>::new(key);
-        self.tree?.shared_prefix().place(&search)
+        self.root_page?.shared_prefix().place_outside(&search)
     }
 }
 
@@ -269,9 +269,9 @@ macro_rules! with_node {
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     /// The root of the tree of `root`, read for as long as the map is
     /// borrowed for `'a`.
-    fn of_root(root: RootPage<K, V, S>) -> Self {
+    fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
         Self {
-            node: root.top(),
+            node: root_page.root(),
             depth: 0,
             is_root: true,
             _borrow: PhantomData,
@@ -446,7 +446,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     }
 
     fn inline_width_of<C: Child<K, V, S>>(_: C) -> Option<usize> {
-        C::plan().inline_width().map(|width| width.bytes())
+        C::plan().inline_width().map(|width| width.byte_len())
     }
 }
 
@@ -587,7 +587,7 @@ impl PageMap {
     /// The arrays every page of kind `Kind` starts with: its header, and
     /// its inline keys if it has them, of which a node of `len` keys uses
     /// `len`.
-    fn header_and_inline_keys<K, V, S: InlineKeyStrategy<K>, Kind: PageKind>(
+    fn header_and_inline_keys<K, V, S: InlineKeyStrategy<K>, Kind: NodeKind>(
         len: usize,
     ) -> Vec<SlotArray> {
         let header_size = if NodePtr::<K, V, S>::has_inline_keys() {
@@ -604,7 +604,7 @@ impl PageMap {
             arrays.push(SlotArray::dense(
                 SlotContents::InlineKeys,
                 offset,
-                width.bytes(),
+                width.byte_len(),
                 keys.capacity,
                 len,
             ));

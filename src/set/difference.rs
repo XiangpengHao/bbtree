@@ -208,7 +208,7 @@ struct PrintedAsPeekable<'d, 'a, T, S> {
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsPeekable<'_, '_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let other = &self.sides.right;
-        let peeked = self.peeked.then(|| other.first_left());
+        let peeked = self.peeked.then(|| other.first_remaining());
         f.debug_struct("Peekable")
             .field("iter", &other.printed_as_iter(self.peeked))
             .field("peeked", &peeked)

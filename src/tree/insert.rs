@@ -20,16 +20,16 @@
 
 use core::mem;
 
-use super::node::inline_keys::{InlinedKey, SearchKey};
+use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::{Insertion, Node};
 use super::path::{MAX_DEPTH, PathMut};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Inserts `key`/`value` and returns `None`, counting the entry in
     /// `length`; or, if an equal key is there, keeps that key, drops `key`,
     /// replaces its value and returns the old one, as std's
@@ -70,9 +70,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
             *length += 1;
             return None;
         }
-        self.page_or_new();
+        self.ensure_root_page();
         self.cover_key(&key);
-        match self.top_mut().find_for_insert(&SearchKey::new(&key)) {
+        match self.root_mut().find_for_insert(&SearchKey::new(&key)) {
             Ok(found) => {
                 // Keep std's drop-before-replacement behavior on this path
                 // too: a panicking key destructor leaves the value intact.
@@ -83,7 +83,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
                 let prefix_len = leaf.prefix_len();
                 if leaf.len() < Leaf::<K, V, S>::capacity() {
                     // Compute the summary before the first mutation.
-                    leaf.insert_fit(edge, InlinedKey::new(key, prefix_len), value);
+                    leaf.insert_fit(edge, WindowedKey::new(key, prefix_len), value);
                     *length += 1;
                     return None;
                 }
@@ -126,7 +126,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// Inserts `key` and `value` at the leaf edge the path ends at, counts
     /// the entry in `length`, fits the prefixes of the nodes that split,
     /// and moves the path to the new entry; pages come as for
-    /// [`Root::insert`]. Compares no keys.
+    /// [`Tree::insert`]. Compares no keys.
     ///
     /// # Panics
     ///
@@ -148,7 +148,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         if leaf.len() < Leaf::<K, V, S>::capacity() {
             // Compute the inline key before the first change, as on the
             // split path, so a panic leaves the tree unchanged.
-            leaf.insert_fit(index, InlinedKey::new(key, prefix_len), value);
+            leaf.insert_fit(index, WindowedKey::new(key, prefix_len), value);
             *length += 1;
         } else {
             self.insert_splitting(key, value, new_leaf_page, new_internal_page, length);
@@ -170,7 +170,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         let leaf = self.leaf();
         // The key's window at the leaf's prefix length, which both halves
         // of a split keep: the last `InlineKey` call before the first change.
-        let key = InlinedKey::new(key, leaf.prefix_len());
+        let key = WindowedKey::new(key, leaf.prefix_len());
         let split = match leaf.insert(index, key, value, &mut new_leaf_page) {
             // The new key is at the index of the edge it went in at.
             Insertion::Fit(_) => {
@@ -188,14 +188,14 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         indexes_in_halves[0] = split.inserted.index();
         // Above each node that split, where the separator between its halves
         // went, in the node the path goes through.
-        let mut separators = [0; MAX_DEPTH + 1];
+        let mut separator_indexes = [0; MAX_DEPTH + 1];
         let mut carried = (
             split.separator,
             Node::Leaf(split.right),
             split.inserted.is_right(),
         );
         let mut climbed = 0;
-        let top = loop {
+        let levels_climbed = loop {
             let (separator, right, entry_is_right) = carried;
             let node = self.ascend_raising(&mut new_leaf_page, &mut new_internal_page);
             climbed += 1;
@@ -206,12 +206,12 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
                 |separator_index: usize| separator_index + usize::from(entry_is_right);
             match node.insert(index, separator, right, &mut new_internal_page) {
                 Insertion::Fit(separator_index) => {
-                    separators[climbed] = separator_index;
+                    separator_indexes[climbed] = separator_index;
                     self.set_index(beside_separator(separator_index));
                     break climbed;
                 }
                 Insertion::Split(split) => {
-                    separators[climbed] = split.inserted.index();
+                    separator_indexes[climbed] = split.inserted.index();
                     indexes_in_halves[climbed] = beside_separator(split.inserted.index());
                     carried = (
                         split.separator,
@@ -222,11 +222,11 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
             }
         };
         // Back down to the new entry, through the halves that took it.
-        for climbed in (0..top).rev() {
+        for climbed in (0..levels_climbed).rev() {
             self.descend();
             self.set_index(indexes_in_halves[climbed]);
         }
         *length += 1;
-        self.fit_split_halves(&separators, top);
+        self.refit_split_halves(&separator_indexes, levels_climbed);
     }
 }

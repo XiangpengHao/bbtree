@@ -126,7 +126,7 @@ use self::inline_keys::{RefitBuffer, Separator, Window};
 use self::internal::Internal;
 use self::leaf::Leaf;
 use self::node_plan::NodePlan;
-use self::page::{NodePtr, PageByKind, PageKind};
+use self::page::{NodeKind, NodePtr, PageByType};
 use self::siblings::Siblings;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
@@ -185,7 +185,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// # Safety
     ///
     /// As for [`Leaf::free`] or [`Internal::free`].
-    pub(crate) unsafe fn free(self) -> PageByKind<K, V, S> {
+    pub(crate) unsafe fn free(self) -> PageByType<K, V, S> {
         // SAFETY: forwarded.
         unsafe {
             match self {
@@ -206,7 +206,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         self,
         separator: Separator<K, S>,
         right: Self,
-    ) -> Result<PageByKind<K, V, S>, (Separator<K, S>, Self)> {
+    ) -> Result<PageByType<K, V, S>, (Separator<K, S>, Self)> {
         match (self, right) {
             (Self::Leaf(left), Self::Leaf(right)) => left
                 .absorb(separator, right)
@@ -329,7 +329,7 @@ pub(crate) struct HeadSuccession<K, V, S> {
 /// joining it with another tree's root ([`Child::absorb`]), and fitting its
 /// prefix to its fences (`tree/prefix.rs`) run on either kind through this.
 pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
-    PageKind + Copy
+    NodeKind + Copy
 {
     /// The child at edge `index` of `parent`, whose children are of this
     /// kind.
@@ -356,7 +356,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// Whether the node's trailing slot 0 is initialized: a leaf's head,
     /// which every leaf right of a separator has (D17), or an internal
     /// node's first edge, always.
-    fn has_first_slot(self) -> bool;
+    fn has_first_trailing_slot(self) -> bool;
 
     /// See [`Leaf::move_prefix_back_to`].
     fn move_prefix_back_to(self, fill: Window);
@@ -367,7 +367,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// # Safety
     ///
     /// As for [`Leaf::free`].
-    unsafe fn free_page(self) -> PageByKind<K, V, S>;
+    unsafe fn free_page(self) -> PageByType<K, V, S>;
 
     /// The left child's last entry to the right child's front, through the
     /// parent's separator; see [`Siblings::steal_left`]. The right child is
@@ -377,7 +377,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// # Safety
     ///
     /// The left child has an entry, and the right child room for one.
-    unsafe fn rotate_right(siblings: &Siblings<K, V, S, Self>, fill: Window);
+    unsafe fn steal_left_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window);
 
     /// The right child's first entry to the left child's end, mirrored; see
     /// [`Siblings::steal_right`]. The left child is at `fill`'s prefix length
@@ -386,7 +386,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// # Safety
     ///
     /// The right child has an entry, and the left child room for one.
-    unsafe fn rotate_left(siblings: &Siblings<K, V, S, Self>, fill: Window);
+    unsafe fn steal_right_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window);
 
     /// Moves `separator` to key slot `len` of `left`, and every key and
     /// trailing slot of `right` after it, both nodes at `fill`'s prefix
@@ -426,12 +426,12 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         self,
         separator: Separator<K, S>,
         right: Self,
-    ) -> Result<PageByKind<K, V, S>, (Separator<K, S>, Self)> {
+    ) -> Result<PageByType<K, V, S>, (Separator<K, S>, Self)> {
         if self.len() + 1 + right.len() > Self::capacity() {
             return Err((separator, right));
         }
         assert!(
-            right.has_first_slot(),
+            right.has_first_trailing_slot(),
             "the leaf right of a separator has no head"
         );
         let fill = separator.window();
@@ -478,7 +478,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// `prefix_len`, or as far as the node's prefix may grow toward it: a
     /// leaf's to what its fences share; an internal node's no further than
     /// its children's too.
-    fn grown_prefix_len(self, prefix_len: usize) -> usize;
+    fn allowed_prefix_len(self, prefix_len: usize) -> usize;
 
     /// See [`Leaf::set_windows`].
     fn set_windows(self, prefix_len: usize, inline_keys: impl ExactSizeIterator<Item = InlineWord>);
@@ -499,7 +499,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
 
     /// Sets the node's prefix length to `prefix_len`, at most what its
     /// fences share, as far as its kind lets it grow
-    /// ([`Child::grown_prefix_len`]), and every inline key to its key's
+    /// ([`Child::allowed_prefix_len`]), and every inline key to its key's
     /// window there, read from the key. Computes them all first, then
     /// writes them, so that a panicking `InlineKey` leaves the node as it
     /// was. Does nothing if the node has no inline keys.
@@ -508,7 +508,7 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
         let (Some(inliner), Some(inline_width)) = (plan.inliner(), plan.inline_width()) else {
             return;
         };
-        let prefix_len = self.grown_prefix_len(prefix_len);
+        let prefix_len = self.allowed_prefix_len(prefix_len);
         if prefix_len == self.prefix_len() {
             return;
         }

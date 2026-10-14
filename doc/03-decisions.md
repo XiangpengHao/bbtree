@@ -352,7 +352,7 @@ Design in 04-inline-key.md.
   prefixes before a cut reads the nodes on the path, and a bulk build fits
   the nodes a new leaf closed with the path that hung it (D25). Only a
   join, which lines two trees up, counts how deep each one's leaves lie,
-  down the border it walks anyway (`Root::leaf_depth`). A slot read checks
+  down the border it walks anyway (`Tree::leaf_depth`). A slot read checks
   its depth against the levels on the path, at most 24, which also keeps
   it in bounds. Measured against D52 at 10M, one run each, in instructions
   per operation: lookups and inserts unchanged, removal 689 → 693,
@@ -729,7 +729,7 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
     search body by the plan, is `#[inline(always)]`. The search body is
     inlined for fixed-width keys and left to LLVM for heap strings
     (`NodePlan::inlines_node_search`), except in an insert's search, which
-    always inlines its leaf's (`Leaf::search_inlined`): out of line, it cost
+    always inlines its leaf's (`Leaf::search_always_inlined`): out of line, it cost
     a random JSON insert 40 instructions more (D51).
   - A lookup that ends at a separator reads its value out of line
     (`Found::separator_key_value`): inlined, the walk down to the head sat
@@ -983,8 +983,8 @@ Design in 05-fence-key.md, "The shared prefix".
 Design in 12-tree-structure.md.
 
 - **What:** `Leaf` and `Internal` are page handles with the operations of
-  their kind, and `Root` owns the tree: its root page, with the top node
-  and the fences as the shared prefix (D50, D52), and the append hint
+  their kind, and `Tree` owns the tree: its root page, with the root node
+  and the fences as the shared prefix (D50, D52), and the rightmost leaf
   (D45). `Node`, a leaf or an internal node, as the tag of the pointer to
   it says (D52), is what an edge, a path or the root leads to, and the one place a kind is decided (D28). What both
   kinds share is composition (pages, slots, inline-key column) and `Child`,
@@ -1032,8 +1032,8 @@ Design in 12-tree-structure.md, "The root page and node kinds".
   its root page for life. Raising it moves the root node to a fresh page of
   its kind and makes the root internal above it; lowering it moves the
   root's only child up and frees the child's page; either returns the
-  root page's pointer tagged with the root's new kind, which `Root` keeps
-  in place of the old one. `Root` holds the page once the map has a tree,
+  root page's pointer tagged with the root's new kind, which `Tree` keeps
+  in place of the old one. `Tree` holds the page once the map has a tree,
   which its first entry allocates (D1).
 - **Why:** a node's kind travels with every pointer to it, not as a count
   the code threads down from the root, which a latch taken hand over hand

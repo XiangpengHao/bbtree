@@ -421,7 +421,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, S> {
         Iter {
-            walk: BorrowedWalk::new(self.root.page(), self.length),
+            walk: BorrowedWalk::new(self.tree.root_page(), self.length),
         }
     }
 
@@ -495,11 +495,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root) = self.root.page() else {
+        let Some(root_page) = self.tree.root_page() else {
             return Range::default();
         };
         Range {
-            walk: RangeWalk::new(root, range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
         }
     }
 }

@@ -24,8 +24,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// How far below the root the leaves lie: 0 for a map that is one leaf
     /// or nothing.
     fn leaf_depth(&self) -> usize {
-        if self.root.has_tree() {
-            self.root.leaf_depth()
+        if self.tree.has_root() {
+            self.tree.leaf_depth()
         } else {
             0
         }
@@ -34,8 +34,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// Every node's prefix length (05-fence-key.md), from the root down, each
     /// node before its children.
     fn node_prefix_lens(&self) -> Vec<usize> {
-        if self.root.has_tree() {
-            self.root.node_prefix_lens()
+        if self.tree.has_root() {
+            self.tree.node_prefix_lens()
         } else {
             Vec::new()
         }
@@ -44,8 +44,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// The keys that live in internal nodes, in order: each one's value is a
     /// leaf's head (D17).
     fn separator_keys(&self) -> Vec<&K> {
-        if self.root.has_tree() {
-            self.root.separator_keys()
+        if self.tree.has_root() {
+            self.tree.separator_keys()
         } else {
             Vec::new()
         }

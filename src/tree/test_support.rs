@@ -19,7 +19,7 @@ use super::node::inline_keys::Separator;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{NodePtr, TestPages};
-use super::root::Root;
+use super::root::Tree;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
 
 /// A deterministic xorshift64* generator; shared by reference.
@@ -367,7 +367,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// leaf's keys and values, and each separator's key with its value from
     /// the head that holds it (D17). A head in the leftmost leaf belongs to
     /// a separator outside, and is skipped.
-    pub(super) fn for_each_entry<'a>(self, entry: &mut impl FnMut(&'a K, &'a V))
+    pub(super) fn for_each_entry<'a>(self, on_entry: &mut impl FnMut(&'a K, &'a V))
     where
         K: 'a,
         V: 'a,
@@ -376,15 +376,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
             Node::Leaf(leaf) => {
                 for index in 0..leaf.len() {
                     let (key, value) = leaf.key_value(index);
-                    entry(key, value);
+                    on_entry(key, value);
                 }
             }
             Node::Internal(internal) => {
                 for index in 0..=internal.len() {
-                    internal.child(index).for_each_entry(entry);
+                    internal.child(index).for_each_entry(on_entry);
                     if index < internal.len() {
                         let value = internal.head_leaf(index).head_value();
-                        entry(internal.key(index), value);
+                        on_entry(internal.key(index), value);
                     }
                 }
             }
@@ -427,7 +427,7 @@ impl PageAligned {
 /// insert into the leaf, and split full nodes on the way back up), over
 /// pages from a [`TestPages`] pool.
 pub(super) struct TestTree<'p, K, V, S: InlineKeyStrategy<K> = Auto> {
-    root: Root<K, V, S>,
+    tree: Tree<K, V, S>,
     pages: &'p TestPages<K, V, S>,
 }
 
@@ -435,55 +435,59 @@ impl<'p, K, V, S: InlineKeyStrategy<K>> TestTree<'p, K, V, S> {
     /// A tree with an empty leaf as its root.
     pub(super) fn new(pages: &'p TestPages<K, V, S>) -> Self {
         Self {
-            root: Root::new(pages.fresh()),
+            tree: Tree::new(pages.fresh()),
             pages,
         }
     }
 
-    pub(super) fn root(&self) -> &Root<K, V, S> {
-        &self.root
+    pub(super) fn tree(&self) -> &Tree<K, V, S> {
+        &self.tree
     }
 
-    pub(super) fn root_mut(&mut self) -> &mut Root<K, V, S> {
-        &mut self.root
+    pub(super) fn root(&self) -> Node<K, V, S> {
+        self.tree.root()
+    }
+
+    pub(super) fn tree_mut(&mut self) -> &mut Tree<K, V, S> {
+        &mut self.tree
     }
 
     pub(super) fn leaf_depth(&self) -> usize {
-        self.root().leaf_depth()
+        self.tree().leaf_depth()
     }
 
     /// One `entry(key, value)` per entry, in order.
-    pub(super) fn entries<T>(&self, mut entry: impl FnMut(&K, &V) -> T) -> Vec<T> {
+    pub(super) fn entries<T>(&self, mut on_entry: impl FnMut(&K, &V) -> T) -> Vec<T> {
         let mut entries = Vec::new();
-        self.root().top().for_each_entry(&mut |key, value| {
-            entries.push(entry(key, value));
+        self.root().for_each_entry(&mut |key, value| {
+            entries.push(on_entry(key, value));
         });
         entries
     }
 
     /// Lowers the tree while its root is internal without keys, as the tree
     /// layer does after a merge empties the root.
-    pub(super) fn pop_empty_roots(&mut self) {
+    pub(super) fn lower_while_root_empty(&mut self) {
         let pages = self.pages;
-        let root = self.root_mut();
-        while matches!(root.top(), Node::Internal(top) if top.len() == 0) {
-            pages.release(root.lower());
+        let tree = self.tree_mut();
+        while matches!(tree.root(), Node::Internal(root) if root.len() == 0) {
+            pages.release(tree.lower());
         }
     }
 
     /// Takes the tree apart, giving every page back to the pool.
     pub(super) fn destroy(mut self) {
         let pages = self.pages;
-        self.root.take().destroy(|page| pages.release(page));
+        self.tree.take().destroy(|page| pages.release(page));
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
-    /// Raises the tree a level ([`Root::raise`]), the root node moving to a
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// Raises the tree a level ([`Tree::raise`]), the root node moving to a
     /// page from `pages`, and returns the root, internal now.
     pub(super) fn raise_in(&mut self, pages: &TestPages<K, V, S>) -> Internal<K, V, S> {
         self.raise(|| pages.fresh(), || pages.fresh());
-        let Node::Internal(root) = self.top() else {
+        let Node::Internal(root) = self.root() else {
             unreachable!("a raised root is internal");
         };
         root
@@ -496,7 +500,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
     pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
         let pages = self.pages;
         let mut length = 0;
-        self.root_mut()
+        self.tree_mut()
             .insert(key, value, || pages.fresh(), || pages.fresh(), &mut length)
     }
 }

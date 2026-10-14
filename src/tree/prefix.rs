@@ -21,7 +21,7 @@
 //! whose fences changed then read their keys for their new windows
 //! ([`Child::refit_prefix`]). Along the borders, a key that doesn't share
 //! what the tree's keys share shrinks it, and the border nodes with it,
-//! reading no key ([`Root::cover_key`]).
+//! reading no key ([`Tree::cover_key`]).
 //!
 //! An operation changes the tree's shape without calling user encodings,
 //! so that a panicking `InlineKey` can't stop it halfway. A prefix may have to shrink
@@ -29,11 +29,11 @@
 //! the parent's separator ([`Window::moved_back_to`]), which bounds the node
 //! (`tree/node/mod.rs`). Once it is done, and its entry counted, the nodes
 //! whose fences changed are fit to them: the halves of each split
-//! ([`PathMut::fit_split_halves`]), the nodes a removal merged or moved entries
+//! ([`PathMut::refit_split_halves`]), the nodes a removal merged or moved entries
 //! between (`remove.rs`), the siblings a cut's borders took entries from
-//! ([`Root::fit_border_siblings`]), and a built tree's nodes as they close
+//! ([`Tree::refit_border_siblings`]), and a built tree's nodes as they close
 //! (`build.rs`). A removed separator's successor is the one change read first
-//! ([`PathMut::fit_left_of_separator`]).
+//! ([`PathMut::refit_left_of_separator`]).
 //!
 //! [`Window::moved_back_to`]: super::node::inline_keys::Window::moved_back_to
 
@@ -44,7 +44,7 @@ use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::{Child, KeyList, Node};
 use super::path::{MAX_DEPTH, NodeEnd, PathMut};
-use super::root::Root;
+use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -60,19 +60,23 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     ///
     /// Calls `InlineKey`: an insert does this last, once its entry is in and
     /// counted, so that a panic leaves a map that has it.
-    pub(crate) fn fit_split_halves(&mut self, separators: &[usize; MAX_DEPTH + 1], top: usize) {
+    pub(crate) fn refit_split_halves(
+        &mut self,
+        separator_indexes: &[usize; MAX_DEPTH + 1],
+        levels_climbed: usize,
+    ) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
         let mut indexes = [0; MAX_DEPTH + 1];
         indexes[0] = self.index();
-        for climbed in 1..=top {
+        for climbed in 1..=levels_climbed {
             self.ascend();
             indexes[climbed] = self.index();
-            let separator = separators[climbed];
-            self.fit_children_to_fences([separator, separator + 1]);
+            let separator_index = separator_indexes[climbed];
+            self.refit_children_to_fences([separator_index, separator_index + 1]);
         }
-        for climbed in (0..top).rev() {
+        for climbed in (0..levels_climbed).rev() {
             self.descend();
             self.set_index(indexes[climbed]);
         }
@@ -83,27 +87,27 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// unless the child's own inline keys tell they share no more
     /// ([`Child::keys_differ_past_prefix`]), and, if a prefix changes, the
     /// child's keys.
-    pub(crate) fn fit_children_to_fences<const N: usize>(&mut self, edges: [usize; N]) {
+    pub(crate) fn refit_children_to_fences<const N: usize>(&mut self, edges: [usize; N]) {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
             return;
         };
         if self.internal().has_leaf_children() {
-            self.fit_children_of_kind::<Leaf<K, V, S>, N>(inliner, edges);
+            self.refit_children_of_kind::<Leaf<K, V, S>, N>(inliner, edges);
         } else {
-            self.fit_children_of_kind::<Internal<K, V, S>, N>(inliner, edges);
+            self.refit_children_of_kind::<Internal<K, V, S>, N>(inliner, edges);
         }
     }
 
-    /// [`Self::fit_children_to_fences`], for children of kind `C`, as
+    /// [`Self::refit_children_to_fences`], for children of kind `C`, as
     /// decided once for the bottom node.
-    fn fit_children_of_kind<C: Child<K, V, S>, const N: usize>(
+    fn refit_children_of_kind<C: Child<K, V, S>, const N: usize>(
         &mut self,
         inliner: KeyInliner<K>,
         edges: [usize; N],
     ) {
-        let shared_len = self.root().shared_prefix().len();
+        let shared_len = self.tree().shared_prefix().len();
         let prefix_lens = {
-            let (low, high) = self.bounds();
+            let (low, high) = self.fences();
             let node = self.internal();
             let keys = node.keys();
             edges.map(|edge| {
@@ -144,13 +148,13 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     ///
     /// A node there has fences `low` and `s`, so its new prefix is the
     /// shorter of its own and what `s` and `s'` share: `low ≤ s ≤ s'`.
-    pub(crate) fn fit_left_of_separator(&mut self) {
+    pub(crate) fn refit_left_of_separator(&mut self) {
         let Some(inliner) = KeyInliner::<K>::resolve::<S>() else {
             return;
         };
         let index = self.index();
         let node = self.internal();
-        let shared = {
+        let shared_len = {
             let successor = node
                 .head_leaf(index)
                 .keys()
@@ -168,11 +172,11 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
         loop {
             left = match left {
                 Node::Leaf(leaf) => {
-                    leaf.shrink_prefix_to(shared);
+                    leaf.shrink_prefix_to(shared_len);
                     break;
                 }
                 Node::Internal(internal) => {
-                    internal.shrink_prefix_to(shared);
+                    internal.shrink_prefix_to(shared_len);
                     internal.child(internal.len())
                 }
             };
@@ -186,13 +190,13 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     /// whose nodes become the borders of two trees, both of whose keys share
     /// what this tree's do. Reads no key; no user encoding runs. The path
     /// stays where it is.
-    pub(crate) fn clear_prefixes(&mut self) {
+    pub(crate) fn move_prefixes_back_to_root(&mut self) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
         debug_assert_eq!(
             self.node_at(0).prefix_len(),
-            self.root().shared_prefix().len(),
+            self.tree().shared_prefix().len(),
             "the root's prefix is what every key shares"
         );
         let bottom = self.depth();
@@ -213,7 +217,7 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
                     if depth < bottom {
                         fill = Some(
                             internal
-                                .bound_window(self.index_at(depth))
+                                .fence_window(self.index_at(depth))
                                 .expect("a node on a path down holds a key"),
                         );
                     }
@@ -223,13 +227,13 @@ impl<K, V, S: InlineKeyStrategy<K>> PathMut<'_, K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Fits the prefix of the node beside each node along the tree's `End`
     /// border to its fences, from the root down: after
-    /// [`Root::fix_border`], which moves entries over from those nodes,
+    /// [`Tree::fix_border`], which moves entries over from those nodes,
     /// into the border, without reading a key. The border's own nodes keep
     /// the root's fence on that side, and so its prefix (D50).
-    pub(crate) fn fit_border_siblings<End: NodeEnd>(&mut self) {
+    pub(crate) fn refit_border_siblings<End: NodeEnd>(&mut self) {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
@@ -243,7 +247,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
                 (1, 0)
             };
             if len > 0 {
-                path.fit_children_to_fences([sibling]);
+                path.refit_children_to_fences([sibling]);
             }
             path.set_index(border);
             path.descend();
@@ -251,7 +255,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Makes what every key of the tree shares cover `key` too, before the
     /// tree takes it (D50): an empty tree shares all of `key`'s first bytes,
     /// and its root leaf takes them as its prefix; a tree whose keys share
@@ -266,7 +270,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         if KeyInliner::<K>::resolve::<S>().is_none() {
             return;
         }
-        if matches!(self.top(), Node::Leaf(root) if root.len() == 0) {
+        if matches!(self.root(), Node::Leaf(root) if root.len() == 0) {
             self.start_shared_prefix(key);
             return;
         }
@@ -282,7 +286,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
         let shared = SharedPrefix::of_key::<K, S>(key);
         let shared_len = shared.len();
         *self.shared_prefix_mut() = shared;
-        if let Node::Leaf(leaf) = self.top_mut() {
+        if let Node::Leaf(leaf) = self.root_mut() {
             leaf.set_empty_prefix_len(shared_len);
         }
     }
@@ -314,7 +318,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Root<K, V, S> {
     /// every key of the tree shares, before it shrank.
     fn move_borders_back_to(&mut self, fill: Window) {
         for go_right in [false, true] {
-            let mut node = self.top_mut();
+            let mut node = self.root_mut();
             loop {
                 node = match node {
                     Node::Leaf(leaf) => {

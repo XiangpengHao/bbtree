@@ -45,12 +45,12 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 
-use super::node::inline_keys::{InlinedKey, SearchKey};
+use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByKind};
+use super::node::page::{FreshPage, NodePtr, PageByType};
 use super::node::{KeyList, Node};
-use super::root::Root;
+use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -261,7 +261,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
 
     /// The node at `depth`, which must be on the path: internal above the
     /// bottom, which debug builds check.
-    pub(crate) fn node(&self, depth: usize) -> Node<K, V, S> {
+    pub(crate) fn node_at(&self, depth: usize) -> Node<K, V, S> {
         let node = Node::at(self.node_ptr(depth));
         debug_assert!(
             depth == self.depth() || matches!(node, Node::Internal(_)),
@@ -276,7 +276,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     /// # Panics
     ///
     /// If `depth` is not on the path.
-    pub(crate) fn internal(&self, depth: usize) -> Internal<K, V, S> {
+    pub(crate) fn internal_at(&self, depth: usize) -> Internal<K, V, S> {
         Internal::at(self.node_ptr(depth))
     }
 
@@ -367,7 +367,7 @@ impl<B, K, V, S> Path<B, K, V, S> {
     pub(crate) fn ascend(&mut self) -> Internal<K, V, S> {
         assert!(self.levels > 1, "ascending from the root");
         self.levels -= 1;
-        self.internal(usize::from(self.levels) - 1)
+        self.internal_at(usize::from(self.levels) - 1)
     }
 
     /// Whether `self` and `other`, paths in the same tree, end at the same
@@ -429,7 +429,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     /// If the bottom node is a leaf, or has no such edge.
     pub(crate) fn descend(&mut self) {
         let depth = self.depth();
-        let Node::Internal(internal) = self.node(depth) else {
+        let Node::Internal(internal) = self.node_at(depth) else {
             panic!("descending from a leaf");
         };
         let child = internal.child(self.index()).node_ptr();
@@ -450,7 +450,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     pub(crate) fn descend_to_leaf<End: NodeEnd>(&mut self) {
         let mut depth = self.depth();
         let mut edge = self.index();
-        let mut node = self.node(depth);
+        let mut node = self.node_at(depth);
         while let Node::Internal(internal) = node {
             node = internal.child(edge);
             depth += 1;
@@ -466,14 +466,14 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
     pub(crate) fn descend_to_first_key(&mut self) -> bool {
         self.set_index(0);
         self.descend_to_leaf::<FirstEdge>();
-        self.node(self.depth()).len() > 0
+        self.node_at(self.depth()).len() > 0
     }
 
     /// Goes down from the bottom node to the last key under it, at the end
     /// of its rightmost leaf; returns `false`, ending at that leaf's edge, if
     /// the leaf has no key, which only an empty tree's root has.
     pub(crate) fn descend_to_last_key(&mut self) -> bool {
-        let last_edge = self.node(self.depth()).len();
+        let last_edge = self.node_at(self.depth()).len();
         self.set_index(last_edge);
         self.descend_to_leaf::<LastEdge>();
         match self.index().checked_sub(1) {
@@ -502,14 +502,14 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match shared.place(key) {
+        match shared.place_outside(key) {
             Some(Ordering::Less) => {
                 self.set_index(0);
                 self.descend_to_leaf::<FirstEdge>();
                 return false;
             }
             Some(Ordering::Greater) => {
-                let len = self.node(self.depth()).len();
+                let len = self.node_at(self.depth()).len();
                 self.set_index(len);
                 self.descend_to_leaf::<LastEdge>();
                 return false;
@@ -517,7 +517,7 @@ impl<B, K, V, S: InlineKeyStrategy<K>> Path<B, K, V, S> {
             Some(Ordering::Equal) | None => {}
         }
         let mut depth = self.depth();
-        let leaf = match self.node(depth) {
+        let leaf = match self.node_at(depth) {
             Node::Leaf(leaf) => leaf,
             Node::Internal(mut internal) => loop {
                 let edge = match internal.search(key) {
@@ -596,7 +596,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> Path<Immut<'a>, K, V, S> {
     /// If the path ends at no key.
     pub(crate) fn key_value(&self) -> (&'a K, &'a V) {
         let index = self.index();
-        match self.node(self.depth()) {
+        match self.node_at(self.depth()) {
             Node::Leaf(leaf) => leaf.key_value(index),
             Node::Internal(internal) => {
                 (internal.key(index), internal.head_leaf(index).head_value())
@@ -619,12 +619,12 @@ impl<B: CopyableBorrow, K, V, S> Path<B, K, V, S> {
 /// An exclusive path, from `root` down: what an entry keeps, and what
 /// inserts and removals go back up. It changes the nodes below the root
 /// through the bottom node, and the root only through
-/// [`Self::ascend_raising`] and [`Self::detach_popping_an_empty_root`].
+/// [`Self::ascend_raising`] and [`Self::detach_lowering_an_empty_root`].
 ///
 /// It is made detached, and starts where it is: every way of starting it
 /// first attaches it to the root.
 pub(crate) struct PathMut<'a, K, V, S> {
-    root: &'a mut Root<K, V, S>,
+    tree: &'a mut Tree<K, V, S>,
     path: Path<Mut<'a, K, V>, K, V, S>,
 }
 
@@ -633,30 +633,30 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// start it. It ends the owner's permission to append to its remembered
     /// leaf, which the path may change.
     #[inline(always)]
-    pub(crate) fn new(root: &'a mut Root<K, V, S>) -> Self {
-        root.clear_insertion_hint();
+    pub(crate) fn new(tree: &'a mut Tree<K, V, S>) -> Self {
+        tree.forget_rightmost_leaf();
         Self {
-            root,
+            tree,
             path: Path::detached(),
         }
     }
 
     /// The root the path goes down from, shared.
-    pub(crate) fn root(&self) -> &Root<K, V, S> {
-        self.root
+    pub(crate) fn tree(&self) -> &Tree<K, V, S> {
+        self.tree
     }
 
     /// Makes what every key of the tree shares cover `key`, before the path
-    /// inserts it; see [`Root::cover_key`]. The path still leads where it
+    /// inserts it; see [`Tree::cover_key`]. The path still leads where it
     /// did: only the prefixes along the tree's borders change.
     pub(crate) fn cover_key(&mut self, key: &K) {
-        self.root.cover_key(key);
+        self.tree.cover_key(key);
     }
 
     /// Finishes a plain insertion, remembering its leaf only when the path
     /// proves the new entry is physically last. This consumes the path:
     /// entry handles that keep their path may still remove or merge nodes,
-    /// so they must never publish the hint while retaining mutation access.
+    /// so they must never remember the leaf while retaining mutation access.
     /// No ordinary fitting search needs to track ancestors for this proof.
     pub(crate) fn finish_insertion(self) {
         if !self.path.ends_at_leaf() {
@@ -667,7 +667,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
             return;
         }
         for depth in 0..self.path.depth() {
-            let node = self.path.internal(depth);
+            let node = self.path.internal_at(depth);
             if self.path.index_at(depth) != node.len() {
                 return;
             }
@@ -675,7 +675,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         // SAFETY: every ancestor takes its final edge, so this is the
         // physically last leaf. `self` is consumed and lends no handles;
         // future exclusive access goes through the owner's invalidation.
-        unsafe { self.root.remember_rightmost_leaf(leaf) };
+        unsafe { self.tree.remember_rightmost_leaf(leaf) };
     }
 
     /// Starts the path at the root, at its first edge.
@@ -684,7 +684,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     ///
     /// Without a tree.
     pub(crate) fn start_at_root(&mut self) {
-        self.path.attach(self.root.top());
+        self.path.attach(self.tree.root());
     }
 
     /// Starts the path at the root and searches down; see [`Path::search`].
@@ -694,7 +694,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         Q: Ord + ?Sized,
     {
         self.start_at_root();
-        self.path.search(key, self.root.shared_prefix())
+        self.path.search(key, self.tree.shared_prefix())
     }
 
     /// Starts the path at the root and goes down to the leaf edge beside
@@ -706,7 +706,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     {
         self.start_at_root();
         self.path
-            .search_to_edge(key, side, self.root.shared_prefix());
+            .search_to_edge(key, side, self.tree.shared_prefix());
     }
 
     /// Starts the path at the root and goes down to the tree's first key;
@@ -755,7 +755,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// Goes up to the bottom node's parent and returns it, as
     /// [`Self::ascend`] does; at the root, raises the tree a level first
-    /// ([`Root::raise`]): the root node moves to a page from `new_leaf_page`
+    /// ([`Tree::raise`]): the root node moves to a page from `new_leaf_page`
     /// or `new_internal_page`, by its kind, under the root, now internal
     /// with no keys, which the path then ends at, at its only edge.
     pub(crate) fn ascend_raising(
@@ -766,9 +766,9 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
         if !self.path.is_at_root() {
             return self.path.ascend();
         }
-        self.root.raise(new_leaf_page, new_internal_page);
-        self.path.attach(self.root.top());
-        self.path.internal(0)
+        self.tree.raise(new_leaf_page, new_internal_page);
+        self.path.attach(self.tree.root());
+        self.path.internal_at(0)
     }
 
     /// See [`Path::descend`].
@@ -784,10 +784,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     /// The bottom node's bounds, low and high: the keys just left and just
     /// right of the path in the nodes above it, nearest first; `None` past
     /// the tree's first or last key.
-    pub(super) fn bounds(&self) -> (Option<&K>, Option<&K>) {
+    pub(super) fn fences(&self) -> (Option<&K>, Option<&K>) {
         let (mut low, mut high) = (None, None);
         for depth in (0..self.path.depth()).rev() {
-            let keys = self.path.internal(depth).keys();
+            let keys = self.path.internal_at(depth).keys();
             let index = self.path.index_at(depth);
             low = low.or_else(|| index.checked_sub(1).and_then(|left| keys.get(left)));
             high = high.or_else(|| keys.get(index));
@@ -800,7 +800,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// The bottom node. Changing it leaves the path leading to it.
     pub(crate) fn node(&self) -> Node<K, V, S> {
-        self.path.node(self.path.depth())
+        self.path.node_at(self.path.depth())
     }
 
     /// The node at `depth` on the path, at or above its bottom: changing
@@ -811,7 +811,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     ///
     /// If `depth` is not on the path.
     pub(super) fn node_at(&self, depth: usize) -> Node<K, V, S> {
-        self.path.node(depth)
+        self.path.node_at(depth)
     }
 
     /// See [`Path::index_at`].
@@ -847,15 +847,15 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
 
     /// Detaches the path, which a removal is done with, and lowers the
     /// tree, if merges left the root internal and without keys, moving the
-    /// root's only child up into the root ([`Root::lower`]), and handing the
+    /// root's only child up into the root ([`Tree::lower`]), and handing the
     /// child's page to `release`.
-    pub(crate) fn detach_popping_an_empty_root(
+    pub(crate) fn detach_lowering_an_empty_root(
         &mut self,
-        release: &mut impl FnMut(PageByKind<K, V, S>),
+        release: &mut impl FnMut(PageByType<K, V, S>),
     ) {
         self.path = Path::detached();
-        if matches!(self.root.top(), Node::Internal(root) if root.len() == 0) {
-            release(self.root.lower());
+        if matches!(self.tree.root(), Node::Internal(root) if root.len() == 0) {
+            release(self.tree.lower());
         }
     }
 
@@ -882,7 +882,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> PathMut<'a, K, V, S> {
     pub(crate) fn replace_key(&mut self, key: K) -> K {
         let index = self.index();
         let node = self.node();
-        let key = InlinedKey::new(key, node.prefix_len());
+        let key = WindowedKey::new(key, node.prefix_len());
         match node {
             Node::Leaf(leaf) => leaf.replace_key(index, key),
             Node::Internal(internal) => internal.replace_key(index, key),

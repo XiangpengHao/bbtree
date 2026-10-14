@@ -41,9 +41,9 @@ use super::into_iter::Deallocate;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::join::DetachedTree;
-use crate::tree::node::page::PageByKind;
+use crate::tree::node::page::PageByType;
 use crate::tree::path::{FirstEdge, KeySide};
-use crate::tree::root::Root;
+use crate::tree::root::Tree;
 use crate::tree::walk::DyingWalk;
 
 /// An iterator produced by calling `extract_if` on [`BBTreeMap`].
@@ -87,7 +87,7 @@ struct ExtractionSource<K, V, S: InlineKeyStrategy<K>> {
     /// tree, which this walk owns and frees as it goes.
     rest: DyingWalk<K, V, S, Deallocate<K, V, S>>,
     /// The entry taken out last, while it is tested: kept if that panics.
-    testing: Option<(K, V)>,
+    under_test: Option<(K, V)>,
     /// Whether the walk went past the range's last entry: it takes nothing
     /// more out, and peeks at nothing.
     finished: bool,
@@ -111,11 +111,11 @@ impl<K, V, S: InlineKeyStrategy<K>> ExtractionSource<K, V, S> {
                     self.finished = true;
                     return None;
                 };
-                let (key, value) = self.testing.insert(entry);
+                let (key, value) = self.under_test.insert(entry);
                 if !pick(key, value) {
-                    return self.testing.take();
+                    return self.under_test.take();
                 }
-                let picked = self.testing.take().expect("the entry just tested");
+                let picked = self.under_test.take().expect("the entry just tested");
                 if on_pick(picked).is_break() {
                     return None;
                 }
@@ -128,16 +128,16 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
     /// Takes the entries out of `map` and cuts out those in `range`.
     pub(crate) fn new(map: &'a mut BBTreeMap<K, V, S>, range: R) -> Self {
         let length = map.length;
-        let had_tree = map.root.has_tree();
-        let tree = mem::replace(map, BBTreeMap::empty()).root.take();
+        let had_tree = map.tree.has_root();
+        let tree = mem::replace(map, BBTreeMap::empty()).tree.take();
         let mut walk = Self {
             map,
             had_tree,
             length,
             kept: TreeBuilder::new(),
             source: ExtractionSource {
-                rest: DyingWalk::new(None, 0, PageByKind::deallocate),
-                testing: None,
+                rest: DyingWalk::new(None, 0, PageByType::deallocate),
+                under_test: None,
                 finished: false,
             },
             after: DetachedTree::new(tree),
@@ -165,8 +165,8 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
             let from_start = tree.split_off_at(start, side);
             let before = mem::replace(tree, from_start);
             self.kept = TreeBuilder::continuing(before);
-            self.kept.fit_border_siblings();
-            tree.fit_border_siblings::<FirstEdge>();
+            self.kept.refit_border_siblings();
+            tree.refit_border_siblings::<FirstEdge>();
         }
         let end = match self.range.end_bound() {
             Bound::Included(end) => Some((end, KeySide::After)),
@@ -174,16 +174,17 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
             Bound::Unbounded => None,
         };
         let cut_past_end = end.is_some();
-        let range = match end {
+        let range_tree = match end {
             Some((end, side)) => {
                 let past_end = tree.split_off_at(end, side);
                 mem::replace(tree, past_end)
             }
             None => self.after.take(),
         };
-        self.source.rest = DyingWalk::new(range.page(), usize::MAX, PageByKind::deallocate);
+        self.source.rest =
+            DyingWalk::new(range_tree.root_page(), usize::MAX, PageByType::deallocate);
         if cut_past_end {
-            self.after.tree_mut().fit_border_siblings::<FirstEdge>();
+            self.after.tree_mut().refit_border_siblings::<FirstEdge>();
         }
     }
 }
@@ -229,7 +230,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> ExtractionWalk<'_, K, V, R, S> {
         if source.finished {
             return None;
         }
-        if let Some((key, value)) = &source.testing {
+        if let Some((key, value)) = &source.under_test {
             return Some((key, value));
         }
         let mut rest = source.rest.remaining();
@@ -251,7 +252,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
         let rest = &mut source.rest;
         self.kept.extend(
             source
-                .testing
+                .under_test
                 .take()
                 .into_iter()
                 .chain(iter::from_fn(|| rest.next())),
@@ -259,7 +260,7 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
         let kept = mem::replace(&mut self.kept, TreeBuilder::new());
         let dropped = kept.dropped();
         let (kept, _) = kept.finish();
-        self.map.root = Root::concat(kept, self.after.take());
+        self.map.tree = Tree::concat(kept, self.after.take());
         self.map.length = self.length - dropped;
         if self.had_tree {
             self.map.keep_a_tree();

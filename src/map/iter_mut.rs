@@ -86,9 +86,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for IterMut<'_, K, V, S> {}
 /// Prints the entries left, without moving the iterator.
 impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for IterMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.walk.reborrow();
+        let mut remaining = self.walk.reborrow();
         f.debug_list()
-            .entries(iter::from_fn(|| left.next()))
+            .entries(iter::from_fn(|| remaining.next()))
             .finish()
     }
 }
@@ -170,8 +170,8 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for ValuesMut<'_, K, V, S> {}
 /// Prints the values left, without moving the iterator.
 impl<K, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for ValuesMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.inner.walk.reborrow();
-        let values = iter::from_fn(|| left.next()).map(|(_, value)| value);
+        let mut remaining = self.inner.walk.reborrow();
+        let values = iter::from_fn(|| remaining.next()).map(|(_, value)| value);
         f.debug_list().entries(values).finish()
     }
 }
@@ -254,9 +254,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for RangeMut<'_, K, V, S> {}
 /// Prints the entries left, without moving the iterator.
 impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for RangeMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.walk.reborrow();
+        let mut remaining = self.walk.reborrow();
         f.debug_list()
-            .entries(iter::from_fn(|| left.next()))
+            .entries(iter::from_fn(|| remaining.next()))
             .finish()
     }
 }
@@ -299,7 +299,7 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// ```
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
         IterMut {
-            walk: BorrowedWalk::new(self.root.page_mut(), self.length),
+            walk: BorrowedWalk::new(self.tree.root_page_mut(), self.length),
         }
     }
 
@@ -361,11 +361,11 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root) = self.root.page_mut() else {
+        let Some(root_page) = self.tree.root_page_mut() else {
             return RangeMut::default();
         };
         RangeMut {
-            walk: RangeWalk::new(root, range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
         }
     }
 }
