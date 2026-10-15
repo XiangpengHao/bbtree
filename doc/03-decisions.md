@@ -214,8 +214,6 @@ Design in 04-inline-key.md.
   one-line impl plus `BBTreeMap::with_strategy(WithInlineKey)`; `new()`
   stays `Auto`-only, since a generic `new()` breaks inference. There is no
   separate alias type.
-- **Lint:** node handles carry five type parameters, so `clippy.toml` raises
-  `type-complexity-threshold` to 300.
 - **Width:** windows are 8 bytes (`InlineWord = u64`), and nodes keep the
   first `InlineKey::WIDTH` bytes of them, 2, 4 or 8. Under `Auto`: heap
   byte strings, whose ties read the heap, 8 in leaves and 4 in internal

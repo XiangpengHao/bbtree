@@ -1049,8 +1049,7 @@ mod tests {
             }
         }
         let rng = TestRng::new(49);
-        let random_u128 =
-            || (0..4).fold(0, |word: u128, _| word << 32 | rng.below(1 << 32) as u128);
+        let random_u128 = || u128::from_be_bytes(core::array::from_fn(|_| rng.below(256) as u8));
         for _ in 0..if cfg!(miri) { 300 } else { 30_000 } {
             let stored = random_u128();
             let differing = rng.below(16);

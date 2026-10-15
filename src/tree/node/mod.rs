@@ -205,6 +205,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// # Panics
     ///
     /// If `right` is not of this node's kind.
+    #[expect(
+        clippy::type_complexity,
+        reason = "a refused absorb hands back the separator and the node it took"
+    )]
     pub(in crate::tree) fn absorb(
         self,
         separator: Separator<K, S>,
@@ -432,6 +436,10 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     ///
     /// If `right` is a leaf without a head, or if the separator's prefix
     /// length is longer than either node's; nothing changes then.
+    #[expect(
+        clippy::type_complexity,
+        reason = "a refused absorb hands back the separator and the node it took"
+    )]
     fn absorb(
         self,
         separator: Separator<K, S>,

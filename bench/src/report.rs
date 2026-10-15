@@ -350,6 +350,7 @@ impl RunLog {
     /// The columns that `compare` reads, and the statuses it tells apart.
     pub(crate) const BENCHMARK_COLUMN: &str = "benchmark";
     pub(crate) const MAP_COLUMN: &str = "map";
+    pub(crate) const SIZE_COLUMN: &str = "size";
     pub(crate) const STATUS_COLUMN: &str = "status";
     pub(crate) const TIME_COLUMN: &str = "ns_per_op";
     pub(crate) const MEASURED: &str = "ok";
@@ -360,7 +361,7 @@ impl RunLog {
         Self::MAP_COLUMN,
         "key",
         "value",
-        "size",
+        Self::SIZE_COLUMN,
         "operation",
         "repetition",
         Self::STATUS_COLUMN,

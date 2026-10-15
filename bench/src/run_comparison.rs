@@ -11,6 +11,7 @@ use crate::command_line::{ComparisonRequest, Named};
 use crate::map_adapters::MapKind;
 use crate::perf_counters::PerfEvent;
 use crate::report::{ReportNumber, RunLog, Statistic};
+use crate::workload::MapSize;
 
 /// A number the report compares, per operation: time, or a perf count.
 #[derive(Clone, Copy)]
@@ -125,18 +126,24 @@ impl RecordedRun {
         row.get(index).map(String::as_str)
     }
 
-    /// The benchmarks, in the order the run lists them.
+    /// The benchmarks: those at 10M first, the size the report leads with,
+    /// then the rest, each in the order the run lists them.
     fn benchmarks(&self) -> Vec<&str> {
-        let mut benchmarks: Vec<&str> = Vec::new();
+        let mut benchmarks: Vec<(&str, &str)> = Vec::new();
         for row in &self.rows {
             let benchmark = self
                 .field(row, RunLog::BENCHMARK_COLUMN)
                 .unwrap_or_default();
-            if !benchmarks.contains(&benchmark) {
-                benchmarks.push(benchmark);
+            if !benchmarks.iter().any(|&(listed, _)| listed == benchmark) {
+                let size = self.field(row, RunLog::SIZE_COLUMN).unwrap_or_default();
+                benchmarks.push((benchmark, size));
             }
         }
+        benchmarks.sort_by_key(|&(_, size)| size != MapSize::TenMillion.name());
         benchmarks
+            .into_iter()
+            .map(|(benchmark, _)| benchmark)
+            .collect()
     }
 
     fn value(&self, benchmark: &str, map: MapKind, metric: Metric) -> RecordedValue {
@@ -184,7 +191,7 @@ impl RunComparison {
                 value(&self.head).change_from(value(base))
             }));
         }
-        text.push_str("#### bbtree ÷ std BTreeMap, at head\n\n");
+        text.push_str("#### bbtree ÷ std BTreeMap, at head (lower is better)\n\n");
         text.push_str(&self.metric_table(|benchmark, metric| {
             let value = |map| self.head.value(benchmark, map, metric);
             value(MapKind::BBTree).ratio_to(value(MapKind::StdBTree))
@@ -336,6 +343,28 @@ mod tests {
     }
 
     #[test]
+    fn benchmarks_at_10m_come_first_and_the_rest_keep_the_run_order() {
+        let run = RecordedRun::parse(
+            "benchmark,map,size,status\n\
+             u64_u64_get_hit_1k,bbtree,1k,ok\n\
+             u64_u64_get_hit_10M,bbtree,10M,ok\n\
+             u64_u64_get_hit_1M,bbtree,1M,ok\n\
+             u64_u64_get_hit_10M,std-btree,10M,ok\n\
+             u64_u64_get_miss_10M,bbtree,10M,ok",
+        )
+        .expect("a valid run");
+        assert_eq!(
+            run.benchmarks(),
+            [
+                "u64_u64_get_hit_10M",
+                "u64_u64_get_miss_10M",
+                "u64_u64_get_hit_1k",
+                "u64_u64_get_hit_1M",
+            ]
+        );
+    }
+
+    #[test]
     fn changes_and_ratios() {
         let measured = RecordedValue::Measured;
         assert_eq!(measured(105.0).change_from(measured(100.0)), "+5.0%");
@@ -373,7 +402,7 @@ mod tests {
             "| u64_u64_get_hit_1k | -10.0% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | 0 |"
         );
         assert_eq!(
-            row_after("#### bbtree ÷ std BTreeMap, at head"),
+            row_after("#### bbtree ÷ std BTreeMap, at head (lower is better)"),
             "| u64_u64_get_hit_1k | 0.45× | 1.00× | 0.50× | 1.00× | 1.00× | 1.00× | – |"
         );
         assert_eq!(
