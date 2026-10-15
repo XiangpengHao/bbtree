@@ -90,6 +90,9 @@ jobs:
             echo "BASE_SOURCE=main's run" >> "$GITHUB_ENV"
           else
             rm -f "$RUNNER_TEMP/base/kept-timing.csv"
+            # This machine keeps its checkout between jobs but empties
+            # RUNNER_TEMP, so a past job's worktree is registered and gone.
+            git worktree prune
             git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
             cd "$RUNNER_TEMP/base-source/bench"
             if cargo build --release --bin bbtree-bench &&
