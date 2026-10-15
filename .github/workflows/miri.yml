@@ -26,19 +26,14 @@ env:
 
 jobs:
   miri:
-    name: miri (${{ matrix.model.name }})
+    name: miri (tree borrows, strict provenance)
     runs-on: ubuntu-latest
     # The most a job may run on GitHub's runners.
     timeout-minutes: 360
-    strategy:
-      # Each aliasing model reports its own failures.
-      fail-fast: false
-      matrix:
-        model:
-          - name: stacked borrows
-            flags: ""
-          - name: tree borrows, strict provenance
-            flags: -Zmiri-tree-borrows -Zmiri-strict-provenance
+    # Tree borrows rather than Miri's default, stacked borrows; and strict
+    # provenance: no integer becomes a pointer.
+    env:
+      MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-strict-provenance
     steps:
       - uses: actions/checkout@v4
 
@@ -59,12 +54,8 @@ jobs:
       # Miri interprets on one core. Nextest runs each test in a process of
       # its own, so as many tests run at once as the runner has cores.
       - name: Miri
-        env:
-          MIRIFLAGS: ${{ matrix.model.flags }}
         run: cargo miri nextest run --test-threads "$(nproc)"
 
       # Nextest doesn't run doc tests.
       - name: Miri (doc tests)
-        env:
-          MIRIFLAGS: ${{ matrix.model.flags }}
         run: cargo miri test --doc

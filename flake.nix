@@ -32,8 +32,12 @@
             "llvm-tools-preview"
             "miri"
           ];
-          # The visualizer (`vis/`) builds bbtree for the browser.
-          targets = [ "wasm32-unknown-unknown" ];
+          # The visualizer (`vis/`) builds bbtree for the browser; CI tests
+          # the library on wasm32-wasip1 under wasmtime.
+          targets = [
+            "wasm32-unknown-unknown"
+            "wasm32-wasip1"
+          ];
         };
       in
       {
@@ -44,6 +48,9 @@
             pkgs.cargo-fuzz
             llvmPackages.llvm
             pkgs.cargo-binutils
+            # CI's wasm test runner: `CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime
+            # cargo test --target wasm32-wasip1 --lib`.
+            pkgs.wasmtime
             # Exact instruction attribution (callgrind), on builds without
             # AVX-512, which valgrind can't run.
             pkgs.valgrind

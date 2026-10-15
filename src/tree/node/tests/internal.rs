@@ -244,10 +244,6 @@ fn split_and_insert_at_every_position() {
 
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
-#[cfg_attr(
-    miri,
-    ignore = "the rejected child is leaked on purpose, which Miri reports"
-)]
 fn insert_rejects_a_child_of_the_wrong_kind() {
     let ledger = DropLedger::new();
     let pages = TestPages::<Tracked<'_>, Tracked<'_>>::new();
@@ -260,8 +256,11 @@ fn insert_rejects_a_child_of_the_wrong_kind() {
     assert!(rejected.is_err());
     assert_eq!(root.len(), 0);
     assert_eq!(child_names(root), [first_name]);
+    // The rejected child comes back unchanged, still the caller's to free.
+    internal.destroy(&pages);
     tree.destroy(&pages);
-    assert_eq!(pages.in_use_count(), 2, "only the rejected child is leaked");
+    pages.assert_all_released();
+    ledger.assert_all_dropped_once();
 }
 
 /// A separator over a leaf without a head is a broken tree: balancing it

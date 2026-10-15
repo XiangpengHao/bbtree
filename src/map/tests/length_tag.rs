@@ -17,17 +17,29 @@ use crate::BBTreeMap;
 /// leaf, which takes its windows from the first byte, are all `shared-p`.
 const OUTSIDE_KEY: &str = "z";
 
+/// Whether the leaves here, `String` → `u64` and `String` → `usize`, keep
+/// length tags: their layout has room for them on 64-bit targets, not on
+/// 32-bit ones (D36). Lookups must be right either way.
+const LENGTH_TAGGED: bool = cfg!(target_pointer_width = "64");
+
 impl<V> BBTreeMap<String, V> {
     /// How many of `probe`'s candidates in the leaf its lookup ends in have
-    /// its length tag: its length, truncated to 16 bits (D36).
-    fn candidates_of_its_length(&self, probe: &str) -> usize {
+    /// its length tag: its length, truncated to 16 bits (D36); `None` if the
+    /// leaf keeps no length tags.
+    fn candidates_of_its_length(&self, probe: &str) -> Option<usize> {
         let trace = self.inspect().trace(probe);
         let leaf_step = trace.last().expect("the lookup reads a leaf");
-        let candidates = leaf_step.tied().expect("the leaf has inline keys");
+        let tags: Option<Vec<u16>> = leaf_step
+            .tied()
+            .expect("the leaf has inline keys")
+            .map(|index| leaf_step.node().length_tag(index))
+            .collect();
         let tag = probe.len() as u16;
-        candidates
-            .filter(|&index| leaf_step.node().length_tag(index) == Some(tag))
-            .count()
+        tags.map(|tags| {
+            tags.into_iter()
+                .filter(|&candidate| candidate == tag)
+                .count()
+        })
     }
 }
 
@@ -56,7 +68,11 @@ fn two_length_candidates_check_hits_and_misses_on_either_side() {
         .iter()
         .chain(&missing)
     {
-        assert_eq!(map.candidates_of_its_length(probe), 2, "{probe}");
+        assert_eq!(
+            map.candidates_of_its_length(probe),
+            LENGTH_TAGGED.then_some(2),
+            "{probe}"
+        );
     }
     assert_eq!(map.get("shared-prefix/c0"), Some(&1));
     assert_eq!(map.get("shared-prefix/t0"), Some(&3));
@@ -88,7 +104,10 @@ fn two_length_candidates_confirm_modulo_collisions() {
         format!("{long}{}", "\0".repeat(65536)),
     ];
     for probe in [&short, &long].into_iter().chain(&missing) {
-        assert_eq!(map.candidates_of_its_length(probe), 2);
+        assert_eq!(
+            map.candidates_of_its_length(probe),
+            LENGTH_TAGGED.then_some(2)
+        );
     }
     assert_eq!(map.get(short.as_str()), Some(&1));
     assert_eq!(map.get(long.as_str()), Some(&3));
@@ -118,12 +137,16 @@ fn length_collisions_and_mutations_preserve_exact_key_lookups() {
     actual.insert(String::from(OUTSIDE_KEY), usize::MAX);
     expected.insert(String::from(OUTSIDE_KEY), usize::MAX);
     assert_eq!(actual.leaf_depth(), 0);
-    let candidates: Vec<usize> = keys
+    let candidates: Vec<Option<usize>> = keys
         .iter()
         .map(|key| actual.candidates_of_its_length(key))
         .collect();
-    assert!(candidates.contains(&1) && candidates.contains(&2));
-    assert!(candidates.iter().any(|&count| count > 2));
+    if LENGTH_TAGGED {
+        assert!(candidates.contains(&Some(1)) && candidates.contains(&Some(2)));
+        assert!(candidates.iter().flatten().any(|&count| count > 2));
+    } else {
+        assert!(candidates.iter().all(Option::is_none));
+    }
     let mut probes = Vec::new();
     for key in &keys {
         probes.push(key.clone());

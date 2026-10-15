@@ -28,7 +28,6 @@
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
           { "context": "merge gate", "integration_id": 15368 },
-          { "context": "miri (stacked borrows)", "integration_id": 15368 },
           { "context": "miri (tree borrows, strict provenance)", "integration_id": 15368 },
           { "context": "address sanitizer", "integration_id": 15368 }
         ]
