@@ -467,6 +467,7 @@ impl Ord for Tagged {
 /// new one; `get` and `take` hand back the one in; the operations on two
 /// sets hand out one set's or the other's: all as std's do.
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn which_of_equal_elements_stays_matches_std() {
     let rng = TestRng::new(24);
     let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };

@@ -997,6 +997,7 @@ fn zero_sized_keys_and_values_match_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_keys_with_zero_sized_values_match_std() {
     let rng = TestRng::new(6);
     let steps = if cfg!(miri) { 500 } else { 10_000 };

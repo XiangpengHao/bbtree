@@ -211,6 +211,7 @@ fn cached_runs_resume_after_try_fold_breaks() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn zero_stride_runs_count_logical_entries() {
     use crate::{InlineKey, InlineWord, WithInlineKey};
     use core::cmp::Ordering;

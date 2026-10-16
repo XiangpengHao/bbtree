@@ -402,6 +402,7 @@ fn dense_fixed_width_keys_match_std<K: Ord + Copy + core::fmt::Debug>(key: impl 
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn dense_integer_keys_match_std() {
     dense_fixed_width_keys_match_std(|index| index);
     dense_fixed_width_keys_match_std(|index| u128::from(index) | (7 << 100));
@@ -409,6 +410,7 @@ fn dense_integer_keys_match_std() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_arrays_behind_a_shared_head_match_std() {
     dense_fixed_width_keys_match_std(|index| {
         let mut key = [0x5A; 16];
@@ -427,6 +429,7 @@ fn byte_arrays_behind_a_shared_head_match_std() {
 /// one by one, appended in order by a build, or joined from another tree;
 /// removals leave it. Every node along the borders follows it (D50).
 #[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn keys_that_share_less_shrink_the_shared_prefix() {
     let shared_len = |map: &BBTreeMap<String, usize>| map.inspect().shared_prefix().len();
     let mut map: BBTreeMap<String, usize> = (0..key_count())

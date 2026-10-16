@@ -144,6 +144,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn destroy_drops_entries_in_ascending_order() {
         destroy_in_order::<Bulky<'_>, Auto>(&DropLedger::new(), 300);
         // 25 entries in a leaf with inline keys, and 63 children in an
