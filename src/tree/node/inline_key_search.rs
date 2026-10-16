@@ -1,10 +1,8 @@
 //! A node's inline keys, read in place for a search (D18): the column of
 //! a key's first bytes past the node's prefix that leaves and internal nodes
 //! keep beside their keys, and how a search finds the keys whose inline
-//! keys equal its own, by counting over the whole column or by a binary
-//! search, as the build target and the width call for.
+//! keys equal its own, by counting over the whole column.
 
-use core::hint;
 use core::marker::PhantomData;
 use core::ops::Range;
 
@@ -170,37 +168,17 @@ impl<W: InlineSlot> InlineKeysOfWidth<'_, W> {
     /// range within `0..len` for any. If none equals it, the empty range at
     /// the first inline key greater than it.
     ///
-    /// Found by a count of every slot: in explicit vectors where the build
+    /// Found by a count of every slot, never a binary search: the count's
+    /// loads don't depend on one another, so the lines of a node that comes
+    /// from memory arrive together, where a search's probes would wait for
+    /// them one after another (04, Q6). In explicit vectors where the build
     /// target has them for slots of this width
     /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
-    /// compiler vectorizes it ([`Self::equal_range_by_count`]) where it
-    /// compares slots of this width in vectors
-    /// ([`InlineSlot::COUNT_AUTOVECTORIZES`]); and by a binary search
-    /// otherwise ([`Self::equal_range_by_search`]): without such compares,
-    /// the count is an emulated sequence that costs more than the mispredicts
-    /// it avoids. Measured on 1M-entry maps of 8-byte inline keys (04, Q6).
-    /// Wide four-byte arrays on baseline x86-64 also use binary search:
-    /// beyond the one-word packed reduction, full-capacity counts cost more
-    /// than dependent probes in warm routing nodes.
+    /// compiler vectorizes it ([`Self::equal_range_by_count`]).
     #[inline(always)]
     fn equal_range(self, target: W) -> Range<usize> {
-        if cfg!(all(
-            target_arch = "x86_64",
-            not(target_feature = "avx512bw"),
-            not(target_feature = "popcnt")
-        )) && size_of::<W>() == 4
-            && self.slots.capacity() > 32
-        {
-            return self.equal_range_by_search(target);
-        }
-        if let Some(equal_range) = W::equal_range_in_vectors(self.slots, self.len, target) {
-            return equal_range;
-        }
-        if W::COUNT_AUTOVECTORIZES {
-            self.equal_range_by_count(target)
-        } else {
-            self.equal_range_by_search(target)
-        }
+        W::equal_range_in_vectors(self.slots, self.len, target)
+            .unwrap_or_else(|| self.equal_range_by_count(target))
     }
 
     /// The slots equal to `target`, as a bit mask, where the build target
@@ -232,48 +210,6 @@ impl<W: InlineSlot> InlineKeysOfWidth<'_, W> {
             .count();
         let below = below.min(self.len);
         below..(below + equal).min(self.len)
-    }
-
-    /// A branchless binary search finds where the equal range starts, and a
-    /// scan from there finds where it ends: one compare, which inline keys
-    /// that don't tie make predictable, rather than a second search, whose
-    /// exit depends on where the first one ended. Within `0..len` for any
-    /// slots: the search and the scan stay within the live slots.
-    #[inline(always)]
-    fn equal_range_by_search(self, target: W) -> Range<usize> {
-        let start = self.count_below(target);
-        let mut end = start;
-        // SAFETY: `end < len <= capacity`, initialized (type invariant).
-        while end < self.len && unsafe { self.slots.load(end) } == target {
-            end += 1;
-        }
-        start..end
-    }
-
-    /// How many of the live inline keys, sorted, are below `target`, by a
-    /// branchless binary search, as in `KeyList::branchless_search_index`;
-    /// in `0..=len` for any inline keys, by construction: the loop keeps
-    /// `base + size <= len`, and probes only `mid = base + size / 2 < base +
-    /// size`.
-    #[inline(always)]
-    fn count_below(self, target: W) -> usize {
-        let mut size = self.len;
-        if size == 0 {
-            return 0;
-        }
-        let mut base = 0;
-        while size > 1 {
-            let half = size / 2;
-            let mid = base + half;
-            // SAFETY: `mid < base + size <= len <= capacity`, initialized
-            // (type invariant).
-            let probe = unsafe { self.slots.load(mid) };
-            base = hint::select_unpredictable(probe < target, mid, base);
-            size -= half;
-        }
-        // SAFETY: `base < base + size <= len`, with `size == 1` here.
-        let last = unsafe { self.slots.load(base) };
-        base + usize::from(last < target)
     }
 }
 
@@ -330,7 +266,6 @@ mod tests {
                 let end = inline_keys.partition_point(|&probe| probe <= target);
                 assert_eq!(node.equal_range(target), start..end);
                 assert_eq!(node.equal_range_by_count(target), start..end);
-                assert_eq!(node.equal_range_by_search(target), start..end);
                 for slots in [&slots, &unpadded] {
                     if let Some(equal_range) =
                         W::equal_range_in_vectors(Slots::of_slice(slots), len, target)
@@ -359,11 +294,7 @@ mod tests {
             // SAFETY: the slots are initialized, and outlive `node`.
             let node = unsafe { InlineKeysOfWidth::new(Slots::of_slice(&slots), len) };
             for target in (0..5).map(W::from) {
-                let equal_ranges = [
-                    node.equal_range(target),
-                    node.equal_range_by_count(target),
-                    node.equal_range_by_search(target),
-                ];
+                let equal_ranges = [node.equal_range(target), node.equal_range_by_count(target)];
                 for equal_range in equal_ranges.into_iter().chain(W::equal_range_in_vectors(
                     Slots::of_slice(&slots),
                     len,

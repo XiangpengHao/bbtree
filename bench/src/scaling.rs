@@ -203,6 +203,7 @@ struct CpuOrder {
 
 impl CpuOrder {
     /// The CPUs the process's affinity mask allows, cores first.
+    #[cfg(target_os = "linux")]
     fn of_this_process() -> Result<Self, String> {
         // SAFETY: a zeroed `cpu_set_t` is an empty set, which the call fills
         // for this process.
@@ -229,7 +230,18 @@ impl CpuOrder {
         Ok(Self { cpus: first })
     }
 
+    /// Every CPU, cores all: other systems, macOS among them, have no
+    /// affinity masks, and Apple's chips no SMT.
+    #[cfg(not(target_os = "linux"))]
+    fn of_this_process() -> Result<Self, String> {
+        let cpus = std::thread::available_parallelism().map_err(|error| format!("{error}"))?;
+        Ok(Self {
+            cpus: (0..cpus.get()).collect(),
+        })
+    }
+
     /// The physical core `cpu` belongs to, with its package.
+    #[cfg(target_os = "linux")]
     fn core_of(cpu: usize) -> Result<(u32, u32), String> {
         let read = |name: &str| {
             let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/{name}");
@@ -240,6 +252,12 @@ impl CpuOrder {
                 .map_err(|error| format!("parsing {path}: {error}"))
         };
         Ok((read("physical_package_id")?, read("core_id")?))
+    }
+
+    /// Each CPU a core of its own, as [`Self::of_this_process`] has them.
+    #[cfg(not(target_os = "linux"))]
+    fn core_of(cpu: usize) -> Result<(u32, u32), String> {
+        Ok((0, cpu as u32))
     }
 
     fn physical_cores(&self) -> usize {
@@ -262,6 +280,7 @@ impl CpuOrder {
     }
 
     /// Pins the calling thread to worker `worker`'s CPU.
+    #[cfg(target_os = "linux")]
     fn pin(&self, worker: usize) {
         let cpu = self.cpus[worker];
         // SAFETY: a zeroed `cpu_set_t` is an empty set, and `cpu` is below
@@ -273,6 +292,11 @@ impl CpuOrder {
             assert_eq!(pinned, 0, "pinning a worker to CPU {cpu}");
         }
     }
+
+    /// Leaves the calling thread where the scheduler puts it: macOS can't
+    /// pin threads.
+    #[cfg(not(target_os = "linux"))]
+    fn pin(&self, _worker: usize) {}
 }
 
 /// A worker's own generator of indexes below the map's size.

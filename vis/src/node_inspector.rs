@@ -11,6 +11,7 @@ use dioxus::prelude::*;
 use crate::concepts::{Concept, Term};
 use crate::count_text::Group;
 use crate::descent::Descent;
+use crate::element_ids::ElementIds;
 use crate::fences::{FenceStrip, NodeFences};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
@@ -379,6 +380,9 @@ pub(crate) fn NodeInspector(
     let kind = tree.key_kind();
     let shown = tab();
     let mut tab = tab;
+    let ids = ElementIds::of_current();
+    let tab_id = move |view: InspectorTab| ids.id(&format!("tab-{}", view.slug()));
+    let panel_id = move |view: InspectorTab| ids.id(&format!("panel-{}", view.slug()));
     let mut tracer = tracer;
     let tree_for_pick = tree.clone();
     let detail_for_pick = detail.clone();
@@ -449,27 +453,27 @@ pub(crate) fn NodeInspector(
                         };
                         tab.set(other);
                         document::eval(
-                            &format!("document.getElementById('tab-{}')?.focus()", other.slug()),
+                            &format!("document.getElementById('{}')?.focus()", tab_id(other)),
                         );
                     }
                 },
                 button {
-                    id: "tab-page",
+                    id: tab_id(InspectorTab::Page),
                     class: "tab",
                     role: "tab",
                     "aria-selected": if shown == InspectorTab::Page { "true" } else { "false" },
-                    "aria-controls": "panel-page",
+                    "aria-controls": panel_id(InspectorTab::Page),
                     tabindex: if shown == InspectorTab::Page { "0" } else { "-1" },
                     onclick: move |_| tab.set(InspectorTab::Page),
                     "Page"
                     span { class: "tab-note", "its memory, line by line" }
                 }
                 button {
-                    id: "tab-slots",
+                    id: tab_id(InspectorTab::Slots),
                     class: "tab",
                     role: "tab",
                     "aria-selected": if shown == InspectorTab::Slots { "true" } else { "false" },
-                    "aria-controls": "panel-slots",
+                    "aria-controls": panel_id(InspectorTab::Slots),
                     tabindex: if shown == InspectorTab::Slots { "0" } else { "-1" },
                     onclick: move |_| tab.set(InspectorTab::Slots),
                     "Slots"
@@ -478,10 +482,10 @@ pub(crate) fn NodeInspector(
             }
             if shown == InspectorTab::Page {
                 div {
-                    id: "panel-page",
+                    id: panel_id(InspectorTab::Page),
                     class: "tab-panel inspector-page",
                     role: "tabpanel",
-                    "aria-labelledby": "tab-page",
+                    "aria-labelledby": tab_id(InspectorTab::Page),
                     MemoryMap {
                         detail: detail.clone(),
                         marks,
@@ -492,10 +496,10 @@ pub(crate) fn NodeInspector(
                 }
             } else {
                 div {
-                    id: "panel-slots",
+                    id: panel_id(InspectorTab::Slots),
                     class: "tab-panel-contents",
                     role: "tabpanel",
-                    "aria-labelledby": "tab-slots",
+                    "aria-labelledby": tab_id(InspectorTab::Slots),
                     SlotTable {
                         tree: tree.clone(),
                         detail,

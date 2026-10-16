@@ -1,9 +1,10 @@
-//! The page's state in its address, so a copied link opens on what its
+//! The explorer's state in its address, so a copied link opens on what its
 //! sender saw: `?keys=u64&n=1000000&build=random&key=851191&level=3&view=page`,
 //! or for a batch `?keys=u64&n=1000000&build=random&bk=…&bk=…&bk=…&bk=…`.
 //! Builds are deterministic, so the tree comes back node for node; the key
 //! is looked up again, and the node at `level` on its way down inspected,
-//! or the batch's four keys looked up again.
+//! or the batch's four keys looked up again. A figure of the post starts
+//! from such a link too, and links to the explorer with it.
 //!
 //! Each lookup and each new tree is an entry of the browser's history, so
 //! its back and forward, or `←` and `→`, step through them; inspecting
@@ -13,7 +14,9 @@ use dioxus::prelude::*;
 
 use crate::batch_run::BatchKeys;
 use crate::batch_view::Batcher;
+use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::InspectorTab;
+use crate::site::SitePage;
 use crate::trace::Tracer;
 use crate::workload::{Builder, InsertOrder, KeyKind, Workload};
 
@@ -35,9 +38,10 @@ impl LinkedLookup {
     }
 }
 
-/// What a link says.
+/// What a link to the explorer says: the tree, and the lookup or batch on
+/// it.
 #[derive(Clone, PartialEq, Debug)]
-struct PageLink {
+pub(crate) struct ExplorerLink {
     workload: Workload,
     lookup: Option<LinkedLookup>,
     /// A batch, shown instead of one key.
@@ -45,7 +49,49 @@ struct PageLink {
     tab: InspectorTab,
 }
 
-impl PageLink {
+impl ExplorerLink {
+    /// The link to the lookup of `key` in the tree of `workload`, inspecting
+    /// its node at `level` (0 for the leaf), or else its first.
+    pub(crate) fn lookup(workload: Workload, key: impl Into<String>, level: Option<usize>) -> Self {
+        Self {
+            workload,
+            lookup: Some(LinkedLookup {
+                key: key.into(),
+                level,
+            }),
+            batch: None,
+            tab: InspectorTab::Page,
+        }
+    }
+
+    pub(crate) fn workload(&self) -> Workload {
+        self.workload
+    }
+
+    /// The explorer's address that opens on what the link says.
+    pub(crate) fn href(&self) -> String {
+        let query: Vec<String> = self
+            .pairs()
+            .iter()
+            .map(|(name, value)| format!("{name}={}", Self::encode(value)))
+            .collect();
+        format!("{}?{}", SitePage::Explorer.href(), query.join("&"))
+    }
+
+    /// `value` as a query string holds it: every byte but letters, digits
+    /// and `-._~` as `%` and its hex.
+    fn encode(value: &str) -> String {
+        value
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    char::from(byte).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    }
+
     /// The link a query string's `pairs` make: what they leave out or
     /// misname is as the page starts without a link.
     fn from_pairs(pairs: &[(String, String)]) -> Self {
@@ -108,7 +154,7 @@ impl PageLink {
 
     /// Whether `other` shows another lookup than this link, or another
     /// tree: a step of its own in the history.
-    fn is_another_step(&self, other: &PageLink) -> bool {
+    fn is_another_step(&self, other: &ExplorerLink) -> bool {
         self.workload != other.workload
             || self.batch != other.batch
             || self.lookup.as_ref().map(LinkedLookup::key)
@@ -140,21 +186,41 @@ impl PageLink {
         let _ = eval.send((self.pairs(), write == AddressWrite::Push));
     }
 
-    /// Shows what the link names: builds its tree if another is shown,
-    /// looks up its key, inspects its node and opens its tab, or shows its
-    /// batch.
+    /// Shows what the link names in the explorer: builds its tree if
+    /// another is shown, then starts on it.
     fn open(self, builder: Builder, tracer: Tracer, batcher: Batcher, tab: Signal<InspectorTab>) {
-        let (mut tracer, mut batcher, mut tab) = (tracer, batcher, tab);
-        tab.set(self.tab);
-        match self.batch {
-            Some(keys) => batcher.open(keys),
-            None => batcher.close(),
-        }
-        match builder.tree() {
+        match builder.peek_tree() {
             Some(tree) if self.workload == builder.workload() => {
-                tracer.start(&tree, self.lookup.as_ref())
+                self.start_on(&tree, tracer, batcher, tab)
             }
-            _ => builder.build(self.workload, self.lookup, tracer),
+            _ => {
+                self.show_view(batcher, tab);
+                builder.build(self.workload, self.lookup, tracer);
+            }
+        }
+    }
+
+    /// Shows what the link names on `tree`, the tree of its workload: looks
+    /// up its key, inspects its node and opens its tab, or shows its batch.
+    pub(crate) fn start_on(
+        &self,
+        tree: &LoadedTree,
+        tracer: Tracer,
+        batcher: Batcher,
+        tab: Signal<InspectorTab>,
+    ) {
+        let mut tracer = tracer;
+        self.show_view(batcher, tab);
+        tracer.start(tree, self.lookup.as_ref());
+    }
+
+    /// Opens the link's tab, and its batch or its single key.
+    fn show_view(&self, batcher: Batcher, tab: Signal<InspectorTab>) {
+        let (mut batcher, mut tab) = (batcher, tab);
+        tab.set(self.tab);
+        match &self.batch {
+            Some(keys) => batcher.open(keys.clone()),
+            None => batcher.close(),
         }
     }
 }
@@ -200,10 +266,12 @@ pub(crate) fn SharedLink(
     let mut started = use_signal(|| false);
     // The link last put in the address bar, and whether the next one only
     // rewrites it: the first, and one the history stepped to.
-    let mut written = use_signal(|| None::<PageLink>);
+    let mut written = use_signal(|| None::<ExplorerLink>);
     let mut rewrite_next = use_signal(|| true);
     use_future(move || async move {
-        PageLink::read().await.open(builder, tracer, batcher, tab);
+        ExplorerLink::read()
+            .await
+            .open(builder, tracer, batcher, tab);
         started.set(true);
         let mut steps = document::eval(
             r#"
@@ -214,7 +282,7 @@ pub(crate) fn SharedLink(
         );
         while let Ok(pairs) = steps.recv::<Vec<(String, String)>>().await {
             rewrite_next.set(true);
-            PageLink::from_pairs(&pairs).open(builder, tracer, batcher, tab);
+            ExplorerLink::from_pairs(&pairs).open(builder, tracer, batcher, tab);
         }
     });
     use_effect(move || {
@@ -222,14 +290,14 @@ pub(crate) fn SharedLink(
         let (trace, inspected, tab) = (tracer.trace(), tracer.inspected(), tab());
         let batch = batcher
             .is_shown()
-            .then(|| builder.tree().map(|tree| batcher.keys_for(&tree)))
+            .then(|| builder.peek_tree().map(|tree| batcher.keys_for(&tree)))
             .flatten();
         // Until the link is read and its tree built, the address keeps it.
         if !started() || !builder.is_built() {
             return;
         }
         let link = match (batch, trace) {
-            (Some(batch), _) => PageLink {
+            (Some(batch), _) => ExplorerLink {
                 workload,
                 lookup: None,
                 batch: Some(batch),
@@ -239,7 +307,7 @@ pub(crate) fn SharedLink(
                 let level = inspected
                     .filter(|at| trace.step_at(*at).is_some())
                     .map(|at| at.level());
-                PageLink {
+                ExplorerLink {
                     workload,
                     lookup: Some(LinkedLookup {
                         key: trace.query().to_string(),
@@ -273,7 +341,7 @@ pub(crate) fn SharedLink(
 mod tests {
     use super::*;
 
-    fn pairs(link: &PageLink) -> Vec<(String, String)> {
+    fn pairs(link: &ExplorerLink) -> Vec<(String, String)> {
         link.pairs()
             .into_iter()
             .map(|(name, value)| (name.to_string(), value))
@@ -282,7 +350,7 @@ mod tests {
 
     #[test]
     fn links_read_back_what_they_say() {
-        let link = PageLink {
+        let link = ExplorerLink {
             workload: Workload::new(KeyKind::Urls, 100_000, InsertOrder::Collected),
             lookup: Some(LinkedLookup {
                 key: "https://shop.example.com/users/000000042".to_string(),
@@ -291,8 +359,8 @@ mod tests {
             batch: None,
             tab: InspectorTab::Slots,
         };
-        assert_eq!(PageLink::from_pairs(&pairs(&link)), link);
-        let batch = PageLink {
+        assert_eq!(ExplorerLink::from_pairs(&pairs(&link)), link);
+        let batch = ExplorerLink {
             lookup: None,
             batch: Some(BatchKeys::new(
                 ["1", "2", "3", "https://a.b/c?d=e&f"]
@@ -301,12 +369,21 @@ mod tests {
             )),
             ..link
         };
-        assert_eq!(PageLink::from_pairs(&pairs(&batch)), batch);
+        assert_eq!(ExplorerLink::from_pairs(&pairs(&batch)), batch);
+    }
+
+    #[test]
+    fn query_values_escape_what_a_query_string_reads() {
+        assert_eq!(
+            ExplorerLink::encode("https://a.b/c?d=e&f+g h%"),
+            "https%3A%2F%2Fa.b%2Fc%3Fd%3De%26f%2Bg%20h%25"
+        );
+        assert_eq!(ExplorerLink::encode("851191"), "851191");
     }
 
     #[test]
     fn what_a_link_leaves_out_starts_as_the_page_does() {
-        let link = PageLink::from_pairs(&[
+        let link = ExplorerLink::from_pairs(&[
             ("keys".to_string(), "floats".to_string()),
             ("n".to_string(), "12345".to_string()),
         ]);

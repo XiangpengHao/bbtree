@@ -276,12 +276,57 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px 12px;
+    /* As tall as with its 34 px controls (border-box: their padding and
+     * the rule too), before any are drawn, as on the loading screen. */
+    min-height: 51px;
     padding: 8px 16px;
     background: var(--panel);
     border-bottom: 1px solid var(--rule);
   }
+
+  /* The screen index.html shows until the app draws into #main: the
+   * page's bar over the explorer's waiting state; the post's on white,
+   * without the explorer's cards. */
+  .page-loading {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+  }
+  body:has(#main > *) > .page-loading {
+    display: none;
+  }
+  html[data-page="post"] .page-loading {
+    background: var(--panel);
+  }
+  html[data-page="post"] .page-loading .skeleton-path {
+    display: none;
+  }
   .toolbar .wordmark {
     margin: 0 8px 0 4px;
+  }
+
+  /* The tabs between the site's pages: links, so each page loads afresh. */
+  .site-tabs {
+    display: flex;
+    gap: 2px;
+    margin-right: 4px;
+  }
+  .site-tab {
+    padding: 7px 10px;
+    border-radius: 7px;
+    font: 500 13px var(--font-ui);
+    color: var(--graphite);
+    text-decoration: none;
+    transition: color 120ms, background-color 120ms;
+  }
+  .site-tab:hover {
+    color: var(--ink);
+    background: var(--well);
+  }
+  .site-tab[aria-current="page"] {
+    color: var(--ink);
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
   .toolbar-end {
     display: flex;
@@ -1520,47 +1565,48 @@
     transform: translateX(calc((var(--row) - 1.5) * 28px));
   }
 
-  /* Wide screens: an instrument in one view, each panel scrolls itself. */
+  /* Wide screens: the explorer is an instrument in one view, each panel
+   * scrolls itself. The post scrolls as a page. */
   @media (min-width: 1024px) {
-    html,
-    body {
+    html:has(.app),
+    html:has(.app) body {
       height: 100%;
       overflow: hidden;
     }
     .app {
       height: 100dvh;
     }
-    .workspace {
+    .app .workspace {
       flex: 1;
       min-height: 0;
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(460px, 42%);
     }
-    .path-column {
+    .app .path-column {
       min-height: 0;
     }
-    .path-tree {
+    .app .path-tree {
       flex: 1 1 auto;
       min-height: var(--least);
     }
-    .inspector {
+    .app .inspector {
       min-height: 0;
       border-top: 0;
       border-left: 1px solid var(--rule);
       overflow: hidden;
     }
-    .fence-section,
-    .search-section {
+    .app .fence-section,
+    .app .search-section {
       flex: none;
     }
-    .tab-panel {
+    .app .tab-panel {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
       margin: 0 -22px;
       padding: 0 22px 20px;
     }
-    .slot-scroll {
+    .app .slot-scroll {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
@@ -2296,6 +2342,120 @@
     .keys-hint {
       display: none;
     }
+  }
+
+  /* The post: a column of prose on white, and figures wider than it, each
+   * the explorer's panels on the explorer's paper. */
+  .post-page {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+    background: var(--panel);
+  }
+  .post {
+    flex: 1;
+    display: grid;
+    align-content: start;
+    grid-template-columns:
+      [wide-start] minmax(16px, 1fr)
+      [text-start] minmax(0, 680px)
+      [text-end] minmax(16px, 1fr)
+      [wide-end];
+    padding: 56px 0 72px;
+    font-size: 17px;
+    line-height: 1.7;
+  }
+  .post > * {
+    grid-column: text;
+  }
+  .post > p {
+    margin: 0 0 20px;
+  }
+  .post > p code,
+  .figure-text code {
+    font: 0.9em var(--font-data);
+    background: var(--well);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .post-head {
+    margin-bottom: 28px;
+  }
+  .post-kicker {
+    margin: 0 0 12px;
+    color: var(--marker-ink);
+  }
+  .post-title {
+    margin: 0;
+    font-family: var(--font-display);
+    font-stretch: 112.5%;
+    font-weight: 600;
+    font-size: clamp(26px, 4.2vw, 38px);
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+  }
+  .post-page > .credit {
+    padding: 16px;
+    text-align: center;
+    border-top: 1px solid var(--rule);
+  }
+
+  .post > .figure {
+    grid-column: wide;
+    justify-self: center;
+    width: min(1100px, calc(100% - 32px));
+    margin: 12px 0 36px;
+  }
+  .figure {
+    display: flex;
+    flex-direction: column;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  /* Room for the panels until the lookup starts, so the page holds still. */
+  .figure-view.waiting {
+    min-height: 360px;
+    display: grid;
+    place-items: center;
+  }
+  .figure-wait {
+    margin: 0;
+    font-size: 14px;
+    color: var(--graphite);
+  }
+  .figure .path-tree {
+    height: var(--wanted);
+  }
+  .figure-caption {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px 20px;
+    padding: 12px 18px 14px;
+    background: var(--panel);
+    border-top: 1px solid var(--rule);
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--graphite);
+  }
+  .figure-text {
+    flex: 1 1 320px;
+  }
+  .figure-explore {
+    flex: none;
+    font: 500 13px var(--font-ui);
+    color: var(--link);
+    text-decoration: none;
+  }
+  .figure-explore::after {
+    content: " \2197";
+  }
+  .figure-explore:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
   }
 }
 

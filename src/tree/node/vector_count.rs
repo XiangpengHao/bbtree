@@ -18,8 +18,12 @@
 //! slots, packing comparison lanes to half their width keeps one mask.
 //! Multiple words would add extraction, clipping, and accumulation work;
 //! larger capacities and targets with POPCNT keep the compiler's vector
-//! count unless AVX-512 applies above, but for 4-byte slots beyond 32
-//! without POPCNT, which search instead (`inline_key_search.rs`).
+//! count unless AVX-512 applies above.
+//!
+//! On AArch64, NEON counts every width ([`NeonCount`]): the compiler's own
+//! count there widened each compared lane to 64 bits, one at a time, to add
+//! it to a `usize`, about six instructions a slot, 1,360 a 2M `u64` hit on
+//! an M1 Pro against 228 a 10M one with AVX-512.
 //!
 //! Two equality searches live here too: an exact-key lookup over 8-byte
 //! slots takes an AVX-512 equality mask ([`U64EqualityMask`], D41), and a
@@ -255,6 +259,197 @@ macro_rules! count_avx512_lanes {
     }};
 }
 
+/// The NEON count of a node's slots below and equal to a target, over the
+/// capacity, for every slot width: one compare of each kind per 16 bytes of
+/// slots, whose all-ones lanes are subtracted into counters of the slots'
+/// own width, added up across lanes once, at the end.
+#[cfg(target_arch = "aarch64")]
+struct NeonCount;
+
+#[cfg(target_arch = "aarch64")]
+impl NeonCount {
+    /// [`VectorCount::equal_range_in_vectors`]; `None` for fewer slots than
+    /// a vector holds.
+    #[inline(always)]
+    fn equal_range<W: NeonLanes>(slots: Slots<W>, len: usize, target: W) -> Option<Range<usize>> {
+        if slots.capacity() < W::LANES {
+            return None;
+        }
+        // The capacity is a constant per node kind, so this split folds.
+        let tail = slots.capacity() % W::LANES;
+        let whole = slots.capacity() - tail;
+        // SAFETY: every load reads `W::LANES` slots from at most
+        // `capacity - W::LANES`: the whole vectors, then, for a tail, the
+        // last `W::LANES` slots, which overlap the vector before, whose
+        // lanes `last_lanes` masks out. Every slot up to the capacity is
+        // initialized (type invariant of the callers' slots).
+        let (below, equal) = unsafe {
+            let target = W::splat(target);
+            let (mut below, mut equal) = (W::splat(W::ZERO), W::splat(W::ZERO));
+            for start in (0..whole).step_by(W::LANES) {
+                let chunk = W::load(slots.as_ptr().add(start));
+                below = W::subtract(below, W::below(chunk, target));
+                equal = W::subtract(equal, W::equal(chunk, target));
+            }
+            if tail != 0 {
+                let chunk = W::load(slots.as_ptr().add(slots.capacity() - W::LANES));
+                let fresh = W::last_lanes(tail);
+                below = W::subtract(below, W::and(W::below(chunk, target), fresh));
+                equal = W::subtract(equal, W::and(W::equal(chunk, target), fresh));
+            }
+            (W::sum(below), W::sum(equal))
+        };
+        let below = below.min(len);
+        Some(below..(below + equal).min(len))
+    }
+}
+
+/// A slot width's NEON lanes, for [`NeonCount`]: 16-byte vectors of
+/// `LANES` slots. A lane counts at most a node's capacity, below 2^16 slots,
+/// so its own width holds it, and so does the sum across lanes.
+#[cfg(target_arch = "aarch64")]
+trait NeonLanes: Copy {
+    const LANES: usize;
+    const ZERO: Self;
+    type Vector: Copy;
+
+    /// `self` in every lane.
+    fn splat(self) -> Self::Vector;
+
+    /// The `LANES` slots from `first`.
+    ///
+    /// # Safety
+    ///
+    /// They are initialized and allocated.
+    unsafe fn load(first: *const Self) -> Self::Vector;
+
+    /// All ones in the lanes where `slots` is below `target`.
+    fn below(slots: Self::Vector, target: Self::Vector) -> Self::Vector;
+
+    /// All ones in the lanes where `slots` equals `target`.
+    fn equal(slots: Self::Vector, target: Self::Vector) -> Self::Vector;
+
+    fn and(left: Self::Vector, right: Self::Vector) -> Self::Vector;
+
+    fn subtract(left: Self::Vector, right: Self::Vector) -> Self::Vector;
+
+    /// The lanes added up.
+    fn sum(lanes: Self::Vector) -> usize;
+
+    /// All ones in the last `count` lanes, `count < LANES`, zeros before.
+    fn last_lanes(count: usize) -> Self::Vector;
+}
+
+/// Implements [`NeonLanes`] for one slot width with its intrinsics.
+#[cfg(target_arch = "aarch64")]
+macro_rules! neon_lanes {
+    ($slot:ty, $vector:ident, $splat:ident, $load:ident, $greater:ident, $equal:ident,
+     $and:ident, $subtract:ident, $sum:ident) => {
+        impl NeonLanes for $slot {
+            const LANES: usize = 16 / size_of::<$slot>();
+            const ZERO: Self = 0;
+            type Vector = core::arch::aarch64::$vector;
+
+            #[inline(always)]
+            fn splat(self) -> Self::Vector {
+                // SAFETY: NEON is part of every AArch64 target.
+                unsafe { core::arch::aarch64::$splat(self) }
+            }
+
+            #[inline(always)]
+            unsafe fn load(first: *const Self) -> Self::Vector {
+                // SAFETY: forwarded.
+                unsafe { core::arch::aarch64::$load(first) }
+            }
+
+            #[inline(always)]
+            fn below(slots: Self::Vector, target: Self::Vector) -> Self::Vector {
+                // SAFETY: NEON is part of every AArch64 target.
+                unsafe { core::arch::aarch64::$greater(target, slots) }
+            }
+
+            #[inline(always)]
+            fn equal(slots: Self::Vector, target: Self::Vector) -> Self::Vector {
+                // SAFETY: NEON is part of every AArch64 target.
+                unsafe { core::arch::aarch64::$equal(slots, target) }
+            }
+
+            #[inline(always)]
+            fn and(left: Self::Vector, right: Self::Vector) -> Self::Vector {
+                // SAFETY: NEON is part of every AArch64 target.
+                unsafe { core::arch::aarch64::$and(left, right) }
+            }
+
+            #[inline(always)]
+            fn subtract(left: Self::Vector, right: Self::Vector) -> Self::Vector {
+                // SAFETY: NEON is part of every AArch64 target.
+                unsafe { core::arch::aarch64::$subtract(left, right) }
+            }
+
+            #[inline(always)]
+            fn sum(lanes: Self::Vector) -> usize {
+                // SAFETY: NEON is part of every AArch64 target.
+                (unsafe { core::arch::aarch64::$sum(lanes) }) as usize
+            }
+
+            #[inline(always)]
+            fn last_lanes(count: usize) -> Self::Vector {
+                // Zeros, then ones: the `LANES` from `count` on end with
+                // `count` ones.
+                const WINDOW: [$slot; 32 / size_of::<$slot>()] = {
+                    let mut window = [0; 32 / size_of::<$slot>()];
+                    let mut lane = window.len() / 2;
+                    while lane < window.len() {
+                        window[lane] = <$slot>::MAX;
+                        lane += 1;
+                    }
+                    window
+                };
+                assert!(count < Self::LANES);
+                // SAFETY: `count + LANES <= 2 * LANES`, the window's length.
+                unsafe { core::arch::aarch64::$load(WINDOW.as_ptr().add(count)) }
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "aarch64")]
+neon_lanes!(
+    u16,
+    uint16x8_t,
+    vdupq_n_u16,
+    vld1q_u16,
+    vcgtq_u16,
+    vceqq_u16,
+    vandq_u16,
+    vsubq_u16,
+    vaddvq_u16
+);
+#[cfg(target_arch = "aarch64")]
+neon_lanes!(
+    u32,
+    uint32x4_t,
+    vdupq_n_u32,
+    vld1q_u32,
+    vcgtq_u32,
+    vceqq_u32,
+    vandq_u32,
+    vsubq_u32,
+    vaddvq_u32
+);
+#[cfg(target_arch = "aarch64")]
+neon_lanes!(
+    u64,
+    uint64x2_t,
+    vdupq_n_u64,
+    vld1q_u64,
+    vcgtq_u64,
+    vceqq_u64,
+    vandq_u64,
+    vsubq_u64,
+    vaddvq_u64
+);
+
 /// Implements [`VectorCount`] for slots of one width, with the AVX-512 and
 /// SSE2 intrinsics for its lanes.
 macro_rules! vector_count {
@@ -360,9 +555,17 @@ macro_rules! vector_count {
                     let through = (through_bits.trailing_ones() as usize / bits_per_slot).min(len);
                     Some(below..through)
                 }
+                #[cfg(target_arch = "aarch64")]
+                {
+                    NeonCount::equal_range(slots, len, target)
+                }
                 #[cfg(any(
-                    not(target_arch = "x86_64"),
-                    all(not(target_feature = "avx512bw"), target_feature = "popcnt")
+                    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+                    all(
+                        target_arch = "x86_64",
+                        not(target_feature = "avx512bw"),
+                        target_feature = "popcnt"
+                    )
                 ))]
                 {
                     let _ = (slots, len, target);
@@ -401,13 +604,12 @@ vector_count!(
 );
 
 /// 8-byte slots, those of std byte strings' leaves and of 8-byte `InlineKey`
-/// impls, keep the compiler's count where AVX-512F makes it vector compares,
-/// and a binary search elsewhere (`InlineSlot::COUNT_AUTOVECTORIZES`); the
-/// count measured faster than explicit vectors on string maps
-/// (05-fence-key.md), but for 28 to 31 slots, the capacity of an internal
-/// node with 8-byte inline keys, and of a `String` set's leaf: there the
-/// compiler takes the compares' masks apart a bit at a time, and the count
-/// goes the narrow slots' way.
+/// impls, keep the compiler's count with AVX-512, which measured faster than
+/// explicit vectors on string maps (05-fence-key.md), but for 28 to 31 slots,
+/// the capacity of an internal node with 8-byte inline keys, and of a
+/// `String` set's leaf: there the compiler takes the compares' masks apart a
+/// bit at a time, and the count goes the narrow slots' way. NEON counts every
+/// capacity.
 impl VectorCount for u64 {
     #[inline(always)]
     fn equality_mask_in_vectors(slots: Slots<Self>, target: Self) -> Option<U64EqualityMask> {
@@ -438,7 +640,14 @@ impl VectorCount for u64 {
                 _mm512_mask_cmpeq_epu64_mask
             )
         }
-        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx512f")))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            NeonCount::equal_range(slots, len, target)
+        }
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "avx512f"),
+            target_arch = "aarch64"
+        )))]
         {
             let _ = (slots, len, target);
             None

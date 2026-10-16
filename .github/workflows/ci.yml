@@ -157,9 +157,11 @@ jobs:
         run: cargo test
 
   # The library's tests on other platforms. On ARM, the portable code runs
-  # where x86 has SIMD. On wasm, pointers are 32 bits, a panic aborts and
-  # there are no threads, so tests that assume 64-bit pointers, need
-  # unwinding or spawn threads are ignored there.
+  # where x86 has SIMD. On macOS, Apple's chips run it, with their 128-byte
+  # cache lines and 16 KiB pages, and macOS's own allocator. On wasm, pointers
+  # are 32 bits, a panic aborts and there are no threads, so tests that
+  # assume 64-bit pointers, need unwinding or spawn threads are ignored
+  # there.
   test-aarch64:
     name: test (aarch64)
     runs-on: ubuntu-24.04-arm
@@ -176,6 +178,23 @@ jobs:
 
       - name: Test
         run: cargo test --lib --all-features
+
+  test-macos:
+    name: test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --all-features
 
   test-wasm:
     name: test (wasm32-wasip1)
@@ -244,7 +263,7 @@ jobs:
   merge-gate:
     name: merge gate
     if: always()
-    needs: [plan, check, bench, fuzz, test-aarch64, test-wasm, release-fuzz, release-package]
+    needs: [plan, check, bench, fuzz, test-aarch64, test-macos, test-wasm, release-fuzz, release-package]
     runs-on: ubuntu-latest
     steps:
       - name: Check that every job passed

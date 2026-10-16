@@ -1,8 +1,9 @@
-//! What the reader points at, shared by every panel: a part of one node, or
-//! one of bbtree's ideas, so that each panel showing it lights it up; and
-//! the hint by the pointer that says what it is. While the reader points at
-//! nothing, the panels light what the way down's current search step does,
-//! as pointing at that step would (`descent.rs`).
+//! What the reader points at, shared by every panel of one view of a tree
+//! (the explorer, or one of the post's figures): a part of one node, or one
+//! of bbtree's ideas, so that each panel showing it lights it up; and the
+//! hint by the pointer that says what it is, one a page. While the reader
+//! points at nothing, the panels light what the way down's current search
+//! step does, as pointing at that step would (`descent.rs`).
 
 use dioxus::prelude::*;
 
@@ -61,33 +62,72 @@ impl Hint {
     }
 }
 
-/// What the reader points at: owned by the app, handed to each panel.
+/// The hint by the pointer: one a page, whichever view raises it. Owned by
+/// the page, handed to each view's spotlight.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct PointerHint {
+    /// The hint last shown, kept once it hides so that it fades out where
+    /// it stood, still saying what it said.
+    hint: Signal<Option<Hint>>,
+    shown: Signal<bool>,
+}
+
+impl PointerHint {
+    /// The page's hint, hidden: a hook, for the page's component.
+    pub(crate) fn use_new() -> Self {
+        Self {
+            hint: use_signal(|| None),
+            shown: use_signal(|| false),
+        }
+    }
+
+    fn raise(&mut self, hint: Hint) {
+        self.hint.set(Some(hint));
+        if !*self.shown.peek() {
+            self.shown.set(true);
+        }
+    }
+
+    /// Hides the hint, keeping what it says and where it stands: it fades
+    /// out there rather than empty, from wherever no hint puts it.
+    fn lower(&mut self) {
+        if *self.shown.peek() {
+            self.shown.set(false);
+        }
+    }
+
+    /// Moves the hint with the pointer, while it shows.
+    fn follow(&mut self, anchor: (f64, f64)) {
+        if !*self.shown.peek() {
+            return;
+        }
+        if let Some(hint) = self.hint.write().as_mut() {
+            hint.anchor = anchor;
+        }
+    }
+}
+
+/// What the reader points at in one view: owned by the view, handed to
+/// each of its panels.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Spotlight {
     part: Signal<Option<(NodeAt, NodePart)>>,
     concept: Signal<Option<Concept>>,
-    /// The hint last shown, kept once it hides so that it fades out where
-    /// it stood, still saying what it said.
-    hint: Signal<Option<Hint>>,
-    hint_shown: Signal<bool>,
     /// What the way down's current search step lights.
     current_step: Signal<Option<Light>>,
+    /// Where the view says what is pointed at.
+    hint: PointerHint,
 }
 
 impl Spotlight {
-    pub(crate) fn new(
-        part: Signal<Option<(NodeAt, NodePart)>>,
-        concept: Signal<Option<Concept>>,
-        hint: Signal<Option<Hint>>,
-        hint_shown: Signal<bool>,
-        current_step: Signal<Option<Light>>,
-    ) -> Self {
+    /// A view's spotlight, on nothing, saying what it lights in the page's
+    /// `hint`: a hook, for the view's component.
+    pub(crate) fn use_new(hint: PointerHint) -> Self {
         Self {
-            part,
-            concept,
+            part: use_signal(|| None),
+            concept: use_signal(|| None),
+            current_step: use_signal(|| None),
             hint,
-            hint_shown,
-            current_step,
         }
     }
 
@@ -154,8 +194,8 @@ impl Spotlight {
             self.concept.set(None);
         }
         match hint {
-            Some(hint) => self.raise_hint(hint),
-            None => self.lower_hint(),
+            Some(hint) => self.hint.raise(hint),
+            None => self.hint.lower(),
         }
     }
 
@@ -167,7 +207,7 @@ impl Spotlight {
         if self.part.peek().is_some() {
             self.part.set(None);
         }
-        self.raise_hint(Hint::of_concept(concept, anchor));
+        self.hint.raise(Hint::of_concept(concept, anchor));
     }
 
     /// Lights up an idea without a hint: a step of the search that names
@@ -179,7 +219,7 @@ impl Spotlight {
         if self.part.peek().is_some() {
             self.part.set(None);
         }
-        self.lower_hint();
+        self.hint.lower();
     }
 
     /// Says what something is that no other panel draws.
@@ -190,7 +230,7 @@ impl Spotlight {
         if self.concept.peek().is_some() {
             self.concept.set(None);
         }
-        self.raise_hint(hint);
+        self.hint.raise(hint);
     }
 
     /// Lights up a part without a hint.
@@ -200,12 +240,7 @@ impl Spotlight {
 
     /// Moves the hint with the pointer.
     pub(crate) fn move_hint(&mut self, anchor: (f64, f64)) {
-        if !*self.hint_shown.peek() {
-            return;
-        }
-        if let Some(hint) = self.hint.write().as_mut() {
-            hint.anchor = anchor;
-        }
+        self.hint.follow(anchor);
     }
 
     pub(crate) fn clear(&mut self) {
@@ -215,30 +250,15 @@ impl Spotlight {
         if self.concept.peek().is_some() {
             self.concept.set(None);
         }
-        self.lower_hint();
-    }
-
-    fn raise_hint(&mut self, hint: Hint) {
-        self.hint.set(Some(hint));
-        if !*self.hint_shown.peek() {
-            self.hint_shown.set(true);
-        }
-    }
-
-    /// Hides the hint, keeping what it says and where it stands: it fades
-    /// out there rather than empty, from wherever no hint puts it.
-    fn lower_hint(&mut self) {
-        if *self.hint_shown.peek() {
-            self.hint_shown.set(false);
-        }
+        self.hint.lower();
     }
 }
 
 /// The hint, by the pointer, above it unless that leaves the window.
 #[component]
-pub(crate) fn HintLayer(spotlight: Spotlight) -> Element {
-    let hint = spotlight.hint.read().clone();
-    let shown = *spotlight.hint_shown.read();
+pub(crate) fn HintLayer(hint: PointerHint) -> Element {
+    let shown = *hint.shown.read();
+    let hint = hint.hint.read().clone();
     let (x, y) = hint.as_ref().map_or((0.0, 0.0), |hint| hint.anchor);
     let side = if y < 220.0 { "below" } else { "above" };
     let shown_class = if shown { "shown" } else { "" };

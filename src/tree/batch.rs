@@ -350,8 +350,8 @@ impl Executor {
 }
 
 /// The only software prefetch (D46): a hint about a line of a live node,
-/// the query or a chosen candidate, which reads nothing. Other targets and
-/// Miri do nothing.
+/// the query or a chosen candidate, which reads nothing. On x86-64 and
+/// AArch64; other targets and Miri do nothing.
 pub(in crate::tree) struct Prefetcher {
     yielded: bool,
 }
@@ -383,7 +383,18 @@ impl Prefetcher {
         unsafe {
             core::arch::x86_64::_mm_prefetch(line.cast(), core::arch::x86_64::_MM_HINT_T0);
         }
-        #[cfg(any(not(target_arch = "x86_64"), miri))]
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        // SAFETY: `prfm` is a hint, as `_mm_prefetch` is: it doesn't
+        // dereference its address, and an address that maps nothing doesn't
+        // fault. AArch64's prefetch intrinsic isn't stable.
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{line}]",
+                line = in(reg) line,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+        #[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
         let _ = line;
     }
 }

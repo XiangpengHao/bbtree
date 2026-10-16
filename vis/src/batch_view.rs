@@ -19,14 +19,16 @@ use crate::batch_run::{BatchKeys, BatchRun};
 use crate::batch_timeline::KeyRows;
 use crate::batch_tree::BatchTree;
 use crate::concepts::{Concept, Term};
+use crate::element_ids::ElementIds;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::lane_program::{LaneProgram, PollCaption};
 use crate::spotlight::Spotlight;
 use crate::trace::Tracer;
 
-/// Whether the page shows a batch, its keys, and what changes them: owned
-/// by the app, handed to each panel.
+/// Whether a view shows a batch, its keys, and what changes them and plays
+/// them: owned by the view (the explorer, or one of the post's figures),
+/// handed to each of its panels.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Batcher {
     shown: Signal<bool>,
@@ -35,18 +37,19 @@ pub(crate) struct Batcher {
     /// picked by `seed`.
     chosen: Signal<Option<(BatchKeys, Option<LoadedTree>)>>,
     seed: Signal<u64>,
+    /// The view's, for its board's id.
+    ids: ElementIds,
 }
 
 impl Batcher {
-    pub(crate) fn new(
-        shown: Signal<bool>,
-        chosen: Signal<Option<(BatchKeys, Option<LoadedTree>)>>,
-        seed: Signal<u64>,
-    ) -> Self {
+    /// A view's batcher, showing one key until asked, picking random keys
+    /// by `seed`: a hook, for the view's component.
+    pub(crate) fn use_new(seed: Signal<u64>) -> Self {
         Self {
-            shown,
-            chosen,
+            shown: use_signal(|| false),
+            chosen: use_signal(|| None),
             seed,
+            ids: ElementIds::of_current(),
         }
     }
 
@@ -100,6 +103,22 @@ impl Batcher {
         };
         self.chosen
             .set(Some((keys.with_key(index, key), Some(tree.clone()))));
+    }
+
+    /// Asks the loop that plays the batch to play, pause or step.
+    pub(crate) fn play(&self, command: PlaybackCommand) {
+        Playback::send(&self.board_id(), command);
+    }
+
+    /// Pauses the batch just after the poll running at `time`.
+    pub(crate) fn seek(&self, time: f64) {
+        Playback::seek(&self.board_id(), time);
+    }
+
+    /// The id of the board that plays the batch, which its loop writes its
+    /// time to.
+    fn board_id(&self) -> String {
+        self.ids.id("batch-board")
     }
 }
 
@@ -186,14 +205,20 @@ fn BatchBoard(
     let playback = Playback::of(&run);
     use_future(move || {
         let playback = playback.clone();
-        async move { playback.run(now, playing).await }
+        async move { playback.run(&batcher.board_id(), now, playing).await }
     });
     rsx! {
         section {
-            id: Playback::BOARD,
+            id: batcher.board_id(),
             class: "batch-board",
             "aria-label": "Four keys looked up together, search by search",
-            BatchHeadline { run: run.clone(), now, playing, spotlight }
+            BatchHeadline {
+                run: run.clone(),
+                now,
+                playing,
+                batcher,
+                spotlight,
+            }
             KeyRows {
                 tree: tree.clone(),
                 run: run.clone(),
@@ -230,6 +255,7 @@ fn BatchHeadline(
     run: BatchRun,
     now: Signal<Option<usize>>,
     playing: Signal<bool>,
+    batcher: Batcher,
     spotlight: Spotlight,
 ) -> Element {
     let lanes = run.lanes().len();
@@ -244,21 +270,21 @@ fn BatchHeadline(
                     class: "icon-button",
                     title: if playing() { "Pause (Space)" } else { "Play (Space)" },
                     "aria-label": if playing() { "Pause" } else if at_end { "Play again" } else { "Play" },
-                    onclick: move |_| Playback::send(PlaybackCommand::Toggle),
+                    onclick: move |_| batcher.play(PlaybackCommand::Toggle),
                     IconGlyph { icon: if playing() { Icon::Pause } else if at_end { Icon::Replay } else { Icon::Play } }
                 }
                 button {
                     class: "icon-button quiet",
                     title: "A search back (,)",
                     "aria-label": "A search back",
-                    onclick: move |_| Playback::send(PlaybackCommand::Back),
+                    onclick: move |_| batcher.play(PlaybackCommand::Back),
                     IconGlyph { icon: Icon::StepBack }
                 }
                 button {
                     class: "icon-button quiet",
                     title: "The next search (.)",
                     "aria-label": "The next search",
-                    onclick: move |_| Playback::send(PlaybackCommand::Forward),
+                    onclick: move |_| batcher.play(PlaybackCommand::Forward),
                     IconGlyph { icon: Icon::StepForward }
                 }
             }
@@ -294,7 +320,7 @@ pub(crate) enum PlaybackCommand {
 /// The loop in the browser that advances the batch's time and writes it to
 /// the board, and tells the panels when another poll starts.
 #[derive(Clone, PartialEq)]
-pub(crate) struct Playback {
+struct Playback {
     /// Where each poll starts on the time axis.
     starts: Vec<f64>,
     /// Where the second round starts: the first plays slowly.
@@ -305,9 +331,6 @@ pub(crate) struct Playback {
 }
 
 impl Playback {
-    /// The board's id, which the loop writes its time to.
-    const BOARD: &'static str = "batch-board";
-
     /// How long a poll of the first round lasts on screen: slow enough to
     /// follow each lane's first poll.
     const FIRST_ROUND_MS: f64 = 560.0;
@@ -328,11 +351,11 @@ impl Playback {
         }
     }
 
-    /// Plays the batch from the start, telling `now` each poll that starts
-    /// and `playing` whether it plays, until the board goes. Paused, time
-    /// rests just after a poll; with reduced motion, it jumps from one poll
-    /// to the next.
-    async fn run(self, now: Signal<Option<usize>>, playing: Signal<bool>) {
+    /// Plays the batch from the start on the board with the id `board`,
+    /// telling `now` each poll that starts and `playing` whether it plays,
+    /// until the board goes. Paused, time rests just after a poll; with
+    /// reduced motion, it jumps from one poll to the next.
+    async fn run(self, board: &str, now: Signal<Option<usize>>, playing: Signal<bool>) {
         let (mut now, mut playing) = (now, playing);
         let mut heard = document::eval(
             r#"
@@ -398,7 +421,7 @@ impl Playback {
             "#,
         );
         let _ = heard.send((
-            Self::BOARD,
+            board,
             &self.starts,
             self.first_round,
             self.total,
@@ -416,25 +439,26 @@ impl Playback {
         }
     }
 
-    /// Asks the loop to play, pause or step.
-    pub(crate) fn send(command: PlaybackCommand) {
+    /// Asks the loop of the board with the id `board` to play, pause or
+    /// step.
+    fn send(board: &str, command: PlaybackCommand) {
         let detail = match command {
             PlaybackCommand::Toggle => "'toggle'",
             PlaybackCommand::Back => "'back'",
             PlaybackCommand::Forward => "'forward'",
         };
-        Self::dispatch(detail);
+        Self::dispatch(board, detail);
     }
 
-    /// Pauses the batch just after the poll running at `time`.
-    pub(crate) fn seek(time: f64) {
-        Self::dispatch(&format!("{time:.3}"));
+    /// Pauses the batch of the board with the id `board` just after the
+    /// poll running at `time`.
+    fn seek(board: &str, time: f64) {
+        Self::dispatch(board, &format!("{time:.3}"));
     }
 
-    fn dispatch(detail: &str) {
+    fn dispatch(board: &str, detail: &str) {
         document::eval(&format!(
-            "document.getElementById('{}')?.dispatchEvent(new CustomEvent('batch-playback', {{ detail: {detail} }}));",
-            Self::BOARD
+            "document.getElementById('{board}')?.dispatchEvent(new CustomEvent('batch-playback', {{ detail: {detail} }}));"
         ));
     }
 }

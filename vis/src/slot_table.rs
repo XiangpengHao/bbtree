@@ -7,6 +7,7 @@ use bbtree::inspect::TraceOutcome;
 use dioxus::prelude::*;
 
 use crate::count_text::Group;
+use crate::element_ids::ElementIds;
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::NodeDetail;
 use crate::spotlight::{NodePart, Spotlight};
@@ -38,19 +39,20 @@ impl RowMarks {
         }
     }
 
-    /// The row to keep in view: the key the lookup ended on, the child it
-    /// went down to, the head it read, or where the key would go.
+    /// The row to keep in view, by its `data-row`: the key the lookup
+    /// ended on, the child it went down to, the head it read, or where the
+    /// key would go.
     fn row_in_view(&self) -> Option<String> {
         if let Some(index) = self.found {
-            return Some(format!("slot-row-{index}"));
+            return Some(index.to_string());
         }
         if self.head {
-            return Some("slot-row-head".to_string());
+            return Some("head".to_string());
         }
         match (self.edge, self.insert_at) {
-            (Some(0), _) => Some("slot-row-first".to_string()),
-            (Some(edge), _) => Some(format!("slot-row-{}", edge - 1)),
-            (None, Some(insert_at)) => Some(format!("slot-row-{}", insert_at.saturating_sub(1))),
+            (Some(0), _) => Some("first".to_string()),
+            (Some(edge), _) => Some((edge - 1).to_string()),
+            (None, Some(insert_at)) => Some(insert_at.saturating_sub(1).to_string()),
             (None, None) => None,
         }
     }
@@ -87,15 +89,17 @@ pub(crate) fn SlotTable(
     let has_tags = detail.keys().iter().any(|row| row.length_tag.is_some());
     let marks = RowMarks::of(step.as_ref());
     let in_view = marks.row_in_view();
+    let ids = ElementIds::of_current();
     use_effect(use_reactive!(|in_view, replay| {
         let _ = replay;
         if let Some(row) = in_view {
             // Scrolls the table's own box only: scrolling the row into view
             // would also scroll the page's clipped panels.
+            let scroll = ids.id("slot-scroll");
             document::eval(&format!(
                 "requestAnimationFrame(() => {{
-                    const row = document.getElementById('{row}');
-                    const box = row?.closest('.slot-scroll');
+                    const box = document.getElementById('{scroll}');
+                    const row = box?.querySelector('[data-row=\"{row}\"]');
                     if (!row || !box) return;
                     const offset = row.getBoundingClientRect().top - box.getBoundingClientRect().top;
                     const motion = matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
@@ -111,7 +115,7 @@ pub(crate) fn SlotTable(
     let child_at = move |edge: usize| (!leaf).then(|| shape.child(at, edge));
     let mut spotlight = spotlight;
     rsx! {
-        div { class: "slot-scroll",
+        div { id: ids.id("slot-scroll"), class: "slot-scroll",
             table { class: "slots data",
                 caption { class: "sr-only", "The node's slots, one row each" }
                 thead {
@@ -136,7 +140,7 @@ pub(crate) fn SlotTable(
                 tbody { key: "{replay}-{at.level()}-{at.index()}",
                     if leaf {
                         tr {
-                            id: "slot-row-head",
+                            "data-row": "head",
                             class: match (marks.head, pointed == Some(NodePart::Head)) {
                                 (true, _) => "row-found",
                                 (false, true) => "row-pointed",
@@ -152,7 +156,7 @@ pub(crate) fn SlotTable(
                         }
                     } else {
                         tr {
-                            id: "slot-row-first",
+                            "data-row": "first",
                             class: if pointed == Some(NodePart::Child(0)) { "row-pointed" } else { "" },
                             onmouseenter: move |_| spotlight.light_part(at, NodePart::Child(0)),
                             onmouseleave: move |_| spotlight.clear(),
@@ -176,7 +180,7 @@ pub(crate) fn SlotTable(
                             }
                         }
                         tr {
-                            id: "slot-row-{index}",
+                            "data-row": "{index}",
                             class: marks.key_class(index, pointed == Some(NodePart::Entry(index))),
                             onmouseenter: move |_| spotlight.light_part(at, NodePart::Entry(index)),
                             onmouseleave: move |_| spotlight.clear(),

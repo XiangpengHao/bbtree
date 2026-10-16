@@ -183,7 +183,8 @@ impl Trace {
 }
 
 /// What the panels use to start a lookup and say what to inspect: owned by
-/// the app, handed to each panel.
+/// a view (the explorer, or one of the post's figures), handed to each of
+/// its panels.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Tracer {
     trace: Signal<Option<Trace>>,
@@ -197,21 +198,16 @@ pub(crate) struct Tracer {
 }
 
 impl Tracer {
-    pub(crate) fn new(
-        trace: Signal<Option<Trace>>,
-        inspected: Signal<Option<NodeAt>>,
-        error: Signal<Option<String>>,
-        seed: Signal<u64>,
-        replay: Signal<u64>,
-        descent: Signal<Descent>,
-    ) -> Self {
+    /// A view's tracer, before its first lookup, picking random keys by
+    /// `seed`: a hook, for the view's component.
+    pub(crate) fn use_new(seed: Signal<u64>) -> Self {
         Self {
-            trace,
-            inspected,
-            error,
+            trace: use_signal(|| None),
+            inspected: use_signal(|| None),
+            error: use_signal(|| None),
             seed,
-            replay,
-            descent,
+            replay: use_signal(|| 0),
+            descent: use_signal(Descent::default),
         }
     }
 

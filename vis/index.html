@@ -5,8 +5,35 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Follow one lookup down a bbtree: the path from the root, each node's page as cache lines, and what its search compared." />
+    <!-- The fonts load beside the wasm without holding up the first paint;
+         until they come, text shows in the fallbacks main.css names. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" media="print" onload="this.media = 'all'" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Martian+Mono:wdth,wght@112.5,500;112.5,600&display=swap" />
+    <script>
+      // Which page loads, for the screen shown until the app draws it: the
+      // post at post/ (src/site.rs).
+      if (/\/post\/?$/.test(location.pathname)) document.documentElement.dataset.page = "post";
+    </script>
   </head>
   <body>
+    <!-- Shown until the app draws into #main (main.css hides it then):
+         the page's bar and the explorer's waiting state, in the app's own
+         classes, so nothing moves when the app takes over. -->
+    <div class="page-loading">
+      <header class="toolbar">
+        <p class="wordmark">bbtree</p>
+      </header>
+      <div class="loading-state" role="status">
+        <div class="skeleton-path" aria-hidden="true">
+          <span class="skeleton-card" style="--row: 0"></span>
+          <span class="skeleton-card" style="--row: 1"></span>
+          <span class="skeleton-card" style="--row: 2"></span>
+          <span class="skeleton-card" style="--row: 3"></span>
+        </div>
+        <p>Loading…</p>
+      </div>
+    </div>
     <div id="main"></div>
   </body>
 </html>
