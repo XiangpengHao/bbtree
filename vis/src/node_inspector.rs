@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::concepts::{Concept, Term};
 use crate::count_text::Group;
+use crate::descent::DescentPlan;
 use crate::fences::{FenceStrip, NodeFences};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
@@ -181,41 +182,14 @@ impl NodeDetail {
     }
 
     /// The node's search, step by step, as the trace says it ran.
-    fn search_steps(&self, step: &TraceStep) -> Vec<SearchStep> {
-        let mut steps = Vec::new();
-        let searched = !matches!(
-            step.outcome(),
-            TraceOutcome::ToHead { .. } | TraceOutcome::Head
-        );
-        if searched {
-            if self.prefix_len > 0 {
-                steps.push(SearchStep::SkipPrefix {
-                    bytes: self.prefix_len,
-                    on_border: self.fences.lacks_a_fence(),
-                });
-            }
-            match (step.inline_key(), self.inline_key_width, step.tied()) {
-                (Some(window), Some(width), Some(tied)) => {
-                    steps.push(SearchStep::CompareInlineKeys {
-                        window: window.to_string(),
-                        width,
-                        tied: tied.clone(),
-                    });
-                    if !tied.is_empty() {
-                        steps.push(SearchStep::SearchTies { tied });
-                    }
-                }
-                _ => steps.push(SearchStep::CompareFullKeys),
-            }
-        }
-        steps.push(SearchStep::Outcome(step.outcome()));
-        steps
+    pub(crate) fn search_steps(&self, step: &TraceStep) -> Vec<SearchStep> {
+        SearchStep::for_step(step, self.prefix_len, self.fences.lacks_a_fence())
     }
 }
 
 /// One step of a node's search, in the order it runs.
 #[derive(Clone, PartialEq, Debug)]
-enum SearchStep {
+pub(crate) enum SearchStep {
     /// Skip the bytes every key of the node shares: what its fences share,
     /// or on the tree's border, what every key of the map shares, which
     /// the lookup checked once, before the root.
@@ -236,7 +210,52 @@ enum SearchStep {
 }
 
 impl SearchStep {
-    fn title(&self) -> &'static str {
+    /// The steps of the search at `step`'s node, whose prefix is
+    /// `prefix_len` bytes, on the tree's border if `on_border`.
+    pub(crate) fn for_step(step: &TraceStep, prefix_len: usize, on_border: bool) -> Vec<Self> {
+        let mut steps = Vec::new();
+        let searched = !matches!(
+            step.outcome(),
+            TraceOutcome::ToHead { .. } | TraceOutcome::Head
+        );
+        if searched {
+            if prefix_len > 0 {
+                steps.push(SearchStep::SkipPrefix {
+                    bytes: prefix_len,
+                    on_border,
+                });
+            }
+            match (step.inline_key(), step.inline_width(), step.tied()) {
+                (Some(window), Some(width), Some(tied)) => {
+                    steps.push(SearchStep::CompareInlineKeys {
+                        window: window.to_string(),
+                        width,
+                        tied: tied.clone(),
+                    });
+                    if !tied.is_empty() {
+                        steps.push(SearchStep::SearchTies { tied });
+                    }
+                }
+                _ => steps.push(SearchStep::CompareFullKeys),
+            }
+        }
+        steps.push(SearchStep::Outcome(step.outcome()));
+        steps
+    }
+
+    /// Which part of a node's search the step is, in the order they run:
+    /// skipping the prefix, comparing, searching ties, and the outcome.
+    /// The path's animations play the same parts (`path_summary.rs`).
+    pub(crate) fn phase(&self) -> u8 {
+        match self {
+            SearchStep::SkipPrefix { .. } => 1,
+            SearchStep::CompareInlineKeys { .. } | SearchStep::CompareFullKeys => 2,
+            SearchStep::SearchTies { .. } => 3,
+            SearchStep::Outcome(_) => 4,
+        }
+    }
+
+    pub(crate) fn title(&self) -> &'static str {
         match self {
             SearchStep::SkipPrefix { .. } => "Skip the shared bytes",
             SearchStep::CompareInlineKeys { .. } => "Count the smaller inline keys",
@@ -252,7 +271,7 @@ impl SearchStep {
     }
 
     /// What the step came to, in a few words, beside its title.
-    fn fact(&self, detail: &NodeDetail) -> String {
+    pub(crate) fn fact(&self, detail: &NodeDetail) -> String {
         match self {
             SearchStep::SkipPrefix {
                 bytes,
@@ -409,6 +428,10 @@ pub(crate) fn NodeInspector(
                 SearchSteps {
                     key: "{replay}-{at.level()}-{at.index()}",
                     steps,
+                    current: DescentPlan::of(&tree, &trace)
+                        .current(tracer.shown())
+                        .filter(|&(row, _)| trace.steps().get(row).map(TraceStep::at) == Some(at))
+                        .map(|(_, index)| index),
                     detail: detail.clone(),
                     kind,
                     spotlight,
@@ -493,6 +516,8 @@ pub(crate) fn NodeInspector(
 #[component]
 fn SearchSteps(
     steps: Vec<SearchStep>,
+    /// The step the way down is stepped to, if it is.
+    current: Option<usize>,
     detail: NodeDetail,
     kind: KeyKind,
     spotlight: Spotlight,
@@ -509,6 +534,7 @@ fn SearchSteps(
                         detail: detail.clone(),
                         kind,
                         open: opened() == Some(index),
+                        current: current == Some(index),
                         on_toggle: move |_| {
                             let open = opened() == Some(index);
                             opened.set(if open { None } else { Some(index) });
@@ -531,6 +557,7 @@ fn SearchStepItem(
     detail: NodeDetail,
     kind: KeyKind,
     open: bool,
+    current: bool,
     on_toggle: EventHandler<()>,
     spotlight: Spotlight,
 ) -> Element {
@@ -541,7 +568,11 @@ fn SearchStepItem(
     let fact = search_step.fact(&detail);
     rsx! {
         li {
-            class: if open { "search-step open" } else { "search-step" },
+            class: format!(
+                "search-step{}{}",
+                if open { " open" } else { "" },
+                if current { " current" } else { "" },
+            ),
             style: "--step:{number};",
             onmouseenter: move |_| hover_step.light(at, &mut hover),
             onmouseleave: move |_| leave.clear(),

@@ -17,6 +17,7 @@ use bbtree::inspect::TraceOutcome;
 use dioxus::prelude::*;
 
 use crate::count_text::Group;
+use crate::descent::DescentPlan;
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::PageMarks;
 use crate::path_summary::PathLegend;
@@ -308,9 +309,12 @@ pub(crate) fn PathTree(
     inspected: Option<NodeAt>,
     /// Changes with every lookup, so the way down replays.
     replay: u64,
+    /// How many steps of the way down are shown (`descent.rs`).
+    shown: usize,
     tracer: Tracer,
     spotlight: Spotlight,
 ) -> Element {
+    let plan = DescentPlan::of(&tree, &trace);
     let mut size = use_signal(|| (0.0f64, 0.0f64));
     let mounted: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut pointed_gauge = use_signal(|| None::<usize>);
@@ -342,7 +346,7 @@ pub(crate) fn PathTree(
     rsx! {
         section {
             class: if narrow { "path-tree narrow" } else { "path-tree" },
-            style: "--wanted:{wanted}px;--least:{least}px;--level-ms:{Trace::LEVEL_MS}ms;",
+            style: "--wanted:{wanted}px;--least:{least}px;",
             "aria-label": "The lookup's path from the root",
             onmounted: move |evt| {
                 let mut mounted = mounted;
@@ -363,21 +367,22 @@ pub(crate) fn PathTree(
                     if let Some(curve) = gauge_curve {
                         path { class: "edge-sibling", d: curve }
                     }
+                    // An edge draws once its parent's search has gone down it.
                     for (row, way) in layout.taken.iter().enumerate().skip(1) {
-                        if layout.value_way[row] {
-                            path {
-                                key: "{replay}-{row}",
-                                class: "edge-taken edge-value",
-                                style: "--row:{row - 1};",
-                                d: way.as_str(),
-                            }
-                        } else {
-                            path {
-                                key: "{replay}-{row}",
-                                class: "edge-taken draws",
-                                style: "--row:{row - 1};",
-                                "pathLength": "1",
-                                d: way.as_str(),
+                        if plan.phase(row - 1, shown) >= 4 {
+                            if layout.value_way[row] {
+                                path {
+                                    key: "{replay}-{row}",
+                                    class: "edge-taken edge-value",
+                                    d: way.as_str(),
+                                }
+                            } else {
+                                path {
+                                    key: "{replay}-{row}",
+                                    class: "edge-taken draws",
+                                    "pathLength": "1",
+                                    d: way.as_str(),
+                                }
                             }
                         }
                     }
@@ -394,9 +399,10 @@ pub(crate) fn PathTree(
                     }
                 }
                 for card in layout.cards.iter().cloned() {
-                    PathCard {
+                                        PathCard {
                         key: "card-{card.row}",
                         tree: tree.clone(),
+                        phase: plan.phase(card.row, shown),
                         selected: inspected == Some(card.step.at()),
                         card,
                         replay,
@@ -466,6 +472,9 @@ fn Gauge(
 #[component]
 fn PathCard(
     tree: LoadedTree,
+    /// How far the node's search has gone: the part of the search of its
+    /// last step shown, 0 before any (`DescentPlan::phase`).
+    phase: u8,
     card: CardSpot,
     selected: bool,
     replay: u64,
@@ -479,14 +488,16 @@ fn PathCard(
     let len = level.len(at.index());
     let capacity = level.capacity();
     let prefix = level.prefix_len(at.index());
-    let tied = step.tied().unwrap_or(0..0);
-    let found = step.found();
-    let edge = step.edge_taken();
+    // The count marks the slots smaller, larger and tied; the outcome the
+    // slot found and the child taken.
+    let compared = step.inline_key().is_some() && phase >= 2;
+    let tied = step.tied().filter(|_| phase >= 2).unwrap_or(0..0);
+    let found = step.found().filter(|_| phase >= 4);
+    let edge = step.edge_taken().filter(|_| phase >= 4);
     let insert_at = match step.outcome() {
-        TraceOutcome::Absent { insert_at } => Some(insert_at),
+        TraceOutcome::Absent { insert_at } if phase >= 4 => Some(insert_at),
         _ => None,
     };
-    let compared = step.inline_key().is_some();
     let ruler_width = card.width - 2.0 * PathLayout::RULER_INSET;
     let note = card.note(&tree, len);
     let first = (len > 0).then(|| CardSpot::short_key(&tree, at, 0));
@@ -507,8 +518,12 @@ fn PathCard(
     };
     rsx! {
         div {
-            class: if selected { "path-card selected" } else { "path-card" },
-            style: "transform:translate({card.x}px,{card.y}px);width:{card.width}px;height:{PathLayout::CARD_HEIGHT}px;--row:{card.row};",
+                        class: format!(
+                "path-card{}{}",
+                if selected { " selected" } else { "" },
+                if phase == 0 { " pending" } else { "" },
+            ),
+            style: "transform:translate({card.x}px,{card.y}px);width:{card.width}px;height:{PathLayout::CARD_HEIGHT}px;",
             role: "button",
             tabindex: "0",
             "data-row": "{card.row}",

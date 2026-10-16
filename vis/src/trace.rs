@@ -96,11 +96,6 @@ impl TraceStep {
 }
 
 impl Trace {
-    /// The pace of a lookup's way down, which the stylesheet's animations
-    /// follow: each level starts this long after the one above, in the
-    /// path's cards and in the key above them.
-    pub(crate) const LEVEL_MS: u32 = 260;
-
     pub(crate) fn new(
         query: KeyBytes,
         steps: Vec<TraceStep>,
@@ -196,6 +191,10 @@ pub(crate) struct Tracer {
     seed: Signal<u64>,
     /// Counts lookups and replays, so animations of the way down restart.
     replay: Signal<u64>,
+    /// How many steps of the way down the page shows (`descent.rs`), and
+    /// whether it plays on.
+    shown: Signal<usize>,
+    playing: Signal<bool>,
 }
 
 impl Tracer {
@@ -205,6 +204,8 @@ impl Tracer {
         error: Signal<Option<String>>,
         seed: Signal<u64>,
         replay: Signal<u64>,
+        shown: Signal<usize>,
+        playing: Signal<bool>,
     ) -> Self {
         Self {
             trace,
@@ -212,7 +213,36 @@ impl Tracer {
             error,
             seed,
             replay,
+            shown,
+            playing,
         }
+    }
+
+    /// How many steps of the way down the page shows.
+    pub(crate) fn shown(&self) -> usize {
+        *self.shown.read()
+    }
+
+    pub(crate) fn playing(&self) -> bool {
+        *self.playing.read()
+    }
+
+    /// [`Self::shown`] and [`Self::playing`], read without following them,
+    /// for the loop that plays the way down.
+    pub(crate) fn shown_now(&self) -> usize {
+        *self.shown.peek()
+    }
+
+    pub(crate) fn playing_now(&self) -> bool {
+        *self.playing.peek()
+    }
+
+    pub(crate) fn show_steps(&mut self, shown: usize) {
+        self.shown.set(shown);
+    }
+
+    pub(crate) fn set_playing(&mut self, playing: bool) {
+        self.playing.set(playing);
     }
 
     pub(crate) fn trace(&self) -> Option<Trace> {
@@ -351,8 +381,10 @@ impl Tracer {
         }
     }
 
-    /// Plays the lookup's way down again.
+    /// Plays the lookup's way down again, from its first step.
     pub(crate) fn replay(&mut self) {
+        self.shown.set(0);
+        self.playing.set(true);
         let count = *self.replay.peek();
         self.replay.set(count + 1);
     }

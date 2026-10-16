@@ -40,14 +40,13 @@ the left, the inspected node on the right.
   ids, up to ten million entries (one million URLs), by random inserts,
   ascending inserts or `collect`. Any change builds anew.
 - **Watch the path**: one card per node, root first. Each lookup plays its
-  way down: at each node every inline key flashes at once, then settles
-  dark if it is smaller than the searched key's and pale if larger, so the
-  dark run's length is where the key goes. The tied ones stay outlined, the
-  result fills and the notch drops at the child taken. Play, pause or step
-  it a level at a time with the buttons above the path. The key beside
-  them walks down with it: at each node's turn the bytes it skips dim and
-  a frame slides onto the bytes it compares, stepping right as the
-  prefixes grow.
+  way down a search step at a time: skip the bytes a node's keys share,
+  count the smaller inline keys (every inline key flashes, then settles
+  dark if smaller than the searched key's and pale if larger, so the dark
+  run's length is where the key goes), compare any tied keys in full, then
+  go down. Play, pause or step it with the buttons above the path; the key
+  beside them dims the bytes each node skips and frames the bytes it
+  compares, stepping right as the prefixes grow.
 - **Inspect a node** by clicking its card (or `↑` `↓`); a lookup starts at
   the root. First its fences, the separators either side of the way down to
   it, with its first and last keys and the key looked up, byte by byte: the

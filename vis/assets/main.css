@@ -3,9 +3,10 @@
  * follows a key), two neutral steps for the header and length tags, and a
  * highlighter yellow for everything a lookup reads.
  *
- * Motion explains the lookup and nothing else: each level of the way down
- * starts --level-ms after the one above (path_tree.rs), the page's reads
- * follow in their order (memory_map.rs), and cards glide between lookups. */
+ * Motion explains the lookup and nothing else: the way down plays a search
+ * step at a time (descent.rs), each step's marks arriving as it is shown,
+ * the page's reads follow in their order (memory_map.rs), and cards glide
+ * between lookups. */
 
 /* Tailwind's order, declared first so these components sit between its
  * reset and its utilities. */
@@ -614,6 +615,7 @@
 
   .path-summary {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px 16px;
     padding: 10px 16px 2px 20px;
@@ -633,8 +635,8 @@
     min-width: 0;
   }
   /* The key looked up (query_key.rs): a cell per byte, highlighted as the
-   * lookup's key is. Each node's turn in the replay dims the bytes it
-   * skips and slides the frame onto the bytes it compares. */
+   * lookup's key is. Each step dims the bytes a node skips and slides the
+   * frame onto the bytes it compares. */
   .query-key {
     display: inline-flex;
     align-items: baseline;
@@ -656,19 +658,23 @@
     width: var(--cell);
     text-align: center;
     color: var(--ink);
+    transition: color 240ms ease-out, opacity 240ms ease-out, box-shadow 240ms ease-out;
   }
-  /* Skipped: every key of the node shares it. Ends dim, from the node's
-   * turn on. */
+  /* Skipped: every key of the node shares it. */
   .key-skipped {
     color: var(--muted);
-    animation: key-dim 220ms ease-out both;
   }
-  /* The zeros a window reads past the key's end, shown from the node
-   * that reads them. */
+  /* The zeros a window reads past the key's end, once one does. */
   .key-padding {
     color: var(--muted);
     font-weight: 400;
-    animation: key-appear 200ms ease-out both;
+  }
+  .key-padding.hidden {
+    opacity: 0;
+  }
+  /* Read on past the window, as tied keys are compared in full. */
+  .key-compared {
+    box-shadow: inset 0 -2px 0 var(--marker-strong);
   }
   .key-frame {
     position: absolute;
@@ -678,8 +684,8 @@
     border: 1.5px solid var(--slot-inline);
     border-radius: 3px;
     background: color-mix(in srgb, var(--compare-soft) 70%, transparent);
-    animation-timing-function: var(--ease-in-out);
-    animation-fill-mode: both;
+    transition: transform 360ms var(--ease-in-out), width 360ms var(--ease-in-out),
+      opacity 200ms ease-out;
   }
   .key-number {
     color: var(--graphite);
@@ -786,7 +792,12 @@
     border-radius: 8px;
     box-shadow: 0 1px 2px rgba(21, 23, 28, 0.06);
     cursor: pointer;
-    transition: transform 460ms var(--ease-out), border-color 140ms, box-shadow 200ms;
+    transition: transform 460ms var(--ease-out), border-color 140ms, box-shadow 200ms,
+      opacity 300ms ease-out;
+  }
+  /* A node the way down hasn't reached yet. */
+  .path-card.pending {
+    opacity: 0.5;
   }
   .path-card:hover {
     border-color: var(--graphite);
@@ -1153,6 +1164,10 @@
   .search-step:hover,
   .search-step.open {
     background: var(--marker-wash);
+  }
+  /* The step the way down is stepped to. */
+  .search-step.current {
+    background: var(--marker-soft);
   }
   .step-row {
     display: grid;
@@ -1619,49 +1634,37 @@
     }
   }
 
-  /* The way down: at each level every inline key flashes at once as the
-   * search compares them and settles into smaller or larger, the tied keys
-   * mark, the result and the edge drop in, and the edge to the next level
-   * draws. */
+  /* The way down, a search step at a time: when a node counts, every
+   * inline key flashes at once and settles into smaller or larger, the
+   * tied keys marking; at its outcome the result and the notch drop in,
+   * and the edge to the next node draws. Each mark animates as its step
+   * shows it. */
   .ruler-marks .compared {
     animation: compare-flash 440ms ease-out both;
-    animation-delay: calc(var(--row) * var(--level-ms));
   }
   .ruler-marks .slot-room.compared {
     animation-name: compare-flash-room;
   }
   .ruler-marks .slot-tied {
     animation: mark-in 260ms var(--ease-out) both;
-    animation-delay: calc(var(--row) * var(--level-ms) + 120ms);
   }
   .ruler-marks .slot-found {
     animation: found-in 340ms var(--ease-out) both;
-    animation-delay: calc(var(--row) * var(--level-ms) + 180ms);
   }
   .ruler-marks .edge-notch,
   .ruler-marks .insert-caret {
     animation: notch-drop 300ms var(--ease-out) both;
-    animation-delay: calc(var(--row) * var(--level-ms) + 200ms);
   }
   .edge-taken.draws {
     stroke-dasharray: 1;
-    animation: edge-draw 260ms var(--ease-in-out) both;
-    animation-delay: calc(var(--row) * var(--level-ms) + 220ms);
+    animation: edge-draw 360ms var(--ease-in-out) both;
   }
   .edge-taken.edge-value {
-    animation: fade-in 260ms ease-out both;
-    animation-delay: calc(var(--row) * var(--level-ms) + 220ms);
+    animation: fade-in 300ms ease-out both;
   }
 
 }
 
-/* A byte a node skips, dimming at that node's turn. */
-@keyframes key-dim {
-  from { color: var(--ink); }
-}
-@keyframes key-appear {
-  from { opacity: 0; }
-}
 /* Ends on the slot's own colour, smaller or larger. */
 @keyframes compare-flash {
   0% { background-color: var(--slot-filled); }
@@ -2316,11 +2319,9 @@
   .search-step {
     animation-name: fade-in;
   }
-  /* The key's walk shows where it ends: the last node's window. */
-  .key-frame,
-  .key-skipped,
-  .key-padding {
-    animation: none;
+  /* The key's frame steps from window to window without sliding. */
+  .key-frame {
+    transition-property: opacity;
   }
   .piece.slot-candidate,
   .piece.slot-marked,

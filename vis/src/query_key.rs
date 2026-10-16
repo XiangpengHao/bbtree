@@ -1,16 +1,15 @@
 //! The key looked up, above the path, as the lookup reads its bytes on the
-//! way down. As each node's turn comes in the path's replay
-//! ([`Trace::LEVEL_MS`] a level), the bytes that node skips, its prefix,
-//! dim, and a frame moves onto the bytes its search compares, the key's
-//! inline key there (D18). Down the path the frame steps right as the
-//! fences close in and the prefixes grow (`doc/05-fence-key.md`, D50), and
-//! it rests on the last node's. It marks only what the trace and the
+//! way down, step by step (`descent.rs`): once a node skips its prefix, the
+//! bytes it skips dim; once it compares, a frame slides onto the bytes it
+//! compares, the key's inline key there (D18); while it compares tied keys
+//! in full, the bytes after the frame are marked. Down the path the frame
+//! steps right as the fences close in and the prefixes grow
+//! (`doc/05-fence-key.md`, D50). It marks only what the trace and the
 //! tree's shape say: each node's prefix length and inline-key width.
-
-use std::fmt::Write;
 
 use dioxus::prelude::*;
 
+use crate::descent::DescentPlan;
 use crate::inspected_tree::LoadedTree;
 use crate::trace::Trace;
 use crate::workload::KeyKind;
@@ -36,14 +35,9 @@ struct KeyWalk {
     stops: Vec<WindowStop>,
     /// One cell's width, in px.
     cell: f64,
-    /// The path's rows, which the replay takes a level each.
-    rows: usize,
 }
 
 impl KeyWalk {
-    /// How long, in ms, the frame takes to slide to the next node's window.
-    const SLIDE_MS: f64 = 140.0;
-
     fn of(tree: &LoadedTree, trace: &Trace) -> Self {
         let kind = tree.key_kind();
         let shape = tree.shape();
@@ -85,115 +79,82 @@ impl KeyWalk {
             key_len: bytes.len(),
             stops,
             cell: if kind.is_text() { 8.0 } else { 21.0 },
-            rows: trace.steps().len(),
         }
     }
 
-    /// The row whose node's window first reads cell `index`, if one does.
-    fn read_from(&self, index: usize) -> Option<usize> {
+    /// The window of the last node whose search has compared, once
+    /// `shown` steps are shown.
+    fn frame(&self, plan: &DescentPlan, shown: usize) -> Option<WindowStop> {
         self.stops
             .iter()
-            .find(|stop| index < stop.skipped + stop.width)
-            .map(|stop| stop.row)
+            .rev()
+            .find(|stop| plan.phase(stop.row, shown) >= 2)
+            .copied()
     }
 
-    /// The row whose node first skips byte `index`, if one does.
-    fn skipped_from(&self, index: usize) -> Option<usize> {
+    /// The bytes the last node to skip its prefix skips.
+    fn skipped(&self, plan: &DescentPlan, shown: usize) -> usize {
         self.stops
             .iter()
-            .find(|stop| stop.skipped > index)
-            .map(|stop| stop.row)
-    }
-
-    /// The frame's walk from window to window, as CSS keyframes named
-    /// `name`, over the whole replay.
-    fn keyframes(&self, name: &str) -> String {
-        let level = f64::from(Trace::LEVEL_MS);
-        let total = level * self.rows.max(1) as f64;
-        let at = |ms: f64| (100.0 * ms / total).clamp(0.0, 100.0);
-        let place = |stop: &WindowStop| {
-            format!(
-                "transform:translateX({}px);width:{}px;",
-                stop.skipped as f64 * self.cell,
-                stop.width as f64 * self.cell
-            )
-        };
-        let mut frames = String::new();
-        if let Some(first) = self.stops.first() {
-            let start = first.row as f64 * level;
-            let _ = write!(
-                frames,
-                "0%{{{}opacity:0}}{:.2}%{{{}opacity:0}}{:.2}%{{{}opacity:1}}",
-                place(first),
-                at(start),
-                place(first),
-                at(start + 80.0),
-                place(first)
-            );
-        }
-        for pair in self.stops.windows(2) {
-            let start = pair[1].row as f64 * level;
-            let _ = write!(
-                frames,
-                "{:.2}%{{{}}}{:.2}%{{{}}}",
-                at(start - Self::SLIDE_MS),
-                place(&pair[0]),
-                at(start),
-                place(&pair[1])
-            );
-        }
-        format!("@keyframes {name}{{{frames}}}")
+            .rev()
+            .find(|stop| plan.phase(stop.row, shown) >= 1)
+            .map_or(0, |stop| stop.skipped)
     }
 }
 
-/// The key looked up, with the bytes each node of its way down skips and
-/// compares marked in turn.
+/// The key looked up, with the bytes the way down skipped and compared so
+/// far marked.
 #[component]
 pub(crate) fn QueryKey(
     tree: LoadedTree,
     trace: Trace,
-    /// Changes with every lookup and replay, so the walk plays again.
-    replay: u64,
+    plan: DescentPlan,
+    /// How many steps of the way down are shown.
+    shown: usize,
 ) -> Element {
     let walk = KeyWalk::of(&tree, &trace);
     let kind = tree.key_kind();
     let text = trace.query().to_string();
-    let name = format!("key-walk-{replay}");
-    let level = Trace::LEVEL_MS;
-    let last = walk.stops.last().copied();
-    let total = level as usize * walk.rows.max(1);
+    let frame = walk.frame(&plan, shown);
+    let skipped = walk.skipped(&plan, shown);
+    // A node comparing tied keys in full reads on past its window.
+    let tie_from = plan
+        .current(shown)
+        .filter(|&(row, _)| plan.phase(row, shown) == 3)
+        .and(frame)
+        .map(|stop| stop.skipped + stop.width);
+    let read_to = frame.map_or(0, |stop| stop.skipped + stop.width);
+    // Every state sets every property: the page patches a style, so one
+    // left out would keep its last value.
+    let frame_style = match frame {
+        Some(stop) => format!(
+            "opacity:1;transform:translateX({}px);width:{}px;",
+            stop.skipped as f64 * walk.cell,
+            stop.width as f64 * walk.cell
+        ),
+        None => "opacity:0;transform:translateX(0px);width:0px;".to_string(),
+    };
     rsx! {
         span {
-            key: "{replay}",
             class: "query-key data",
             style: "--cell:{walk.cell}px;",
             title: "Each node on the way down skips the bytes its keys share, dimmed, and compares the next few, its inline key, framed.",
             "aria-label": text.clone(),
-            style { {walk.keyframes(&name)} }
             span { class: "key-cells", "aria-hidden": "true",
-                if let Some(stop) = last {
-                    span {
-                        class: "key-frame",
-                        style: "transform:translateX({stop.skipped as f64 * walk.cell}px);width:{stop.width as f64 * walk.cell}px;animation-name:{name};animation-duration:{total}ms;",
-                    }
-                }
+                span { class: "key-frame", style: frame_style }
                 for (index, cell) in walk.cells.iter().enumerate() {
                     {
-                        // Zeros past the key's end show once a window reads
-                        // them; skipped bytes dim at their node's turn.
-                        let (class, row) = if index >= walk.key_len {
-                            ("key-cell key-padding", walk.read_from(index))
+                        let class = if index >= walk.key_len {
+                            if index < read_to { "key-cell key-padding" } else { "key-cell key-padding hidden" }
+                        } else if index < skipped {
+                            "key-cell key-skipped"
+                        } else if tie_from.is_some_and(|from| index >= from) {
+                            "key-cell key-compared"
                         } else {
-                            match walk.skipped_from(index) {
-                                Some(row) => ("key-cell key-skipped", Some(row)),
-                                None => ("key-cell", None),
-                            }
+                            "key-cell"
                         };
-                        let delay = row
-                            .map(|row| format!("animation-delay:{}ms;", row as u32 * level))
-                            .unwrap_or_default();
                         rsx! {
-                            span { class, style: delay, {cell.clone()} }
+                            span { class, {cell.clone()} }
                         }
                     }
                 }
@@ -225,7 +186,10 @@ mod tests {
                 .all(|pair| pair[0].skipped <= pair[1].skipped)
         );
         // The bytes every key shares are skipped from the root on.
-        assert_eq!(walk.skipped_from(0), Some(0));
-        assert!(walk.keyframes("walk").starts_with("@keyframes walk{0%{"));
+        let plan = DescentPlan::of(&tree, &tree.trace("123455").unwrap());
+        assert_eq!(walk.skipped(&plan, 0), 0);
+        assert!(walk.skipped(&plan, 1) > 0);
+        assert!(walk.frame(&plan, 1).is_none());
+        assert_eq!(walk.frame(&plan, plan.total()), walk.stops.last().copied());
     }
 }

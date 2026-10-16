@@ -10,6 +10,7 @@ mod batch_tree;
 mod batch_view;
 mod concepts;
 mod count_text;
+mod descent;
 mod fences;
 mod icons;
 mod inspected_tree;
@@ -69,7 +70,15 @@ fn App() -> Element {
             .map_or(1, |since| since.as_nanos() as u64 | 1)
     });
     let replay = use_signal(|| 0u64);
-    let tracer = Tracer::new(trace, inspected, error, seed, replay);
+    let tracer = Tracer::new(
+        trace,
+        inspected,
+        error,
+        seed,
+        replay,
+        use_signal(|| 0),
+        use_signal(|| true),
+    );
     let batcher = Batcher::new(use_signal(|| false), use_signal(|| None), seed);
     let builder = Builder::new(
         tree,
@@ -136,6 +145,7 @@ fn App() -> Element {
                             trace: current.clone(),
                             inspected: at,
                             replay: replayed,
+                            shown: tracer.shown(),
                             tracer,
                             spotlight,
                         }

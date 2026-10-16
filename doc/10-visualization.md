@@ -239,26 +239,30 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   they are, on a faint fan; pointing at one draws its own edge, clicking it
   looks up that node's first key. A separator's way to its value is dashed.
 
-  Every lookup plays its way down, a level every 260 ms: all the inline
-  keys of a ruler flash at once, as the search compares them all, and
-  settle dark where smaller than the searched key's inline key, pale where
-  larger: the search counts the smaller ones, and the count is where the
-  key goes (D18). The tied ones mark; the result and the notch drop in;
-  the edge to the next card draws. Between lookups the cards glide to
-  their new places.
-- **Above the path** (`path_summary.rs`), the play controls a batch has:
-  play or pause the way down, or step it a level at a time, every level to
-  the one stepped to done and none below begun. They drive the path's and
-  the key's own CSS animations, timed by the key's walk. Where the lookup
-  ended is in the toolbar's search button, and read out for screen
-  readers.
+  Every lookup plays its way down a search step at a time (`descent.rs`),
+  through each node's steps as the inspector lists them: skip the shared
+  bytes, count the smaller inline keys, search the tied keys, the outcome.
+  At the count all the inline keys of a ruler flash at once, as the search
+  compares them all, and settle dark where smaller than the searched key's
+  inline key, pale where larger: the count of the smaller ones is where
+  the key goes (D18), and the tied ones mark. At the outcome the result
+  and the notch drop in and the edge to the next card draws. Cards the way
+  down hasn't reached are faded. Between lookups the cards glide to their
+  new places.
+- **Above the path** (`path_summary.rs`), the controls a batch has: play
+  or pause the way down, or step it a search step at a time. The way down
+  is one number, the steps shown, which the tracer keeps; the cards, the
+  key and the inspector's current step draw from it, and CSS transitions
+  carry each change, so nothing remounts. Playing adds a step every 700
+  ms. Where the lookup ended is in the toolbar's search button, and read
+  out for screen readers.
 - **The key** (`query_key.rs`), above the path, highlighted, a cell per
   byte of its encoding (hex, or characters for URLs; a `u64` also as its
-  number). It walks down with the path, at the same pace
-  (`Trace::LEVEL_MS`): at each node's turn the bytes it skips, its prefix,
-  dim, and a frame slides onto the bytes its search compares, the key's
-  inline key there; zeros a window reads past the key's end show when a
-  node reads them. Down the path the frame steps right, as the fences
+  number). It walks down with the path, step by step: once a node skips
+  its prefix those bytes dim; once it counts, a frame slides onto the
+  bytes it compares, the key's inline key there; while it compares tied
+  keys in full, the bytes after the frame are underlined; zeros a window
+  reads past the key's end show once a node reads them. Down the path the frame steps right, as the fences
   close in and the prefixes grow (05-fence-key.md, D50), and it rests on
   the last node's window. The prefix comes from the shape, the window's
   width from the trace (`TraceStep::inline_width`, the node's own
