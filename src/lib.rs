@@ -30,7 +30,8 @@ pub use set::BBTreeSet;
 #[cfg(feature = "inspect")]
 pub mod inspect {
     pub use crate::tree::inspect::{
-        NodeId, NodeView, PageMap, SlotArray, SlotContents, TraceOutcome, TraceStep, TreeView,
+        BatchPoll, BatchTrace, LaneFetch, NodeId, NodeView, PageMap, SlotArray, SlotContents,
+        TraceOutcome, TraceStep, TreeView,
     };
 }
 

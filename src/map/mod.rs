@@ -570,7 +570,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// and page layouts, as the map stores them. For the visualizer (`vis/`);
     /// the `inspect` feature promises no stability.
     pub fn inspect(&self) -> TreeView<'_, K, V, S> {
-        TreeView::new(&self.tree)
+        TreeView::new(&self.tree, self.length)
     }
 }
 

@@ -12,6 +12,7 @@
 
 use alloc::vec::Vec;
 use core::borrow::Borrow;
+use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::fmt;
 use core::marker::PhantomData;
@@ -19,6 +20,7 @@ use core::mem::size_of;
 use core::ops::Range;
 use core::ptr;
 
+use super::batch::LaneWatch;
 use super::node::inline_key_search::NodeInlineKeys;
 use super::node::inline_keys::{InlineTarget, SearchKey};
 use super::node::internal::Internal;
@@ -29,17 +31,22 @@ use super::node::{Child, Node};
 use super::root::Tree;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
+pub use super::batch::LaneFetch;
+
 /// A map's tree, read in place: see [`crate::BBTreeMap::inspect`].
 pub struct TreeView<'a, K, V, S> {
+    tree: &'a Tree<K, V, S>,
     root_page: Option<RootPage<K, V, S>>,
-    _borrow: PhantomData<&'a Tree<K, V, S>>,
+    /// How many entries the map holds, which its batches' size cutoff reads.
+    length: usize,
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
-    pub(crate) fn new(tree: &'a Tree<K, V, S>) -> Self {
+    pub(crate) fn new(tree: &'a Tree<K, V, S>, length: usize) -> Self {
         Self {
+            tree,
             root_page: tree.root_page(),
-            _borrow: PhantomData,
+            length,
         }
     }
 
@@ -147,6 +154,144 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     {
         let search = SearchKey::<K, S, Q>::new(key);
         self.root_page?.shared_prefix().place_outside(&search)
+    }
+
+    /// The lanes and executor of [`crate::BBTreeMap::get_many`] (doc 12),
+    /// run for `keys` and watched: every poll of a lane, in the executor's
+    /// order, with the line the lane fetched before it yielded. They run
+    /// whatever the map's size, but on a map without an internal root, where
+    /// batches run no lanes, the trace has no polls; whether `get_many`
+    /// runs them on this map is [`BatchTrace::batches`].
+    pub fn trace_many<Q, const N: usize>(&self, keys: [&Q; N]) -> BatchTrace<'a, K, V, S>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let heard = RefCell::new(Vec::new());
+        let watches = core::array::from_fn(|lane| BatchRecorder {
+            heard: &heard,
+            lane,
+        });
+        self.tree.find_many_watched(keys, watches);
+        // Each lane's line lies in a page on its way down: the pages of the
+        // nodes its single-key lookup reads.
+        let ways_down = keys.map(|key| {
+            self.trace(key)
+                .iter()
+                .map(|step| {
+                    let node = step.node();
+                    let start = node.id().0;
+                    (node, start..start + node.page_map().size())
+                })
+                .collect::<Vec<_>>()
+        });
+        let polls = heard
+            .into_inner()
+            .into_iter()
+            .map(|(lane, fetched)| BatchPoll {
+                lane,
+                fetched: fetched.map(|(fetch, line)| {
+                    let in_page = ways_down[lane]
+                        .iter()
+                        .find(|(_, page)| page.contains(&line))
+                        .map(|(node, page)| {
+                            (
+                                *node,
+                                (line - page.start) / BatchPoll::<K, V, S>::LINE_BYTES,
+                            )
+                        });
+                    FetchedLine { fetch, in_page }
+                }),
+            })
+            .collect();
+        BatchTrace {
+            polls,
+            batches: Tree::<K, V, S>::batches(self.length),
+        }
+    }
+}
+
+/// What [`TreeView::trace_many`]'s watch hears of each lane, in the
+/// executor's order: the lane, and the line it fetched, as an address, or
+/// `None` when it ends.
+type HeardPolls = RefCell<Vec<(usize, Option<(LaneFetch, usize)>)>>;
+
+/// The watch of one lane of [`TreeView::trace_many`].
+#[derive(Clone, Copy)]
+struct BatchRecorder<'h> {
+    heard: &'h HeardPolls,
+    lane: usize,
+}
+
+impl LaneWatch for BatchRecorder<'_> {
+    fn fetching(self, fetch: LaneFetch, line: *const u8) {
+        self.heard
+            .borrow_mut()
+            .push((self.lane, Some((fetch, line.addr()))));
+    }
+
+    fn finished(self) {
+        self.heard.borrow_mut().push((self.lane, None));
+    }
+}
+
+/// A batch lookup as [`crate::BBTreeMap::get_many`] runs it, poll by poll
+/// ([`TreeView::trace_many`]).
+pub struct BatchTrace<'a, K, V, S> {
+    polls: Vec<BatchPoll<'a, K, V, S>>,
+    batches: bool,
+}
+
+impl<'a, K, V, S> BatchTrace<'a, K, V, S> {
+    /// Every poll of a lane, in the order the executor made them: round
+    /// after round, each over the lanes still running, in input order.
+    pub fn polls(&self) -> &[BatchPoll<'a, K, V, S>] {
+        &self.polls
+    }
+
+    /// Whether `get_many` runs lanes on this map: whether the map is past
+    /// the size below which there are too few misses to overlap. Smaller
+    /// maps look each key up alone.
+    pub fn batches(&self) -> bool {
+        self.batches
+    }
+}
+
+/// One poll of a lane: it ran from where it last yielded to its next fetch,
+/// or to its end.
+pub struct BatchPoll<'a, K, V, S> {
+    lane: usize,
+    /// `None` if the poll ended the lane.
+    fetched: Option<FetchedLine<'a, K, V, S>>,
+}
+
+/// A line a lane fetched: what for, and the node whose page holds it with
+/// the line's index there, if a node's.
+struct FetchedLine<'a, K, V, S> {
+    fetch: LaneFetch,
+    in_page: Option<(NodeView<'a, K, V, S>, usize)>,
+}
+
+impl<'a, K, V, S> BatchPoll<'a, K, V, S> {
+    /// The lines a page is read in, from its start.
+    const LINE_BYTES: usize = 64;
+
+    /// The lane polled: its key's index in the batch.
+    pub fn lane(&self) -> usize {
+        self.lane
+    }
+
+    /// What the lane fetched before it yielded; `None` if the poll ended
+    /// the lane.
+    pub fn fetch(&self) -> Option<LaneFetch> {
+        self.fetched.as_ref().map(|fetched| fetched.fetch)
+    }
+
+    /// The node whose page holds the fetched line, and the line, counted in
+    /// 64-byte lines from the page's start. `None` for bytes outside the
+    /// nodes: the query's, or a key's on the heap.
+    pub fn line(&self) -> Option<(NodeView<'a, K, V, S>, usize)> {
+        self.fetched.as_ref().and_then(|fetched| fetched.in_page)
     }
 }
 
@@ -999,6 +1144,84 @@ mod tests {
 
     fn tree_shared_len<K, V, S: InlineKeyStrategy<K>>(map: &BBTreeMap<K, V, S>) -> usize {
         map.inspect().shared_prefix().len()
+    }
+
+    /// Checks that `trace` polls the live lanes in turn, in input order,
+    /// round after round, and that each line a lane fetched from a node lies
+    /// on its key's way down. Returns the fetches, lane by lane.
+    fn check_batch_trace<K, V, Q, S, const N: usize>(
+        map: &BBTreeMap<K, V, S>,
+        keys: [&Q; N],
+    ) -> Vec<Vec<(LaneFetch, Option<usize>)>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+        S: InlineKeyStrategy<K>,
+    {
+        let tree = map.inspect();
+        let trace = tree.trace_many(keys);
+        let mut fetches: Vec<Vec<_>> = (0..N).map(|_| Vec::new()).collect();
+        let mut polls = trace.polls().iter();
+        let mut live: Vec<usize> = (0..N).collect();
+        while !live.is_empty() {
+            live.retain(|&lane| {
+                let poll = polls.next().expect("a poll of every live lane, each round");
+                assert_eq!(poll.lane(), lane);
+                let Some(fetch) = poll.fetch() else {
+                    return false;
+                };
+                let line = poll.line().map(|(node, line)| {
+                    let way_down = tree.trace(keys[lane]);
+                    assert!(way_down.iter().any(|step| step.node().id() == node.id()));
+                    assert!(line * 64 < node.page_map().size());
+                    line
+                });
+                fetches[lane].push((fetch, line));
+                true
+            });
+        }
+        assert!(polls.next().is_none());
+        fetches
+    }
+
+    #[test]
+    fn batch_traces_poll_lanes_in_turn_along_their_ways_down() {
+        let integers: BBTreeMap<u64, u64> = shuffled(60_000, 7)
+            .into_iter()
+            .map(|key| (key as u64 * 2, key as u64))
+            .collect();
+        // Present, absent, and lacking the bytes every key shares (D50).
+        let fetches = check_batch_trace(&integers, [&10, &11, &0, &119_998, &u64::MAX, &77_777]);
+        assert!(fetches[4].is_empty());
+        for lane in [0, 1, 2, 3, 5] {
+            assert!(fetches[lane].iter().all(|(_, line)| line.is_some()));
+            // Down from the root: an edge, then a header, level by level.
+            assert_eq!(
+                fetches[lane][..2],
+                [
+                    (LaneFetch::Edge, fetches[lane][0].1),
+                    (LaneFetch::Header, Some(0))
+                ]
+            );
+        }
+
+        let mut strings = BBTreeMap::new();
+        for number in shuffled(20_000, 3) {
+            strings.insert(format!("https://example.com/{:06}", number * 2), number);
+        }
+        let fetches = check_batch_trace(
+            &strings,
+            ["https://example.com/000010", "https://example.com/000011"],
+        );
+        for lane in fetches {
+            // The query's bytes come first, and lie in no node.
+            assert_eq!(lane[0], (LaneFetch::QueryWindow, None));
+            assert!(
+                lane.iter()
+                    .skip(1)
+                    .all(|(fetch, line)| { line.is_some() || *fetch == LaneFetch::CandidateBytes })
+            );
+        }
     }
 
     #[test]

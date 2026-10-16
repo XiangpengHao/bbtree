@@ -1,10 +1,13 @@
 //! Keys for the common moves, anywhere but in a text field: `/` to search,
 //! `R` for a random key, `[` and `]` for the leaves beside the last one,
 //! the arrows up and down the path, and left and right back and forward
-//! through the lookups.
+//! through the lookups. `B` switches between one key and a batch; in a
+//! batch, `R` picks new keys, Space plays or pauses, `,` and `.` step a
+//! poll back or on.
 
 use dioxus::prelude::*;
 
+use crate::batch_view::{Batcher, Playback, PlaybackCommand};
 use crate::inspected_tree::LoadedTree;
 use crate::scenarios::Scenario;
 use crate::shared_link::HistoryStep;
@@ -15,9 +18,11 @@ use crate::trace::Tracer;
 pub(crate) fn Shortcuts(
     tree: Signal<Option<LoadedTree>>,
     tracer: Tracer,
+    batcher: Batcher,
     search_open: Signal<bool>,
 ) -> Element {
     let mut tracer = tracer;
+    let mut batcher = batcher;
     let mut search_open = search_open;
     use_future(move || async move {
         // The page forwards the keys it doesn't leave to the browser: none
@@ -32,8 +37,12 @@ pub(crate) fn Shortcuts(
                 const vertical = event.key === 'ArrowUp' || event.key === 'ArrowDown';
                 const pageScrolls = document.documentElement.scrollHeight > window.innerHeight + 1;
                 if (vertical && pageScrolls) return;
-                if (event.key.startsWith('Arrow') && target.closest?.('.slot-scroll, .fence-scroll, [role=dialog]')) return;
-                const keys = ['/', 'r', 'R', '[', ']', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+                if (event.key.startsWith('Arrow') && target.closest?.('.slot-scroll, .fence-scroll, [role=dialog], [role=tablist]')) return;
+                // Space presses a focused control; the batch's keys need a batch.
+                if (event.key === ' ' && target.closest?.('button, a, [role=tab]')) return;
+                const batch = !!document.getElementById('batch-board');
+                if ([' ', ',', '.'].includes(event.key) && !batch) return;
+                const keys = ['/', 'r', 'R', '[', ']', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', ',', '.', 'b', 'B'];
                 if (!keys.includes(event.key)) return;
                 event.preventDefault();
                 dioxus.send(event.key);
@@ -44,7 +53,20 @@ pub(crate) fn Shortcuts(
             let Some(tree) = tree.peek().clone() else {
                 continue;
             };
+            let batch = batcher.is_shown();
             match key.as_str() {
+                "b" | "B" if batch => {
+                    batcher.close();
+                    if tracer.trace().is_none() {
+                        tracer.start(&tree, None);
+                    }
+                }
+                "b" | "B" => batcher.start(),
+                "r" | "R" if batch => batcher.reseed(),
+                " " => Playback::send(PlaybackCommand::Toggle),
+                "," => Playback::send(PlaybackCommand::Back),
+                "." => Playback::send(PlaybackCommand::Forward),
+                _ if batch => {}
                 "/" => search_open.set(true),
                 "r" | "R" => tracer.run_scenario(&tree, Scenario::Random),
                 "[" => tracer.run_beside(&tree, -1),

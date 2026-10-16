@@ -20,8 +20,8 @@ pub(crate) enum Concept {
     LengthTag,
     Child,
     Page,
-    CacheLine,
     Wasm32,
+    Prefetch,
 }
 
 impl Concept {
@@ -37,8 +37,8 @@ impl Concept {
             Concept::LengthTag => "Length tags",
             Concept::Child => "Children",
             Concept::Page => "Page",
-            Concept::CacheLine => "Cache lines",
             Concept::Wasm32 => "wasm32 layouts",
+            Concept::Prefetch => "Prefetch",
         }
     }
 
@@ -72,11 +72,11 @@ impl Concept {
             Concept::Page => {
                 "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's shared prefix. Whatever no array covers is padding."
             }
-            Concept::CacheLine => {
-                "The processor fetches memory 64 bytes at a time. A lookup is fast when it needs few lines of each node it passes through."
-            }
             Concept::Wasm32 => {
                 "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for length tags. Leaves of fixed-size keys and values are the same. Without vector compares, it counts the smaller inline keys by a binary search over them instead, to the same count; the cache lines drawn are those of the x86-64 count."
+            }
+            Concept::Prefetch => {
+                "Asking memory for a line before it is needed, without waiting for it. Each key prefetches the line its search reads next, and the other keys search while it comes, so their waits for memory overlap instead of adding up. Batches are the only code in bbtree that prefetches."
             }
         }
     }
@@ -93,7 +93,8 @@ impl Concept {
             Concept::LengthTag => Some("D36"),
             Concept::Page => Some("D15"),
             Concept::Child => Some("D32"),
-            Concept::CacheLine | Concept::Wasm32 => None,
+            Concept::Prefetch => Some("D53"),
+            Concept::Wasm32 => None,
         }
     }
 }

@@ -17,7 +17,7 @@
   --panel: #ffffff;
   --ink: #15171c;
   --graphite: #5a606b;
-  --muted: #686e79;
+  --muted: #636974;
   --rule: #e2e5ea;
   --rule-strong: #c6ccd5;
   --well: #eef0f3;
@@ -28,6 +28,8 @@
   --marker: #ffe24a;
   --marker-strong: #a67c00;
   --marker-soft: #fff4b8;
+  /* The highlighter's ink, for text: 6.4:1 on panel. */
+  --marker-ink: #7a5a00;
   --marker-wash: #fffbe3;
 
   --slot-keys: #2a78d6;
@@ -198,6 +200,7 @@
   }
   .icon-button {
     width: 32px;
+    flex: none;
     display: inline-grid;
     place-items: center;
     padding: 0;
@@ -629,13 +632,58 @@
     font-weight: 500;
     min-width: 0;
   }
-  .summary-key {
+  /* The key looked up (query_key.rs): a cell per byte, highlighted as the
+   * lookup's key is. Each node's turn in the replay dims the bytes it
+   * skips and slides the frame onto the bytes it compares. */
+  .query-key {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
     font-size: 13px;
     font-weight: 500;
-    background: var(--marker);
+    vertical-align: baseline;
+  }
+  .key-cells {
+    position: relative;
+    display: inline-flex;
+    padding: 1px 4px;
     border-radius: 3px;
-    padding: 1px 6px;
-    word-break: break-all;
+    background: var(--marker);
+  }
+  .key-cell {
+    position: relative;
+    z-index: 1;
+    width: var(--cell);
+    text-align: center;
+    color: var(--ink);
+  }
+  /* Skipped: every key of the node shares it. Ends dim, from the node's
+   * turn on. */
+  .key-skipped {
+    color: var(--muted);
+    animation: key-dim 220ms ease-out both;
+  }
+  /* The zeros a window reads past the key's end, shown from the node
+   * that reads them. */
+  .key-padding {
+    color: var(--muted);
+    font-weight: 400;
+    animation: key-appear 200ms ease-out both;
+  }
+  .key-frame {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    left: 4px;
+    border: 1.5px solid var(--slot-inline);
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--compare-soft) 70%, transparent);
+    animation-timing-function: var(--ease-in-out);
+    animation-fill-mode: both;
+  }
+  .key-number {
+    color: var(--graphite);
+    font-weight: 400;
   }
   .summary-cost {
     margin: 0;
@@ -976,6 +1024,10 @@
     padding-bottom: 20px;
     animation: fade-in 180ms ease-out both;
   }
+  /* The slot table's panel, which lays out as if it weren't there. */
+  .tab-panel-contents {
+    display: contents;
+  }
   .icon-button.quiet {
     border-color: transparent;
     background: transparent;
@@ -1124,7 +1176,7 @@
     border-radius: 50%;
     background: var(--ink);
     color: var(--panel);
-    font: 600 10px var(--font-data);
+    font: 600 11px var(--font-data);
   }
   .step-title {
     font: 600 13px var(--font-ui);
@@ -1575,6 +1627,9 @@
     animation: compare-flash 440ms ease-out both;
     animation-delay: calc(var(--row) * var(--level-ms));
   }
+  .ruler-marks .slot-room.compared {
+    animation-name: compare-flash-room;
+  }
   .ruler-marks .slot-tied {
     animation: mark-in 260ms var(--ease-out) both;
     animation-delay: calc(var(--row) * var(--level-ms) + 120ms);
@@ -1597,12 +1652,24 @@
     animation: fade-in 260ms ease-out both;
     animation-delay: calc(var(--row) * var(--level-ms) + 220ms);
   }
+
 }
 
+/* A byte a node skips, dimming at that node's turn. */
+@keyframes key-dim {
+  from { color: var(--ink); }
+}
+@keyframes key-appear {
+  from { opacity: 0; }
+}
 /* Ends on the slot's own colour, smaller or larger. */
 @keyframes compare-flash {
   0% { background-color: var(--slot-filled); }
   25% { background-color: var(--compare); }
+}
+/* An empty slot is read too, softly, and ends empty. */
+@keyframes compare-flash-room {
+  25% { background-color: var(--compare-soft); }
 }
 /* A tied or found slot reads as any other key until its level's turn. */
 @keyframes mark-in {
@@ -1652,6 +1719,583 @@
   to { background-position: -100% 0; }
 }
 
+/* The batch: four keys looked up together, search by search. One number,
+ * the batch's time --t in searches, which the board's loop writes each
+ * frame, drives every continuous change here in CSS: prefetched lines
+ * fill, the rows draw themselves, the playhead moves. What hasn't happened
+ * yet is faint. */
+@layer components {
+  .mode-switch {
+    display: inline-flex;
+    padding: 2px;
+    gap: 2px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 8px;
+    background: var(--paper);
+  }
+  .mode-option {
+    min-height: 28px;
+    min-width: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--graphite);
+    font: 500 13px var(--font-ui);
+    cursor: pointer;
+    transition: background-color 120ms, color 120ms;
+  }
+  .mode-option:hover {
+    color: var(--ink);
+  }
+  .mode-option[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--panel);
+  }
+
+  /* The board: the headline, the keys and the tree on the left, the code
+   * every key runs on the right. */
+  .batch-board {
+    --t: -1;
+    /* A page strip's lines, tinted as the page map tints their arrays. */
+    --strip-slot-header: color-mix(in srgb, var(--slot-header) 40%, var(--panel));
+    --strip-slot-inline: color-mix(in srgb, var(--slot-inline) 34%, var(--panel));
+    --strip-slot-tags: color-mix(in srgb, var(--slot-tags) 30%, var(--panel));
+    --strip-slot-keys: color-mix(in srgb, var(--slot-keys) 30%, var(--panel));
+    --strip-slot-trailing: color-mix(in srgb, var(--slot-trailing) 30%, var(--panel));
+    /* Work on lines at hand, in the code and the rows. */
+    --compute: color-mix(in srgb, var(--slot-keys) 78%, var(--ink));
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "head" "keys" "code" "tree";
+  }
+  .batch-headline {
+    grid-area: head;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 20px 12px;
+  }
+  .batch-controls {
+    display: flex;
+    gap: 2px;
+    flex: none;
+  }
+  .batch-lead {
+    min-width: 0;
+  }
+  .batch-sentence {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--graphite);
+  }
+  .batch-sentence strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .batch-note {
+    margin: 2px 0 0;
+    font-size: 12px;
+    color: var(--graphite);
+  }
+  .batch-note code {
+    font: 500 11.5px var(--font-data);
+  }
+  .batch-heading {
+    margin: 0;
+    font: 600 13px var(--font-ui);
+    color: var(--ink);
+  }
+  .batch-heading strong {
+    font-weight: 700;
+    background: var(--marker-soft);
+    border-radius: 3px;
+    padding: 0 3px;
+  }
+  .batch-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  /* The keys, each beside its searches and prefetches */
+  .batch-keys {
+    grid-area: keys;
+    padding: 14px 20px 12px;
+    border-top: 1px solid var(--rule);
+  }
+  .rows-canvas {
+    position: relative;
+  }
+  .rows-plot {
+    position: absolute;
+    left: 0;
+    top: 0;
+    cursor: crosshair;
+  }
+  .row-rule {
+    stroke: var(--rule);
+    stroke-width: 1;
+  }
+  .key-field {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: var(--keys);
+    height: 32px;
+  }
+  .key-chip {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1.5px solid var(--ink);
+    border-radius: 50%;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .key-field.lit .key-chip,
+  .key-chip:hover {
+    background: var(--ink);
+    color: var(--panel);
+  }
+  .key-input {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 12.5px;
+    transition: border-color 120ms, box-shadow 120ms;
+  }
+  .key-input:hover {
+    border-color: var(--graphite);
+  }
+  .key-input:focus {
+    outline: none;
+    border-color: var(--link);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--link) 18%, transparent);
+  }
+  .key-input.invalid {
+    border-color: var(--error);
+    background: var(--error-soft);
+  }
+  .search {
+    fill: var(--ink);
+    opacity: clamp(0.14, calc((var(--t) - var(--s)) * 40 + 0.14), 1);
+  }
+  .search.lit {
+    fill: var(--link);
+  }
+  /* A prefetch: from the search that sends it to the key's next, which
+   * reads the line. Drawn faint ahead of time, then as it goes. */
+  .prefetch-ghost {
+    stroke: var(--marker);
+    stroke-width: 6;
+    opacity: 0.25;
+  }
+  .prefetch {
+    stroke: var(--marker);
+    stroke-width: 6;
+    transform-box: fill-box;
+    transform-origin: 0 50%;
+    transform: scaleX(clamp(0, calc((var(--t) - var(--s)) / var(--d)), 1));
+  }
+  .prefetch.lit {
+    stroke: color-mix(in srgb, var(--link) 60%, var(--marker));
+  }
+  .playhead {
+    stroke: var(--link);
+    stroke-width: 1.5;
+    transform: translateX(calc(max(var(--t), 0) * var(--scale) * 1px));
+    opacity: clamp(0, calc((var(--t) + 0.05) * 100), 1);
+    pointer-events: none;
+  }
+  .batch-keys-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 18px;
+    margin: 10px 0 0;
+    min-height: 18px;
+    font-size: 12px;
+    color: var(--graphite);
+  }
+  .keys-hint {
+    margin-left: auto;
+    color: var(--muted);
+  }
+  .key-error {
+    color: var(--error);
+  }
+  .legend-mark {
+    display: inline-block;
+    flex: none;
+  }
+  .legend-mark.search {
+    width: 10px;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--ink);
+  }
+  .legend-mark.prefetch {
+    width: 20px;
+    height: 6px;
+    background: var(--marker);
+  }
+
+  /* The nodes the keys read */
+  .batch-tree {
+    grid-area: tree;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--rule);
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .batch-tree-canvas {
+    position: relative;
+  }
+  .batch-tree-canvas > * {
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+  .batch-edges {
+    pointer-events: none;
+  }
+  .batch-edge {
+    fill: none;
+    stroke: var(--ink);
+    stroke-width: 1.4;
+    opacity: clamp(0.1, calc((var(--t) - var(--at)) * 8 + 0.1), 1);
+  }
+  .batch-edge.lit {
+    stroke: var(--link);
+    stroke-width: 2.4;
+  }
+  .batch-level {
+    pointer-events: none;
+    line-height: 16px;
+  }
+  .batch-level.narrow {
+    padding-left: 0;
+  }
+  .batch-page {
+    transition: transform 380ms var(--ease-out);
+  }
+  .page-strip {
+    position: relative;
+    height: 20px;
+    border-radius: 3px;
+    box-shadow: 0 0 0 1px var(--rule-strong);
+  }
+  /* A prefetched line: outlined when the prefetch goes out, filling until
+   * the key's next search reads it; then a read line's pale yellow. */
+  .fetched-line {
+    --since: calc(var(--t) - var(--issued));
+    --read: clamp(0, calc((var(--t) - var(--used)) * 20), 1);
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: var(--cell);
+    min-width: 2px;
+    border-radius: 1px;
+    opacity: clamp(0, calc(var(--since) * 30), 1);
+    box-shadow: inset 0 0 0 calc(1.5px * (1 - var(--read))) var(--marker-strong);
+    pointer-events: none;
+  }
+  .fetched-line::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--marker);
+    transform-origin: bottom;
+    transform: scaleY(clamp(0, calc(var(--since) / var(--flight)), 1));
+    opacity: calc(1 - 0.55 * var(--read));
+  }
+  .fetched-line.lit {
+    outline: 2px solid var(--link);
+    outline-offset: 1px;
+  }
+  /* A key, on the node it searches or prefetches from: its ring fills
+   * while its line is pending. */
+  .lane-token {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1.5px solid var(--ink);
+    border-radius: 50%;
+    background: var(--panel);
+    color: var(--ink);
+    font: 600 11px var(--font-data);
+    cursor: pointer;
+    transition: transform 380ms var(--ease-out), background-color 150ms, box-shadow 150ms,
+      opacity 150ms;
+  }
+  .lane-token::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+  }
+  .lane-token.waiting {
+    border-color: var(--marker-strong);
+    background: conic-gradient(
+      var(--marker) calc(clamp(0, calc((var(--t) - var(--issued)) / var(--flight)), 1) * 1turn),
+      var(--panel) 0
+    );
+  }
+  .lane-token.running {
+    background: var(--ink);
+    color: var(--panel);
+    box-shadow: 0 0 0 3px var(--marker);
+  }
+  .lane-token.ended {
+    border-style: dashed;
+    border-color: var(--graphite);
+    color: var(--graphite);
+  }
+  .lane-token.lit {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--link) 35%, transparent);
+  }
+  .batch-tree-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 18px;
+    padding: 6px 20px 12px;
+    font-size: 12px;
+    color: var(--graphite);
+  }
+  .legend-token {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--ink);
+    border-radius: 50%;
+    background: var(--panel);
+  }
+  .legend-token.running {
+    background: var(--ink);
+  }
+  .legend-token.waiting {
+    border-color: var(--marker-strong);
+    background: conic-gradient(var(--marker) 0.6turn, var(--panel) 0);
+  }
+  .legend-token.ended {
+    border-style: dashed;
+    border-color: var(--graphite);
+  }
+  .legend-line {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--marker);
+    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
+  }
+
+  /* The code every key runs */
+  .batch-code {
+    grid-area: code;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+    padding: 16px 22px 20px;
+    border-top: 1px solid var(--rule);
+    background: var(--panel);
+  }
+  .lane-program {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .program {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    font: 13px/1 var(--font-data);
+  }
+  .program-line {
+    display: grid;
+    /* A code column as wide as the longest line, so the comments align. */
+    grid-template-columns: 84px 34ch minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
+    min-height: 30px;
+    border-radius: 4px;
+    transition: background-color 150ms;
+  }
+  .program-line.ran {
+    background: var(--marker-wash);
+  }
+  .program-line.stop {
+    background: var(--marker-soft);
+  }
+  .program-line.unused {
+    opacity: 0.4;
+  }
+  .program-gutter {
+    display: flex;
+    justify-content: flex-end;
+    gap: 2px;
+    padding-right: 2px;
+  }
+  .gutter-lane {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border: 1.5px solid var(--ink);
+    border-radius: 50%;
+    background: var(--panel);
+    font: 600 11px/1 var(--font-data);
+  }
+  .gutter-lane.ended {
+    border-style: dashed;
+    border-color: var(--graphite);
+    color: var(--graphite);
+  }
+  .gutter-lane.running {
+    border-style: solid;
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--panel);
+  }
+  .gutter-lane.lit {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--link) 40%, transparent);
+  }
+  .program-code {
+    padding-left: calc(var(--indent) * 2ch);
+    white-space: pre;
+    line-height: 30px;
+  }
+  .tok-plain {
+    color: var(--ink);
+  }
+  .tok-keyword {
+    color: var(--graphite);
+    font-weight: 600;
+  }
+  .tok-compute {
+    color: var(--compute);
+    font-weight: 600;
+  }
+  .tok-prefetch {
+    color: var(--marker-ink);
+    font-weight: 600;
+  }
+  .tok-await {
+    color: var(--marker-ink);
+    font-style: italic;
+  }
+  .program-comment {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: 12px var(--font-ui);
+    color: var(--muted);
+  }
+  .program-comment:not(:empty)::before {
+    content: "// ";
+    font-family: var(--font-data);
+  }
+  .program-line.stop .program-comment {
+    color: var(--ink);
+  }
+  .program-legend {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--rule);
+    font-size: 12px;
+    color: var(--graphite);
+  }
+  .legend-swatch-text {
+    display: inline-block;
+    min-width: 64px;
+    font: 12px var(--font-data);
+  }
+  /* The search running, in a sentence: under the code it ran. */
+  .poll-story {
+    margin: 0;
+    min-height: calc(3 * 1.5em + 24px);
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: var(--paper);
+    box-shadow: inset 0 0 0 1px var(--rule);
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .poll-story:empty {
+    visibility: hidden;
+  }
+
+  @media (min-width: 1024px) {
+    .workspace.batch {
+      display: flex;
+      flex-direction: column;
+    }
+    .workspace.batch > .batch-board {
+      flex: 1;
+      min-height: 0;
+      grid-template-columns: minmax(0, 1fr) minmax(500px, 40%);
+      grid-template-rows: auto auto minmax(0, 1fr);
+      grid-template-areas: "head code" "keys code" "tree code";
+    }
+    .batch-code {
+      border-top: 0;
+      border-left: 1px solid var(--rule);
+      overflow-y: auto;
+    }
+  }
+  @media (max-width: 640px) {
+    .batch-headline,
+    .batch-keys,
+    .batch-tree-legend {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    .batch-code {
+      padding: 14px 12px 18px;
+    }
+    .program-line {
+      grid-template-columns: 64px max-content;
+    }
+    .program-comment {
+      display: none;
+    }
+    .program-line.stop .program-comment {
+      display: block;
+      grid-column: 2;
+      padding-bottom: 4px;
+    }
+    .keys-hint {
+      display: none;
+    }
+  }
+}
+
 /* Less motion: nothing travels or grows; reads and marks still arrive in
  * their order, as fades. */
 @media (prefers-reduced-motion: reduce) {
@@ -1672,6 +2316,12 @@
   .search-step {
     animation-name: fade-in;
   }
+  /* The key's walk shows where it ends: the last node's window. */
+  .key-frame,
+  .key-skipped,
+  .key-padding {
+    animation: none;
+  }
   .piece.slot-candidate,
   .piece.slot-marked,
   .skeleton-card {
@@ -1679,6 +2329,10 @@
   }
   .popover {
     animation-name: fade-in;
+  }
+  .lane-token,
+  .batch-page {
+    transition-property: opacity, background-color, box-shadow;
   }
   .hint.above,
   .hint.below {

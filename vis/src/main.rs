@@ -1,18 +1,25 @@
 //! Look keys up in a bbtree, in the browser, and watch how it finds them:
 //! the path from the root, and each node's page, cache line by cache line,
 //! drawn from bbtree's own read-only views of its nodes
-//! (`BBTreeMap::inspect`), as bbtree stores them (`doc/10-visualization.md`).
+//! (`BBTreeMap::inspect`), as bbtree stores them; or many keys at once, as
+//! `get_many` interleaves their lookups (`doc/10-visualization.md`).
 
+mod batch_run;
+mod batch_timeline;
+mod batch_tree;
+mod batch_view;
 mod concepts;
 mod count_text;
 mod fences;
 mod icons;
 mod inspected_tree;
+mod lane_program;
 mod memory_map;
 mod node_inspector;
 mod path_summary;
 mod path_tree;
 mod popover;
+mod query_key;
 mod scenarios;
 mod shared_link;
 mod shortcuts;
@@ -26,6 +33,7 @@ mod workload;
 use dioxus::prelude::*;
 use web_time::{SystemTime, UNIX_EPOCH};
 
+use crate::batch_view::{BatchView, Batcher, ModeSwitch};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::{InspectorTab, NodeInspector};
@@ -62,6 +70,7 @@ fn App() -> Element {
     });
     let replay = use_signal(|| 0u64);
     let tracer = Tracer::new(trace, inspected, error, seed, replay);
+    let batcher = Batcher::new(use_signal(|| false), use_signal(|| None), seed);
     let builder = Builder::new(
         tree,
         use_signal(Workload::first),
@@ -80,6 +89,7 @@ fn App() -> Element {
     let current = tracer.trace();
     let at = tracer.inspected();
     let replayed = tracer.replay_count();
+    let batch = batcher.is_shown();
     rsx! {
         document::Link { rel: "preconnect", href: "https://fonts.googleapis.com" }
         document::Link { rel: "stylesheet", href: FONTS }
@@ -88,7 +98,8 @@ fn App() -> Element {
         div { class: "app",
             header { class: "toolbar",
                 h1 { class: "wordmark", "bbtree" }
-                if let Some(loaded) = loaded.clone() {
+                ModeSwitch { batcher, tracer, tree: loaded.clone() }
+                if let Some(loaded) = loaded.clone().filter(|_| !batch) {
                     LookupMenu { tree: loaded, tracer, open: search_open }
                 }
                 WorkloadMenu { builder, tracer }
@@ -107,10 +118,19 @@ fn App() -> Element {
                     }
                 }
             }
-            if let (Some(loaded), Some(current)) = (loaded.clone(), current) {
+            if let Some(loaded) = loaded.clone().filter(|_| batch) {
+                main { class: "workspace batch",
+                    BatchView {
+                        tree: loaded,
+                        batcher,
+                        tracer,
+                        spotlight,
+                    }
+                }
+            } else if let (Some(loaded), Some(current)) = (loaded.clone(), current) {
                 main { class: "workspace",
                     div { class: "path-column",
-                        PathSummary { tree: loaded.clone(), trace: current.clone(), tracer, spotlight }
+                        PathSummary { tree: loaded.clone(), trace: current.clone(), tracer, replay: replayed }
                         PathTree {
                             tree: loaded.clone(),
                             trace: current.clone(),
@@ -150,8 +170,18 @@ fn App() -> Element {
                 }
             }
             HintLayer { spotlight }
-            Shortcuts { tree, tracer, search_open }
-            SharedLink { builder, tracer, tab }
+            Shortcuts {
+                tree,
+                tracer,
+                batcher,
+                search_open,
+            }
+            SharedLink {
+                builder,
+                tracer,
+                batcher,
+                tab,
+            }
         }
     }
 }

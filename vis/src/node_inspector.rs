@@ -414,26 +414,53 @@ pub(crate) fn NodeInspector(
                     spotlight,
                 }
             }
-            div { class: "tabs", role: "tablist", "aria-label": "Views of the node",
+            div {
+                class: "tabs",
+                role: "tablist",
+                "aria-label": "Views of the node",
+                // The arrows move between the tabs, as a tab list's do.
+                onkeydown: move |evt| {
+                    if matches!(evt.key(), Key::ArrowLeft | Key::ArrowRight) {
+                        evt.prevent_default();
+                        let other = match shown {
+                            InspectorTab::Page => InspectorTab::Slots,
+                            InspectorTab::Slots => InspectorTab::Page,
+                        };
+                        tab.set(other);
+                        document::eval(
+                            &format!("document.getElementById('tab-{}')?.focus()", other.slug()),
+                        );
+                    }
+                },
                 button {
+                    id: "tab-page",
                     class: "tab",
                     role: "tab",
                     "aria-selected": if shown == InspectorTab::Page { "true" } else { "false" },
+                    "aria-controls": "panel-page",
+                    tabindex: if shown == InspectorTab::Page { "0" } else { "-1" },
                     onclick: move |_| tab.set(InspectorTab::Page),
                     "Page"
                     span { class: "tab-note", "its memory, line by line" }
                 }
                 button {
+                    id: "tab-slots",
                     class: "tab",
                     role: "tab",
                     "aria-selected": if shown == InspectorTab::Slots { "true" } else { "false" },
+                    "aria-controls": "panel-slots",
+                    tabindex: if shown == InspectorTab::Slots { "0" } else { "-1" },
                     onclick: move |_| tab.set(InspectorTab::Slots),
                     "Slots"
                     span { class: "tab-note", "every key, one row each" }
                 }
             }
             if shown == InspectorTab::Page {
-                div { class: "tab-panel inspector-page", role: "tabpanel",
+                div {
+                    id: "panel-page",
+                    class: "tab-panel inspector-page",
+                    role: "tabpanel",
+                    "aria-labelledby": "tab-page",
                     MemoryMap {
                         detail: detail.clone(),
                         marks,
@@ -443,13 +470,19 @@ pub(crate) fn NodeInspector(
                     }
                 }
             } else {
-                SlotTable {
-                    tree: tree.clone(),
-                    detail,
-                    step,
-                    replay,
-                    tracer,
-                    spotlight,
+                div {
+                    id: "panel-slots",
+                    class: "tab-panel-contents",
+                    role: "tabpanel",
+                    "aria-labelledby": "tab-slots",
+                    SlotTable {
+                        tree: tree.clone(),
+                        detail,
+                        step,
+                        replay,
+                        tracer,
+                        spotlight,
+                    }
                 }
             }
         }
@@ -543,9 +576,9 @@ fn SearchStepItem(
                         SearchStep::CompareInlineKeys { window, width, tied } => rsx! {
                             if detail.prefix_len() > 0 { "Its next {width} bytes, " } else { "Its first {width} bytes, " }
                             code { class: "bytes", {window} }
-                            ", are compared with all {detail.len()} of the node's "
-                            Term { concept: Concept::InlineKey, spotlight, "inline keys" }
-                            ", counting how many are smaller and how many equal. "
+                            ", are compared with all {detail.capacity()} of the node's "
+                            Term { concept: Concept::InlineKey, spotlight, "inline key" }
+                            " slots at once, the {detail.len()} in use among them, counting how many are smaller and how many equal. "
                             {CompareOutcome::new(&tied, detail.len()).to_string()}
                         },
                         SearchStep::CompareFullKeys => rsx! {

@@ -13,6 +13,10 @@
 //! Level-by-level lanes, which search every lane at one depth before any
 //! follows its edge, are the measured ceiling: at 10M these lanes take
 //! 12–30% longer (doc 12).
+//!
+//! Each fetch names what it is for ([`LaneFetch`]) to the lane's watch,
+//! which the map's batches leave empty, `()`, and the visualizer's trace
+//! fills (`tree/inspect.rs`).
 
 use core::borrow::Borrow;
 use core::future::Future;
@@ -36,6 +40,43 @@ use crate::inline_key::InlineKeyStrategy;
 /// outlined the single-key one.
 struct BatchSearch;
 
+/// What a lane fetches: the line it reads next, which it may not have, so
+/// it prefetches the line and yields (doc 12).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LaneFetch {
+    /// The query's bytes that the root's search compares: its window
+    /// (D18), before the root, which is in cache.
+    QueryWindow,
+    /// The chosen edge's line, which holds the child's address.
+    Edge,
+    /// A child's header line, where its search starts.
+    Header,
+    /// The entry of a leaf's only candidate, whose key the lane compares in
+    /// full.
+    CandidateEntry,
+    /// The first line of the candidate key's heap bytes that the comparison
+    /// reads.
+    CandidateBytes,
+}
+
+/// What hears a lane's fetches and its end: nothing for the map's batches,
+/// `()`, which compiles to nothing; the visualizer's trace behind `inspect`.
+pub(in crate::tree) trait LaneWatch: Copy {
+    /// The lane prefetches `line`, for `fetch`, and yields.
+    fn fetching(self, fetch: LaneFetch, line: *const u8);
+
+    /// The lane has written its result.
+    fn finished(self);
+}
+
+impl LaneWatch for () {
+    #[inline(always)]
+    fn fetching(self, _: LaneFetch, _: *const u8) {}
+
+    #[inline(always)]
+    fn finished(self) {}
+}
+
 /// One key's descent. With the index a lane keeps between stages, its
 /// fields are all a suspended lane holds, so successive stages reuse them:
 /// one node for the internal levels and the leaf, and one prefix length,
@@ -45,29 +86,32 @@ struct BatchSearch;
 /// Each lane is one flat async block, the internal levels' loop included:
 /// awaiting a nested future for them added a second dispatch to every
 /// resume, 124 instructions and 13 ns per 10M `u64` hit.
-struct Lane<'q, K, V, S, Q: ?Sized> {
+struct Lane<'q, K, V, S, Q: ?Sized, W> {
     key: SearchKey<'q, K, S, Q>,
     node: NodePtr<K, V, S>,
     prefix_len: u16,
     /// False for a key that lacks what every key of the tree shares (D50),
     /// which no node holds.
     active: bool,
+    watch: W,
 }
 
-impl<'q, K, V, S, Q> Lane<'q, K, V, S, Q>
+impl<'q, K, V, S, Q, W> Lane<'q, K, V, S, Q, W>
 where
     K: Borrow<Q>,
     S: InlineKeyStrategy<K>,
     Q: Ord + ?Sized,
+    W: LaneWatch,
 {
     #[inline(always)]
-    fn new(key: &'q Q, root: Internal<K, V, S>, shared: &SharedPrefix) -> Self {
+    fn new(key: &'q Q, root: Internal<K, V, S>, shared: &SharedPrefix, watch: W) -> Self {
         let key = SearchKey::new(key);
         Self {
             active: shared.len() == 0 || shared.place_outside(&key).is_none(),
             key,
             node: root.node_ptr(),
             prefix_len: root.prefix_len() as u16,
+            watch,
         }
     }
 
@@ -92,7 +136,7 @@ where
                 return;
             }
             if let Some(line) = self.key.window_line(usize::from(self.prefix_len)) {
-                Prefetcher::fetch(line).await;
+                Prefetcher::watched(self.watch, LaneFetch::QueryWindow, line).await;
             }
             loop {
                 index = match Internal::at(self.node).search(&self.key) {
@@ -103,7 +147,8 @@ where
                     }
                     Err(edge) => edge as u16,
                 };
-                Prefetcher::fetch(Internal::at(self.node).edge_line(usize::from(index))).await;
+                let edge = Internal::at(self.node).edge_line(usize::from(index));
+                Prefetcher::watched(self.watch, LaneFetch::Edge, edge).await;
                 // SAFETY: the search returned an initialized edge, and the
                 // whole batch borrows the tree: no node or index changes.
                 match unsafe { Internal::at(self.node).child_unchecked(usize::from(index)) } {
@@ -113,18 +158,24 @@ where
                     }
                     Node::Internal(child) => {
                         self.node = child.node_ptr();
-                        Prefetcher::fetch(child.search_line()).await;
+                        Prefetcher::watched(self.watch, LaneFetch::Header, child.search_line())
+                            .await;
                     }
                 }
             }
-            Prefetcher::fetch(Leaf::at(self.node).search_line()).await;
+            Prefetcher::watched(
+                self.watch,
+                LaneFetch::Header,
+                Leaf::at(self.node).search_line(),
+            )
+            .await;
             let found = if Leaf::<K, V, S>::plan().inline_width().is_some() {
                 match Leaf::at(self.node).candidate_line(&self.key) {
                     CandidateLine::Absent => return,
                     CandidateLine::One(candidate, line) => {
                         index = candidate as u16;
                         self.prefix_len = Leaf::at(self.node).prefix_len() as u16;
-                        Prefetcher::fetch(line).await;
+                        Prefetcher::watched(self.watch, LaneFetch::CandidateEntry, line).await;
                         if Leaf::<K, V, S>::plan().has_length_tags() {
                             // SAFETY: the candidate is an initialized key of
                             // this leaf, and the prefix the leaf's; neither
@@ -137,7 +188,8 @@ where
                                 )
                             };
                             if let Some(line) = line {
-                                Prefetcher::fetch(line).await;
+                                Prefetcher::watched(self.watch, LaneFetch::CandidateBytes, line)
+                                    .await;
                             }
                         }
                         // SAFETY: as above.
@@ -179,7 +231,12 @@ where
                     }
                     Err(edge) => edge,
                 };
-                Prefetcher::fetch(Internal::at(self.node).edge_line(edge)).await;
+                Prefetcher::watched(
+                    self.watch,
+                    LaneFetch::Edge,
+                    Internal::at(self.node).edge_line(edge),
+                )
+                .await;
                 // SAFETY: as in `find`.
                 match unsafe { Internal::at(self.node).child_unchecked(edge) } {
                     Node::Leaf(leaf) => {
@@ -188,11 +245,17 @@ where
                     }
                     Node::Internal(child) => {
                         self.node = child.node_ptr();
-                        Prefetcher::fetch(child.search_line()).await;
+                        Prefetcher::watched(self.watch, LaneFetch::Header, child.search_line())
+                            .await;
                     }
                 }
             }
-            Prefetcher::fetch(Leaf::at(self.node).search_line()).await;
+            Prefetcher::watched(
+                self.watch,
+                LaneFetch::Header,
+                Leaf::at(self.node).search_line(),
+            )
+            .await;
             let leaf = Leaf::at(self.node);
             let found = leaf.search_always_inlined(&self.key);
             if let Err(edge) = found
@@ -302,6 +365,15 @@ impl Prefetcher {
         Self { yielded: false }
     }
 
+    /// [`Self::fetch`], telling `watch` what the line is for. Takes the
+    /// watch rather than the lane: borrowing the whole lane would change
+    /// what its async block keeps across awaits.
+    #[inline(always)]
+    fn watched(watch: impl LaneWatch, fetch: LaneFetch, line: *const u8) -> Self {
+        watch.fetching(fetch, line);
+        Self::fetch(line)
+    }
+
     /// Prefetches `line` without yielding.
     #[inline(always)]
     fn hint(line: *const u8) {
@@ -380,7 +452,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let Node::Internal(root) = root_page.node() else {
             return keys.map(|key| self.find_in_batch(key));
         };
-        let lanes = keys.map(|key| Lane::new(key, root, root_page.shared_prefix()));
+        let lanes = keys.map(|key| Lane::new(key, root, root_page.shared_prefix(), ()));
         let mut values = [None; N];
         let mut outputs = values.iter_mut();
         Executor::run(lanes.map(|lane| lane.find(outputs.next().expect("one value per key"))));
@@ -454,7 +526,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let mut outputs = destinations.iter_mut();
         Executor::run(entries.each_ref().map(|(key, _)| {
             let output = outputs.next().expect("one destination per key");
-            Lane::new(key, root, shared).find_destination(output)
+            Lane::new(key, root, shared, ()).find_destination(output)
         }));
         let mut destinations = destinations.into_iter();
         let mut descents_valid = true;
@@ -505,6 +577,42 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
                 }
             }
         })
+    }
+}
+
+#[cfg(any(test, feature = "inspect"))]
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// Runs [`Self::find_many`]'s lanes and executor for `keys`, whatever
+    /// the tree's size, each lane told to its watch, and each watch told
+    /// when its lane ends: the watches hear every poll in the executor's
+    /// order. `None` for a tree without an internal root, where batches run
+    /// no lanes.
+    pub(in crate::tree) fn find_many_watched<Q, W: LaneWatch, const N: usize>(
+        &self,
+        keys: [&Q; N],
+        watches: [W; N],
+    ) -> Option<[Option<&V>; N]>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let root_page = self.root_page()?;
+        let Node::Internal(root) = root_page.node() else {
+            return None;
+        };
+        let mut values = [None; N];
+        let mut outputs = values.iter_mut();
+        let mut watches = watches.into_iter();
+        Executor::run(keys.map(|key| {
+            let watch = watches.next().expect("one watch per key");
+            let lane = Lane::new(key, root, root_page.shared_prefix(), watch);
+            let output = outputs.next().expect("one value per key");
+            async move {
+                lane.find(output).await;
+                watch.finished();
+            }
+        }));
+        Some(values)
     }
 }
 

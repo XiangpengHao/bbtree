@@ -1,8 +1,9 @@
 # 10 — Visualization: browsing the real tree in a browser
 
-Status (2026-10-12): the `inspect` feature with lookup traces
-(`tree/inspect.rs`, `map/mod.rs`), and the visualizer in `vis/`.
-Inserts and removals are still to come.
+Status (2026-10-15): the `inspect` feature with lookup and batch traces
+(`tree/inspect.rs`, `tree/batch.rs`, `map/mod.rs`), and the visualizer in
+`vis/`, one key or a batch at a time. Inserts and removals are still to
+come.
 
 ## Goals
 
@@ -69,6 +70,25 @@ From the original note:
   inline key's bytes marked; its search shrank to a line a step, the full
   sentence a click away. A lookup inspects the root, where it starts. The
   address holds the page's state, so a copied link opens on the same view.
+- **Batches, as bbtree runs them (2026-10-15, sixth pass).** A second
+  mode plays a real run of `get_many` (doc 12) poll by poll: the lanes, the
+  executor's order and every line each lane fetched come from bbtree's own
+  lanes and executor, watched (below). A critique and audit (28/40
+  heuristics, 14/20 technical) led the same pass to fix the one-key view,
+  and a second round on the batch view (28/40, 15/20) to the breaks, the
+  caption across the board and the legend below:
+  the ruler's compare flash now covers every inline-key slot up to the
+  capacity, as the count reads them, and the inspector says so; the tabs
+  are a real tab list; shortcuts leave focused controls and the tab list
+  alone; dimmed text meets 4.5:1.
+- **Batches show the idea, not a cost model (2026-10-15).** A first cut
+  timed searches and lines with a model of a 9900X's caches, which drew
+  speedups the measurements don't match; a second marked where the thread
+  "waits", which the trace can't know: a prefetch never blocks, and a
+  search stalls on its load whenever its line hasn't come, however many
+  keys there are. The view now shows searches and prefetches in the order
+  they run, four keys, on one thread, and nothing about the executor,
+  polls or timing.
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -117,8 +137,9 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **Tests:** a walk through the views over `u64`, `String` and tuple keys
   sees every key once in order, `len()` entries, a head on every leaf but the
   leftmost, and pages whose used slots lie within them without overlapping.
-- **Code:** `tree/inspect.rs` holds the views; it is safe code. The one
-  addition elsewhere is `NodePtr::addr` in `page.rs`, for node ids.
+- **Code:** `tree/inspect.rs` holds the views; it is safe code. The
+  additions elsewhere are `NodePtr::addr` in `page.rs`, for node ids, and
+  the lanes' watch in `tree/batch.rs` (next section but one).
 
 ## Lookup traces: `TreeView::trace`
 
@@ -146,6 +167,29 @@ The node code changes only in visibility: `inline_target` and
 `NodeInlineKeys::equal_range` are `pub(in crate::tree)`. A test traces every
 key of two maps, `u64` and `String`, and some absent keys, against `get`,
 with keys that lack the shared prefix on either side.
+
+## Batch traces: `TreeView::trace_many`
+
+`trace_many(keys)` runs `get_many`'s own lanes and executor
+(`Tree::find_many_watched`), whatever the map's size, with a watch on each
+lane: every `.await` in a lane names what it fetches (`LaneFetch`: the
+query's window, an edge's line, a header, the candidate's entry, its heap
+bytes), and the watch hears it, then the lane's end. The trace is every
+poll in the executor's order: the lane, and the line it fetched, placed by
+address in a page on that key's way down (`TreeView::trace`), as a node and
+a 64-byte line from the page's start; the query's and heap bytes lie in no
+node. `BatchTrace::batches` says whether `get_many` runs lanes on this map
+at all, past its size cutoff.
+
+The map's batches pass `()` as the watch, which does nothing. A lane hands
+the watch to `Prefetcher::watched` rather than calling a method on itself:
+borrowing the whole lane changed what the async block keeps across awaits,
+and cost 1 to 12 instructions a key. As built, `HEAD`'s and this build's
+bench binaries run the same instructions per key, to two decimals, on 1M
+`batch_get_hit`, `batch_get_miss` and `extend_random` for `u64`, JSON and
+`hash32`, and every batch function compiles to the same size. A test polls
+`u64` and `String` lanes in turn and finds every fetched node line on its
+key's way down.
 
 ## The visualizer (`vis/`)
 
@@ -189,7 +233,7 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     found slot filled, a notch at the edge taken, a red caret where an
     absent key would go. Pointing at a slot names its key; clicking it
     looks the key up;
-  - what the lookup did there, in a few words.
+  - what the lookup did there, in a few words;
 
   The parent's other children sit beside the card as gauges of how full
   they are, on a faint fan; pointing at one draws its own edge, clicking it
@@ -202,6 +246,25 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   key goes (D18). The tied ones mark; the result and the notch drop in;
   the edge to the next card draws. Between lookups the cards glide to
   their new places.
+- **Above the path** (`path_summary.rs`), the play controls a batch has:
+  play or pause the way down, or step it a level at a time, every level to
+  the one stepped to done and none below begun. They drive the path's and
+  the key's own CSS animations, timed by the key's walk. Where the lookup
+  ended is in the toolbar's search button, and read out for screen
+  readers.
+- **The key** (`query_key.rs`), above the path, highlighted, a cell per
+  byte of its encoding (hex, or characters for URLs; a `u64` also as its
+  number). It walks down with the path, at the same pace
+  (`Trace::LEVEL_MS`): at each node's turn the bytes it skips, its prefix,
+  dim, and a frame slides onto the bytes its search compares, the key's
+  inline key there; zeros a window reads past the key's end show when a
+  node reads them. Down the path the frame steps right, as the fences
+  close in and the prefixes grow (05-fence-key.md, D50), and it rests on
+  the last node's window. The prefix comes from the shape, the window's
+  width from the trace (`TraceStep::inline_width`, the node's own
+  `inline_key_width`). It has no hover: a strip of the key in every card,
+  with a hint per part, flickered under the pointer and repeated the key
+  four times, so the key is drawn once.
 - **The inspector** (`node_inspector.rs`), for the card you pick, the root
   after each lookup, right of the path: a header line with its place, keys,
   page size and address; its fences, its search, then a tab for the page
@@ -241,6 +304,44 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     in any of them lights it up in the others, with a hint by the pointer.
     Terms in the text (`concepts.rs`) define themselves on hover or focus,
     with the design note behind them, and light up what they name.
+- **A batch** (`batch_view.rs`), from the toolbar's switch, `B`, or a link
+  that holds its keys (`bk=…`, four times): four keys, picked at random,
+  for URLs the last one a key the map lacks, or typed: each key is a field
+  the reader edits, and Enter looks it up in the batch, or says why the
+  text names no key. It shows search and prefetch, in the words of the
+  lookup, not of the executor: each key searches a node and prefetches the
+  line it reads next, and the others search while that line comes; all on
+  one thread. It plays a search at a time, the first round slowly; Space
+  pauses, `,` and `.` step, a click on the rows jumps there, `R` or the
+  keys' button picks new keys. Paused or stepped, every view shows the
+  moment just after a search. One grid, the keys and the tree left, the
+  code right:
+  - the keys (`batch_timeline.rs`), each beside a row of its searches,
+    blocks, and its prefetches, drawn from each search to the key's next:
+    across the rows the prefetches stack up, the lines fetched together;
+  - the nodes the batch reads (`batch_tree.rs`), level by level, spread
+    over the panel's height, each as its page, a strip of 64-byte lines
+    tinted as the page map tints its slots; each key a numbered token on
+    the node it searches or prefetches from, searching, prefetching or
+    done. A prefetched line outlines and fills until the key's next search
+    reads it; an edge draws from the parent's line that holds it to the
+    child's header;
+  - the code (`lane_program.rs`), `find` as a dozen lines of highlighted
+    pseudo-Rust under "All searches run in a single thread": searches,
+    which work on lines at hand, in the keys' blue; prefetches, which ask
+    for the line read next without waiting, in the highlighter's ink; each
+    `.await`, where the other keys search until this key's turn, marked;
+    and a comment on every line, aligned. Each key sits in the gutter of
+    the line it stopped at; the search running lights the lines it ran;
+    lines no key of the batch runs are dim. A test walks every lane of
+    real batches through it, so it can't drift from `find`. Below it, the
+    search running, in a sentence.
+  The trace says nothing of when a line arrives, so the view claims no
+  stall or speed: a prefetch is only drawn as pending until its key's next
+  search. Clicking a key's number looks it up alone, in the one-key view.
+  One number drives the motion: a loop writes the playback's time, in
+  searches, to the board as `--t`, and CSS `calc()` on it fills the lines
+  and draws the rows, so the panels redraw only when another search starts.
 - **The tree's shape** (`tree_shape.rs`): one top-down read of every node
   per build gives each level's nodes in key order, with parents, children,
   key counts and prefixes. That is enough to name nodes, find neighbors and
@@ -256,7 +357,9 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     for data; nothing below 11 px, and secondary text at 4.5:1 or more.
   - Motion explains the lookup and nothing else; with reduced motion,
     nothing travels or grows, and the reads still arrive in order, as
-    fades.
+    fades. A batch with reduced motion jumps from poll to poll.
+  - In a batch, ink for polls and lanes, and the highlighter's yellow for
+    a line on its way, as for a line read.
 
 ### What it shows
 
@@ -279,6 +382,9 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 
 ## Not done
 
+- Batched inserts (`insert_many`, `extend`): their lanes descend as
+  lookups do and could be traced the same way; the inserts that follow
+  are serial.
 - Inserts and removals. The effects come from comparing the touched nodes
   before and after, keyed by page address. Their way down is not one node
   stack: D37 records a node stack only when the leaf is full, and D45 appends

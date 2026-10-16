@@ -22,20 +22,22 @@ Since the hash is over the inline key, the K itself doesn't require Hash trait. 
 - [-] When we insert to sorted array, we need to shift the keys, which is a memmov, is it? and I think it has to first copy the data to a temporary buffer, and then copy back, because the move is interleaving.
 BUT if we move data in the reverse order, we can avoid this buffer. 
 
-- [ ] We should specialize the root node. It's a special type in addition to internal and leaf nodes.
+- [x] We should specialize the root node. It's a special type in addition to internal and leaf nodes.
 Reason is that for small tree, root node should be smaller than 1KB. So for root node, we start with 128 bytes, and each time double the size until 1KB, then we do the normal split.
 This should make our memory usage more efficient for small tree.
 Root node has no parents, so its prefix lenght is determined by the min and max keys of the node.
 In fact, since we never truncate the prefix in storage, I think we can always make the fence key to be the min/max keys of the current node, which means the inline keys are maintained once a new key is inserted.
 
 
-- [ ] In node layout, should we put children/values first, then keys? looking at the vis, I realized that most of the keys are actually not used in the lookup, because the inline keys are very effective, but they still take up spaces.
+- [x] In node layout, should we put children/values first, then keys? looking at the vis, I realized that most of the keys are actually not used in the lookup, because the inline keys are very effective, but they still take up spaces.
 This probably means we should push the keys down to the leaf, and inner node should just hold a point to the leaf's key.
 Worked out in 11-separator-key.md.
 
 
-- [ ] I think, if we want to specialize the inner, leaf, and root. then the abstraction of "Subtree" doesn't makes sense. because the tree is no longer a
+- [x] I think, if we want to specialize the inner, leaf, and root. then the abstraction of "Subtree" doesn't makes sense. because the tree is no longer a
   recursive thing, it has well defined structure. the way we currently organize the code makes it confusing and unnecessarily complicated. wdyt?
 Phase 1 built (D51, D52).
 
 - [ ] we might want to benchmark the insert performance of roughly sorted data, compare with hashmap.
+
+- [ ] entry should also go through the right most leaf fast path.

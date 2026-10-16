@@ -32,6 +32,12 @@ impl KeyBytes {
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
+
+    /// The bytes bbtree orders and windows, as `VisKey::encoding` reads
+    /// them.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 /// A fence: a separator of an ancestor, at slot `slot` of the node at

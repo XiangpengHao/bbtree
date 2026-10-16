@@ -93,10 +93,6 @@ impl PathLayout {
     const GAUGE_GAP: f64 = 5.0;
     /// Room for "+12" past the gauges that don't fit.
     const MORE_WIDTH: f64 = 34.0;
-    /// The pace of a lookup's way down, which the stylesheet's animations
-    /// follow: each level starts this long after the one above.
-    const LEVEL_MS: u32 = 260;
-
     /// The least height that fits `rows` nodes, side by side with the
     /// inspector.
     fn least_height(rows: usize) -> f64 {
@@ -346,7 +342,7 @@ pub(crate) fn PathTree(
     rsx! {
         section {
             class: if narrow { "path-tree narrow" } else { "path-tree" },
-            style: "--wanted:{wanted}px;--least:{least}px;--level-ms:{PathLayout::LEVEL_MS}ms;",
+            style: "--wanted:{wanted}px;--least:{least}px;--level-ms:{Trace::LEVEL_MS}ms;",
             "aria-label": "The lookup's path from the root",
             onmounted: move |evt| {
                 let mut mounted = mounted;
@@ -354,7 +350,9 @@ pub(crate) fn PathTree(
                 measure.call(());
             },
             onresize: move |_| measure.call(()),
-            PathLegend { spotlight }
+            if !trace.steps().is_empty() {
+                PathLegend { spotlight }
+            }
             if let Some(layout) = layout {
                 svg {
                     class: "path-edges",
@@ -640,7 +638,9 @@ enum SlotMark {
     Larger,
     /// A key of a node the lookup compared no inline keys in.
     Key,
-    Empty,
+    /// A slot holding no key: the count reads it all the same, if
+    /// `compared`, as it reads the inline keys' whole array (doc 10).
+    Empty { compared: bool },
 }
 
 impl SlotMark {
@@ -656,7 +656,7 @@ impl SlotMark {
         } else if tied.contains(&slot) {
             SlotMark::Tied
         } else if slot >= len {
-            SlotMark::Empty
+            SlotMark::Empty { compared }
         } else if !compared {
             SlotMark::Key
         } else if slot < tied.start {
@@ -673,7 +673,8 @@ impl SlotMark {
             SlotMark::Smaller => "slot-smaller compared",
             SlotMark::Larger => "slot-larger compared",
             SlotMark::Key => "slot-key",
-            SlotMark::Empty => return "slot slot-room".to_string(),
+            SlotMark::Empty { compared: true } => return "slot slot-room compared".to_string(),
+            SlotMark::Empty { compared: false } => return "slot slot-room".to_string(),
         };
         if pointed {
             format!("slot {mark} slot-pointed")

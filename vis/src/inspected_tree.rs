@@ -4,9 +4,10 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use bbtree::inspect::{NodeView, PageMap};
+use bbtree::inspect::{NodeId, NodeView, PageMap, TreeView};
 use bbtree::{Auto, BBTreeMap, InlineKey};
 
+use crate::batch_run::{BatchKeys, BatchRun, Fetched, LanePoll};
 use crate::fences::{Fence, KeyBytes, NodeFences};
 use crate::node_inspector::{KeyRow, NodeDetail};
 use crate::trace::{Trace, TraceStep};
@@ -135,6 +136,11 @@ pub(crate) trait InspectedTree {
     /// `query` names no key of this map's type.
     fn trace(&self, query: &str) -> Result<Trace, String>;
 
+    /// The batch lookup of the keys `queries` name, as `get_many` runs it
+    /// (`TreeView::trace_many`); or why one names no key. Takes as many
+    /// keys as a batch looks up ([`BatchKeys::LANES`]).
+    fn trace_many(&self, queries: &[String]) -> Result<BatchRun, String>;
+
     /// How many leading bytes every key of the map shares, as the map
     /// keeps them (D50): the prefix of the nodes along the tree's borders.
     fn shared_prefix_len(&self) -> usize;
@@ -219,6 +225,48 @@ impl<K: VisKey> InspectedMap<K> {
         NodeFences::new(low, high, first, last)
     }
 
+    /// The nodes the lookup of `key` reads, by their ids, with their places.
+    fn way_down(&self, view: &TreeView<'_, K, u64, Auto>, key: &K) -> Vec<(NodeId, NodeAt)> {
+        let Some(mut at) = self.shape.root() else {
+            return Vec::new();
+        };
+        view.trace(key)
+            .iter()
+            .map(|step| {
+                let here = (step.node().id(), at);
+                if let Some(edge) = step.edge_taken() {
+                    at = self.shape.child(at, edge);
+                }
+                here
+            })
+            .collect()
+    }
+
+    /// The executor's polls of `keys`' lanes, each fetched line placed in
+    /// the shape, and whether `get_many` runs lanes on this map.
+    fn polls<const N: usize>(&self, keys: &[K]) -> (Vec<LanePoll>, bool) {
+        let view = self.map.inspect();
+        let ways_down: Vec<_> = keys.iter().map(|key| self.way_down(&view, key)).collect();
+        let trace = view.trace_many::<K, N>(std::array::from_fn(|lane| &keys[lane]));
+        let polls = trace
+            .polls()
+            .iter()
+            .map(|poll| {
+                let fetched = poll.fetch().map(|fetch| {
+                    let line = poll.line().and_then(|(node, line)| {
+                        ways_down[poll.lane()]
+                            .iter()
+                            .find(|(id, _)| *id == node.id())
+                            .map(|&(_, at)| (at, line))
+                    });
+                    Fetched::new(fetch, line)
+                });
+                LanePoll::new(poll.lane(), fetched)
+            })
+            .collect();
+        (polls, trace.batches())
+    }
+
     /// An inline key as the node keeps it: its first `width` bytes, in
     /// hex, a byte at a time.
     fn inline_key_hex(word: u64, width: usize) -> String {
@@ -253,6 +301,7 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
                     at,
                     step.outcome(),
                     inline_key,
+                    width,
                     step.tied(),
                     edge,
                 ));
@@ -263,6 +312,22 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
         }
         let placed = view.placed_by_shared_prefix(&key);
         Ok(Trace::new(key.key_bytes(), steps, placed))
+    }
+
+    fn trace_many(&self, queries: &[String]) -> Result<BatchRun, String> {
+        let keys = queries
+            .iter()
+            .map(|query| K::parse(query).ok_or_else(|| self.kind.parse_error(query)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let lanes = queries
+            .iter()
+            .map(|query| self.trace(query))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (polls, batches) = match keys.len() {
+            BatchKeys::LANES => self.polls::<{ BatchKeys::LANES }>(&keys),
+            count => return Err(format!("a batch of {count} keys isn't offered")),
+        };
+        Ok(BatchRun::new(lanes, polls, batches))
     }
 
     fn shared_prefix_len(&self) -> usize {
@@ -384,5 +449,36 @@ mod tests {
             assert_eq!(shared + &rest, query);
         }
         assert!(tree.trace("not a number").is_err());
+    }
+
+    #[test]
+    fn batches_end_every_lane_once_on_its_way_down() {
+        let map: BBTreeMap<u64, u64> = (0..50_000).map(|key| (key * 3 % 50_000, key)).collect();
+        let tree = InspectedMap::new(map, KeyKind::Integers);
+        let queries: Vec<String> = ["31337", "0", "49999", "12345"].map(String::from).to_vec();
+        let run = tree.trace_many(&queries).unwrap();
+        assert_eq!(run.lanes().len(), 4);
+        for lane in 0..4 {
+            let polls: Vec<_> = run
+                .polls()
+                .iter()
+                .filter(|poll| poll.lane() == lane)
+                .collect();
+            assert!(polls.last().unwrap().fetched().is_none());
+            assert_eq!(
+                polls.iter().filter(|poll| poll.fetched().is_none()).count(),
+                1
+            );
+            let way_down: Vec<NodeAt> = run.lanes()[lane]
+                .steps()
+                .iter()
+                .map(|step| step.at())
+                .collect();
+            for fetched in polls.iter().filter_map(|poll| poll.fetched()) {
+                let (at, _) = fetched.line().expect("u64 lanes read only nodes");
+                assert!(way_down.contains(&at));
+            }
+        }
+        assert!(tree.trace_many(&queries[..3]).is_err());
     }
 }

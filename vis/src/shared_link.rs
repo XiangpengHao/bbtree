@@ -1,7 +1,9 @@
 //! The page's state in its address, so a copied link opens on what its
-//! sender saw: `?keys=u64&n=1000000&build=random&key=851191&level=3&view=page`.
+//! sender saw: `?keys=u64&n=1000000&build=random&key=851191&level=3&view=page`,
+//! or for a batch `?keys=u64&n=1000000&build=random&bk=…&bk=…&bk=…&bk=…`.
 //! Builds are deterministic, so the tree comes back node for node; the key
-//! is looked up again, and the node at `level` on its way down inspected.
+//! is looked up again, and the node at `level` on its way down inspected,
+//! or the batch's four keys looked up again.
 //!
 //! Each lookup and each new tree is an entry of the browser's history, so
 //! its back and forward, or `←` and `→`, step through them; inspecting
@@ -9,6 +11,8 @@
 
 use dioxus::prelude::*;
 
+use crate::batch_run::BatchKeys;
+use crate::batch_view::Batcher;
 use crate::node_inspector::InspectorTab;
 use crate::trace::Tracer;
 use crate::workload::{Builder, InsertOrder, KeyKind, Workload};
@@ -36,6 +40,8 @@ impl LinkedLookup {
 struct PageLink {
     workload: Workload,
     lookup: Option<LinkedLookup>,
+    /// A batch, shown instead of one key.
+    batch: Option<BatchKeys>,
     tab: InspectorTab,
 }
 
@@ -67,9 +73,16 @@ impl PageLink {
         let tab = value("view")
             .and_then(InspectorTab::from_slug)
             .unwrap_or(InspectorTab::Page);
+        let batch_keys: Vec<String> = pairs
+            .iter()
+            .filter(|(name, _)| name == "bk")
+            .map(|(_, key)| key.clone())
+            .collect();
+        let batch = (batch_keys.len() == BatchKeys::LANES).then(|| BatchKeys::new(batch_keys));
         Self {
             workload: Workload::new(kind, count, order),
             lookup,
+            batch,
             tab,
         }
     }
@@ -81,7 +94,9 @@ impl PageLink {
             ("n", self.workload.count().to_string()),
             ("build", self.workload.order().slug().to_string()),
         ];
-        if let Some(lookup) = &self.lookup {
+        if let Some(batch) = &self.batch {
+            pairs.extend(batch.keys().iter().map(|key| ("bk", key.clone())));
+        } else if let Some(lookup) = &self.lookup {
             pairs.push(("key", lookup.key.clone()));
             if let Some(level) = lookup.level {
                 pairs.push(("level", level.to_string()));
@@ -95,6 +110,7 @@ impl PageLink {
     /// tree: a step of its own in the history.
     fn is_another_step(&self, other: &PageLink) -> bool {
         self.workload != other.workload
+            || self.batch != other.batch
             || self.lookup.as_ref().map(LinkedLookup::key)
                 != other.lookup.as_ref().map(LinkedLookup::key)
     }
@@ -125,10 +141,15 @@ impl PageLink {
     }
 
     /// Shows what the link names: builds its tree if another is shown,
-    /// looks up its key, inspects its node and opens its tab.
-    fn open(self, builder: Builder, tracer: Tracer, tab: Signal<InspectorTab>) {
-        let (mut tracer, mut tab) = (tracer, tab);
+    /// looks up its key, inspects its node and opens its tab, or shows its
+    /// batch.
+    fn open(self, builder: Builder, tracer: Tracer, batcher: Batcher, tab: Signal<InspectorTab>) {
+        let (mut tracer, mut batcher, mut tab) = (tracer, batcher, tab);
         tab.set(self.tab);
+        match self.batch {
+            Some(keys) => batcher.open(keys),
+            None => batcher.close(),
+        }
         match builder.tree() {
             Some(tree) if self.workload == builder.workload() => {
                 tracer.start(&tree, self.lookup.as_ref())
@@ -170,14 +191,19 @@ impl HistoryStep {
 /// step with what the page shows, and shows what the browser's back and
 /// forward step to. Draws nothing.
 #[component]
-pub(crate) fn SharedLink(builder: Builder, tracer: Tracer, tab: Signal<InspectorTab>) -> Element {
+pub(crate) fn SharedLink(
+    builder: Builder,
+    tracer: Tracer,
+    batcher: Batcher,
+    tab: Signal<InspectorTab>,
+) -> Element {
     let mut started = use_signal(|| false);
     // The link last put in the address bar, and whether the next one only
     // rewrites it: the first, and one the history stepped to.
     let mut written = use_signal(|| None::<PageLink>);
     let mut rewrite_next = use_signal(|| true);
     use_future(move || async move {
-        PageLink::read().await.open(builder, tracer, tab);
+        PageLink::read().await.open(builder, tracer, batcher, tab);
         started.set(true);
         let mut steps = document::eval(
             r#"
@@ -188,29 +214,42 @@ pub(crate) fn SharedLink(builder: Builder, tracer: Tracer, tab: Signal<Inspector
         );
         while let Ok(pairs) = steps.recv::<Vec<(String, String)>>().await {
             rewrite_next.set(true);
-            PageLink::from_pairs(&pairs).open(builder, tracer, tab);
+            PageLink::from_pairs(&pairs).open(builder, tracer, batcher, tab);
         }
     });
     use_effect(move || {
         let workload = builder.workload();
         let (trace, inspected, tab) = (tracer.trace(), tracer.inspected(), tab());
+        let batch = batcher
+            .is_shown()
+            .then(|| builder.tree().map(|tree| batcher.keys_for(&tree)))
+            .flatten();
         // Until the link is read and its tree built, the address keeps it.
         if !started() || !builder.is_built() {
             return;
         }
-        let Some(trace) = trace else {
-            return;
-        };
-        let level = inspected
-            .filter(|at| trace.step_at(*at).is_some())
-            .map(|at| at.level());
-        let link = PageLink {
-            workload,
-            lookup: Some(LinkedLookup {
-                key: trace.query().to_string(),
-                level,
-            }),
-            tab,
+        let link = match (batch, trace) {
+            (Some(batch), _) => PageLink {
+                workload,
+                lookup: None,
+                batch: Some(batch),
+                tab,
+            },
+            (None, Some(trace)) => {
+                let level = inspected
+                    .filter(|at| trace.step_at(*at).is_some())
+                    .map(|at| at.level());
+                PageLink {
+                    workload,
+                    lookup: Some(LinkedLookup {
+                        key: trace.query().to_string(),
+                        level,
+                    }),
+                    batch: None,
+                    tab,
+                }
+            }
+            (None, None) => return,
         };
         let before = written.peek().clone();
         if before.as_ref() == Some(&link) {
@@ -249,9 +288,20 @@ mod tests {
                 key: "https://shop.example.com/users/000000042".to_string(),
                 level: Some(1),
             }),
+            batch: None,
             tab: InspectorTab::Slots,
         };
         assert_eq!(PageLink::from_pairs(&pairs(&link)), link);
+        let batch = PageLink {
+            lookup: None,
+            batch: Some(BatchKeys::new(
+                ["1", "2", "3", "https://a.b/c?d=e&f"]
+                    .map(String::from)
+                    .to_vec(),
+            )),
+            ..link
+        };
+        assert_eq!(PageLink::from_pairs(&pairs(&batch)), batch);
     }
 
     #[test]

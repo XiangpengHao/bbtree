@@ -76,6 +76,13 @@ A lane ends early at a separator equal to its key, at a key outside what
 every key of the tree shares (D50), or at a leaf whose inline keys rule the
 key out. Ties in the inline keys (D18) go to the ordinary leaf search.
 
+Each `.await` names what it fetches (`LaneFetch`) to the lane's watch:
+`()` in the map's batches, which compiles to nothing (as many instructions
+a key as before, `doc/10-visualization.md`), and the visualizer's trace
+behind `inspect` (`TreeView::trace_many`). The lane passes its watch, not
+itself, to `Prefetcher::watched`: borrowing the whole lane changes what
+the async block keeps across awaits.
+
 A lane keeps only its query, one node pointer for the internal levels and
 the leaf, a `u16` index for the chosen edge and then the leaf candidate,
 and a `u16` prefix length, the root's for the query window and then the

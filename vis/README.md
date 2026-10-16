@@ -2,7 +2,10 @@
 
 Look keys up in a bbtree and see how it finds them: the path from the root,
 each node's page cache line by cache line, and what the search compared at
-every node. Everything is read from bbtree's own read-only views
+every node. Or look a batch of keys up at once and watch `get_many`
+search them together on one thread: each key prefetches the line it reads
+next, and the others search while it comes. Everything is read from
+bbtree's own read-only views
 (`BBTreeMap::inspect`, `TreeView::trace`, the `inspect` feature), never
 recomputed. Design and decisions are in `doc/10-visualization.md`.
 
@@ -40,8 +43,11 @@ the left, the inspected node on the right.
   way down: at each node every inline key flashes at once, then settles
   dark if it is smaller than the searched key's and pale if larger, so the
   dark run's length is where the key goes. The tied ones stay outlined, the
-  result fills and the notch drops at the child taken.
-  The replay button plays it again.
+  result fills and the notch drops at the child taken. Play, pause or step
+  it a level at a time with the buttons above the path. The key beside
+  them walks down with it: at each node's turn the bytes it skips dim and
+  a frame slides onto the bytes it compares, stepping right as the
+  prefixes grow.
 - **Inspect a node** by clicking its card (or `↑` `↓`); a lookup starts at
   the root. First its fences, the separators either side of the way down to
   it, with its first and last keys and the key looked up, byte by byte: the
@@ -50,6 +56,15 @@ the left, the inspected node on the right.
   sentence), then its page as 64-byte cache lines, or its slots as a table.
   Point at any slot, step or underlined term and the others light up what
   it names.
+
+- **Look up a batch** with the toolbar's switch (`B`): four keys searched
+  together on one thread, as bbtree's `get_many` runs them. Edit any key
+  and press Enter, or take new ones (`R`). Each key sits beside its row of
+  searches and prefetches; below, the nodes they read, drawn as their
+  pages' cache lines, with a token for each key; right, the code all
+  searches run, with every key at the line it stopped at. Space plays or
+  pauses, `,` and `.` step a search; click a key's number to look it up
+  alone.
 
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
@@ -78,5 +93,12 @@ By feature, in `src/`:
 - `concepts.rs`: bbtree's ideas in plain words, and the terms that name
   them;
 - `shortcuts.rs`, `icons.rs`: keys for the common moves, and the icons;
+- `batch_run.rs`: a batch's lanes and the executor's polls as plain data,
+  and the keys a batch looks up;
+- `batch_view.rs`: the batch's switch, button, headline, and the loop that
+  plays it;
+- `batch_tree.rs`, `lane_program.rs`, `batch_timeline.rs`: the batch's
+  pages and keys, the search's code, and the searches in order;
+- `query_key.rs`: the key above the path, walking down with it;
 - `tree_shape.rs`: each level's nodes in key order, read once per build;
 - `tree_summary.rs`, `count_text.rs`: the header line, and counts as text.

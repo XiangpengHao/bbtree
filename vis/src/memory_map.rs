@@ -140,7 +140,7 @@ impl PageMarks {
 }
 
 /// How the map draws, names and links what a slot array holds.
-trait SlotLook: Copy {
+pub(crate) trait SlotLook: Copy {
     fn class(self) -> &'static str;
     fn label(self) -> &'static str;
     /// What the legend calls the array: a head is drawn as the values are.
@@ -234,7 +234,7 @@ impl SlotLook for SlotContents {
             Concept::Separator => {
                 (self == SlotContents::Keys && !marks.leaf) || self == SlotContents::HeadKey
             }
-            Concept::Page | Concept::CacheLine | Concept::Wasm32 => true,
+            Concept::Page | Concept::Wasm32 => true,
             concept => self.concept() == Some(concept),
         }
     }
@@ -333,8 +333,11 @@ impl MapDrawing {
     fn legend(page: &PageMap) -> Vec<SlotContents> {
         let mut seen: Vec<SlotContents> = Vec::new();
         for array in page.arrays() {
+            // Keys and the head's key, values and the head, share a hue
+            // and a name.
             let contents = match array.contents() {
                 SlotContents::Head => SlotContents::Values,
+                SlotContents::HeadKey => SlotContents::Keys,
                 contents => contents,
             };
             if !seen.contains(&contents) {

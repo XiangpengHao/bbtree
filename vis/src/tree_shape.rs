@@ -38,6 +38,8 @@ pub(crate) struct TreeShape {
     levels: Vec<Level>,
     leaf_page_size: usize,
     internal_page_size: usize,
+    /// The root's page: a node's room and the root area (D52).
+    root_page_size: usize,
 }
 
 /// One level's nodes, in key order.
@@ -61,6 +63,7 @@ impl TreeShape {
             levels: Vec::new(),
             leaf_page_size: 0,
             internal_page_size: 0,
+            root_page_size: 0,
         };
         let Some(root) = tree.root() else {
             return shape;
@@ -81,9 +84,13 @@ impl TreeShape {
         shape.leaf_page_size = top_down
             .last()
             .map_or(0, |leaves| leaves[0].page_map().size());
-        if top_down.len() > 1 {
-            shape.internal_page_size = root.page_map().size();
-        }
+        shape.root_page_size = root.page_map().size();
+        // An internal node below the root has a page of its own size.
+        shape.internal_page_size = top_down
+            .iter()
+            .skip(1)
+            .find(|nodes| !nodes[0].is_leaf())
+            .map_or(shape.root_page_size, |nodes| nodes[0].page_map().size());
         for (depth, nodes) in top_down.iter().enumerate().rev() {
             let level = Level::new(
                 nodes,
@@ -115,14 +122,22 @@ impl TreeShape {
         self.levels.first().map_or(0, Level::node_count)
     }
 
-    pub(crate) fn node_count(&self) -> usize {
-        self.levels.iter().map(Level::node_count).sum()
-    }
-
     /// The bytes all the tree's pages take.
     pub(crate) fn page_bytes(&self) -> usize {
-        let internal_nodes = self.node_count() - self.leaf_count();
-        self.leaf_count() * self.leaf_page_size + internal_nodes * self.internal_page_size
+        (0..self.levels.len())
+            .map(|level| self.level_bytes(level))
+            .sum()
+    }
+
+    /// The bytes the pages of one level take.
+    pub(crate) fn level_bytes(&self, level: usize) -> usize {
+        if Some(level) == self.root_level() {
+            self.root_page_size
+        } else if level == 0 {
+            self.leaf_count() * self.leaf_page_size
+        } else {
+            self.levels[level].node_count() * self.internal_page_size
+        }
     }
 
     /// The root, if the tree has nodes.
@@ -152,6 +167,17 @@ impl TreeShape {
             format!("leaf {}", Group(at.index + 1))
         } else {
             format!("level {} node {}", at.level, Group(at.index + 1))
+        }
+    }
+
+    /// The node's name in a label: "root", "leaf 1,204", "node 7".
+    pub(crate) fn short_name(&self, at: NodeAt) -> String {
+        if Some(at.level) == self.root_level() {
+            "root".to_string()
+        } else if at.level == 0 {
+            format!("leaf {}", Group(at.index + 1))
+        } else {
+            format!("node {}", Group(at.index + 1))
         }
     }
 

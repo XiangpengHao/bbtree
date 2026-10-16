@@ -11,7 +11,6 @@ use dioxus::prelude::*;
 use crate::fences::KeyBytes;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
-use crate::memory_map::PageMarks;
 use crate::popover::Popover;
 use crate::scenarios::Scenario;
 use crate::shared_link::LinkedLookup;
@@ -35,6 +34,9 @@ pub(crate) struct TraceStep {
     /// The searched key's inline key at the node's prefix, in hex, as many
     /// bytes as the node keeps.
     inline_key: Option<String>,
+    /// How many bytes of each key the node keeps as its inline key, the
+    /// bytes its search compares first; `None` where it keeps none.
+    inline_width: Option<usize>,
     /// The keys whose inline keys tie with it: the only ones the search
     /// goes on to compare in full.
     tied: Option<Range<usize>>,
@@ -46,6 +48,7 @@ impl TraceStep {
         at: NodeAt,
         outcome: TraceOutcome,
         inline_key: Option<String>,
+        inline_width: Option<usize>,
         tied: Option<Range<usize>>,
         edge_taken: Option<usize>,
     ) -> Self {
@@ -53,6 +56,7 @@ impl TraceStep {
             at,
             outcome,
             inline_key,
+            inline_width,
             tied,
             edge_taken,
         }
@@ -68,6 +72,10 @@ impl TraceStep {
 
     pub(crate) fn inline_key(&self) -> Option<&str> {
         self.inline_key.as_deref()
+    }
+
+    pub(crate) fn inline_width(&self) -> Option<usize> {
+        self.inline_width
     }
 
     pub(crate) fn tied(&self) -> Option<Range<usize>> {
@@ -88,6 +96,11 @@ impl TraceStep {
 }
 
 impl Trace {
+    /// The pace of a lookup's way down, which the stylesheet's animations
+    /// follow: each level starts this long after the one above, in the
+    /// path's cards and in the key above them.
+    pub(crate) const LEVEL_MS: u32 = 260;
+
     pub(crate) fn new(
         query: KeyBytes,
         steps: Vec<TraceStep>,
@@ -115,16 +128,6 @@ impl Trace {
 
     pub(crate) fn step_at(&self, at: NodeAt) -> Option<&TraceStep> {
         self.steps.iter().find(|step| step.at == at)
-    }
-
-    /// The cache lines the lookup read over all its nodes: surely, and how
-    /// many more it may have read in searches among tied keys.
-    pub(crate) fn lines_read(&self, tree: &LoadedTree) -> (usize, usize) {
-        self.steps.iter().fold((0, 0), |(certain, possible), step| {
-            let marks = PageMarks::of_step(step, step.at.level() == 0);
-            let (node_certain, node_possible) = marks.lines_read(&tree.page_map(step.at));
-            (certain + node_certain, possible + node_possible)
-        })
     }
 
     /// Where the lookup ended, in a few words.
