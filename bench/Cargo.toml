@@ -7,11 +7,12 @@ description = "bbtree's benchmark suite: BBTreeMap against std's maps and hashbr
 default-run = "bbtree-bench"
 
 [dependencies]
+artmap = "0.8.0"
 bbtree = { path = ".." }
 bytes = "1"
 concurrent-map = "5.0.37"
-congee = "0.4.1"
 crossbeam-skiplist = "0.1.3"
+dashmap = "6.2.1"
 hashbrown = "0.17"
 # Pins `bbtree-scaling`'s workers to CPUs (`sched_setaffinity`).
 libc = "0.2"
@@ -45,10 +46,16 @@ path = "src/bin/bbtree-bench.rs"
 name = "bbtree-bench-memory"
 path = "src/bin/bbtree-bench-memory.rs"
 
-# Throughput as threads are added, on maps threads share (`scaling.rs`).
+# Throughput and latency as threads are added, on maps threads share
+# (`scaling.rs`).
 [[bin]]
 name = "bbtree-scaling"
 path = "src/bin/bbtree-scaling.rs"
+
+# The same maps' memory, with a counting allocator, as for the memory binary.
+[[bin]]
+name = "bbtree-scaling-memory"
+path = "src/bin/bbtree-scaling-memory.rs"
 
 # Counts separators and the ties lookups meet in internal nodes, untimed
 # (`doc/11-separator-key.md`).
@@ -63,11 +70,6 @@ required-features = ["inspect"]
 codegen-units = 1
 lto = "fat"
 debug = "line-tables-only"
-
-# jemalloc's configure turns warnings into errors, and under Nix's hardening
-# `_FORTIFY_SOURCE` warns at -O0: build it optimized even for `cargo check`.
-[profile.dev.package.tikv-jemalloc-sys]
-opt-level = 1
 
 # A workspace of its own: the benchmark dependencies stay out of the library's
 # dependency graph and lockfile.

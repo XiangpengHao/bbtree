@@ -23,48 +23,56 @@ use super::super::node::page::NodePtr;
 use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf};
+use super::insert::InsertPolicy;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Appends `key` and `value` to the last leaf, if it has room, and `key`
-    /// is greater than its last key, and shares what every key shares; or
-    /// gives both back, for the ordinary insert.
+    /// is greater than its last key, and shares what every key shares, and
+    /// returns what `policy` returns of a new entry; or gives all back, for
+    /// the ordinary insert.
     #[inline(always)]
-    pub(super) fn append(&self, key: K, value: V) -> Result<(), (K, V)>
+    pub(super) fn append<P: InsertPolicy<K, V>>(
+        &self,
+        key: K,
+        value: V,
+        policy: P,
+    ) -> Result<P::Output, (K, V, P)>
     where
         K: Ord,
     {
         // A tree another thread is making has no last leaf yet.
         let Some(leaf) = self.rightmost_leaf() else {
-            return Err((key, value));
+            return Err((key, value, policy));
         };
         if !leaf.may_go_last_racing(&SearchKey::new(&key)) {
-            return Err((key, value));
+            return Err((key, value, policy));
         }
         let held = HeldLeaf::<K, V, S, Exclusive>::lock(leaf);
         if !self.is_rightmost_leaf(leaf) {
-            return Err((key, value));
+            return Err((key, value, policy));
         }
         let len = leaf.len();
         if len >= Leaf::<K, V, Latched<S>>::capacity() {
-            return Err((key, value));
+            return Err((key, value, policy));
         }
         let Some(last) = len.checked_sub(1) else {
-            return Err((key, value));
+            return Err((key, value, policy));
         };
         if SearchKey::<K, Latched<S>, K>::new(&key).cmp_full(leaf.key(last)) != KeyOrdering::Greater
         {
-            return Err((key, value));
+            return Err((key, value, policy));
         }
         let root_page = self.root_page().expect("a tree with a last leaf");
         let key = match PrefixedKey::checked::<Latched<S>>(root_page.shared_prefix(), key) {
             Ok(key) => key,
             // A key that shares less shrinks the shared prefix first.
-            Err(key) => return Err((key, value)),
+            Err(key) => return Err((key, value, policy)),
         };
+        let output = policy.vacant(key.key(), &value);
         leaf.insert_fit(len, key.window_at(leaf.prefix_len()), value);
         drop(held);
-        Ok(())
+        Ok(output)
     }
 
     /// The leaf appends go to, the last leaf when no thread holds it; `None`

@@ -1,10 +1,11 @@
 # 09 — Concurrency: BCTree, closures instead of handles
 
-Status: built (2026-10-15): `BCTreeMap` with `read`, `update`,
-`get_cloned`, `contains_key`, `insert`, `remove` and `remove_entry`: bbtree's
-tree, shared through optimistic lock coupling, its tree operations
-bbtree's own. No `entry` or `scan` yet. `BBTreeMap` stays single-threaded
-(D4).
+Status: built (2026-10-15, 2026-10-16): `BCTreeMap` with `read`,
+`update`, `get_cloned`, `contains_key`, `insert`, `get_or_insert`,
+`remove`, `remove_entry`, `remove_if`, `scan`, `scan_rev` and
+`range_cloned`: bbtree's tree, shared through optimistic lock coupling,
+its tree operations bbtree's own. No `entry` yet. `BBTreeMap` stays
+single-threaded (D4).
 
 ## Scope
 
@@ -37,11 +38,20 @@ impl<K: Ord, V> BCTreeMap<K, V> {
     fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>;
     /// Runs `f` on the entry while its leaf is latched exclusive.
     fn update<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &mut V) -> R) -> Option<R>;
-    /// std's `Entry` API within one exclusive latch: insert or modify.
-    fn entry<R>(&self, key: K, f: impl FnOnce(Entry<'_, K, V>) -> R) -> R;
-    /// Visits the range one leaf at a time until `f` breaks.
+    /// Runs `f` on the entry, inserting `key` and `value` first if there
+    /// is none, while the leaf is latched exclusive.
+    fn get_or_insert<R>(&self, key: K, value: V, f: impl FnOnce(&K, &V) -> R) -> R;
+    /// Removes the entry if `condition` holds of it, latched exclusive.
+    fn remove_if<Q>(&self, key: &Q, condition: impl FnMut(&K, &V) -> bool)
+        -> Option<(K, V)>;
+    /// Visits the range one leaf at a time until `f` breaks: in key order,
+    /// and in reverse (`scan_rev`).
     fn scan<Q, R>(&self, range: impl RangeBounds<Q>,
                   f: impl FnMut(&K, &V) -> ControlFlow<R>) -> Option<R>;
+    /// Clones of the range's entries, from both ends, holding nothing
+    /// between calls.
+    fn range_cloned<Q, R>(&self, range: R) -> RangeCloned<'_, K, V, ..>
+    where K: Clone, V: Clone;
 
     fn get_cloned<Q>(&self, key: &Q) -> Option<V> where V: Clone {
         self.read(key, |_, v| v.clone())
@@ -57,7 +67,10 @@ The types keep references from escaping: `impl FnOnce(&K, &V) -> R` is
 shape.
 
 One entry at a time: an entry can't be held across calls, there is no
-`get_mut` handle, and an operation on two entries isn't atomic.
+`get_mut` handle, and an operation on two entries isn't atomic. `entry`,
+std's API within one exclusive latch, is not built: `get_or_insert`
+(insert unless present, then read) and `remove_if` (remove only the entry
+the caller saw) cover what the integrations surveyed need of it.
 
 There is no `len`: a shared counter would cost every insert an atomic on
 one line all threads write.
@@ -294,22 +307,58 @@ about an eighth more. Inserts scale less: each dirties several leaf lines,
 and a profile at 6 threads showed no time spinning on latches and under 1%
 in splits.
 
-Against other crates' concurrent ordered maps, the same runs (`--maps`),
-millions of operations per second at 1 / 12 / 24 threads:
+Against other crates' concurrent maps (`bbtree-scaling --maps`), each as
+its crate ships it: Congee pins an epoch on every call; `SkipMap` and
+`TreeIndex` hand out values shared only, so theirs are atomics an update
+adds to; concurrent-map gives each worker a clone and returns values by
+copy; DashMap, a hash map in locked shards, keeps no order and scans
+nothing. Millions of operations a second at 1 / 12 / 24 threads; a scan
+visits 100 entries from a key the map holds:
 
-| map | get | 90/10 get/update | insert |
-|---|--:|--:|--:|
-| BCTree | 6.83 / 75.5 / 86.1 | 7.33 / 71.2 / 84.3 | 6.82 / 45.2 / 48.5 |
-| Congee 0.4.1 (ART, 8-byte keys) | 6.65 / 70.0 / 85.4 | 6.43 / 67.7 / 86.7 | 8.55 / 56.6 / 58.8 |
-| scc 3.8.8 `TreeIndex` | 2.48 / 28.6 / 51.1 | 2.44 / 27.9 / 48.4 | 2.50 / 25.7 / 32.3 |
-| concurrent-map 5.0.37 | 2.48 / 27.2 / 47.0 | 2.26 / 22.9 / 36.9 | 2.42 / 12.9 / 14.6 |
-| crossbeam-skiplist 0.1.3 | 0.99 / 12.3 / 22.1 | 1.04 / 12.2 / 22.1 | 1.30 / 10.2 / 15.7 |
+| map | get | 90/10 get/update | insert | scan |
+|---|--:|--:|--:|--:|
+| BCTree | 6.85 / 72.0 / 85.5 | 7.37 / 73.8 / 84.8 | 6.89 / 45.6 / 49.2 | 1.68 / 11.4 / 12.0 |
+| Congee 0.4.1 (ART, 8-byte keys) | 6.78 / 70.3 / 87.9 | 6.55 / 68.2 / 87.4 | 8.71 / 69.3 / 55.3 | 0.08 / 0.94 / 1.54 |
+| scc 3.8.8 `TreeIndex` | 2.48 / 28.9 / 50.8 | 2.45 / 27.9 / 48.4 | 2.54 / 25.5 / 41.4 | 0.55 / 5.96 / 8.73 |
+| concurrent-map 5.0.37 | 2.43 / 26.7 / 46.0 | 2.25 / 23.1 / 37.8 | 2.43 / 12.7 / 13.7 | 1.37 / 11.4 / 12.7 |
+| crossbeam-skiplist 0.1.3 | 1.07 / 12.4 / 22.2 | 1.05 / 12.3 / 22.1 | 1.29 / 10.2 / 15.7 | 0.10 / 1.01 / 1.68 |
+| DashMap 6.2.1 (hash) | 13.4 / 101 / 150 | 14.6 / 106 / 140 | 14.4 / 53.8 / 65.6 | — |
+| bbtree in a `RwLock` | 7.58 / 21.6 / 25.9 | 7.45 / 4.90 / 5.19 | 7.15 / 2.48 / 2.11 | 1.43 / 11.3 / 12.9 |
 
-Each as its crate ships it: Congee pins an epoch on every call; `SkipMap`
-and `TreeIndex` hand out values shared only, so theirs are atomics an
-update adds to; concurrent-map gives each worker a clone and returns values
-by copy. Congee, which keeps only 8-byte keys, inserts about a fifth faster
-than BCTree, and looks up as fast.
+Congee scans by copying a range between two keys out: given an end key
+where 150 entries are expected, it took 5.4 µs a scan of 100 out of 200,000
+entries in a probe of its own. DashMap reaches one bucket where a tree
+descends.
+
+Latency, each operation timed alone with the time-stamp counter (10 ns
+resolution here), ns, p50 / p99 / p99.9 at 1 and 24 threads (`--measure
+latency`):
+
+| map | get, 1 thread | get, 24 | insert, 1 thread | insert, 24 |
+|---|--:|--:|--:|--:|
+| BCTree | 150 / 461 / 591 | 190 / 601 / 842 | 180 / 591 / 882 | 341 / 1823 / 3556 |
+| Congee | 190 / 601 / 681 | 230 / 591 / 852 | 90 / 511 / 812 | 210 / 1302 / 5035 |
+| scc `TreeIndex` | 391 / 751 / 922 | 441 / 842 / 1102 | 351 / 1031 / 1603 | 471 / 2004 / 3414 |
+| concurrent-map | 411 / 852 / 1262 | 441 / 1022 / 1663 | 361 / 1071 / 3884 | 1323 / 4627 / 25299 |
+| crossbeam-skiplist | 932 / 2124 / 2783 | 1011 / 2343 / 3144 | 731 / 1924 / 2543 | 1372 / 2933 / 4875 |
+| DashMap | 70 / 351 / 451 | 120 / 511 / 681 | 40 / 341 / 431 | 190 / 792 / 4518 |
+| bbtree in a `RwLock` | 130 / 481 / 651 | 1312 / 3184 / 4314 | 140 / 531 / 761 | 8919 / 59050 / 96299 |
+
+The slowest operation at 24 threads took 0.9–2.4 ms for every map alike:
+the workers fill every CPU, and the operating system preempts them.
+
+Memory, 10M `u64 → u64` entries, each map built in a process of its own
+(`bbtree-scaling-memory`): heap bytes per entry the map frees when dropped,
+and the resident set's growth per entry while it was built:
+
+| map | heap | resident |
+|---|--:|--:|
+| BCTree | 26.9 | 27.1 |
+| concurrent-map | 25.9 | 33.7 |
+| DashMap | 28.5 | 52.1 |
+| scc `TreeIndex` | 39.5 | 45.6 |
+| crossbeam-skiplist | 40.0 | 43.7 |
+| Congee | 90.9 | 94.9 |
 
 ## Type-stable nodes
 
@@ -342,15 +391,69 @@ alone, as a leaf is read past what its node writes only under its latch.
 
 ## What is left out
 
-- **No `entry`, no `scan`.**
+- **No `entry`.**
 - **No `len`** (above).
 
 ## Scans
 
-`scan` latches one leaf at a time. Between leaves it unlatches and resumes
-by searching for the first key after the last one it returned. A scan is
-not a snapshot: a change behind the cursor is missed and one ahead of it
-is seen. A key present for the whole scan is visited exactly once.
+`scan` and `scan_rev` (`tree/latched/scan.rs`) run the caller's closure on
+each entry of a range, in key order or in reverse, with its leaf latched
+shared, until the closure breaks. One code serves both orders, a type
+parameter deciding each mirrored step. A scan starts at the leaf where the
+bound it starts from belongs, and moves on to the leaf beside it, right in
+key order, left in reverse, through the internal nodes its descent kept:
+the nearest with an edge on that side of the path, then the edges nearest
+the held leaf down, each read optimistically. It latches the next leaf
+before it lets go of the one it has, which can't split meanwhile, and the
+next leaf is that one's neighbor if every node kept from there down is at
+the version read. Otherwise it searches again for the last key it visited,
+still holding that key's leaf, and goes on past it: no key is cloned.
+
+Scans in both directions latch a leaf while holding another, left to right
+and right to left, and can't deadlock: a thread waits for a leaf while it
+holds one only in a scan, for a shared latch, which waits only while a
+thread holds the leaf exclusively (the latch has no writer preference); and
+a thread holding leaves exclusively takes every other node without waiting,
+but for a page off a free list, which a thread that reached it through a
+stale pointer holds a moment, waiting for nothing.
+
+A scan is not a snapshot: an entry inserted or removed while it runs may or
+may not be visited. An entry present for the whole scan is visited exactly
+once.
+
+`range_cloned` (`bctree_map/range.rs`) is the iterator over a range that
+the integrations surveyed need: a cursor held across calls, by a query
+plan or an `async` task. It holds no latch between calls. Each end copies a
+few entries during a scan, each with its leaf's stamp: the leaf's latch
+word version while the scan held it. It hands a copy out while the stamps
+of its leaf and of the previous entry's leaf are current, so that nothing
+was inserted or removed between the two, and otherwise scans again past the
+last key it handed out. So it hands out entries other threads insert ahead
+of it, as a skiplist cursor does. Pages stay the map's until it drops
+(type-stable nodes, above), so a kept page is always there to latch or
+read. An end copies 1 entry, then 4, then 16 at a time, so that a caller
+taking a few entries clones a few.
+
+A copy goes on where the last one's scan stopped (`ScanResume`): it latches
+that leaf, checks the stamp, and goes on from the place kept, without a
+descent. Past that leaf it descends once, from the leaf's last key, unless
+the resume keeps the path down to it too: one box, which the cursor asks
+for at its third copy, a caller that scans on, and then the copies cross
+leaves along it. A cursor that only seeks stays 264 bytes, with no
+allocation; keeping a path inline made it 2,088.
+
+Measured (2026-10-16, 100-entry scans, 10M keys, one thread): copies that
+each descended from the root, about six a scan, ran 0.66 million scans a
+second for `u64` keys; with the resume, 0.88, as many as the OLC B+ tree of
+Turso's PR #9267, whose cursor keeps its leaf, at 1, 12 and 24 threads. In
+Turso's own map benchmark, 100-entry scans of table rows take 3.0 µs, of
+index records 7.2 µs, from 3.6 and 8.1. The closure scan stays the fastest
+way through a range: 1.5 million a second.
+
+The visit counts the entries it visits with a plain counter, for the place
+a stopped scan keeps: `enumerate` over the chained head-and-keys iterator
+cost about 1,450 instructions more a 100-entry scan, 12% of the closure
+scan's throughput.
 
 ## Panics
 
@@ -378,8 +481,16 @@ tests: writers whose keys readers check as they appear, threads inserting
 and updating the same keys, threads removing while others insert, threads
 racing to remove the same keys, threads checking their own interleaved
 keys against models of their own, with many keys and with about a leaf of
-them, and threads appending while another shrinks the shared prefix
-(`bctree_map/tests.rs`).
+them, threads appending while another shrinks the shared prefix, and
+scans of the steady keys while other threads insert and remove others,
+which visit each once, in order, in both directions, and the same for
+`range_cloned` iterators (`bctree_map/tests.rs`). Scans of random ranges,
+in both directions, and `range_cloned` from both ends in random
+interleavings, match std's `range`; a `range_cloned` iterator hands out a
+key inserted ahead of it in a leaf it copied, and not one removed;
+`get_or_insert` matches std's `entry().or_insert`, and threads racing to
+`get_or_insert` the same keys all see the entry the map keeps;
+`remove_if` removes only what its condition holds of.
 
 Races that need a narrow schedule escape them, and a 12-thread release
 stress run outside the crate found two: a removal that left the path below

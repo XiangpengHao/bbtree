@@ -1,6 +1,7 @@
 //! `BCTreeMap` against std's `BTreeMap`, one thread at a time, and its
 //! answers while threads share it.
 
+use core::ops::{Bound, ControlFlow};
 use std::collections::BTreeMap;
 use std::format;
 use std::string::String;
@@ -8,7 +9,8 @@ use std::sync::Barrier;
 use std::thread;
 use std::vec::Vec;
 
-use super::BCTreeMap;
+use super::{BCTreeMap, RangeCloned};
+use crate::allocator::Global;
 use crate::inline_key::Auto;
 use crate::tree::node::page::TestPages;
 use crate::tree::test_support::TestRng;
@@ -596,6 +598,459 @@ fn threads_append_while_another_shrinks_what_keys_share() {
                 map.get_cloned(&(base + step * appenders + appender)),
                 Some(step)
             );
+        }
+    }
+}
+
+/// Scans of random ranges, bounded and not, of integer and string keys,
+/// visit what std's `range` does, in order, and stop where the closure
+/// breaks.
+#[test]
+fn scans_match_std() {
+    let rng = TestRng::new(103);
+    let map = BCTreeMap::<u64, u64>::new();
+    let mut std_map = BTreeMap::new();
+    for number in random_numbers(&rng, 20_000, 1 << 20) {
+        map.insert(number, number * 3);
+        std_map.insert(number, number * 3);
+    }
+    let collect = |range: (Bound<u64>, Bound<u64>), reverse: bool| {
+        let mut visited = Vec::new();
+        let visit = |key: &u64, value: &u64| {
+            visited.push((*key, *value));
+            ControlFlow::Continue(())
+        };
+        let none: Option<()> = if reverse {
+            map.scan_rev(range, visit)
+        } else {
+            map.scan(range, visit)
+        };
+        assert_eq!(none, None);
+        visited
+    };
+    for _ in 0..300 {
+        let (a, b) = (rng.below_u64(1 << 20), rng.below_u64(1 << 20));
+        let (low, high) = (a.min(b), a.max(b));
+        let bound = |key: u64, kind: usize| match kind {
+            0 => Bound::Included(key),
+            1 if low != high => Bound::Excluded(key),
+            1 => Bound::Included(key),
+            _ => Bound::Unbounded,
+        };
+        let range = (bound(low, rng.below(3)), bound(high, rng.below(3)));
+        let expected: Vec<(u64, u64)> = std_map.range(range).map(|(&k, &v)| (k, v)).collect();
+        assert_eq!(collect(range, false), expected, "{range:?}");
+        let reversed: Vec<(u64, u64)> = expected.into_iter().rev().collect();
+        assert_eq!(collect(range, true), reversed, "{range:?} in reverse");
+    }
+    // Breaking stops the scan, with what the closure broke with.
+    let mut seen = 0;
+    let tenth = map.scan(.., |key, _| {
+        seen += 1;
+        if seen == 10 {
+            ControlFlow::Break(*key)
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    assert_eq!(tenth, std_map.keys().nth(9).copied());
+    let mut seen = 0;
+    let tenth_last = map.scan_rev(.., |key, _| {
+        seen += 1;
+        if seen == 10 {
+            ControlFlow::Break(*key)
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+    assert_eq!(tenth_last, std_map.keys().nth_back(9).copied());
+
+    let strings = BCTreeMap::<String, usize>::new();
+    let mut std_strings = BTreeMap::new();
+    for (index, number) in random_numbers(&rng, 5_000, 1 << 30).into_iter().enumerate() {
+        let key = format!("/srv/{}/{number:08x}", number % 3);
+        strings.insert(key.clone(), index);
+        std_strings.insert(key, index);
+    }
+    for start in ["", "/srv/1/", "/srv/1/8", "/srv/2/f", "/zzz"] {
+        let mut visited = Vec::new();
+        strings.scan::<str, ()>((Bound::Included(start), Bound::Unbounded), |key, &value| {
+            visited.push((key.clone(), value));
+            ControlFlow::Continue(())
+        });
+        let expected: Vec<(String, usize)> = (std_strings
+            .range::<str, _>((Bound::Included(start), Bound::Unbounded)))
+        .map(|(k, &v)| (k.clone(), v))
+        .collect();
+        assert_eq!(visited, expected, "from {start:?}");
+        let mut visited = Vec::new();
+        strings.scan_rev::<str, ()>((Bound::Unbounded, Bound::Included(start)), |key, &value| {
+            visited.push((key.clone(), value));
+            ControlFlow::Continue(())
+        });
+        let expected: Vec<(String, usize)> = (std_strings
+            .range::<str, _>((Bound::Unbounded, Bound::Included(start))))
+        .rev()
+        .map(|(k, &v)| (k.clone(), v))
+        .collect();
+        assert_eq!(visited, expected, "down from {start:?}");
+    }
+}
+
+/// Scans, in both orders, while other threads insert and remove: every key
+/// present for the whole scan is visited exactly once, in the scan's order.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn scans_visit_every_steady_key_once_while_others_change_the_map() {
+    let (writers, scanners, steady) = (3, 3, 30_000_u64);
+    let map = BCTreeMap::<u64, u64>::new();
+    // Even keys stay for the whole test; odd ones come and go.
+    for number in 0..steady {
+        map.insert(number * 2, number);
+    }
+    let barrier = Barrier::new(writers + scanners);
+    thread::scope(|scope| {
+        for writer in 0..writers {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(500 + writer as u64);
+                barrier.wait();
+                for _ in 0..100_000 {
+                    let key = rng.below_u64(steady) * 2 + 1;
+                    if rng.below(2) == 0 {
+                        map.insert(key, key);
+                    } else {
+                        map.remove(&key);
+                    }
+                }
+            });
+        }
+        for scanner in 0..scanners {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(600 + scanner as u64);
+                barrier.wait();
+                for round in 0..40 {
+                    let start = rng.below_u64(steady * 2);
+                    let (mut previous, mut evens) = (None, 0);
+                    if round % 2 == 0 {
+                        map.scan(start.., |&key, _| {
+                            assert!(previous < Some(key), "{previous:?} then {key}");
+                            previous = Some(key);
+                            evens += u64::from(key % 2 == 0);
+                            ControlFlow::<()>::Continue(())
+                        });
+                        assert_eq!(evens, steady - start.div_ceil(2), "from {start}");
+                    } else {
+                        map.scan_rev(..start, |&key, _| {
+                            assert!(
+                                previous.is_none_or(|previous| previous > key),
+                                "{previous:?} then {key}"
+                            );
+                            previous = Some(key);
+                            evens += u64::from(key % 2 == 0);
+                            ControlFlow::<()>::Continue(())
+                        });
+                        assert_eq!(evens, start.div_ceil(2), "down from {start}");
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// `get_or_insert` leaves an entry the map holds as it is, and runs its
+/// closure on the stored entry, as std's `entry().or_insert` does, across
+/// splits.
+#[test]
+fn get_or_insert_matches_std() {
+    let rng = TestRng::new(107);
+    let mut map = BCTreeMap::<String, usize>::new();
+    let mut std_map = BTreeMap::new();
+    for (position, number) in random_numbers(&rng, 30_000, 1 << 14)
+        .into_iter()
+        .enumerate()
+    {
+        let key = format!("{number:05}");
+        let stored = map.get_or_insert(key.clone(), position, |stored, &value| {
+            (stored.clone(), value)
+        });
+        let expected = *std_map.entry(key.clone()).or_insert(position);
+        assert_eq!(stored, (key, expected));
+    }
+    map.check_invariants(std_map.len());
+    for (key, &value) in &std_map {
+        assert_eq!(map.get_cloned(key), Some(value));
+    }
+}
+
+/// Threads racing to `get_or_insert` the same keys all see the first
+/// thread's entry, the one the map keeps.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn threads_racing_to_get_or_insert_agree() {
+    let (threads, key_count) = (4, 20_000);
+    let map = BCTreeMap::<u64, usize>::new();
+    let barrier = Barrier::new(threads);
+    let seen: Vec<Vec<usize>> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|thread| {
+                let (map, barrier) = (&map, &barrier);
+                scope.spawn(move || {
+                    let rng = TestRng::new(108 + thread as u64);
+                    let mut order: Vec<u64> = (0..key_count).collect();
+                    rng.shuffle(&mut order);
+                    let mut seen = std::vec![usize::MAX; key_count as usize];
+                    barrier.wait();
+                    for key in order {
+                        seen[key as usize] = map.get_or_insert(key, thread, |_, &value| value);
+                    }
+                    seen
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    let mut map = map;
+    map.check_invariants(key_count as usize);
+    for key in 0..key_count {
+        let stored = map.get_cloned(&key).expect("every key was inserted");
+        for thread_seen in &seen {
+            assert_eq!(thread_seen[key as usize], stored, "key {key}");
+        }
+    }
+}
+
+/// `remove_if` removes an entry only if its condition holds of it, from
+/// leaves that keep their minimum, and from ones that rebalance.
+#[test]
+fn remove_if_removes_what_its_condition_holds_of() {
+    let rng = TestRng::new(109);
+    let mut map = BCTreeMap::<u64, u64>::new();
+    let mut std_map = BTreeMap::new();
+    for number in random_numbers(&rng, 30_000, 1 << 20) {
+        map.insert(number, number % 7);
+        std_map.insert(number, number % 7);
+    }
+    let keys: Vec<u64> = std_map.keys().copied().collect();
+    for key in keys {
+        let removed = map.remove_if(&key, |_, &value| value % 2 == 0);
+        let expected = std_map
+            .get(&key)
+            .filter(|value| *value % 2 == 0)
+            .map(|&value| (key, value));
+        if expected.is_some() {
+            std_map.remove(&key);
+        }
+        assert_eq!(removed, expected, "key {key}");
+    }
+    map.check_invariants(std_map.len());
+    for (key, &value) in &std_map {
+        assert_eq!(map.get_cloned(key), Some(value));
+    }
+}
+
+/// `range_cloned` hands out what std's `range` does, from both ends, in
+/// any interleaving, and stops where the ends meet.
+#[test]
+fn cloned_ranges_match_std() {
+    let rng = TestRng::new(110);
+    let map = BCTreeMap::<u64, u64>::new();
+    let mut std_map = BTreeMap::new();
+    for number in random_numbers(&rng, 20_000, 1 << 20) {
+        map.insert(number, number * 5);
+        std_map.insert(number, number * 5);
+    }
+    for _ in 0..300 {
+        let (a, b) = (rng.below_u64(1 << 20), rng.below_u64(1 << 20));
+        let (low, high) = (a.min(b), a.max(b));
+        let bound = |key: u64, kind: usize| match kind {
+            0 => Bound::Included(key),
+            1 if low != high => Bound::Excluded(key),
+            1 => Bound::Included(key),
+            _ => Bound::Unbounded,
+        };
+        let range = (bound(low, rng.below(3)), bound(high, rng.below(3)));
+        let mut cloned = map.range_cloned(range);
+        let mut expected = std_map.range(range);
+        // Mostly one end at a time, so that copies get long.
+        let back_share = rng.below(4);
+        loop {
+            let (got, want) = if rng.below(4) < back_share {
+                (
+                    cloned.next_back(),
+                    expected.next_back().map(|(&k, &v)| (k, v)),
+                )
+            } else {
+                (cloned.next(), expected.next().map(|(&k, &v)| (k, v)))
+            };
+            assert_eq!(got, want, "{range:?}");
+            if want.is_none() {
+                break;
+            }
+        }
+    }
+}
+
+/// An iterator from `range_cloned` hands out a key inserted ahead of it,
+/// in a leaf it copied entries of, and no key removed ahead of it.
+#[test]
+fn cloned_ranges_see_what_changes_ahead_of_them() {
+    let map = BCTreeMap::<u64, u64>::new();
+    for number in 0..10_000 {
+        map.insert(number * 4, number);
+    }
+    for (taken, from_back) in [(1, false), (5, false), (30, false), (5, true), (30, true)] {
+        let mut iter = map.range_cloned(..);
+        let last = (0..taken)
+            .map(|_| {
+                if from_back {
+                    iter.next_back()
+                } else {
+                    iter.next()
+                }
+            })
+            .last()
+            .flatten()
+            .expect("an entry")
+            .0;
+        let (inserted, removed) = if from_back {
+            (last - 2, last - 4)
+        } else {
+            (last + 2, last + 4)
+        };
+        map.insert(inserted, 1);
+        map.remove(&removed);
+        let next = |iter: &mut RangeCloned<'_, u64, u64, Auto, Global, u64, _>| {
+            if from_back {
+                iter.next_back()
+            } else {
+                iter.next()
+            }
+        };
+        assert_eq!(next(&mut iter).map(|(key, _)| key), Some(inserted));
+        let after = next(&mut iter).map(|(key, _)| key);
+        let expected = if from_back { last - 8 } else { last + 8 };
+        assert_eq!(after, Some(expected), "after taking {taken}");
+        map.remove(&inserted);
+        map.insert(removed, removed / 4);
+    }
+}
+
+/// Iterators from `range_cloned`, from both ends, while other threads
+/// insert and remove: every key present all along is handed out exactly
+/// once, in order.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn cloned_ranges_hand_out_every_steady_key_once_while_others_change_the_map() {
+    let (writers, readers, steady) = (3, 3, 30_000_u64);
+    let map = BCTreeMap::<u64, u64>::new();
+    for number in 0..steady {
+        map.insert(number * 2, number);
+    }
+    let barrier = Barrier::new(writers + readers);
+    thread::scope(|scope| {
+        for writer in 0..writers {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(700 + writer as u64);
+                barrier.wait();
+                for _ in 0..100_000 {
+                    let key = rng.below_u64(steady) * 2 + 1;
+                    if rng.below(2) == 0 {
+                        map.insert(key, key);
+                    } else {
+                        map.remove(&key);
+                    }
+                }
+            });
+        }
+        for reader in 0..readers {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(800 + reader as u64);
+                barrier.wait();
+                for round in 0..20 {
+                    let start = rng.below_u64(steady * 2);
+                    let keys: Vec<u64> = if round % 2 == 0 {
+                        map.range_cloned(start..).map(|(key, _)| key).collect()
+                    } else {
+                        map.range_cloned(..start)
+                            .rev()
+                            .map(|(key, _)| key)
+                            .collect()
+                    };
+                    let ordered = keys.windows(2).all(|pair| {
+                        if round % 2 == 0 {
+                            pair[0] < pair[1]
+                        } else {
+                            pair[0] > pair[1]
+                        }
+                    });
+                    assert!(ordered, "round {round} from {start}");
+                    let evens = keys.iter().filter(|&&key| key % 2 == 0).count() as u64;
+                    let expected = if round % 2 == 0 {
+                        steady - start.div_ceil(2)
+                    } else {
+                        start.div_ceil(2)
+                    };
+                    assert_eq!(evens, expected, "round {round} from {start}");
+                }
+            });
+        }
+    });
+}
+
+/// Each step of a `range_cloned` iterator, from either end, hands out the
+/// successor of the key it handed out last in the map as it is then, with
+/// keys inserted and removed around it between steps: copies it still holds,
+/// and where its last scan stopped, it uses only while their leaves are
+/// unchanged.
+#[test]
+fn each_cloned_range_step_hands_out_the_current_successor() {
+    for seed in 0..8 {
+        let rng = TestRng::new(120 + seed);
+        let map = BCTreeMap::<u64, u64>::new();
+        let mut std_map = BTreeMap::new();
+        for number in random_numbers(&rng, 3_000, 4_000) {
+            map.insert(number, number);
+            std_map.insert(number, number);
+        }
+        let from_back = seed % 2 == 1;
+        let mut iter = map.range_cloned(..);
+        let mut last: Option<u64> = None;
+        loop {
+            let expected = match (last, from_back) {
+                (None, false) => std_map.keys().next().copied(),
+                (None, true) => std_map.keys().next_back().copied(),
+                (Some(last), false) => std_map.range(last + 1..).next().map(|(&k, _)| k),
+                (Some(last), true) => std_map.range(..last).next_back().map(|(&k, _)| k),
+            };
+            let got = if from_back {
+                iter.next_back()
+            } else {
+                iter.next()
+            };
+            assert_eq!(
+                got.map(|(key, _)| key),
+                expected,
+                "seed {seed} after {last:?}"
+            );
+            let Some(key) = expected else { break };
+            last = Some(key);
+            for _ in 0..rng.below(4) {
+                let key = rng.below_u64(4_000);
+                if rng.below(2) == 0 {
+                    map.insert(key, key);
+                    std_map.insert(key, key);
+                } else {
+                    map.remove(&key);
+                    std_map.remove(&key);
+                }
+            }
         }
     }
 }

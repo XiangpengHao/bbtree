@@ -112,6 +112,11 @@ impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> Drop for HeldLeaf<K, V, S, M> 
     }
 }
 
+/// Where a descent ends: the leaf where its key belongs, latched in mode
+/// `M`, and whether the key is that leaf's head; or, for a key that lacks
+/// what every key shares, where it sorts against them all.
+pub(super) type Descent<K, V, S, M> = Result<(HeldLeaf<K, V, S, M>, bool), KeyOrdering>;
+
 /// What a descent keeps of the internal nodes it goes through: nothing, for
 /// most operations, or each node, for a split or a removal that rebalances
 /// ([`TreePath`]).
@@ -165,6 +170,14 @@ impl<K, V, S> TreePath<K, V, S> {
     /// The leaf's level: how many internal nodes are above it.
     pub(super) fn depth(&self) -> usize {
         self.depth
+    }
+
+    /// The levels above `depth`, to go down another way from there.
+    pub(super) fn prefix(&self, depth: usize) -> Self {
+        let mut prefix = Self::new();
+        prefix.levels[..depth].copy_from_slice(&self.levels[..depth]);
+        prefix.depth = depth;
+        prefix
     }
 
     /// Level `level`, which the descent went through.
@@ -254,8 +267,9 @@ impl<K, V, S> DescentPath<K, V, S> for TreePath<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// The leaf where `key` belongs, latched in mode `M`, and whether `key`
     /// is its head, the entry of the separator left of it (D17); with `path`
-    /// keeping the internal nodes it went through. `None` if `key` lacks
-    /// what every key of the tree shares (D50): it is in no node.
+    /// keeping the internal nodes it went through. If `key` lacks what every
+    /// key of the tree shares (D50), it is in no node: where it sorts against
+    /// all of them instead, before or after.
     ///
     /// # Panics
     ///
@@ -265,7 +279,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         &self,
         key: &SearchKey<'_, K, Latched<S>, Q>,
         path: &mut P,
-    ) -> Option<(HeldLeaf<K, V, S, M>, bool)>
+    ) -> Descent<K, V, S, M>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -282,10 +296,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     }
                     // The root leaf is on both borders: the shared prefix
                     // stays as it is while the leaf is latched.
-                    if root_page.shared_prefix().place_outside(key).is_some() {
-                        return None;
+                    if let Some(outside) = root_page.shared_prefix().place_outside(key) {
+                        return Err(outside);
                     }
-                    return Some((held, false));
+                    return Ok((held, false));
                 }
                 Node::Internal(internal) => internal,
             };
@@ -299,9 +313,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // SAFETY: the tree is latched, and its root page allocated; the
             // copy is checked by the root's version below.
             let shared = unsafe { root_page.load_racing_shared_prefix() };
-            if shared.is_some_and(|shared| shared.place_outside(key).is_some()) {
+            if let Some(outside) = shared.and_then(|shared| shared.place_outside(key)) {
                 if node.latch().is_unchanged(version) {
-                    return None;
+                    return Err(outside);
                 }
                 continue 'restart;
             }
@@ -331,7 +345,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                         if at_separator && !Self::is_head(leaf, key) {
                             continue 'restart;
                         }
-                        return Some((held, at_separator));
+                        return Ok((held, at_separator));
                     }
                     Node::Internal(child) => {
                         let child_version = child.latch().read_version();

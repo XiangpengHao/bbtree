@@ -10,7 +10,7 @@ extern crate alloc;
 extern crate std;
 
 mod allocator;
-mod bctree_map;
+pub mod bctree_map;
 mod inline_key;
 mod map;
 mod set;

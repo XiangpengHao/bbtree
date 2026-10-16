@@ -22,8 +22,10 @@ use std::process::ExitCode;
 
 mod cell_runner;
 mod command_line;
+mod concurrent_maps;
 mod datasets;
 mod keys;
+mod latency;
 mod map_adapters;
 mod memory;
 mod operations;

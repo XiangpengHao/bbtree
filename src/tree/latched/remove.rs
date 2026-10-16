@@ -1,5 +1,7 @@
 //! Removing from a latched tree, as bbtree removes (`tree/remove.rs`, D22).
 //!
+//! - **A condition** the caller gives decides, run on the entry while its
+//!   leaf is latched exclusively, before anything changes.
 //! - **An entry whose leaf keeps its minimum**, or is the root, comes out
 //!   with the leaf latched exclusively, nothing else held.
 //! - **Otherwise** the removal descends again, keeping its path, and takes,
@@ -43,11 +45,18 @@ use crate::inline_key::InlineKeyStrategy;
 struct StartOver;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// Removes the entry whose key equals `key` and returns it, with the key
-    /// as stored; `None` without one. Pages a removal frees go on the
+    /// Removes the entry whose key equals `key`, if `condition` holds of
+    /// it, and returns it, with the key as stored; `None` without one, or if
+    /// `condition` doesn't hold. `condition` runs while the entry's leaf is
+    /// latched exclusively, once a try. Pages a removal frees go on the
     /// tree's free lists (`pages.rs`); `alloc` is the map's allocator.
     #[inline]
-    pub(crate) fn remove_entry<Q>(&self, key: &Q, alloc: &impl Allocator) -> Option<(K, V)>
+    pub(crate) fn remove_entry<Q>(
+        &self,
+        key: &Q,
+        mut condition: impl FnMut(&K, &V) -> bool,
+        alloc: &impl Allocator,
+    ) -> Option<(K, V)>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -55,16 +64,24 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         self.root_page()?;
         let key = SearchKey::new(key);
         {
-            let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ())?;
+            let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ()).ok()?;
             let leaf = held.leaf();
-            if !at_separator {
+            if at_separator {
+                if !condition(leaf.head_key(), leaf.head_value()) {
+                    return None;
+                }
+            } else {
                 let index = leaf.find(&key, ())?;
+                let (stored, value) = leaf.key_value(index);
+                if !condition(stored, value) {
+                    return None;
+                }
                 if Self::keeps_its_minimum(leaf) || self.is_root(leaf) {
                     return Some(leaf.remove(index));
                 }
             }
         }
-        self.remove_rebalancing(&key, alloc)
+        self.remove_rebalancing(&key, &mut condition, alloc)
     }
 
     /// Whether `leaf` keeps its minimum after losing an entry.
@@ -79,6 +96,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     fn remove_rebalancing<Q>(
         &self,
         key: &SearchKey<'_, K, Latched<S>, Q>,
+        condition: &mut impl FnMut(&K, &V) -> bool,
         alloc: &impl Allocator,
     ) -> Option<(K, V)>
     where
@@ -88,7 +106,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         // Dropped last, after the nodes the removal held: see `NodePages`.
         let pages = self.pages(alloc);
         loop {
-            if let Ok(removed) = self.try_remove_rebalancing(key, &pages) {
+            if let Ok(removed) = self.try_remove_rebalancing(key, condition, &pages) {
                 return removed;
             }
         }
@@ -99,6 +117,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     fn try_remove_rebalancing<Q, A: Allocator>(
         &self,
         key: &SearchKey<'_, K, Latched<S>, Q>,
+        condition: &mut impl FnMut(&K, &V) -> bool,
         pages: &NodePages<'_, A>,
     ) -> Result<Option<(K, V)>, StartOver>
     where
@@ -106,7 +125,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Q: Ord + ?Sized,
     {
         let mut path = TreePath::new();
-        let Some((held, at_separator)) = self.descend::<Q, Exclusive, _>(key, &mut path) else {
+        let Ok((held, at_separator)) = self.descend::<Q, Exclusive, _>(key, &mut path) else {
             return Ok(None);
         };
         let leaf = held.leaf();
@@ -114,6 +133,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let mut held_nodes = HeldNodes::new();
         // The separator's level, or the entry's index in the leaf.
         let (separator_level, leaf_index) = if at_separator {
+            if !condition(leaf.head_key(), leaf.head_value()) {
+                return Ok(None);
+            }
             let level = (0..depth)
                 .find(|&level| path.level(level).routed.at_separator)
                 .expect("a descent that matched a separator went through it");
@@ -122,6 +144,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             let Some(index) = leaf.find(key, ()) else {
                 return Ok(None);
             };
+            let (stored, value) = leaf.key_value(index);
+            if !condition(stored, value) {
+                return Ok(None);
+            }
             // Another thread may have filled the leaf since.
             if Self::keeps_its_minimum(leaf) || self.is_root(leaf) {
                 return Ok(Some(leaf.remove(index)));

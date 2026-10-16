@@ -8,5 +8,5 @@ use bbtree_bench::BaseAllocator;
 static ALLOCATOR: BaseAllocator = BaseAllocator;
 
 fn main() -> ExitCode {
-    bbtree_bench::run_scaling()
+    bbtree_bench::run_scaling(None)
 }

@@ -242,6 +242,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         ordering
     }
 
+    /// The node's length, read in place while writers may change it, and
+    /// clamped to the capacity: what it holds only if the node's version is
+    /// unchanged after.
+    #[inline(always)]
+    pub(in crate::tree) fn racing_len(self) -> usize {
+        // SAFETY: the page is an internal node's, allocated while threads
+        // share the tree, its header initialized.
+        let (len, _) = unsafe { self.node_ptr().load_racing_header() };
+        len.min(Self::capacity())
+    }
+
     /// The child at edge `index`, read in place while writers may change
     /// it: what a writer stored there, or `None` for an edge none has.
     ///

@@ -47,7 +47,11 @@ mod held;
 mod insert;
 mod pages;
 mod remove;
+mod scan;
 mod shared_prefix;
+
+pub(crate) use self::insert::{ReadOrInsert, Replace};
+pub(crate) use self::scan::{LeafStamp, ScanResume};
 
 use core::borrow::Borrow;
 use core::marker::PhantomData;
@@ -233,7 +237,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     {
         self.root_page()?;
         let key = SearchKey::new(key);
-        let (held, at_separator) = self.descend::<Q, Shared, ()>(&key, &mut ())?;
+        let (held, at_separator) = self.descend::<Q, Shared, ()>(&key, &mut ()).ok()?;
         let leaf = held.leaf();
         let (key, value) = if at_separator {
             (leaf.head_key(), leaf.head_value())
@@ -258,7 +262,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     {
         self.root_page()?;
         let key = SearchKey::new(key);
-        let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ())?;
+        let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ()).ok()?;
         let leaf = held.leaf();
         let (key, value) = if at_separator {
             (leaf.head_key(), leaf.head_value_mut())
