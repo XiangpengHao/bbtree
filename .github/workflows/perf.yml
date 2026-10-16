@@ -1,0 +1,205 @@
+# Named for the check it shows on pull requests.
+name: perf
+
+# A report, never a gate: the bench's `ci` suite with `--perf`, bbtree
+# against std's BTreeMap, in ns per operation and the hardware counts of the
+# timed regions (instructions, branches, branch misses, L1d misses, cache
+# lines from memory). A pull request gets it as a comment, against its base;
+# a commit to main gets it in the run's summary, against its parent, and its
+# results are kept on the `bench-data` branch, at
+# `<runner name>/<commit>.csv`, as main's history. Nothing here fails a pull
+# request, and the merge gate (ci.yml) doesn't wait for it.
+#
+# The counters need real hardware: GitHub's runners are VMs that don't expose
+# them (perf answers `<not supported>`). So the measuring runs on a
+# self-hosted runner, a bare-metal machine labelled `bbtree-perf`, set up in
+# nixhome (hosts/pittsburgh). It runs a pull request's code, so the
+# repository requires approval before an outside contributor's workflows run:
+# a fork could otherwise change this file to run anything there. Publishing
+# needs write access, so it runs on GitHub's runners, apart from that code.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel a pull request's superseded runs. Every commit on main finishes its
+# run, so that its results are kept.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  measure:
+    name: measure
+    runs-on: [self-hosted, bbtree-perf]
+    # Two builds of the bench, at about 3 minutes each, and two runs of the
+    # suite, at about a minute each; the first run on a machine also
+    # downloads the toolchain.
+    timeout-minutes: 30
+    defaults:
+      run:
+        # The toolchain and perf, from the flake (`devShells.bench`).
+        shell: nix develop .#bench --command bash -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit too, which may be built here.
+          fetch-depth: 0
+          # The code checked out runs next; it gets no token.
+          persist-credentials: false
+
+      # The base is the pull request's base, or the commit before a push, or
+      # the parent of a manual run's commit.
+      - name: Choose the base
+        env:
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSHED_OVER: ${{ github.event.before }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=$PULL_REQUEST_BASE ;;
+            # All zeros when the push made the branch: no base.
+            push) [[ $PUSHED_OVER =~ ^0+$ ]] && base="" || base=$PUSHED_OVER ;;
+            *) base=$(git rev-parse --verify --quiet HEAD^ || true) ;;
+          esac
+          echo "BASE=$base" >> "$GITHUB_ENV"
+
+      - name: Build the bench
+        working-directory: bench
+        run: cargo build --release --bin bbtree-bench
+
+      - name: Measure this commit
+        run: bench/target/release/bbtree-bench ci --perf --out "$RUNNER_TEMP/head"
+
+      # The base's results as main's run on this machine kept them, which
+      # saves building and running the base here; or else measured here. A
+      # base whose bench lacks the `ci` suite has no results.
+      - name: Measure the base
+        if: env.BASE != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          kept="$RUNNER_NAME/$BASE.csv"
+          if git fetch --quiet --depth=1 origin bench-data &&
+              git show "FETCH_HEAD:$kept" > "$RUNNER_TEMP/base/kept-timing.csv" 2>/dev/null; then
+            echo "BASE_SOURCE=main's run" >> "$GITHUB_ENV"
+          else
+            rm -f "$RUNNER_TEMP/base/kept-timing.csv"
+            # This machine keeps its checkout between jobs but empties
+            # RUNNER_TEMP, so a past job's worktree is registered and gone.
+            git worktree prune
+            git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
+            cd "$RUNNER_TEMP/base-source/bench"
+            if cargo build --release --bin bbtree-bench &&
+                target/release/bbtree-bench ci --perf --out "$RUNNER_TEMP/base"; then
+              echo "BASE_SOURCE=measured here" >> "$GITHUB_ENV"
+            else
+              echo "::warning::The base couldn't be measured; the report shows this commit alone"
+              rm -rf "$RUNNER_TEMP/base"
+            fi
+          fi
+
+      - name: Write the report
+        env:
+          PULL_REQUEST_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          head_csv=$(echo "$RUNNER_TEMP"/head/*-timing.csv)
+          base_csv=$(echo "$RUNNER_TEMP"/base/*-timing.csv 2>/dev/null || true)
+          compare=(--head "$head_csv")
+          if [ -f "$base_csv" ]; then
+            compare+=(--base "$base_csv")
+            base_line="base \`${BASE:0:12}\` (${BASE_SOURCE})"
+          else
+            base_line="no base"
+          fi
+          if [ -n "$PULL_REQUEST_HEAD" ]; then
+            head_line="head \`${PULL_REQUEST_HEAD:0:12}\` merged into its base"
+          else
+            head_line="head \`${GITHUB_SHA:0:12}\`"
+          fi
+          cpu=$(sed -n 's/^model name\s*: //p' /proc/cpuinfo | head -1)
+          out="$RUNNER_TEMP/perf-report"
+          mkdir -p "$out/results/$RUNNER_NAME"
+          {
+            echo "### Performance: bbtree against std's BTreeMap"
+            echo
+            echo "The bench's \`ci\` suite, $head_line, $base_line, on $RUNNER_NAME ($cpu)."
+            echo "A report only: nothing here fails the pull request."
+            echo
+            bench/target/release/bbtree-bench compare "${compare[@]}"
+          } > "$out/report.md"
+          cp "$head_csv" "$out/results/$RUNNER_NAME/$GITHUB_SHA.csv"
+          cp "${head_csv%.csv}.md" "$out/results/$RUNNER_NAME/$GITHUB_SHA.md"
+          cat "$out/report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: ${{ runner.temp }}/perf-report
+          retention-days: 30
+
+  # A pull request's report, as one comment that each run updates. A fork's
+  # token can't comment; its report is in the measure job's summary.
+  comment:
+    name: comment
+    needs: measure
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-report
+
+      - name: Comment on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+            --body-file report.md --edit-last --create-if-none
+
+  # Main's results, kept by commit on the `bench-data` branch, which pull
+  # requests then compare against.
+  record:
+    name: record
+    needs: measure
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: bench-data
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-report
+          path: ${{ runner.temp }}/perf-report
+
+      - name: Commit the results to bench-data
+        run: |
+          if git fetch --depth=1 origin bench-data; then
+            git switch --detach FETCH_HEAD
+          else
+            git switch --orphan bench-data
+          fi
+          cp -r "$RUNNER_TEMP/perf-report/results/." .
+          git add --all
+          # A re-run of a commit replaces its results.
+          if git diff --cached --quiet; then
+            echo "bench-data already has these results"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet --message "Results of $GITHUB_SHA"
+          git push origin HEAD:refs/heads/bench-data

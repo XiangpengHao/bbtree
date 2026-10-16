@@ -11,6 +11,7 @@ use bytes::Bytes;
 use crate::cell_runner::{CellMeasurement, CellRun};
 use crate::command_line::Named;
 use crate::datasets::DataFile;
+use crate::map_adapters::CountedBCTree;
 use crate::operations::PreparedCell;
 use crate::random::{RandomStream, SeededRng};
 use crate::values::BenchValue;
@@ -153,9 +154,11 @@ impl KeyKind {
         match self {
             Self::CrateNames => &[MapSize::OneThousand, MapSize::HundredThousand, MapSize::All],
             Self::KernelPaths => &[MapSize::OneThousand, MapSize::All],
-            Self::WikiTitles | Self::Urls | Self::Addresses => {
-                &[MapSize::OneMillion, MapSize::TenMillion]
-            }
+            Self::WikiTitles | Self::Urls | Self::Addresses => &[
+                MapSize::TenThousand,
+                MapSize::OneMillion,
+                MapSize::TenMillion,
+            ],
             // TODO(phase 2): GeoNames' count decides whether 10M or `all`.
             Self::GeoNames | Self::DblpTitles => &[MapSize::OneMillion, MapSize::All],
             Self::JsonObjectKeys => &[MapSize::RealJsonObjects],
@@ -182,6 +185,15 @@ pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
         run.measure::<BBTreeMap<Self, V>, Self, V>(prepared)
+    }
+
+    /// Measures `prepared` on `bctree`, a `BCTreeMap` with the strategy
+    /// `bbtree` uses for the key type, on one thread.
+    fn measure_on_bctree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<CountedBCTree<Self, V>, Self, V>(prepared)
     }
 
     /// Measures `prepared` on `bbtree-inline`, a `BBTreeMap` whose keys have
@@ -239,6 +251,13 @@ impl BenchKey for SequencedKey {
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
         run.measure::<BBTreeMap<Self, V, WithInlineKey>, Self, V>(prepared)
+    }
+
+    fn measure_on_bctree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<CountedBCTree<Self, V, WithInlineKey>, Self, V>(prepared)
     }
 }
 

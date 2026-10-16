@@ -42,12 +42,9 @@ jobs:
 
       # `-Zbuild-std` instruments std as well, which needs an explicit
       # `--target`. Doc tests aren't built with the sanitizer, so they stay
-      # out. One test leaks the child it hands a rejecting insert on purpose
-      # (its Miri `ignore` says so); LeakSanitizer would report it.
+      # out.
       - name: Test
         env:
           RUSTFLAGS: -Zsanitizer=address
           ASAN_OPTIONS: detect_leaks=1
-        run: |
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features -- \
-            --exact --skip node::internal::tests::insert_rejects_a_child_of_the_wrong_height
+        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features

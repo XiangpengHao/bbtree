@@ -1,5 +1,5 @@
 //! Iterating over a map by shared reference: [`Iter`], [`Keys`], [`Values`]
-//! and [`Range`], each a walk from both ends (`walk.rs`, D23). The whole-map
+//! and [`Range`], each a walk from both ends (`tree/walk.rs`, D23). The whole-map
 //! iterators know how many entries are left; a range stops where its ends
 //! meet. Only building a range calls `Ord`, to find its ends.
 
@@ -11,13 +11,11 @@ use core::iter::FusedIterator;
 use core::ops::RangeBounds;
 
 use super::BBTreeMap;
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::{Immut, KeyRun};
-use crate::node::walk::{BorrowedWalk, RangeWalk};
-
-#[cfg(test)]
-#[path = "iterator_tests.rs"]
-mod tests;
+use crate::tree::node::leaf::KeyRun;
+use crate::tree::node_stack::Immut;
+use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
 ///
@@ -402,7 +400,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for Range<'_, K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Gets an iterator over the entries of the map, sorted by key.
     ///
     /// # Examples
@@ -423,9 +421,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, S> {
-        let root = self.root.as_ref().map(|root| root.borrow());
         Iter {
-            walk: BorrowedWalk::new(root, self.length),
+            walk: BorrowedWalk::new(self.tree.root_page(), self.length),
         }
     }
 
@@ -499,16 +496,18 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root) = &self.root else {
+        let Some(root_page) = self.tree.root_page() else {
             return Range::default();
         };
         Range {
-            walk: RangeWalk::new(root.borrow(), range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
         }
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> IntoIterator for &'a BBTreeMap<K, V, S> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> IntoIterator
+    for &'a BBTreeMap<K, V, S, A>
+{
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V, S>;
 

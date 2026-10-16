@@ -32,10 +32,12 @@
 - Reason then measure. Don't start with blind sweeping, or brainless micro/premature optimizations. Always first think about what is the bottleneck by profiling and measurements, reason the cost model. Benchmark is the last step, to verify that your reasoning is correct, if not, correct your model and repeat; benchmark is NOT a tool to guide the optimization.
 
 - Never do explicit prefetching: no software prefetch instructions or intrinsics (`_mm_prefetch`, `core::intrinsics::prefetch_*`, inline `prefetcht0`, ...), not in the library, benchmarks, prototypes or A/B variants, and not behind a feature flag. Fix memory latency with layout instead: put what an operation needs in the cache lines it already loads (D46).
+  Exception: the batch lanes (doc 12, D53) prefetch, only through `Prefetcher` in `src/tree/batch.rs`, the line each lane reads next, the query window included. Never in single-key paths, and never whole keys or unchosen edges.
 
 ## Verification
 
 - Never run Miri (`cargo miri test`, any mode) in a coding session or a subagent. Miri runs in CI only. Local checks are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.
+- Miri runs only the tests `.config/nextest.toml` names. Don't mark tests `#[cfg_attr(miri, ignore)]`; to run a test under Miri, name it there.
 
 ## Benchmark rule
 

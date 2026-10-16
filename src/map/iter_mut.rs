@@ -1,6 +1,6 @@
 //! Iterating over a map with mutable access to its values: [`IterMut`],
 //! [`ValuesMut`] and [`RangeMut`], each a walk from both ends that hands out
-//! every value at most once (`node/walk.rs`, D23). Keys stay shared.
+//! every value at most once (`tree/walk.rs`, D23). Keys stay shared.
 
 #![forbid(unsafe_code)]
 
@@ -10,9 +10,10 @@ use core::iter::{self, FusedIterator};
 use core::ops::RangeBounds;
 
 use super::BBTreeMap;
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::handle::ValMut;
-use crate::node::walk::{BorrowedWalk, RangeWalk};
+use crate::tree::node_stack::ValMut;
+use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// A mutable iterator over the entries of a `BBTreeMap`, in key order.
 ///
@@ -86,9 +87,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for IterMut<'_, K, V, S> {}
 /// Prints the entries left, without moving the iterator.
 impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for IterMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.walk.reborrow();
+        let mut remaining = self.walk.reborrow();
         f.debug_list()
-            .entries(iter::from_fn(|| left.next()))
+            .entries(iter::from_fn(|| remaining.next()))
             .finish()
     }
 }
@@ -170,8 +171,8 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for ValuesMut<'_, K, V, S> {}
 /// Prints the values left, without moving the iterator.
 impl<K, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for ValuesMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.inner.walk.reborrow();
-        let values = iter::from_fn(|| left.next()).map(|(_, value)| value);
+        let mut remaining = self.inner.walk.reborrow();
+        let values = iter::from_fn(|| remaining.next()).map(|(_, value)| value);
         f.debug_list().entries(values).finish()
     }
 }
@@ -254,9 +255,9 @@ impl<K, V, S: InlineKeyStrategy<K>> FusedIterator for RangeMut<'_, K, V, S> {}
 /// Prints the entries left, without moving the iterator.
 impl<K: fmt::Debug, V: fmt::Debug, S: InlineKeyStrategy<K>> fmt::Debug for RangeMut<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut left = self.walk.reborrow();
+        let mut remaining = self.walk.reborrow();
         f.debug_list()
-            .entries(iter::from_fn(|| left.next()))
+            .entries(iter::from_fn(|| remaining.next()))
             .finish()
     }
 }
@@ -276,7 +277,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Default for RangeMut<'_, K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Gets a mutable iterator over the entries of the map, sorted by key.
     ///
     /// # Examples
@@ -298,9 +299,8 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(map.get("b"), Some(&12));
     /// ```
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V, S> {
-        let root = self.root.as_mut().map(|root| root.borrow_valmut());
         IterMut {
-            walk: BorrowedWalk::new(root, self.length),
+            walk: BorrowedWalk::new(self.tree.root_page_mut(), self.length),
         }
     }
 
@@ -362,16 +362,18 @@ impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root) = &mut self.root else {
+        let Some(root_page) = self.tree.root_page_mut() else {
             return RangeMut::default();
         };
         RangeMut {
-            walk: RangeWalk::new(root.borrow_valmut(), range.start_bound(), range.end_bound()),
+            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
         }
     }
 }
 
-impl<'a, K, V, S: InlineKeyStrategy<K>> IntoIterator for &'a mut BBTreeMap<K, V, S> {
+impl<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> IntoIterator
+    for &'a mut BBTreeMap<K, V, S, A>
+{
     type Item = (&'a K, &'a mut V);
     type IntoIter = IterMut<'a, K, V, S>;
 

@@ -12,8 +12,8 @@ This way, each search pay one cache line miss and linear search the group head, 
 
 - [ ] Performance infra: we want to continously monitor the performance, so something that doesn't rely on the CI machine is needed. I wonder if we can just collect the instructions, and just analyze the instruction count and their memory access pattern to get a accurate performance expectation? Basically, we still run the benchmark, but we collect every instruction get executed, measure the memory latency, and build a model to e.g., interleave memory access, model prefetching, parameterize the load/store latency, etc.
 
-- [ ] the 8-byte inline-key count still compiles to the slow bit-by-bit form at 28–31 slots. That's why a String set
-  (31-slot leaves) is at 702 instructions per lookup against 534 for String→u64.
+- [x] the 8-byte inline-key count compiled to the slow bit-by-bit form at 28–31 slots. Now counted in explicit AVX-512
+  vectors there (05-fence-key.md): memtable lookups 1,102 → 393 instructions. String sets no longer have 31-slot leaves.
 
 
 - [-] I think leaf node should not use inline key, because leaf node is to find that key, not to find the gap that contains the key. so we should do this: instead of storing the 8/4/2 bytes inline key which contains the raw values, we should store the hashed inline key, and only store 2 bytes (even 1 byte?). 
@@ -21,3 +21,23 @@ Since the hash is over the inline key, the K itself doesn't require Hash trait. 
 
 - [-] When we insert to sorted array, we need to shift the keys, which is a memmov, is it? and I think it has to first copy the data to a temporary buffer, and then copy back, because the move is interleaving.
 BUT if we move data in the reverse order, we can avoid this buffer. 
+
+- [x] We should specialize the root node. It's a special type in addition to internal and leaf nodes.
+Reason is that for small tree, root node should be smaller than 1KB. So for root node, we start with 128 bytes, and each time double the size until 1KB, then we do the normal split.
+This should make our memory usage more efficient for small tree.
+Root node has no parents, so its prefix lenght is determined by the min and max keys of the node.
+In fact, since we never truncate the prefix in storage, I think we can always make the fence key to be the min/max keys of the current node, which means the inline keys are maintained once a new key is inserted.
+
+
+- [x] In node layout, should we put children/values first, then keys? looking at the vis, I realized that most of the keys are actually not used in the lookup, because the inline keys are very effective, but they still take up spaces.
+This probably means we should push the keys down to the leaf, and inner node should just hold a point to the leaf's key.
+Worked out in 11-separator-key.md.
+
+
+- [x] I think, if we want to specialize the inner, leaf, and root. then the abstraction of "Subtree" doesn't makes sense. because the tree is no longer a
+  recursive thing, it has well defined structure. the way we currently organize the code makes it confusing and unnecessarily complicated. wdyt?
+Phase 1 built (D51, D52).
+
+- [ ] we might want to benchmark the insert performance of roughly sorted data, compare with hashmap.
+
+- [ ] entry should also go through the right most leaf fast path.

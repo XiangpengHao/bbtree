@@ -21,6 +21,7 @@ pub(crate) enum MapSize {
     /// One map of 1k entries, like cargo's per-package maps: rebuilt or
     /// reused until the cell has timed enough operations.
     OneThousand,
+    TenThousand,
     HundredThousand,
     OneMillion,
     /// DRAM-resident: memtables and indexes.
@@ -35,6 +36,7 @@ impl Named for MapSize {
         Self::ThirtyTwoEntryMaps,
         Self::RealJsonObjects,
         Self::OneThousand,
+        Self::TenThousand,
         Self::HundredThousand,
         Self::OneMillion,
         Self::TenMillion,
@@ -47,6 +49,7 @@ impl Named for MapSize {
             Self::ThirtyTwoEntryMaps => "100kx32",
             Self::RealJsonObjects => "1Mxreal",
             Self::OneThousand => "1k",
+            Self::TenThousand => "10k",
             Self::HundredThousand => "100k",
             Self::OneMillion => "1M",
             Self::TenMillion => "10M",
@@ -61,6 +64,7 @@ impl MapSize {
         Self::FourEntryMaps,
         Self::ThirtyTwoEntryMaps,
         Self::OneThousand,
+        Self::TenThousand,
         Self::HundredThousand,
         Self::OneMillion,
         Self::TenMillion,
@@ -77,6 +81,7 @@ impl MapSize {
             Self::FourEntryMaps => (scale.shrink(1_000_000), 4),
             Self::ThirtyTwoEntryMaps => (scale.shrink(100_000), 32),
             Self::OneThousand => (1, scale.shrink(1_000)),
+            Self::TenThousand => (1, scale.shrink(10_000)),
             Self::HundredThousand => (1, scale.shrink(100_000)),
             Self::OneMillion => (1, scale.shrink(1_000_000)),
             Self::TenMillion => (1, scale.shrink(10_000_000)),

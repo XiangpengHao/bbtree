@@ -19,13 +19,13 @@ that misbehaves. Seven targets, in `fuzz/fuzz_targets/`, over the harnesses in
 
 | target | what only it reaches | minutes a week |
 |---|---|---|
-| `map_heap_byte_strings` | `Vec<u8>`: 8/4-byte windows (D43), length tags (D36), local prefixes (D33); the most row-specific code | 20 |
+| `map_heap_byte_strings` | `Vec<u8>`: 8/4-byte windows (D43), length tags (D36); the most row-specific code | 20 |
 | `user_code_panics` | `Ord`, `InlineKey`, `Clone`, `Drop` that panic or lie: memory safety of every unsafe path, panic isolation (D26), D44 | 20 |
 | `map_integers` | `u64`: 2-byte windows past shared bytes (D31); the most common keys with inline keys | 12 |
 | `map_user_inline_keys` | a user's `InlineKey` under `WithInlineKey`, at the default width: prefixes kept without calling it while keys move, borrowed lookups by `Ord` alone (D19) | 12 |
 | `map_plain_keys` | no inline keys: `u32`, branchless (D19); 64-byte keys whose trees reach three levels from a few hundred entries | 10 |
 | `set_algebra` | the operations on two sets: strategy choice, the merge of two walks (`set/merge.rs`), std's prints | 10 |
-| `map_byte_arrays` | `[u8; 16]`: children first (D39), whole-key equality (D38) | 6 |
+| `map_byte_arrays` | `[u8; 16]`: separator keys in heads (D49), whole-key equality (D38) | 6 |
 
 The four map targets with inline keys each run a wide map (`u64` values) and
 a narrow one (328-byte values that own heap memory, about a dozen entries to

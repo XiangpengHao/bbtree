@@ -8,12 +8,14 @@ use crate::operations::Operation;
 use crate::values::ValueKind;
 use crate::workload::{MapSize, Workload};
 
-/// A suite runs within 10 minutes at full scale, one repetition, on the
-/// benchmark machine (Ryzen 9 9900X).
+/// Named collections of workloads. Select cells to keep each run below
+/// five minutes on the benchmark machine (Ryzen 9 9900X).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Suite {
     /// `u64 → u64` at 10M, every operation.
     Headline,
+    /// Fixed batches on generated and real keys, at cache and DRAM scales.
+    Batch,
     /// Each generated key kind → `u64`, at 1M, and the fixed-size keys and
     /// JSON keys at 10M too: inserts and lookups.
     Keys,
@@ -32,11 +34,19 @@ pub(crate) enum Suite {
     /// `u64 → u64` and `String → u64` at 1k, every operation; and crate names
     /// and kernel paths → `u64` at 1k: inserts and lookups.
     Small,
+    /// What CI measures for every pull request and every commit to main
+    /// (.github/workflows/perf.yml), bbtree against std's `BTreeMap` only:
+    /// `u64 → u64` at 1k and at 1M, past the CI machine's 12 MiB L3, every
+    /// operation, and at 10M inserts and lookups; and strings → `u64` at 1k
+    /// and 1M, inserts and lookups. Generated keys only, since the CI machine
+    /// has no datasets.
+    Ci,
 }
 
 impl Named for Suite {
     const ALL: &'static [Self] = &[
         Self::Headline,
+        Self::Batch,
         Self::Keys,
         Self::RealKeys,
         Self::Values,
@@ -44,11 +54,13 @@ impl Named for Suite {
         Self::Memtable,
         Self::Sets,
         Self::Small,
+        Self::Ci,
     ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Headline => "headline",
+            Self::Batch => "batch",
             Self::Keys => "keys",
             Self::RealKeys => "realkeys",
             Self::Values => "values",
@@ -56,6 +68,7 @@ impl Named for Suite {
             Self::Memtable => "memtable",
             Self::Sets => "sets",
             Self::Small => "small",
+            Self::Ci => "ci",
         }
     }
 }
@@ -87,10 +100,11 @@ impl Suite {
 
     /// The maps the suite's workloads run on. The real-keys suite compares
     /// the ordered maps only: at 10M entries of long strings, building each
-    /// map takes seconds, and the hash maps wouldn't fit its time budget.
+    /// map takes seconds, and the hash maps wouldn't fit its time budget. CI
+    /// compares bbtree with its baseline, std's `BTreeMap`.
     pub(crate) fn maps(self) -> &'static [MapKind] {
         match self {
-            Self::RealKeys => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::RealKeys | Self::Ci | Self::Batch => &[MapKind::BBTree, MapKind::StdBTree],
             Self::Headline
             | Self::Keys
             | Self::Values
@@ -109,6 +123,21 @@ impl Suite {
             Operation::GetMiss,
         ];
         match self {
+            Self::Batch => Workload::product(
+                &[
+                    KeyKind::U64Random,
+                    KeyKind::JsonString,
+                    KeyKind::Hash32,
+                    KeyKind::WikiTitles,
+                ],
+                &[ValueKind::U64],
+                &[
+                    MapSize::TenThousand,
+                    MapSize::OneMillion,
+                    MapSize::TenMillion,
+                ],
+                Operation::BATCH,
+            ),
             Self::Headline => Workload::product(
                 &[KeyKind::U64Random],
                 &[ValueKind::U64],
@@ -184,6 +213,33 @@ impl Suite {
                     &[KeyKind::CrateNames, KeyKind::KernelPaths],
                     &[ValueKind::U64],
                     &[MapSize::OneThousand],
+                    &inserts_hits_and_misses,
+                ));
+                workloads
+            }
+            Self::Ci => {
+                let mut workloads = Workload::product(
+                    &[KeyKind::U64Random],
+                    &[ValueKind::U64],
+                    &[MapSize::OneThousand, MapSize::OneMillion],
+                    Operation::ON_ONE_MAP,
+                );
+                workloads.extend(Workload::product(
+                    &[KeyKind::U64Random],
+                    &[ValueKind::U64],
+                    &[MapSize::TenMillion],
+                    &inserts_hits_and_misses,
+                ));
+                workloads.extend(Workload::product(
+                    &[KeyKind::CrateString],
+                    &[ValueKind::U64],
+                    &[MapSize::OneThousand],
+                    &inserts_hits_and_misses,
+                ));
+                workloads.extend(Workload::product(
+                    &[KeyKind::JsonString],
+                    &[ValueKind::U64],
+                    &[MapSize::OneMillion],
                     &inserts_hits_and_misses,
                 ));
                 workloads

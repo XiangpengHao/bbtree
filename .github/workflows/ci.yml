@@ -157,8 +157,9 @@ jobs:
         run: cargo test
 
   # The library's tests on other platforms. On ARM, the portable code runs
-  # where x86 has SIMD. On wasm, pointers are 32 bits and a panic aborts,
-  # so tests that assume 64-bit pointers or need unwinding are ignored there.
+  # where x86 has SIMD. On wasm, pointers are 32 bits, a panic aborts and
+  # there are no threads, so tests that assume 64-bit pointers, need
+  # unwinding or spawn threads are ignored there.
   test-aarch64:
     name: test (aarch64)
     runs-on: ubuntu-24.04-arm
@@ -199,6 +200,11 @@ jobs:
       - name: Test
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+          # The tests run on the main thread, whose stack wasm-ld makes 1 MiB,
+          # and an overflow there faults far from the cause. Debug builds of
+          # walks over page-aligned values need about 1.25 MiB; give the 8 MiB
+          # of a native main thread.
+          CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -C link-arg=-zstack-size=8388608
         run: cargo test --target wasm32-wasip1 --lib --all-features
 
   # The release checks: the fuzzing takes hours, so it runs for releases (and

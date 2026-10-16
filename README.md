@@ -7,7 +7,7 @@
 
 Blessed B-tree:
 1. Drop-in replacement for std's `BTreeMap`/`BTreeSet`.
-2. Zero dependencies.
+2. Zero dependencies, `no_std` compatible.
 3. x% lower memory usage, y% faster search, z% lower tail latency.
 4. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
 5. Brought to you by decades of database research and careful curation from [Xiangpeng Hao](https://xiangpeng.systems).
@@ -31,8 +31,8 @@ println!("{:?}", map);
 
 ## license
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT), at your option.
+Licensed under either of Apache License, Version 2.0 or MIT license, at
+your option; [LICENSE](LICENSE) holds both texts.
 
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in bbtree by you, as defined in the Apache-2.0

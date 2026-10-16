@@ -125,7 +125,7 @@ insert than a bigger leaf.
 
 A scan pays the descent once, then crosses a leaf boundary about every 40
 `u64` pairs or 18 `String` pairs at 70% fill. Each crossing climbs and
-descends the path. Bigger leaves mean fewer crossings; batched iteration
+descends the node stack. Bigger leaves mean fewer crossings; batched iteration
 (`fold`) means less bookkeeping per entry without bigger leaves.
 
 ## What the measurements taught us
@@ -138,7 +138,7 @@ the evidence.
    336 summaries per `u64` descent instead of 224.
 2. **A saved level is not a saved cache miss.** Upper levels are warm.
    Removing a warm level saves instructions, not DRAM time. Most wins on
-   warm levels came from fewer instructions: no path bookkeeping, no
+   warm levels came from fewer instructions: no node stack bookkeeping, no
    128-byte query copy, no result passed through memory.
 3. **Code generation can flip a result.** Adding a second caller made
    LLVM outline a tiny wrapper, and a 26-instruction population count
@@ -172,18 +172,18 @@ main suite.
 | Short fitting-insert path | accepted | D33 |
 | Range construction without the extra copy | not adopted | |
 | SIMD scan of full `u64` leaf keys | rejected | |
-| Local search prefix for long strings | accepted | D33 |
+| Shared prefix where fences are missing | accepted | D50 |
 | Bulk compare of long suffixes | rejected | |
 | Cached range leaf run | accepted | D33 |
 | Aligned leaf pairs | accepted | D34 |
 | String length tags | accepted | D36 |
 | Whole-map iterators reuse the leaf run | accepted | D35 |
-| Insert without a path | accepted | D37 |
+| Insert without a node stack | accepted | D37 |
 | One fixed-array candidate: equality only | accepted | D38 |
 | Two length-tag candidates; zero/one handling | accepted | D36, D38 |
 | Redistribution before a split | deferred (model) | |
 | 4-byte string leaf summaries | rejected (model) | |
-| Children before keys for fixed arrays | accepted | D39 |
+| Children before keys for fixed arrays | accepted, moot since internal nodes keep no keys | D49 |
 | Equality-only leaf masks | native 8-byte only | D41 |
 | Portable packed 2-byte masks, 33–64 slots | accepted | D40 |
 | Grouped local-prefix guards | accepted with D41 | D41 |
@@ -200,6 +200,7 @@ main suite.
 | 2 KiB upper levels only | deferred (model) | |
 | Sign-biased portable summaries | rejected (codegen) | |
 | Map-owned page arena | deferred (model) | |
+| Min/max node prefixes instead of fences | rejected | |
 
 ### Node size and layout
 
@@ -240,10 +241,11 @@ directory, scans stop being linear, capacity drops (`u64` 55 → 53,
 moves (`u64` hit 131.5 → 129.6, JSON hit 348.7 → 353.5). Accepted for
 the traffic and the 48 bytes it frees for D36.
 
-**Children before keys for fixed arrays (D39).** `[u8; 32]` keys stop
+**Children before keys for fixed arrays.** `[u8; 32]` keys stop
 crossing cache lines and summaries plus children shrink by one line.
 `hash32` hits 240.9 → 225.1, misses 190.2 → 168.4, inserts 206.2 → 188.1,
-same instructions, fewer L1 and DRAM misses. Accepted.
+same instructions, fewer L1 and DRAM misses. Accepted; moot since internal
+nodes with inline keys keep no keys (D49).
 
 **Children before keys for `u128`.** Native random operations improve
 2–7%, but portable random hit and insert lose 1–2% and native dense misses
@@ -291,14 +293,50 @@ summaries to save one dependent load. Hits 131.3 → 360.7, misses 96.1 →
 315.7; DRAM fills 3.8 → 16.1 per lookup. Rejected: summaries are the
 better filter.
 
-**Local search prefix for long strings (D33).** On 1M paths, a query
-needs 7.7 full-key comparisons, because the root has prefix 0 and its
-windows all tie. Giving the seven internal nodes whose keys share 8+ more
-bytes their own validated prefix cuts this to 3.6 (eight-byte word
-compares: 41.5 → 17.9). 10M paths 3–4% faster; 1M path hits 492 → 455,
-instructions 1128 → 809. JSON has no such nodes and doesn't change.
-Accepted. Carrying a parent's matched prefix down instead is unsound: it
-says nothing about an outer child's other side.
+**Shared prefix where fences are missing (D50).** A node whose windows
+all tie at its prefix searches its keys whole: on 1M paths, 7.7 full-key
+comparisons a query when the root had prefix 0. Dense integers tie the same
+way at the root and borders, UUIDv7-like arrays wherever their timestamp is
+shared. Two ways to skip those bytes:
+
+- **Per node,** a local prefix kept where the windows tie, checked against
+  the node's first key. Built and measured (2026-10-10): dense `u64` hits
+  −8.5%, inserts −5%; 1M paths −2.7%; UUIDv7-like `[u8; 16]` 366 → 270
+  instructions at 10M, 27.7 → 7.5 ns at 1k. Every internal search paid a
+  header field and a branch, 16–28 instructions a lookup on random keys;
+  every key move restored and rebuilt the windows; and once separator keys
+  became leaf heads (D49), each check walked to a leaf.
+- **Per tree,** the bytes every key shares, beside the root, which the root
+  and the borders, the nodes without a fence, take as their prefix. A
+  query is checked once, at the top, against bytes in one line next to the
+  root pointer; one without them reads no node. Model: one compare a
+  lookup, a null test where keys share nothing; a shrink touches the two
+  borders, O(log n) nodes, at most once per byte. Measured against D49:
+  dense `u64` lookups −46 instructions, 10M paths −123, random keys +1.
+
+Accepted per tree. Inside the tree, a node's keys fill the range between
+its fences, so the fences give it nearly all its keys share.
+Code generation decided most of the per-node work: a call anywhere in the
+descent loop, even a cold one, kept the loop's state in stack slots (+30
+to +100 instructions); comparing 64 shared path bytes a window at a time
+took 300 more instructions than in 32-byte chunks, which the per-tree check
+keeps. Node searches are forced inline for fixed-width keys (outlined,
+`hash32` lookups took 442 instructions instead of 271) and left to LLVM for
+heap strings (forced inline, the benchmark's `String` lookups took 449
+instead of 433).
+Carrying a parent's matched prefix down instead is unsound: it says
+nothing about an outer child's other side.
+
+**Min/max node prefixes instead of fences.** One prefix per node, what its
+first and last keys share, would drop fences. Built, optimized and
+measured (2026-10-12): JSON hits 309 → 446 ns, Wikipedia 423 → 527,
+`hash32` 175 → 189; Codex's tuning got JSON to 409. Why, by adding each
+cost to the fence tree alone: a prefix the fences don't guarantee must be
+checked against a key at about two levels a lookup, and a leaf hit
+confirmed from the key's bytes; for strings both read heap lines (+1.3
+DRAM lines a lookup), and the bookkeeping adds about 120 instructions.
+Rejected; fences stay, and the tree's shared prefix covers where they are
+missing.
 
 **Bulk compare of long suffixes.** About 100 fewer instructions per path
 operation, but more branch misses: paths 1–2.5% slower, JSON 1–2% slower.
@@ -389,12 +427,12 @@ Without POPCNT, LLVM counts mask bits in software, with multiplies.
 
 **Short fitting-insert path (D33).** The old insert reserved split
 scratch space every time (a 2,216-byte frame), called `memmove` even for
-an append, and copied a 256-byte path to replace a value. After: a
+an append, and copied a 256-byte node stack to replace a value. After: a
 360-byte frame. Ordered `u64` insert 36.0 → 34.0 (405 → 362
 instructions); random insert unchanged. Accepted.
 
-**Insert without a path (D37).** Full leaves are rare (2.6% of `u64`,
-5.8% of string inserts at 1M), so recording the path only then, with a
+**Insert without a node stack (D37).** Full leaves are rare (2.6% of `u64`,
+5.8% of string inserts at 1M), so recording the node stack only then, with a
 second search, saves work on the rest. Random `u64` −4.1%, ordered `u64`
 −8.8%, JSON −19.4% (824 → 649 instructions), paths −4.8%; DRAM fills
 unchanged. The bigger string gain comes from no longer calling outlined
@@ -410,7 +448,7 @@ and value on failure, adding a 32-byte copy for `hash32` and 12
 instructions for JSON; the final version checks a borrowed key and
 returns a token that moves the key only on success. Baseline x86-64:
 ordered `u64` 43.5 → 5.5, JSON 143.7 → 47.9; random +0.9% / +0.2%.
-Accepted, superseding D30's rejection.
+Accepted (D45); D30's per-node check stays rejected.
 
 ### Scans
 

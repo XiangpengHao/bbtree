@@ -21,7 +21,8 @@ use core::mem::size_of;
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
 /// compare like the bytes they come from (see [`InlineKey`]).
 ///
-/// Always 8 bytes, of which the nodes keep the first [`InlineKey::WIDTH`].
+/// Always 8 bytes, of which the nodes keep the first 2, 4 or 8
+/// ([`InlineWidth`]).
 pub type InlineWord = u64;
 
 /// How many bytes of each inline key the nodes keep: the first 2, the first
@@ -39,7 +40,8 @@ pub type InlineWord = u64;
 /// declared width in both kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineWidth {
-    /// The first 2 bytes: the integers' width.
+    /// The first 2 bytes: the std integers' width, and under [`Auto`], fixed
+    /// byte arrays'.
     Two,
     /// The first 4 bytes.
     Four,
@@ -49,7 +51,7 @@ pub enum InlineWidth {
 
 impl InlineWidth {
     /// How many bytes the nodes keep.
-    pub(crate) const fn bytes(self) -> usize {
+    pub(crate) const fn byte_len(self) -> usize {
         match self {
             Self::Two => 2,
             Self::Four => 4,
@@ -70,9 +72,11 @@ impl InlineWidth {
 /// compares the full keys. Offsets past 0 let the map skip bytes that all the
 /// keys of a node share.
 ///
-/// The nodes keep the first [`Self::WIDTH`] bytes of each inline key, all 8
-/// unless the impl says fewer: kept bytes that differ order the keys the
-/// same way, and kept bytes that tie say nothing.
+/// Where the map uses this impl, every key under [`WithInlineKey`] and the
+/// std integers under [`Auto`], the nodes keep the first [`Self::WIDTH`]
+/// bytes of each inline key, all 8 unless the impl says fewer: kept bytes
+/// that differ order the keys the same way, and kept bytes that tie say
+/// nothing.
 ///
 /// A key wrapping a byte string can window its bytes. A key ordered by
 /// several fields encodes them one after the other: a `u32` and then a
@@ -105,8 +109,8 @@ impl InlineWidth {
 /// assert_eq!(names.get(&UserName("ferris".to_string())), Some(&7));
 /// ```
 pub trait InlineKey: Ord {
-    /// How many bytes of each inline key the nodes keep (see
-    /// [`InlineWidth`]).
+    /// How many bytes of each inline key the nodes keep, where the map uses
+    /// this impl (see [`InlineWidth`]).
     const WIDTH: InlineWidth = InlineWidth::Eight;
 
     /// This key's inline key at `offset`: bytes `offset..offset + 8` of its
@@ -191,8 +195,11 @@ impl InlineKey for u64 {
     /// top, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
-        self.checked_shl(shift_bits).unwrap_or(0)
+        if offset < size_of::<Self>() {
+            self << (8 * offset)
+        } else {
+            0
+        }
     }
 }
 
@@ -205,9 +212,11 @@ impl InlineKey for u128 {
     /// top 8 bytes, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let shift_bits = u32::try_from(offset).map_or(u32::MAX, |bytes| bytes.saturating_mul(8));
-        let shifted = self.checked_shl(shift_bits).unwrap_or(0);
-        (shifted >> InlineWord::BITS) as InlineWord
+        if offset < size_of::<Self>() {
+            ((self << (8 * offset)) >> InlineWord::BITS) as InlineWord
+        } else {
+            0
+        }
     }
 }
 
@@ -253,8 +262,8 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
     }
 }
 
-/// The default strategy: std byte-string and integer keys have inline keys,
-/// other keys have none, at no cost.
+/// The default strategy: std byte-string keys and 64- and 128-bit integer
+/// keys have inline keys, other keys have none, at no cost.
 ///
 /// The key types recognized are the byte strings `String`, `str`,
 /// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,
@@ -296,8 +305,8 @@ pub(crate) mod sealed {
     use super::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
 
     /// Where a strategy's inline keys come from. Plain data: the node code
-    /// resolves it for a key type (`node/inline_keys.rs`), and page layouts
-    /// depend on the answer.
+    /// resolves it for a key type (`tree/node/inline_keys.rs`), and page
+    /// layouts depend on the answer.
     pub enum InlineKeySource<K> {
         /// Std byte strings and integers, recognized by their type, have
         /// inline keys: windows of a byte string's bytes, and an integer's
@@ -313,6 +322,11 @@ pub(crate) mod sealed {
 
     pub trait Sealed<K> {
         const SOURCE: InlineKeySource<K>;
+
+        /// Whether the nodes keep a latch word in their header, for a tree
+        /// that threads share (`tree/node/latch.rs`): only the strategy a
+        /// `BCTreeMap` wraps its own in, never a public one.
+        const LATCHED: bool = false;
     }
 
     impl<K> Sealed<K> for Auto {
@@ -334,7 +348,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{InlineKey, InlineWidth, InlineWord};
-    use crate::node::test_support::TestRng;
+    use crate::tree::test_support::TestRng;
 
     #[test]
     fn windows_big_endian_and_zero_padded() {

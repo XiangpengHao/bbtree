@@ -1,7 +1,7 @@
 //! A suite run's results: a CSV row per run, and a markdown summary under a
 //! header that records where and how the numbers were made.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::fs::File;
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -256,8 +256,8 @@ impl RunRecord {
         let status = match self.outcome {
             RunOutcome::NotApplicable => "n/a",
             RunOutcome::MissingData => "missing-data",
-            RunOutcome::Failed(_) => "failed",
-            RunOutcome::Measured { .. } => "ok",
+            RunOutcome::Failed(_) => RunLog::FAILED,
+            RunOutcome::Measured { .. } => RunLog::MEASURED,
         };
         let identity = [
             workload.name(),
@@ -321,14 +321,20 @@ impl RunRecord {
         }
     }
 
-    /// The perf counts per operation, in `PerfEvent::ALL` order.
-    fn perf_fields(measurement: CellMeasurement, perf_counts: Option<&PerfCounts>) -> [String; 5] {
+    /// The perf counts per operation, in `PerfEvent::ALL` order, to six
+    /// decimals: one event in a million operations, which rare events, such
+    /// as cache lines from memory on small maps, come down to.
+    fn perf_fields(
+        measurement: CellMeasurement,
+        perf_counts: Option<&PerfCounts>,
+    ) -> [String; PerfEvent::ALL.len()] {
         let CellMeasurement::Timing { operations, .. } = measurement else {
             return Default::default();
         };
         PerfEvent::ALL.map(|event| {
-            (perf_counts.and_then(|counts| counts.per_operation(event, operations)))
-                .map_or_else(String::new, |count| format!("{count:.3}"))
+            perf_counts.map_or_else(String::new, |counts| {
+                format!("{:.6}", counts.per_operation(event, operations))
+            })
         })
     }
 }
@@ -341,22 +347,31 @@ pub(crate) struct RunLog {
 }
 
 impl RunLog {
+    /// The columns that `compare` reads, and the statuses it tells apart.
+    pub(crate) const BENCHMARK_COLUMN: &str = "benchmark";
+    pub(crate) const MAP_COLUMN: &str = "map";
+    pub(crate) const SIZE_COLUMN: &str = "size";
+    pub(crate) const STATUS_COLUMN: &str = "status";
+    pub(crate) const TIME_COLUMN: &str = "ns_per_op";
+    pub(crate) const MEASURED: &str = "ok";
+    pub(crate) const FAILED: &str = "failed";
+
     const IDENTITY_COLUMNS: [&str; 8] = [
-        "benchmark",
-        "map",
+        Self::BENCHMARK_COLUMN,
+        Self::MAP_COLUMN,
         "key",
         "value",
-        "size",
+        Self::SIZE_COLUMN,
         "operation",
         "repetition",
-        "status",
+        Self::STATUS_COLUMN,
     ];
 
     /// Timing runs fill the first three and the last; memory runs the rest.
     const MEASURED_COLUMNS: [&str; 8] = [
         "operations",
         "elapsed_ns",
-        "ns_per_op",
+        Self::TIME_COLUMN,
         "entries",
         "map_bytes",
         "bytes_per_entry",
@@ -396,13 +411,13 @@ impl RunLog {
 
 /// Which number of a cell's runs a summary table shows.
 #[derive(Clone, Copy)]
-enum Statistic {
+pub(crate) enum Statistic {
     Median,
     Minimum,
 }
 
 impl Statistic {
-    fn of(self, mut values: Vec<f64>) -> Option<f64> {
+    pub(crate) fn of(self, mut values: Vec<f64>) -> Option<f64> {
         values.sort_by(f64::total_cmp);
         let middle = values.len() / 2;
         match self {
@@ -537,8 +552,10 @@ impl<'run> Summary<'run> {
         {
             return "failed".to_owned();
         }
-        self.value(row, map, statistic)
-            .map_or_else(|| "–".to_owned(), Self::format_number)
+        self.value(row, map, statistic).map_or_else(
+            || "–".to_owned(),
+            |value| ReportNumber::new(value).to_string(),
+        )
     }
 
     /// The comparison column's title, when both maps it compares are in the
@@ -566,13 +583,29 @@ impl<'run> Summary<'run> {
         };
         format!("{ratio:.2}×")
     }
+}
 
-    /// Three significant digits or so: `2.31`, `23.1`, `231`.
-    fn format_number(value: f64) -> String {
-        match value {
-            value if value < 10.0 => format!("{value:.2}"),
-            value if value < 100.0 => format!("{value:.1}"),
-            value => format!("{value:.0}"),
-        }
+/// A measured value as reports print it: three significant digits, as in
+/// `0.00312`, `2.31`, `23.1` and `231`, and whole numbers above that.
+pub(crate) struct ReportNumber {
+    value: f64,
+}
+
+impl ReportNumber {
+    pub(crate) fn new(value: f64) -> Self {
+        Self { value }
+    }
+}
+
+impl fmt::Display for ReportNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = self.value;
+        let magnitude = if value == 0.0 {
+            0
+        } else {
+            value.abs().log10().floor() as i32
+        };
+        let decimals = (2 - magnitude).max(0) as usize;
+        write!(formatter, "{value:.decimals$}")
     }
 }

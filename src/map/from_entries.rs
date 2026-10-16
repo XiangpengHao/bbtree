@@ -1,11 +1,11 @@
 //! Building a map from entries, as std's map does: [`FromIterator`], `From`
 //! an array, and [`Extend`].
 //!
-//! `extend` inserts each entry in turn. `collect` and `from` sort the
-//! entries by key, stably, and keep only the last of each run of equal keys,
-//! key and value, dropping the others in order; then they build the tree
-//! from the sorted entries, into full nodes, comparing no more keys
-//! (`node/build.rs`).
+//! `extend` inserts in input order, batching descents on large trees.
+//! `collect` and `from` sort entries by key, stably, and keep only the last
+//! key and value of each run of equal keys, dropping the others in order;
+//! then they build the tree from sorted entries, into full nodes, comparing
+//! no more keys (`tree/build.rs`).
 //!
 //! Like `new` and `Default`, `collect` and `from` make maps of the default
 //! strategy only, as std's make maps of the global allocator only: with a
@@ -17,27 +17,56 @@ use alloc::vec::Vec;
 use core::iter::Peekable;
 
 use super::BBTreeMap;
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::build::TreeBuilder;
+use crate::tree::build::TreeBuilder;
+use crate::tree::root::Tree;
 
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
     /// of equal keys is kept; the others are dropped in order.
-    fn from_sorted_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        Self::from_ascending_entries(LastOfEqualKeys {
+    fn from_sorted_keeping_last(entries: impl Iterator<Item = (K, V)>) -> Self {
+        let entries = LastOfEqualKeys {
             entries: entries.peekable(),
-        })
+        };
+        Self::from_ascending_entries(entries, Global)
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
+    /// Keeps chunking and lane state out of callers of `extend`. A partial
+    /// chunk is consumed before stopping, including non-fused iterators.
+    #[inline(never)]
+    fn extend_batches(&mut self, entries: impl Iterator<Item = (K, V)>)
+    where
+        K: Ord,
+    {
+        let mut entries = entries.fuse();
+        loop {
+            let batch: [_; 16] = core::array::from_fn(|_| entries.next());
+            if batch[15].is_none() {
+                for (key, value) in batch.into_iter().flatten() {
+                    self.tree.insert(key, value, &self.alloc, &mut self.length);
+                }
+                return;
+            }
+            self.insert_many(batch.map(|entry| entry.expect("a full batch")));
+        }
+    }
+
     /// A map of `entries`, whose keys ascend strictly, built into full nodes
-    /// comparing no keys (`node/build.rs`). Keys out of order make a map
-    /// whose searches give wrong answers, but that is memory-safe.
-    pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        let mut builder = TreeBuilder::new();
+    /// comparing no keys (`tree/build.rs`), on pages from `alloc`. Keys out
+    /// of order make a map whose searches give wrong answers, but that is
+    /// memory-safe.
+    pub(crate) fn from_ascending_entries(entries: impl Iterator<Item = (K, V)>, alloc: A) -> Self {
+        let mut builder = TreeBuilder::new(&alloc);
         builder.extend(entries);
-        Self::from_builder(builder)
+        let (tree, length) = builder.finish();
+        Self {
+            tree,
+            length,
+            alloc,
+        }
     }
 }
 
@@ -67,7 +96,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for BBTreeMap<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut entries: Vec<(K, V)> = iter.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_entries(entries.into_iter())
+        Self::from_sorted_keeping_last(entries.into_iter())
     }
 }
 
@@ -86,21 +115,42 @@ impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BBTreeMap<K, V> {
     /// ```
     fn from(mut entries: [(K, V); N]) -> Self {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_entries(entries.into_iter())
+        Self::from_sorted_keeping_last(entries.into_iter())
     }
 }
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Extend<(K, V)> for BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Extend<(K, V)>
+    for BBTreeMap<K, V, S, A>
+{
     /// Inserts each entry in turn, as `insert` does.
+    /// Large trees may pull sixteen entries ahead; a panic can drop entries
+    /// already pulled from the iterator but not yet inserted.
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
-        for (key, value) in iter {
-            self.insert(key, value);
+        let mut entries = iter.into_iter();
+        // Automatic batching must not put large inline values in several
+        // temporary arrays. Keep its input buffer within one 4 KiB page.
+        if core::mem::size_of::<[Option<(K, V)>; 16]>() > 4096
+            || entries.size_hint().1.is_some_and(|remaining| {
+                !Tree::<K, V, S>::batches(self.length.saturating_add(remaining))
+            })
+        {
+            for (key, value) in entries {
+                self.tree.insert(key, value, &self.alloc, &mut self.length);
+            }
+            return;
         }
+        while !Tree::<K, V, S>::batches(self.length) {
+            let Some((key, value)) = entries.next() else {
+                return;
+            };
+            self.tree.insert(key, value, &self.alloc, &mut self.length);
+        }
+        self.extend_batches(entries);
     }
 }
 
-impl<'a, K: Ord + Copy, V: Copy, S: InlineKeyStrategy<K>> Extend<(&'a K, &'a V)>
-    for BBTreeMap<K, V, S>
+impl<'a, K: Ord + Copy, V: Copy, S: InlineKeyStrategy<K>, A: Allocator + Clone>
+    Extend<(&'a K, &'a V)> for BBTreeMap<K, V, S, A>
 {
     /// Inserts a copy of each entry in turn, as `insert` does.
     fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {

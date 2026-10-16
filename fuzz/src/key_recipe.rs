@@ -17,8 +17,9 @@ use libfuzzer_sys::arbitrary::{self, Arbitrary};
 pub struct Stems(Vec<Vec<u8>>);
 
 impl Stems {
-    /// Long enough for nodes to share more than an inline key's 8 bytes past
-    /// their fences (D33); longer stems only make keys slower to compare.
+    /// Long enough for keys to share more than an inline key's 8 bytes past
+    /// their fences, and across the tree (D50); longer stems only make keys
+    /// slower to compare.
     const MAX_LEN: usize = 40;
 
     /// Stem `index`, modulo their number; empty if there are none.

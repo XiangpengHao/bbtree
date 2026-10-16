@@ -1,6 +1,11 @@
 //! Iterating over a set: [`Iter`] and [`Range`] by shared reference, and
 //! [`IntoIter`] by value, each the map's iterator of the same job with the
 //! values dropped from its items (`map/iter.rs`, `map/into_iter.rs`).
+//!
+//! Removing the elements a predicate picks: [`ExtractIf`], on the map's walk
+//! (`map/extract_if.rs`), with the predicate seeing each element alone, as
+//! std's. Like the map's, it cuts the range out of the set, and puts its
+//! kept elements back: O(log n) beyond the range's elements.
 
 #![forbid(unsafe_code)]
 
@@ -10,9 +15,10 @@ use core::iter::FusedIterator;
 use core::ops::RangeBounds;
 
 use super::{BBTreeSet, SetValZST};
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::map::{self, Keys};
-use crate::node::handle::KeyRun;
+use crate::map::{self, ExtractionWalk, Keys};
+use crate::tree::node::leaf::KeyRun;
 
 /// An iterator over the items of a `BBTreeSet`.
 ///
@@ -100,7 +106,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Iter<'_, T, S> {
 
 impl<'a, T, S: InlineKeyStrategy<T>> Iter<'a, T, S> {
     /// The elements after the walk's front, a leaf's run at a time, which
-    /// the walk moves past at once (`node/walk.rs`): what the operations on
+    /// the walk moves past at once (`tree/walk.rs`): what the operations on
     /// two sets visit.
     pub(super) fn next_key_run(&mut self) -> Option<KeyRun<'a, T>> {
         self.iter.next_key_run()
@@ -221,11 +227,11 @@ impl<T, S: InlineKeyStrategy<T>> Default for Range<'_, T, S> {
 /// (provided by the [`IntoIterator`] trait). See its documentation for more.
 ///
 /// [`into_iter`]: IntoIterator::into_iter
-pub struct IntoIter<T, S: InlineKeyStrategy<T> = Auto> {
-    iter: map::IntoIter<T, SetValZST, S>,
+pub struct IntoIter<T, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    iter: map::IntoIter<T, SetValZST, S, A>,
 }
 
-impl<T, S: InlineKeyStrategy<T>> Iterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator for IntoIter<T, S, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -237,23 +243,25 @@ impl<T, S: InlineKeyStrategy<T>> Iterator for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> DoubleEndedIterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> DoubleEndedIterator for IntoIter<T, S, A> {
     fn next_back(&mut self) -> Option<T> {
         self.iter.next_back().map(|(element, _)| element)
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> ExactSizeIterator for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> ExactSizeIterator for IntoIter<T, S, A> {
     fn len(&self) -> usize {
         self.iter.len()
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> FusedIterator for IntoIter<T, S> {}
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> FusedIterator for IntoIter<T, S, A> {}
 
 /// Prints the map's iterator, as std's does:
 /// `IntoIter { iter: [(1, SetValZST)] }`.
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for IntoIter<T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for IntoIter<T, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoIter")
             .field("iter", &self.iter)
@@ -261,7 +269,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> Default for IntoIter<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone + Default> Default for IntoIter<T, S, A> {
     /// Creates an empty `bbtree::bbtree_set::IntoIter`.
     ///
     /// ```
@@ -276,7 +284,7 @@ impl<T, S: InlineKeyStrategy<T>> Default for IntoIter<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Gets an iterator that visits the elements in the `BBTreeSet` in
     /// ascending order.
     ///
@@ -337,7 +345,7 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<'a, T, S: InlineKeyStrategy<T>> IntoIterator for &'a BBTreeSet<T, S> {
+impl<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> IntoIterator for &'a BBTreeSet<T, S, A> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T, S>;
 
@@ -346,9 +354,9 @@ impl<'a, T, S: InlineKeyStrategy<T>> IntoIterator for &'a BBTreeSet<T, S> {
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> IntoIterator for BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> IntoIterator for BBTreeSet<T, S, A> {
     type Item = T;
-    type IntoIter = IntoIter<T, S>;
+    type IntoIter = IntoIter<T, S, A>;
 
     /// Gets an iterator for moving out the `BBTreeSet`'s contents in
     /// ascending order.
@@ -363,9 +371,111 @@ impl<T, S: InlineKeyStrategy<T>> IntoIterator for BBTreeSet<T, S> {
     /// let v: Vec<_> = set.into_iter().collect();
     /// assert_eq!(v, [1, 2, 3, 4]);
     /// ```
-    fn into_iter(self) -> IntoIter<T, S> {
+    fn into_iter(self) -> IntoIter<T, S, A> {
         IntoIter {
             iter: self.map.into_iter(),
+        }
+    }
+}
+
+/// An iterator produced by calling `extract_if` on [`BBTreeSet`].
+#[must_use = "iterators are lazy and do nothing unless consumed; \
+              use `retain` or `extract_if().for_each(drop)` to remove and discard elements"]
+pub struct ExtractIf<'a, T, R, F, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    walk: ExtractionWalk<'a, T, SetValZST, R, S, A>,
+    pred: F,
+}
+
+impl<T, R, F, S, A> Iterator for ExtractIf<'_, T, R, F, S, A>
+where
+    T: PartialOrd,
+    R: RangeBounds<T>,
+    F: FnMut(&T) -> bool,
+    S: InlineKeyStrategy<T>,
+    A: Allocator + Clone,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        let Self { walk, pred } = self;
+        walk.next(&mut |element, _| pred(element))
+            .map(|(element, _)| element)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.walk.size_hint()
+    }
+}
+
+impl<T, R, F, S, A> FusedIterator for ExtractIf<'_, T, R, F, S, A>
+where
+    T: PartialOrd,
+    R: RangeBounds<T>,
+    F: FnMut(&T) -> bool,
+    S: InlineKeyStrategy<T>,
+    A: Allocator + Clone,
+{
+}
+
+/// Prints the next element to visit, as std's does.
+impl<T: fmt::Debug, R, F, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for ExtractIf<'_, T, R, F, S, A>
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtractIf")
+            .field("peek", &self.walk.peek().map(|(element, _)| element))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
+    /// Creates an iterator that visits elements in the specified range in
+    /// ascending order and uses a closure to determine if an element should
+    /// be removed.
+    ///
+    /// If the closure returns `true`, the element is removed from the set
+    /// and yielded. If the closure returns `false`, or panics, the element
+    /// remains in the set and will not be yielded.
+    ///
+    /// If the returned `ExtractIf` is not exhausted, e.g. because it is
+    /// dropped without iterating or the iteration short-circuits, then the
+    /// remaining elements will be retained. Use `extract_if().for_each(drop)`
+    /// if you do not need the returned iterator, or [`retain`] with a negated
+    /// predicate if you also do not need to restrict the range.
+    ///
+    /// Unlike std's, which passes over the range in place, this walk cuts the
+    /// range out of the set, and puts its kept elements back: O(log n)
+    /// beyond the range's elements.
+    ///
+    /// [`retain`]: BBTreeSet::retain
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::BBTreeSet;
+    ///
+    /// // Splitting a set into even and odd values, reusing the original set:
+    /// let mut set: BBTreeSet<i32> = (0..8).collect();
+    /// let evens: BBTreeSet<_> = set.extract_if(.., |v| v % 2 == 0).collect();
+    /// let odds = set;
+    /// assert_eq!(evens.into_iter().collect::<Vec<_>>(), vec![0, 2, 4, 6]);
+    /// assert_eq!(odds.into_iter().collect::<Vec<_>>(), vec![1, 3, 5, 7]);
+    ///
+    /// // Splitting a set into low and high halves, reusing the original set:
+    /// let mut set: BBTreeSet<i32> = (0..8).collect();
+    /// let low: BBTreeSet<_> = set.extract_if(0..4, |_v| true).collect();
+    /// let high = set;
+    /// assert_eq!(low.into_iter().collect::<Vec<_>>(), [0, 1, 2, 3]);
+    /// assert_eq!(high.into_iter().collect::<Vec<_>>(), [4, 5, 6, 7]);
+    /// ```
+    pub fn extract_if<F, R>(&mut self, range: R, pred: F) -> ExtractIf<'_, T, R, F, S, A>
+    where
+        R: RangeBounds<T>,
+        F: FnMut(&T) -> bool,
+    {
+        ExtractIf {
+            walk: ExtractionWalk::new(&mut self.map, range),
+            pred,
         }
     }
 }

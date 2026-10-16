@@ -1,0 +1,12 @@
+[application]
+name = "bbtree-vis"
+
+[web.app]
+title = "bbtree: how a lookup finds its key"
+
+[web.resource]
+style = []
+script = []
+
+[web.resource.dev]
+script = []

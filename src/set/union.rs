@@ -9,6 +9,7 @@ use core::ops::BitOr;
 
 use super::BBTreeSet;
 use super::merge::{HeldSide, MergeSides};
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the union of `BBTreeSet`s.
@@ -70,22 +71,15 @@ impl<T, S> Clone for Union<'_, T, S> {
 }
 
 /// Prints as std's does: `Union(MergeIterInner(..))`.
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Union").field(&PrintedMerge(self)).finish()
+        f.debug_tuple("Union")
+            .field(&self.sides.printed_as_merge_iter(self.held))
+            .finish()
     }
 }
 
-/// A union's merge, printed as std's `MergeIterInner`.
-struct PrintedMerge<'u, 'a, T, S>(&'u Union<'a, T, S>);
-
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.sides.print_as_std(f, self.0.held)
-    }
-}
-
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Visits the elements representing the union, i.e., all the elements
     /// in `self` or `other`, without duplicates, in ascending order.
     ///
@@ -116,8 +110,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitOr<&BBTreeSet<T, S>> for &BBTreeSet<T, S> {
-    type Output = BBTreeSet<T, S>;
+impl<T: Ord + Clone, S: InlineKeyStrategy<T>, A: Allocator + Clone> BitOr<&BBTreeSet<T, S, A>>
+    for &BBTreeSet<T, S, A>
+{
+    type Output = BBTreeSet<T, S, A>;
 
     /// Returns the union of `self` and `rhs` as a new `BBTreeSet<T>`, built
     /// into full nodes without searching it.
@@ -133,7 +129,7 @@ impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitOr<&BBTreeSet<T, S>> for &BBTre
     /// let result = &a | &b;
     /// assert_eq!(result, BBTreeSet::from([1, 2, 3, 4, 5]));
     /// ```
-    fn bitor(self, rhs: &BBTreeSet<T, S>) -> BBTreeSet<T, S> {
-        BBTreeSet::from_ascending(self.union(rhs).cloned())
+    fn bitor(self, rhs: &BBTreeSet<T, S, A>) -> BBTreeSet<T, S, A> {
+        BBTreeSet::from_ascending(self.union(rhs).cloned(), self.allocator().clone())
     }
 }

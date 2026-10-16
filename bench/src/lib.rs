@@ -12,6 +12,8 @@
 //! - The binary fixes the global allocator: `bbtree-bench` times cells on
 //!   plain mimalloc, and `bbtree-bench-memory` counts live bytes instead
 //!   (`memory.rs`).
+//! - `bbtree-scaling` measures throughput as threads are added, on maps
+//!   threads share (`scaling.rs`).
 //! - Some key kinds are read from real-world datasets (`datasets.rs`), which
 //!   live outside the repository: `fetch` downloads them and `verify-data`
 //!   checks them.
@@ -29,6 +31,10 @@ mod parallel_setup;
 mod perf_counters;
 mod random;
 mod report;
+mod run_comparison;
+mod scaling;
+#[cfg(feature = "inspect")]
+pub mod separator_census;
 mod suite_runner;
 mod suites;
 mod values;
@@ -38,9 +44,11 @@ use cell_runner::CellRun;
 use command_line::Invocation;
 use datasets::{DataDirectory, DatasetFetch};
 use memory::RunMode;
+use run_comparison::RunComparison;
 use suite_runner::SuiteRunner;
 
 pub use memory::{BaseAllocator, CountingAllocator};
+pub use scaling::run as run_scaling;
 
 /// Runs either binary's command line. The memory binary passes its global
 /// allocator, whose live-byte count its cells report.
@@ -58,6 +66,9 @@ pub fn run(counting_allocator: Option<&'static CountingAllocator>) -> ExitCode {
         Ok(Invocation::FetchData) => DataDirectory::from_environment()
             .and_then(|directory| DatasetFetch::fetch_into(&directory)),
         Ok(Invocation::RunSuites(request)) => SuiteRunner::new(request, mode).run(),
+        Ok(Invocation::CompareRuns(request)) => {
+            RunComparison::load(&request).map(|comparison| print!("{}", comparison.markdown()))
+        }
         Ok(Invocation::MeasureCell(request)) => CellRun::new(request, mode).measure_and_report(),
         Err(message) => Err(format!("{message}\n\n{}", Invocation::usage())),
     };

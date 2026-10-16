@@ -13,8 +13,10 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::Sub;
 
-use super::merge::{MergeSides, MergeStep};
+use super::lookups::LookupsAhead;
+use super::merge::{MergeSides, MergeStep, SetCursor};
 use super::{BBTreeSet, Iter};
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the difference of `BBTreeSet`s.
@@ -25,8 +27,8 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
 /// [`difference`]: BBTreeSet::difference
 #[must_use = "this returns the difference as an iterator, \
               without modifying either input set"]
-pub struct Difference<'a, T: 'a, S: InlineKeyStrategy<T> = Auto> {
-    strategy: DifferenceStrategy<'a, T, S>,
+pub struct Difference<'a, T: 'a, S: InlineKeyStrategy<T> = Auto, A: Allocator + Clone = Global> {
+    strategy: DifferenceStrategy<'a, T, S, A>,
 }
 
 /// How a [`Difference`] finds the elements of `self` not in `other`.
@@ -34,7 +36,7 @@ pub struct Difference<'a, T: 'a, S: InlineKeyStrategy<T> = Auto> {
     clippy::large_enum_variant,
     reason = "the iterator lives by value, as std's; boxing the walks would allocate for every set operation"
 )]
-enum DifferenceStrategy<'a, T, S: InlineKeyStrategy<T>> {
+enum DifferenceStrategy<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> {
     /// Walks all of `self` and some of `other`, side by side, a leaf's run
     /// of each at a time (`merge.rs`).
     Stitch {
@@ -43,16 +45,19 @@ enum DifferenceStrategy<'a, T, S: InlineKeyStrategy<T>> {
         /// `Peekable`, holds it peeked: for printing as std's does.
         other_peeked: bool,
     },
-    /// Walks `self` and looks each element up in `other`.
+    /// Walks `self` and looks each element up in `other`, a batch ahead.
     Search {
         self_iter: Iter<'a, T, S>,
-        other_set: &'a BBTreeSet<T, S>,
+        other_set: &'a BBTreeSet<T, S, A>,
+        lookups: LookupsAhead,
     },
     /// Walks `self`, whose elements left are not in `other`.
     Iterate(Iter<'a, T, S>),
 }
 
-impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Difference<'a, T, S> {
+impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
+    for Difference<'a, T, S, A>
+{
     type Item = &'a T;
 
     // Inlined into the caller's loop, see `merge.rs`.
@@ -88,7 +93,12 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Difference<'a, T, S> {
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
-            } => self_iter.find(|&self_next| !other_set.contains(self_next)),
+                lookups,
+            } => loop {
+                if let (self_next, false) = lookups.next(self_iter, other_set)? {
+                    return Some(self_next);
+                }
+            },
             DifferenceStrategy::Iterate(iter) => iter.next(),
         }
     }
@@ -99,33 +109,37 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Difference<'a, T, S> {
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
+                ..
             } => (self_iter.len(), other_set.len()),
             DifferenceStrategy::Iterate(iter) => (iter.len(), 0),
         };
         (self_len.saturating_sub(other_len), Some(self_len))
     }
 
-    fn fold<A, F>(self, accumulator: A, mut fold: F) -> A
+    fn fold<B, F>(self, accumulator: B, mut fold: F) -> B
     where
-        F: FnMut(A, Self::Item) -> A,
+        F: FnMut(B, Self::Item) -> B,
     {
         match self.strategy {
             DifferenceStrategy::Stitch { sides, .. } => {
-                sides.fold_steps::<A, true, false>(accumulator, |accumulator, step| match step {
+                sides.fold_steps::<B, true, false>(accumulator, |accumulator, step| match step {
                     MergeStep::Left(element) => fold(accumulator, element),
                     MergeStep::Right(_) | MergeStep::Both(_) => accumulator,
                 })
             }
             DifferenceStrategy::Search {
-                self_iter,
+                mut self_iter,
                 other_set,
-            } => self_iter.fold(accumulator, |accumulator, element| {
-                if other_set.contains(element) {
-                    accumulator
-                } else {
-                    fold(accumulator, element)
+                mut lookups,
+            } => {
+                let mut accumulator = accumulator;
+                while let Some((element, found)) = lookups.next(&mut self_iter, other_set) {
+                    if !found {
+                        accumulator = fold(accumulator, element);
+                    }
                 }
-            }),
+                accumulator
+            }
             DifferenceStrategy::Iterate(iter) => iter.fold(accumulator, fold),
         }
     }
@@ -135,9 +149,12 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Difference<'a, T, S> {
     }
 }
 
-impl<T: Ord, S: InlineKeyStrategy<T>> FusedIterator for Difference<'_, T, S> {}
+impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> FusedIterator
+    for Difference<'_, T, S, A>
+{
+}
 
-impl<T, S: InlineKeyStrategy<T>> Clone for Difference<'_, T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Difference<'_, T, S, A> {
     fn clone(&self) -> Self {
         let strategy = match &self.strategy {
             DifferenceStrategy::Stitch {
@@ -150,9 +167,11 @@ impl<T, S: InlineKeyStrategy<T>> Clone for Difference<'_, T, S> {
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
+                lookups,
             } => DifferenceStrategy::Search {
                 self_iter: self_iter.clone(),
                 other_set,
+                lookups: *lookups,
             },
             DifferenceStrategy::Iterate(iter) => DifferenceStrategy::Iterate(iter.clone()),
         };
@@ -161,13 +180,17 @@ impl<T, S: InlineKeyStrategy<T>> Clone for Difference<'_, T, S> {
 }
 
 /// Prints as std's does, the strategy's name and field names included.
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Difference<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for Difference<'_, T, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Difference").field(&self.strategy).finish()
     }
 }
 
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
+    for DifferenceStrategy<'_, T, S, A>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Stitch {
@@ -179,7 +202,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'
                 .field(
                     "other_iter",
                     &PrintedAsPeekable {
-                        sides,
+                        other: &sides.right,
                         peeked: *other_peeked,
                     },
                 )
@@ -188,6 +211,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'
             Self::Search {
                 self_iter,
                 other_set,
+                ..
             } => f
                 .debug_struct("Search")
                 .field("self_iter", self_iter)
@@ -201,14 +225,14 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for DifferenceStrategy<'
 /// `other`'s side of a difference, printed as std's `Peekable` over it is,
 /// with its next element, or the end, peeked or not.
 struct PrintedAsPeekable<'d, 'a, T, S> {
-    sides: &'d MergeSides<'a, T, S>,
+    other: &'d SetCursor<'a, T, S>,
     peeked: bool,
 }
 
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsPeekable<'_, '_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let other = &self.sides.right;
-        let peeked = self.peeked.then(|| other.first_left());
+        let other = self.other;
+        let peeked = self.peeked.then(|| other.first_remaining());
         f.debug_struct("Peekable")
             .field("iter", &other.printed_as_iter(self.peeked))
             .field("peeked", &peeked)
@@ -216,7 +240,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsPeekable<'_
     }
 }
 
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Visits the elements representing the difference, i.e., the elements
     /// that are in `self` but not in `other`, in ascending order.
     ///
@@ -236,7 +260,7 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     /// let diff: Vec<_> = a.difference(&b).cloned().collect();
     /// assert_eq!(diff, [1]);
     /// ```
-    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, T, S>
+    pub fn difference<'a>(&'a self, other: &'a Self) -> Difference<'a, T, S, A>
     where
         T: Ord,
     {
@@ -262,6 +286,7 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
                 _ if other.prefers_lookups(self.len()) => DifferenceStrategy::Search {
                     self_iter: self.iter(),
                     other_set: other,
+                    lookups: LookupsAhead::default(),
                 },
                 _ => DifferenceStrategy::Stitch {
                     sides: MergeSides::new(self.iter(), other.iter()),
@@ -275,8 +300,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<T: Ord + Clone, S: InlineKeyStrategy<T>> Sub<&BBTreeSet<T, S>> for &BBTreeSet<T, S> {
-    type Output = BBTreeSet<T, S>;
+impl<T: Ord + Clone, S: InlineKeyStrategy<T>, A: Allocator + Clone> Sub<&BBTreeSet<T, S, A>>
+    for &BBTreeSet<T, S, A>
+{
+    type Output = BBTreeSet<T, S, A>;
 
     /// Returns the difference of `self` and `rhs` as a new `BBTreeSet<T>`,
     /// built into full nodes without searching it.
@@ -292,7 +319,7 @@ impl<T: Ord + Clone, S: InlineKeyStrategy<T>> Sub<&BBTreeSet<T, S>> for &BBTreeS
     /// let result = &a - &b;
     /// assert_eq!(result, BBTreeSet::from([1, 2]));
     /// ```
-    fn sub(self, rhs: &BBTreeSet<T, S>) -> BBTreeSet<T, S> {
-        BBTreeSet::from_ascending(self.difference(rhs).cloned())
+    fn sub(self, rhs: &BBTreeSet<T, S, A>) -> BBTreeSet<T, S, A> {
+        BBTreeSet::from_ascending(self.difference(rhs).cloned(), self.allocator().clone())
     }
 }

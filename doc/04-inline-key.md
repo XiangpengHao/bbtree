@@ -1,8 +1,8 @@
 # 04 — Inline keys
 
-Status: draft. The problem, the evidence, the layout and the mechanism
-((b) + (d), section 3) are settled; the details in section 4 are open. Inline keys come after the node prefetch and the
-B+-tree refactor (D17).
+Status: implemented (D18), on the B+-tree (D17). The problem, the evidence,
+the layout and the mechanism ((b) + (d), section 3) are as built; widths per
+key type are D31, D32 and D43, prefix stripping is 05-fence-key.md.
 
 ## 1. Problem
 
@@ -37,25 +37,19 @@ touching the heap**.
 - **Inline keys are stored beside the keys, as a parallel dense array in the
   node,** not inside a fatter key element; see "Layout" below.
 - **Bytes-like keys** (`String`, `str`, `Box<str>`, `Arc<str>`, `Vec<u8>`,
-  `Box<[u8]>`, `[u8; N]`, `Bytes`, and the user-key part of memtable keys): the
-  first **8 bytes** to start (one constant, so 16 is a one-line change; Q7),
-  big-endian, zero-padded. A tie falls back to the full
-  comparison.
+  `Box<[u8]>`, `[u8; N]`, `Bytes`, and the user-key part of memtable keys):
+  8-byte windows, big-endian, zero-padded, of which nodes keep 8 bytes for
+  heap strings' leaves, 4 for their internal nodes and 2 for byte arrays
+  (D43, D32; Q7). A tie falls back to the full comparison.
 - **Search runs over the inline keys,** which compare in a register, so the
   search strategy follows the inline key, not `K`. On a tie, the remaining range
   of equal inline keys is searched on full keys. The run is found by a linear
   count over every slot with AVX-512, a branchless binary search otherwise
   (Q6).
-- **Node prefetch** covers the header, the inline-key array and the key area by
-  capacity (D20). Prefetching only the inline array is not enough: every hit on
-  a key longer than the inline width, and every tie, reads a key line, which
-  then sits on the critical path. Measured on wiki titles at 10M, `get_hit`:
-  878 ns with the inline array only, 704 ns with the key area too.
-  - **Rechecked by node kind** (2026-10-08, 1M entries, AVX-512 build, one
-    run each). Leaves prefetching only their inline keys: misses 4–25%
-    faster, hits 5–34% slower, inserts 10–22% slower (hash32 worst on hits
-    and inserts, str-json best on misses). Internal nodes prefetching only
-    theirs: within noise. Both kinds keep the full prefetch.
+- **No node prefetch** (D46). Every hit on a key longer than its inline key,
+  and every tie, reads a key line, which sits on the critical path; the
+  layouts put it where the search already reads (D29, D32), and internal
+  nodes keep only their separators' inline keys, the keys being heads (D49).
 - **Both leaves and internal nodes carry inline keys.** Every lookup searches
   both, and in both each probe would otherwise read the heap. Measured: both
   benefit (Q3).
@@ -121,8 +115,8 @@ let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
 Opting in goes through `with_strategy`, not an annotated `new()`: a `new()`
 generic over `S` breaks plain `BBTreeMap::new()` with "type annotations
 needed", because default type parameters don't drive inference. `new()` stays
-`Auto`-only, as std's is `Global`-only. Until the allocator parameter lands, the
-strategy is the third parameter.
+`Auto`-only, as std's is `Global`-only. The strategy is the third parameter,
+before the allocator (D8), so opting in names only the strategy.
 
 How `Auto` recognizes std types inside the tree. `type_id_of` is `TypeId`
 with lifetimes erased (dtolnay's `typeid` trick, vendored):
@@ -142,7 +136,7 @@ if is_byte_string::<K>() && is_byte_string::<Q>() {
 ```
 
 - **Drop-in compatibility.** `BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
-  means; `A` sits in std's allocator slot, and `S` is defaulted. Every method is
+  means; `S` and the allocator `A` after it are defaulted. Every method is
   identical for every `S`.
 - **Both sides must be recognized.** `Auto` uses inline keys only when **both** `K`
   and `Q` are listed types, because `K: Borrow<Q>` allows a user type with its
@@ -181,8 +175,8 @@ fat element:     | hdr | (i0,k0) (i1,k1) … (i24,k24) | free | … v1 v0 | head
 Both cost 8 bytes per entry. The parallel array wins on what the search
 touches:
 
-- **Search lines:** 4 instead of 13 while inline keys decide. Prefetch still
-  covers the key lines, which hits and ties read (section 3).
+- **Search lines:** 4 instead of 13 while inline keys decide. Hits and ties
+  still read key lines (section 3).
 - **Search loop:** runs over a dense `[u64]`, which can be vectorized.
 - **Hot set:** internal nodes keep only inline-key arrays and edges hot, about 4×
   less, so more upper levels stay in L1/L2.
@@ -226,8 +220,8 @@ only.
 
 **Q5. (resolved)** The name is **inline key**: the `InlineKey` trait.
 
-**Q7. Width: start with 8 bytes, decide later on real keys.** The width is
-one constant (`InlineWord`), so trying 16 is a one-line change. Real key sets tie on
+**Q7. (resolved) Width: 8-byte windows, of which each key type keeps 2, 4 or
+8 bytes** (D18), by what a tie costs (05-fence-key.md, "Width"). Real key sets tie on
 8-byte prefixes far more than the synthetic benchmark keys, which almost never
 tie. Fraction of sorted neighbours sharing the first 8 / 16 bytes
 (`~/.cache/bbtree-bench`, see each `SOURCE.md`):
@@ -249,8 +243,8 @@ AVX-512, a branchless binary search otherwise.**
   inline keys below the target and those equal to it, masked by `len`, so
   the run is `below..below + equal`. Its trip count is a constant per node
   kind, so for 21 slots each count compiles to three AVX-512 compares and
-  no loop, branch or dependent load. It reads slots past `len`,
-  so a new node zeroes its inline-key array.
+  no loop, branch or dependent load. It reads slots past `len`, so those
+  hold the greatest inline key.
 - **The search:** a branchless binary search for the run's start, then a
   scan for its end. The scan replaced a second binary search, whose exit
   depended on where the first one ended: on hits it mispredicted about 0.5
@@ -330,6 +324,3 @@ AVX-512, a branchless binary search otherwise.**
   - **Last checked:** 2026-10-07. Design work only; stabilization in later years.
 - [ ] **AVX2: count or search?** It takes the search; one run was mixed
   (Q6). Settle it if AVX2 builds matter.
-- [ ] **Long shared prefixes:** per-node prefix stripping, designed in
-  05-fence-key.md.
-

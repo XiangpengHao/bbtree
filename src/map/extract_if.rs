@@ -2,14 +2,14 @@
 //! it, as std's.
 //!
 //! The walk cuts the map's tree at the range's bounds when made
-//! (`split_off.rs`): the entries before the range stay where they are, as
+//! (`tree/cut.rs`): the entries before the range stay where they are, as
 //! the start of the tree it keeps, and those after it are held aside. It
 //! takes the range's entries out in order, by value, and appends those the
 //! predicate passes over to the kept tree, as `collect` builds one
-//! (`node/build.rs`); each one the predicate picks is handed out as it is
+//! (`tree/build.rs`); each one the predicate picks is handed out as it is
 //! taken, or, by `retain`, dropped. When dropped, the walk appends the
 //! range's entries it has not visited, untested, and joins the entries
-//! after the range back on (`node/join.rs`). That is O(log n) beyond the
+//! after the range back on (`tree/join.rs`). That is O(log n) beyond the
 //! range's entries, where std's walk passes over them in place.
 //!
 //! The only `Ord` calls are the two searches for the bounds, each before
@@ -34,50 +34,49 @@
 use core::fmt;
 use core::iter::{self, FusedIterator};
 use core::mem;
-use core::ops::{Bound, ControlFlow, RangeBounds, RangeFull};
+use core::ops::{ControlFlow, RangeBounds};
 
 use super::BBTreeMap;
-use super::into_iter::Deallocate;
+use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::node::build::TreeBuilder;
-use crate::node::handle::Subtree;
-use crate::node::inline_keys::InlinedKey;
-use crate::node::page::{FreshPage, PageByKind};
-use crate::node::path::{FirstEdge, KeySide, Path, PathMut};
-use crate::node::walk::DyingWalk;
-
-#[cfg(test)]
-#[path = "concat_tests.rs"]
-mod tests;
+use crate::tree::build::TreeBuilder;
+use crate::tree::join::DetachedTree;
+use crate::tree::node_stack::KeySide;
+use crate::tree::root::Tree;
+use crate::tree::walk::DyingWalk;
 
 /// An iterator produced by calling `extract_if` on [`BBTreeMap`].
 #[must_use = "iterators are lazy and do nothing unless consumed; \
               use `retain` to remove and drop elements"]
-pub struct ExtractIf<'a, K, V, R, F, S: InlineKeyStrategy<K> = Auto> {
-    walk: ExtractionWalk<'a, K, V, R, S>,
+pub struct ExtractIf<'a, K, V, R, F, S: InlineKeyStrategy<K> = Auto, A: Allocator + Clone = Global>
+{
+    walk: ExtractionWalk<'a, K, V, R, S, A>,
     pred: F,
 }
 
 /// The walk of an `extract_if`, but for its predicate, which each step
-/// takes.
-pub(crate) struct ExtractionWalk<'a, K, V, R, S: InlineKeyStrategy<K>> {
+/// takes. Every piece of the map's tree it holds frees its pages to a clone
+/// of the map's allocator.
+pub(crate) struct ExtractionWalk<'a, K, V, R, S: InlineKeyStrategy<K>, A: Allocator + Clone> {
     /// Empty until the walk is dropped, when it gets back the entries not
     /// handed out.
-    map: &'a mut BBTreeMap<K, V, S>,
-    /// Whether the map had a tree, which it keeps even if no entry stays.
+    map: &'a mut BBTreeMap<K, V, S, A>,
+    /// Whether the map had a tree, which it keeps even if no entry stays, as
+    /// std's map keeps an empty root after losing its entries, which decides
+    /// whether `range` checks its bounds.
     had_tree: bool,
     /// The map's entries not handed out: its length less those the walk has
     /// handed out, which std's walk counts down in the map as it goes. The
     /// kept tree's builder counts those it dropped, which a panicking
-    /// `InlineKey` stopped it from placing (`node/build.rs`).
+    /// `InlineKey` stopped it from placing (`tree/build.rs`).
     length: usize,
     /// The entries before the range, where they were, and then those in it
     /// visited and kept, in order.
-    kept: TreeBuilder<K, V, S>,
+    kept: TreeBuilder<K, V, S, A>,
     /// The range's entries not kept or handed out yet.
-    source: ExtractionSource<K, V, S>,
+    source: ExtractionSource<K, V, S, A>,
     /// The entries after the range, which come back as they are.
-    after: DetachedTree<K, V, S>,
+    after: DetachedTree<K, V, S, A>,
     /// The range, done with once the tree is cut at its bounds, and dropped
     /// with the walk, as std's is.
     range: R,
@@ -86,18 +85,18 @@ pub(crate) struct ExtractionWalk<'a, K, V, R, S: InlineKeyStrategy<K>> {
 /// The range's entries an extraction has neither kept nor handed out yet,
 /// in order: apart from the tree it keeps them in, so that one `extend` of
 /// that tree can take a run of them.
-struct ExtractionSource<K, V, S: InlineKeyStrategy<K>> {
+struct ExtractionSource<K, V, S: InlineKeyStrategy<K>, A: Allocator> {
     /// The range's entries not taken out yet, from the front of their own
     /// tree, which this walk owns and frees as it goes.
-    rest: DyingWalk<K, V, S, Deallocate<K, V, S>>,
+    rest: DyingWalk<K, V, S, A>,
     /// The entry taken out last, while it is tested: kept if that panics.
-    testing: Option<(K, V)>,
+    under_test: Option<(K, V)>,
     /// Whether the walk went past the range's last entry: it takes nothing
     /// more out, and peeks at nothing.
     finished: bool,
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> ExtractionSource<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> ExtractionSource<K, V, S, A> {
     /// The entries to keep, in order, up to one that `pick` picks, which
     /// goes to `on_pick`, and on past it only if that says to continue: the
     /// range's entries that `pick` passes over.
@@ -115,11 +114,11 @@ impl<K, V, S: InlineKeyStrategy<K>> ExtractionSource<K, V, S> {
                     self.finished = true;
                     return None;
                 };
-                let (key, value) = self.testing.insert(entry);
+                let (key, value) = self.under_test.insert(entry);
                 if !pick(key, value) {
-                    return self.testing.take();
+                    return self.under_test.take();
                 }
-                let picked = self.testing.take().expect("the entry just tested");
+                let picked = self.under_test.take().expect("the entry just tested");
                 if on_pick(picked).is_break() {
                     return None;
                 }
@@ -128,48 +127,31 @@ impl<K, V, S: InlineKeyStrategy<K>> ExtractionSource<K, V, S> {
     }
 }
 
-/// A tree held apart from any map, as the entries after the range are while
-/// the walk lasts: taken apart if dropped.
-struct DetachedTree<K, V, S: InlineKeyStrategy<K>>(Option<Subtree<K, V, S>>);
-
-impl<K, V, S: InlineKeyStrategy<K>> DetachedTree<K, V, S> {
-    /// The first entry, for `Debug` to print where std's walk would.
-    fn first_entry(&self) -> Option<(&K, &V)> {
-        let mut path = Path::detached();
-        path.attach(self.0.as_ref()?.borrow());
-        if path.descend_to_first_key() {
-            Some(path.kv().into_key_value())
-        } else {
-            None
-        }
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> Drop for DetachedTree<K, V, S> {
-    fn drop(&mut self) {
-        if let Some(tree) = self.0.take() {
-            tree.destroy(PageByKind::deallocate);
-        }
-    }
-}
-
-impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'a, K, V, R, S> {
+impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>, A: Allocator + Clone>
+    ExtractionWalk<'a, K, V, R, S, A>
+{
     /// Takes the entries out of `map` and cuts out those in `range`.
-    pub(crate) fn new(map: &'a mut BBTreeMap<K, V, S>, range: R) -> Self {
-        let length = map.length;
-        let had_tree = map.root.is_some();
-        let tree = mem::replace(map, BBTreeMap::empty()).root.take();
+    pub(crate) fn new(map: &'a mut BBTreeMap<K, V, S, A>, range: R) -> Self {
+        let length = mem::take(&mut map.length);
+        let had_tree = map.tree.has_root();
+        let tree = map.tree.take();
+        let alloc = &map.alloc;
+        let (kept, after) = (
+            TreeBuilder::new(alloc.clone()),
+            DetachedTree::new(tree, alloc.clone()),
+        );
+        let rest = DyingWalk::new(None, 0, alloc.clone());
         let mut walk = Self {
             map,
             had_tree,
             length,
-            kept: TreeBuilder::new(),
+            kept,
             source: ExtractionSource {
-                rest: DyingWalk::new(None, 0, PageByKind::deallocate),
-                testing: None,
+                rest,
+                under_test: None,
                 finished: false,
             },
-            after: DetachedTree(tree),
+            after,
             range,
         };
         if length > 0 {
@@ -181,49 +163,29 @@ impl<'a, K: Ord, V, R: RangeBounds<K>, S: InlineKeyStrategy<K>> ExtractionWalk<'
     /// Cuts the tree, which `after` holds, at the range's bounds: what lies
     /// before the start becomes the start of the kept tree, what lies past
     /// the end stays in `after`, and what lies between goes to the source.
-    /// Each piece is held where a panic can't lose it before the nodes
-    /// beside the cuts fit their prefixes, which reads keys.
+    /// Each piece goes where a panic can't lose it before the cut that made
+    /// it finishes, fitting the nodes beside it, which reads keys.
     fn cut_out_range(&mut self) {
-        let tree = self
-            .after
-            .0
-            .as_mut()
-            .expect("a map with entries has a tree");
-        let start = match self.range.start_bound() {
-            Bound::Included(start) => Some((start, KeySide::Before)),
-            Bound::Excluded(start) => Some((start, KeySide::After)),
-            Bound::Unbounded => None,
-        };
-        if let Some((start, side)) = start {
-            let from_start = tree.split_off_at(start, side);
-            let before = mem::replace(tree, from_start);
-            self.kept = TreeBuilder::continuing(before);
-            self.kept.fit_border_siblings();
-            tree.fit_border_siblings::<FirstEdge>();
+        let alloc = &self.map.alloc;
+        if let Some((start, side)) = KeySide::of_start(self.range.start_bound()) {
+            let tree = self.after.tree_mut();
+            let cut = tree.split_off_at(start, side, alloc);
+            self.kept = TreeBuilder::continuing(tree.take(), alloc.clone());
+            cut.finish(Some(self.kept.tree_mut()), self.after.tree_mut());
         }
-        let end = match self.range.end_bound() {
-            Bound::Included(end) => Some((end, KeySide::After)),
-            Bound::Excluded(end) => Some((end, KeySide::Before)),
-            Bound::Unbounded => None,
+        let tree = self.after.tree_mut();
+        let Some((end, side)) = KeySide::of_end(self.range.end_bound()) else {
+            self.source.rest = DyingWalk::new(tree.take().root_page(), usize::MAX, alloc.clone());
+            return;
         };
-        let cut_past_end = end.is_some();
-        let range = match end {
-            Some((end, side)) => {
-                let past_end = tree.split_off_at(end, side);
-                mem::replace(tree, past_end)
-            }
-            None => self.after.0.take().expect("the tree, cut or not"),
-        };
-        self.source.rest = DyingWalk::new(Some(range), usize::MAX, PageByKind::deallocate);
-        if let Some(past_end) = &mut self.after.0
-            && cut_past_end
-        {
-            past_end.fit_border_siblings::<FirstEdge>();
-        }
+        let cut = tree.split_off_at(end, side, alloc);
+        self.source.rest = DyingWalk::new(tree.take().root_page(), usize::MAX, alloc.clone());
+        // The range's own tree is only taken apart: it needs no fitting.
+        cut.finish(None, self.after.tree_mut());
     }
 }
 
-impl<K, V, R, S: InlineKeyStrategy<K>> ExtractionWalk<'_, K, V, R, S> {
+impl<K, V, R, S: InlineKeyStrategy<K>, A: Allocator + Clone> ExtractionWalk<'_, K, V, R, S, A> {
     /// Hands out the next entry in the range that `pick` picks, keeping
     /// those it passes over.
     pub(crate) fn next(&mut self, pick: &mut impl FnMut(&K, &mut V) -> bool) -> Option<(K, V)> {
@@ -264,20 +226,25 @@ impl<K, V, R, S: InlineKeyStrategy<K>> ExtractionWalk<'_, K, V, R, S> {
         if source.finished {
             return None;
         }
-        if let Some((key, value)) = &source.testing {
+        if let Some((key, value)) = &source.under_test {
             return Some((key, value));
         }
         let mut rest = source.rest.remaining();
-        rest.next().or_else(|| self.after.first_entry())
+        rest.next().or_else(|| self.after.first_key_value())
     }
 }
 
 // The entry being tested is held by value, but never pinned: like the map,
 // the walk is `Unpin` whatever `K` and `V` are, and as std's, if its range
 // is; an `ExtractIf` also needs its predicate to be.
-impl<K, V, R: Unpin, S: InlineKeyStrategy<K>> Unpin for ExtractionWalk<'_, K, V, R, S> {}
+impl<K, V, R: Unpin, S: InlineKeyStrategy<K>, A: Allocator + Clone + Unpin> Unpin
+    for ExtractionWalk<'_, K, V, R, S, A>
+{
+}
 
-impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
+impl<K, V, R, S: InlineKeyStrategy<K>, A: Allocator + Clone> Drop
+    for ExtractionWalk<'_, K, V, R, S, A>
+{
     /// Gives the map back the entries not handed out, in order: appends the
     /// range's entries not visited to the kept tree and joins the entries
     /// after the range back on.
@@ -286,85 +253,30 @@ impl<K, V, R, S: InlineKeyStrategy<K>> Drop for ExtractionWalk<'_, K, V, R, S> {
         let rest = &mut source.rest;
         self.kept.extend(
             source
-                .testing
+                .under_test
                 .take()
                 .into_iter()
                 .chain(iter::from_fn(|| rest.next())),
         );
-        let kept = mem::replace(&mut self.kept, TreeBuilder::new());
+        let map = &mut *self.map;
+        let kept = mem::replace(&mut self.kept, TreeBuilder::new(map.alloc.clone()));
         let dropped = kept.dropped();
         let (kept, _) = kept.finish();
-        self.map.root = Subtree::concat(kept, self.after.0.take());
-        self.map.length = self.length - dropped;
-        if self.had_tree {
-            self.map.keep_a_tree();
+        map.tree = Tree::concat(kept, self.after.take(), &map.alloc);
+        map.length = self.length - dropped;
+        if self.had_tree && !map.tree.has_root() {
+            map.tree = Tree::new(&map.alloc);
         }
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Subtree<K, V, S> {
-    /// The tree of `left`'s entries and then `right`'s, every one of whose
-    /// keys must be greater, joined around `left`'s last entry
-    /// (`node/join.rs`); or the one with entries; or `None` if neither has
-    /// any. Keys out of order make a tree whose searches give wrong answers,
-    /// but that is memory-safe.
-    ///
-    /// Both trees stay with owners that take them apart while `InlineKey`
-    /// runs, as the last entry's removal, its window and the join call it:
-    /// a panic then drops their entries rather than leaking them.
-    fn concat(left: Option<Self>, right: Option<Self>) -> Option<Self> {
-        let (left, right) = match (Self::with_entries(left), Self::with_entries(right)) {
-            (Some(left), Some(right)) => (left, right),
-            (left, right) => return left.or(right),
-        };
-        let (mut left, mut right) = (DetachedTree(Some(left)), DetachedTree(Some(right)));
-        let mut left_length = 1;
-        let (key, value) = (left.0.as_mut())
-            .and_then(|left| left.pop_last(PageByKind::deallocate, &mut left_length))
-            .expect("a tree with entries has a last one");
-        match Self::with_entries(left.0.take()) {
-            Some(rest) => left.0 = Some(rest),
-            None => {
-                let mut right_length = 0;
-                let mut path = PathMut::new(right.0.as_mut().expect("the right tree"));
-                path.start_at_root();
-                path.descend_to_leaf::<FirstEdge>();
-                path.insert(
-                    key,
-                    value,
-                    FreshPage::allocate,
-                    FreshPage::allocate,
-                    &mut right_length,
-                );
-                return right.0.take();
-            }
-        }
-        let separator = InlinedKey::new(key, 0);
-        let right = right.0.take().expect("the right tree");
-        left.0
-            .as_mut()
-            .expect("the left tree")
-            .join(separator, value, right);
-        left.0.take()
-    }
-
-    /// `tree`, if it has entries; otherwise it is taken apart, and `None`.
-    fn with_entries(tree: Option<Self>) -> Option<Self> {
-        let tree = tree?;
-        if tree.borrow().len() > 0 {
-            return Some(tree);
-        }
-        tree.destroy(PageByKind::deallocate);
-        None
-    }
-}
-
-impl<K, V, R, F, S> Iterator for ExtractIf<'_, K, V, R, F, S>
+impl<K, V, R, F, S, A> Iterator for ExtractIf<'_, K, V, R, F, S, A>
 where
     K: PartialOrd,
     R: RangeBounds<K>,
     F: FnMut(&K, &mut V) -> bool,
     S: InlineKeyStrategy<K>,
+    A: Allocator + Clone,
 {
     type Item = (K, V);
 
@@ -377,18 +289,19 @@ where
     }
 }
 
-impl<K, V, R, F, S> FusedIterator for ExtractIf<'_, K, V, R, F, S>
+impl<K, V, R, F, S, A> FusedIterator for ExtractIf<'_, K, V, R, F, S, A>
 where
     K: PartialOrd,
     R: RangeBounds<K>,
     F: FnMut(&K, &mut V) -> bool,
     S: InlineKeyStrategy<K>,
+    A: Allocator + Clone,
 {
 }
 
 /// Prints the next entry to visit, as std's does.
-impl<K: fmt::Debug, V: fmt::Debug, R, F, S: InlineKeyStrategy<K>> fmt::Debug
-    for ExtractIf<'_, K, V, R, F, S>
+impl<K: fmt::Debug, V: fmt::Debug, R, F, S: InlineKeyStrategy<K>, A: Allocator + Clone> fmt::Debug
+    for ExtractIf<'_, K, V, R, F, S, A>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtractIf")
@@ -397,7 +310,7 @@ impl<K: fmt::Debug, V: fmt::Debug, R, F, S: InlineKeyStrategy<K>> fmt::Debug
     }
 }
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Creates an iterator that visits elements (key-value pairs) in the
     /// specified range in ascending key order and uses a closure to
     /// determine if an element should be removed.
@@ -414,8 +327,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// remaining elements will be retained. Use [`retain`] with a negated
     /// predicate if you do not need the returned iterator.
     ///
-    /// Unlike std's, this walk takes every entry out of the map and puts the
-    /// kept ones back, wherever the range is: O(n).
+    /// Unlike std's, which passes over the range in place, this walk cuts the
+    /// range out of the map, and puts its kept entries back: O(log n) beyond
+    /// the range's entries.
     ///
     /// [`retain`]: BBTreeMap::retain
     ///
@@ -438,7 +352,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// assert_eq!(low.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
     /// assert_eq!(high.keys().copied().collect::<Vec<_>>(), [4, 5, 6, 7]);
     /// ```
-    pub fn extract_if<F, R>(&mut self, range: R, pred: F) -> ExtractIf<'_, K, V, R, F, S>
+    pub fn extract_if<F, R>(&mut self, range: R, pred: F) -> ExtractIf<'_, K, V, R, F, S, A>
     where
         R: RangeBounds<K>,
         F: FnMut(&K, &mut V) -> bool,
@@ -464,10 +378,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     /// map.retain(|&k, _| k % 2 == 0);
     /// assert!(map.into_iter().eq(vec![(0, 0), (2, 20), (4, 40), (6, 60)]));
     /// ```
-    pub fn retain<F>(&mut self, mut f: F)
+    pub fn retain<F>(&mut self, f: F)
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        ExtractionWalk::<_, _, RangeFull, _>::new(self, ..).retain(|key, value| f(key, value));
+        ExtractionWalk::new(self, ..).retain(f);
     }
 }

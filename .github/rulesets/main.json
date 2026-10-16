@@ -19,16 +19,19 @@
         "dismiss_stale_reviews_on_push": false,
         "require_code_owner_review": false,
         "require_last_push_approval": false,
-        "required_review_thread_resolution": false
+        "required_review_thread_resolution": false,
+        "require_extra_approval_for_unattributed_changes": true,
+        "required_reviewers": [],
+        "allowed_merge_methods": ["merge", "squash", "rebase"]
       }
     },
     {
       "type": "required_status_checks",
       "parameters": {
         "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
         "required_status_checks": [
           { "context": "merge gate", "integration_id": 15368 },
-          { "context": "miri (stacked borrows)", "integration_id": 15368 },
           { "context": "miri (tree borrows, strict provenance)", "integration_id": 15368 },
           { "context": "address sanitizer", "integration_id": 15368 }
         ]

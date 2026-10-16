@@ -3,7 +3,7 @@
 //!
 //! It takes the entries of both maps by value, from the front (`IntoIter`),
 //! merges them in key order and builds the tree they make into full nodes
-//! (`node/build.rs`): in O(n + m), as std's.
+//! (`tree/build.rs`): in O(n + m), as std's.
 
 #![forbid(unsafe_code)]
 
@@ -11,10 +11,11 @@ use core::cmp::Ordering;
 use core::mem;
 
 use super::{BBTreeMap, IntoIter};
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::build::TreeBuilder;
+use crate::tree::build::TreeBuilder;
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Moves all elements from `other` into `self`, leaving `other` empty.
     ///
     /// If a key from `other` is already present in `self`, the respective
@@ -24,6 +25,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
     ///
     /// If `K`'s `Ord` panics, `self` keeps its entries and those of `other`
     /// merged so far, and the rest of `other` is dropped, as with std's map.
+    ///
+    /// The merged nodes come from `self`'s allocator; `other` keeps its own.
+    /// If `self` is empty, the two maps swap, allocators too, as std's do.
     ///
     /// # Examples
     ///
@@ -59,8 +63,10 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
             mem::swap(self, other);
             return;
         }
-        let ours = mem::replace(self, Self::empty()).into_iter();
-        let theirs = mem::replace(other, Self::empty()).into_iter();
+        let (our_alloc, their_alloc) = (self.alloc.clone(), other.alloc.clone());
+        let merged = TreeBuilder::new(self.alloc.clone());
+        let ours = mem::replace(self, Self::empty(our_alloc)).into_iter();
+        let theirs = mem::replace(other, Self::empty(their_alloc)).into_iter();
         let mut merge = Merge {
             target: self,
             entries: MergedEntries {
@@ -69,9 +75,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
                 took_from_theirs: false,
                 first_duplicate_key: None,
             },
-            merged: TreeBuilder::new(),
+            merged,
         };
-        merge.run();
+        merge.merged.extend(&mut merge.entries);
     }
 }
 
@@ -80,17 +86,19 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> BBTreeMap<K, V, S> {
 /// or unwinding from a panicking `Ord`. The target then also gets the
 /// entries of its own not merged yet; those of the other map not merged yet
 /// are dropped.
-struct Merge<'a, K, V, S: InlineKeyStrategy<K>> {
-    target: &'a mut BBTreeMap<K, V, S>,
-    entries: MergedEntries<K, V, S>,
-    merged: TreeBuilder<K, V, S>,
+struct Merge<'a, K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> {
+    /// Empty, with its allocator, until the merge is dropped.
+    target: &'a mut BBTreeMap<K, V, S, A>,
+    entries: MergedEntries<K, V, S, A>,
+    /// On pages from the target's allocator.
+    merged: TreeBuilder<K, V, S, A>,
 }
 
 /// The entries of both maps in key order, each key once: where both maps
 /// have a key, the target's key with the other map's value.
-struct MergedEntries<K, V, S: InlineKeyStrategy<K>> {
-    ours: IntoIter<K, V, S>,
-    theirs: IntoIter<K, V, S>,
+struct MergedEntries<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> {
+    ours: IntoIter<K, V, S, A>,
+    theirs: IntoIter<K, V, S, A>,
     /// Whether an entry of the other map was merged yet.
     took_from_theirs: bool,
     /// The key of the other map's first entry, if the target had that key:
@@ -100,15 +108,9 @@ struct MergedEntries<K, V, S: InlineKeyStrategy<K>> {
     first_duplicate_key: Option<K>,
 }
 
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Merge<'_, K, V, S> {
-    /// Builds the new tree from the merged entries in one go, which finds
-    /// the tree's rightmost leaf once per leaf rather than once per entry.
-    fn run(&mut self) {
-        self.merged.extend(&mut self.entries);
-    }
-}
-
-impl<K: Ord, V, S: InlineKeyStrategy<K>> Iterator for MergedEntries<K, V, S> {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Iterator
+    for MergedEntries<K, V, S, A>
+{
     type Item = (K, V);
 
     fn next(&mut self) -> Option<(K, V)> {
@@ -130,7 +132,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Iterator for MergedEntries<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> MergedEntries<K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> MergedEntries<K, V, S, A> {
     /// The first entries of both maps, whose keys are equal, as one: the
     /// target's key and the other map's value. The target's old value is
     /// dropped, then the other map's key, unless it is the first of that map
@@ -148,11 +150,15 @@ impl<K, V, S: InlineKeyStrategy<K>> MergedEntries<K, V, S> {
     }
 }
 
-impl<K, V, S: InlineKeyStrategy<K>> Drop for Merge<'_, K, V, S> {
+impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Drop for Merge<'_, K, V, S, A> {
     fn drop(&mut self) {
         self.merged.extend(&mut self.entries.ours);
-        let merged = mem::replace(&mut self.merged, TreeBuilder::new());
-        *self.target = BBTreeMap::from_builder(merged);
+        let merged = mem::replace(
+            &mut self.merged,
+            TreeBuilder::new(self.target.alloc.clone()),
+        );
+        // The target has no tree to drop: its entries were in `ours`.
+        (self.target.tree, self.target.length) = merged.finish();
         // Before the other map's entries not merged, as std's unwinding
         // drops them.
         drop(self.entries.first_duplicate_key.take());

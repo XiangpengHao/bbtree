@@ -10,6 +10,7 @@ use core::ops::BitXor;
 
 use super::BBTreeSet;
 use super::merge::{HeldSide, MergeSides, MergeStep};
+use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the symmetric difference of
@@ -77,24 +78,15 @@ impl<T, S> Clone for SymmetricDifference<'_, T, S> {
 }
 
 /// Prints as std's does: `SymmetricDifference(MergeIterInner(..))`.
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SymmetricDifference")
-            .field(&PrintedMerge(self))
+            .field(&self.sides.printed_as_merge_iter(self.held))
             .finish()
     }
 }
 
-/// A symmetric difference's merge, printed as std's `MergeIterInner`.
-struct PrintedMerge<'d, 'a, T, S>(&'d SymmetricDifference<'a, T, S>);
-
-impl<T: fmt::Debug + Ord, S: InlineKeyStrategy<T>> fmt::Debug for PrintedMerge<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.sides.print_as_std(f, self.0.held)
-    }
-}
-
-impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
+impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Visits the elements representing the symmetric difference, i.e., the
     /// elements that are in `self` or in `other` but not in both, in
     /// ascending order.
@@ -126,8 +118,10 @@ impl<T, S: InlineKeyStrategy<T>> BBTreeSet<T, S> {
     }
 }
 
-impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitXor<&BBTreeSet<T, S>> for &BBTreeSet<T, S> {
-    type Output = BBTreeSet<T, S>;
+impl<T: Ord + Clone, S: InlineKeyStrategy<T>, A: Allocator + Clone> BitXor<&BBTreeSet<T, S, A>>
+    for &BBTreeSet<T, S, A>
+{
+    type Output = BBTreeSet<T, S, A>;
 
     /// Returns the symmetric difference of `self` and `rhs` as a new
     /// `BBTreeSet<T>`, built into full nodes without searching it.
@@ -143,7 +137,10 @@ impl<T: Ord + Clone, S: InlineKeyStrategy<T>> BitXor<&BBTreeSet<T, S>> for &BBTr
     /// let result = &a ^ &b;
     /// assert_eq!(result, BBTreeSet::from([1, 4]));
     /// ```
-    fn bitxor(self, rhs: &BBTreeSet<T, S>) -> BBTreeSet<T, S> {
-        BBTreeSet::from_ascending(self.symmetric_difference(rhs).cloned())
+    fn bitxor(self, rhs: &BBTreeSet<T, S, A>) -> BBTreeSet<T, S, A> {
+        BBTreeSet::from_ascending(
+            self.symmetric_difference(rhs).cloned(),
+            self.allocator().clone(),
+        )
     }
 }

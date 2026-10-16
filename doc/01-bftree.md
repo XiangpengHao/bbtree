@@ -22,9 +22,8 @@ is the free space (`remaining_size`).
 ```
 
 bf-tree needs per-record metadata (offsets, lengths) because records are
-variable-length. bbtree's K and V are fixed-size, so the same two-direction
-shape becomes simply keys growing from the front and values growing from the
-back (decisions D9).
+variable-length. bbtree's K and V are fixed-size, so a node is simply arrays:
+the keys, then the values (decisions D9).
 
 ### Shared header word: `NodeMeta` (`src/nodes/node_meta.rs`)
 
@@ -90,22 +89,25 @@ back (decisions D9).
 
 | bf-tree | bbtree |
 |---|---|
-| Metadata grows from the front, payload from the back | Keys grow from the front, values from the back (decisions D9). |
-| Count + flags packed in one `u16`; header const-asserted | Header is just `len: u16`, const-asserted. |
-| Node kind decided by the parent (`children_is_leaf`) | Same idea via a height counter carried down from the root, as in std. |
-| Inner nodes page-aligned | All nodes page-aligned (decisions D7), via our own allocator (D8). |
-| No parent pointers | Same. Iterators, entries and cursors carry a path stack instead (decisions D11). |
+| Metadata grows from the front, payload from the back | Keys, then values, each an array (decisions D9). |
+| Count + flags packed in one `u16`; header const-asserted | Header is `len: u16` and a head flag, plus prefix lengths in nodes with inline keys; layouts const-asserted. |
+| Node kind decided by the parent (`children_is_leaf`) | Same idea per edge: a pointer's lowest bit tags a leaf, so the parent's edge tells the child's kind before it is read; the tree's pointer to the root page tells the root's (decisions D52). |
+| Root id swapped for a new root, its kind in a bit (`ROOT_IS_LEAF_MASK`) | The root page stays the root: growing or shrinking the tree moves a node into or out of it (decisions D52). |
+| Inner nodes page-aligned | All nodes aligned to their own size, 1 KB or more, so none crosses a page (decisions D15), from the map's allocator (D8). |
+| No parent pointers | Same. Iterators, entries and cursors carry a node stack instead (decisions D11). |
 | Configuration limits checked once, at construction | Const-asserted per `(K, V)`: minimum capacity, so an insert needs at most one split per level and the exact allocation count is known before mutating. |
 | Debug cross-checks; const-asserted layouts | Same. |
 | Differential fuzzing with a small, colliding key space | Same, plus a tiny-capacity mode so splits happen with few keys. |
 
 Not taken:
 
-- **Fence keys and prefix compression.** Fences would need `K: Clone`, and
-  prefix compression needs byte-comparable keys.
-- **Preview / look-ahead bytes.** Generic `Ord` gives only a comparison, no
-  bytes to copy.
+- **Stored fence keys.** They would need `K: Clone`. bbtree strips what a
+  node's fences share without storing them, from windows of an
+  order-preserving encoding (decisions D26).
+- **Preview bytes from `Ord`.** Generic `Ord` gives only a comparison, no
+  bytes to copy; keys with an `InlineKey` encoding get them as inline keys
+  (decisions D18).
 - **Byte-packed payload read with `read_unaligned`.** We hand out `&K`/`&V`,
   which must be aligned.
 - **Re-descending from the root to reach the next leaf.** It would call `Ord`
-  inside `next()`, which std's iterators never do. A path stack avoids it.
+  inside `next()`, which std's iterators never do. A node stack avoids it.

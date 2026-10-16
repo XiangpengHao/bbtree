@@ -1,10 +1,13 @@
 # 05 — Fence keys: per-node prefix stripping
 
-Status: implemented (2026-10-08), exact since 2026-10-09, in `node/prefix.rs`
-and the node operations of `node/handle.rs`; measured in "Measured". Builds on inline keys
-(04-inline-key.md). Applies to every key with inline keys: std byte strings
-and the 64- and 128-bit integers under `Auto`, and keys with an `InlineKey`
-impl under `WithInlineKey`, through their encoding.
+Status: implemented (D26), in `tree/prefix.rs` and the node operations of
+`tree/node/leaf.rs` and `tree/node/internal.rs`; measured in "Measured". Builds on inline keys
+(04-inline-key.md). Applies to every key with inline keys: std byte strings,
+byte arrays and the 64- and 128-bit integers under `Auto`, and keys with an
+`InlineKey` impl under `WithInlineKey`, through their encoding. Where a
+fence is missing, on the root and the borders, the root's fences, the
+tree's shared prefix, stand in (D50, "The shared prefix"), in
+`tree/root.rs` and `tree/shared_prefix.rs`.
 
 ## Problem
 
@@ -16,21 +19,20 @@ names, 44% for Wikipedia titles at 1M (65% at 10M) and 99% for Linux paths
 Ties cost more than a heap read. When every inline key in a node ties, the
 inline search decides nothing and costs about 100 instructions per level before
 the full-key search starts. With 8-byte inline keys, paths run at 1.2–1.7× std's
-time (04-inline-key.md, section 5). There is no separate guard for nodes whose
-inline keys all tie: prefix stripping removes the cause.
+time (04-inline-key.md, section 5). Prefix stripping removes most of the cause.
 
 ## Idea: the separators are the fences
 
 Every node has two fences, `low` and `high`: the separators beside it in its
-ancestors, the nearest on each side. D17 keeps separators as real keys in
-internal nodes.
+ancestors, the nearest on each side. D17 keeps separators as real keys: in
+internal nodes, or with inline keys, as leaf heads (D49).
 
 - **`prefix_len = LCP(low, high)`, exactly.** Every key `k` with
   `low ≤ k < high` starts with `P = LCP(low, high)` and is at least `|P|`
   bytes long. A shorter key would be a prefix of `low` and sort before it.
-- So a node needs only **`prefix_len: u16`** in its header, already reserved
-  in every node with inline keys (`page.rs`). Its inline keys are the 8 bytes
-  right after the prefix.
+- So a node needs only **`prefix_len: u16`** in its header, in every node
+  with inline keys (`page.rs`). Its inline keys are its keys' windows right
+  after the prefix, of which it keeps its width.
 - **An insert never changes a prefix:** a key that goes into a node lies
   between its fences already. Only a separator change does: a split adds
   one, a merge takes one out, a move between siblings or a removal replaces
@@ -44,21 +46,22 @@ internal nodes.
 - **Search:** a key we descended to is between the node's fences, so the search
   skips `prefix_len` bytes of it with no check.
 - The leftmost and rightmost spines have an infinite fence on one side, so
-  their prefix is 0.
+  their prefix is what every key of the tree shares, which the tree keeps
+  and every search checks once, at the top (D50, "The shared prefix").
 
 ## Inline keys belong to a node
 
-An inline key is no longer a function of the key alone: it is the key's
-**window** at its node's `prefix_len`, the 8 bytes from there.
+An inline key is not a function of the key alone: it is the key's
+**window** at its node's `prefix_len`, the 8 bytes from there, of which the
+node keeps its width.
 
 - **Stored:** inline key `i` is key `i`'s window at the node's `prefix_len`
-  (`Window` in `node/inline_keys.rs`: an inline key with its prefix length).
+  (`Window` in `tree/node/inline_keys.rs`: an inline key with its prefix length).
 - **Search target:** the search key's window at each node's `prefix_len`,
   which sits in the header beside `len`. A std byte string being searched
-  for is copied once per search into a 128-byte buffer, zero-padded
-  (`SearchBytes`): each node's window is then one load from it at
-  `prefix_len`, with no length to check and nothing to pad. Copying and
-  windowing use loads of a fixed size only, so no `memcpy`.
+  for is windowed from its own bytes (`SearchBytes`): one load where 8
+  bytes remain, overlapping fixed-size loads near its end, so no `memcpy`
+  (D32).
   - **Taken where it is used.** Taking it once per node and handing it to
     the node search went through the stack, written right before the search
     read it back, a store this CPU (Zen 5) can't always forward: every level
@@ -67,10 +70,10 @@ An inline key is no longer a function of the key alone: it is the key's
     `prefix_len`, which comes with the node, so the inline-key compare
     starts a load later than with a window taken before the node arrives.
     That is what `hash32` pays (see "Measured").
-- **Ties:** std byte strings compare from byte `prefix_len + 8`, 8 bytes at a
-  time as big-endian words, then by length (`SearchBytes::cmp_from`): every
-  key of the node and the search key share the prefix, and tied windows the
-  next 8 bytes. Loads of a fixed size only, so no `memcmp`; a key that ends
+- **Ties:** std byte strings compare from past the prefix and the bytes the
+  node keeps of each window, 8 bytes at a time as big-endian words, then by
+  length (`SearchBytes::cmp_from`): every key of the node and the search key
+  share the prefix, and tied windows the bytes kept. Loads of a fixed size only, so no `memcmp`; a key that ends
   within those bytes isn't read at all, which covers what an
   equal-by-length shortcut did. Other keys compare with `Ord`.
 - **Moving between nodes:** a run moving to a node with the same prefix is
@@ -90,7 +93,8 @@ pub trait InlineKey: Ord {
 
 - **The contract:** each key has a byte-string encoding, and if `a`'s
   encoding orders before `b`'s, both zero-padded, then `a < b`. Equal
-  encodings say nothing. Windows at offset 0 are today's inline keys.
+  encodings say nothing. Windows at offset 0 are inline keys without
+  stripping.
 - **Why windows, not one summary:** skipping `prefix_len` bytes needs keys to
   have bytes, and keeping prefixes valid needs the common prefix length of
   two keys, which windows give 8 bytes at a time (XOR, leading zeros).
@@ -101,27 +105,25 @@ pub trait InlineKey: Ord {
   `"ab"` and `"ab\0"` have the same windows, so they tie and compare in full.
   A key shorter than the prefix is a prefix of the others, windows to zero,
   and sorts first, which matches.
-- **Stricter than today:** a summary that orders consistently but is not a
-  window of one encoding no longer qualifies. At 0.1.0, changing it costs
-  nothing.
+- **Stricter than a summary:** one that orders consistently but is not a
+  window of one encoding does not qualify.
 - **Inside the map:** `KeyInliner` gives both strategies the same two
   operations, a key's window at a prefix and the common prefix length of two
   keys. `Auto` reads std byte strings' bytes directly, which lets ties skip
   the bytes known equal.
 - **When user code runs.** Searches call `inline_key_at`, before any change.
   An operation then changes the tree's shape without calling it, so that a
-  panic can't stop a split, a merge or a cut halfway: the iterators trust
-  the map's length with unchecked moves, and a half-done rebalance would
-  leave a node under its minimum. Once the entry is in or out and counted,
-  it calls it to fit the nodes whose fences changed. An insert also takes
-  the new key's window before the first change, and a separator's removal
-  shrinks the border its successor widens before the first change. A panic
-  leaves the map unchanged, or, from a last step, with the entry in or out;
-  valid either way, since a node being fit computes every window into a
-  buffer before writing any. A wrong impl gives wrong answers, never
-  undefined behaviour.
-- **8 bytes for every key type, for now;** each key type chooses its own
-  width later (see "Width").
+  panic can't stop a split, a merge or a cut halfway, which unchecked code
+  would trust (D48): the iterators trust the map's length with unchecked
+  moves, and a half-done rebalance would leave a node under its minimum.
+  Once the entry is in or out and counted, it calls it to fit the nodes
+  whose fences changed. An insert also takes the new key's window before
+  the first change, and a separator's removal shrinks the border its
+  successor widens before the first change. A node being fit writes each
+  window as it computes it, and its prefix length last: a panic there leaves
+  windows off the prefix, which only makes searches wrong. A wrong impl
+  gives wrong answers, never undefined behaviour.
+- **Nodes keep `InlineKey::WIDTH` bytes of each window** (see "Width").
 - **Capped at `u16::MAX`:** two different keys can have equal encodings (a
   lossy encoding, or `"ab"` and `"ab\0"`), so the common prefix scan stops
   there. A smaller prefix is always valid.
@@ -138,7 +140,7 @@ pub trait InlineKey: Ord {
   left and right borders, which have no fence on one side;
 - every inline key is its key's window at `prefix_len`.
 
-The test-only checker verifies both on every tree (`map/invariants.rs`).
+The test-only checker verifies both on every tree (`tree/invariants.rs`).
 Correctness needs less: any `prefix_len` up to `LCP(low, high)` gives right
 answers, only shorter windows. That is what an operation keeps in the middle,
 and what a panic in its last step leaves.
@@ -156,15 +158,14 @@ An operation does its upkeep in two steps:
   bytes it needs, both filled from that key. At `d ≥ 8`, every window is
   that one.
 - **Once the entry is counted, the nodes whose fences changed fit them**
-  (`NodeMut::refit_prefix`): each reads its two fences, and, if what they
+  (`Child::refit_prefix`): each reads its two fences, and, if what they
   share changed, its keys. A node whose first and last inline keys differ
   in their first byte reads neither: its fences lie outside its keys, so
   they share no more than its prefix, and fitting only ever grows one. On
   inserts, that settles 84% of split halves for `str-json` and 66% for
   `str-16` without a heap read; a prefix changes in 13% and 28%. A node
-  whose prefix changes computes every window into a buffer of 128 on the
-  stack before writing any (more than any node with inline keys holds: each
-  takes 8 bytes of a 1 KB node for its inline key alone).
+  whose prefix changes writes each window as it reads its key, then its
+  prefix length.
 
 | operation | fences that change | during | once counted |
 |---|---|---|---|
@@ -173,9 +174,10 @@ An operation does its upkeep in two steps:
 | merge | the merged node's widen | it takes the parent's prefix: both halves move back, filled from the separator, which comes down at its window | the merged node |
 | steal | the receiver's widen, the giver's narrow; their children's don't | the receiver takes the parent's prefix, filled from the separator, which comes down at its window; the key going up moves back the same way | both |
 | removal of separator `s`, replaced by its successor `s'` (D17) | the right border of the subtree left of `s` (upper fence `s` → `s'`) and the left border of the subtree right of it (lower fence `s` → `s'`) | before any change, the first border's nodes shrink to `min(own, LCP(s, s'))`, reading keys; then `s'` moves back to `s`'s node's prefix, filled from `s` | the second border's nodes |
-| `split_off` (D25) | the path's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the path takes prefix 0, from the root down, each filled from its parent's key beside the path | once both maps are counted, the nodes beside each border |
+| `split_off` (D25) | the node stack's nodes become borders; the nodes beside the borders give them entries | before the cut, every node on the node stack takes the root's prefix, the shared prefix, from the root down, each filled from its parent's key beside the node stack; both trees keep the shared bytes | once both maps are counted, the nodes beside each border |
 | builder (D25) | each node's, as it closes; the left siblings `finish` takes entries from | — | the nodes a new leaf closes, from the leaf up, once it hangs after them; after `finish`, the nodes beside the right border |
-| root push / pop, clone | none | a new root has prefix 0; a copy copies prefixes | — |
+| raising or lowering the tree (D52), clone | none | a raised root has the shared prefix, and a lowered root's child had it; a copy copies prefixes and the shared bytes | — |
+| insert of a key that shares less, join | the borders' missing ones: the shared bytes shrink | every border node moves back to the new length, filled from the shared bytes' window there | — |
 
 - **Why the first border of a removed separator shrinks first.** Its
   fences widen, so its prefixes must shrink before `s'` replaces `s`, and
@@ -183,118 +185,89 @@ An operation does its upkeep in two steps:
   has fences `low` and `s`, so its new prefix is `min(own, LCP(s, s'))`, with
   no fence read: `low ≤ s ≤ s'`. It can't be skipped: a search for a key in
   `(s, s')` goes down that border.
-- **What a removal fits:** at each height it fixed, the child the path
+- **What a removal fits:** at each node it fixed, the child the node stack
   leads to and the sibling that gave it an entry; for a separator, every node
-  below it on the path, which goes down the second border. It keeps the
-  path's indexes up to date as merges and moves shift entries, to find them
-  again. A removal that fixes nothing fits nothing.
-- **Fences come from the path** (D24): a node's `low` is the key left of the
-  path's edge at the nearest ancestor where that edge isn't the first, its
-  `high` the key right of it at the nearest where it isn't the last
-  (`PathMut::bounds`). Only fitting reads them. A plain search reads no
+  below it on the node stack, which goes down the second border. It keeps the
+  node stack's indexes up to date as merges and moves shift entries, to find
+  them again. A removal that fixes nothing fits nothing.
+- **Fences come from the node stack** (D24): a node's `low` is the key left of
+  the node stack's edge at the nearest ancestor where that edge isn't the
+  first, its `high` the key right of it at the nearest where it isn't the last
+  (`NodeStackMut::fences`). Only fitting reads them. A plain search reads no
   fence.
-- **A node on a border keeps prefix 0 through a panic.** A search for a key
-  past the first or last goes down a border and reads windows there, so no
-  fit may give a border node a prefix, even for a moment that a panicking
-  `InlineKey` could make last: the builder fits a full rightmost node only
-  once the next leaf hangs after it, off the border.
+- **A node on a border keeps the shared prefix through a panic.** A search
+  for a key past the first or last that has the shared bytes goes down a
+  border and reads windows there, so no fit may give a border node a longer
+  prefix, even for a moment that a panicking `InlineKey` could make last:
+  the builder fits a full rightmost node only once the next leaf hangs after
+  it, off the border.
 - **An internal node grows at most to its children's prefixes,** which reads
   their headers: a prefix that fits its fences never passes them, but a panic
   during an earlier fit may have left one of theirs short.
 
+## The shared prefix (D50)
+
+The root has no parent, so no separator above it gives it fences, and a
+node on a border has no separator above it on one side: they would get
+nothing from fences, yet their keys often share many bytes (dense integers,
+UUIDv7-like arrays, paths behind a common head). Every window there ties,
+and searches compare whole keys.
+
+- **Kept** by the root, as its fences, in the root page after the root
+  node (D52): the leading bytes of the encoding every key shares, up to 64,
+  by their bytes for byte strings and by their encoding otherwise
+  (`SharedPrefix`). A node with no separator
+  above it on a side takes the root's fence there, so the root and the
+  border nodes take its length as their prefix, and `prefix_len` is what
+  every node's fences share.
+- **Search:** a query is checked against the bytes once, before the root;
+  one without them sorts before or after every key, and reads no node.
+  Every query that goes down has them, so every node skips its prefix
+  unchecked, as with fences. Heap strings check 32 bytes at a time;
+  fixed-width keys a window at a time.
+- **Upkeep:** an insert shrinks the shared prefix for its key first
+  (`shrink_shared_prefix_for`): an empty tree starts from the key's bytes;
+  a key that shares fewer shrinks them, and every border node moves back
+  to the new length, filled from their window there, reading no key. Removals leave them, so they are what every key shares, not
+  exactly what the keys share. A cut gives both trees the bytes; a join
+  shrinks both to what they share with the separator; the builder checks
+  each key it appends.
+- **Leaves need nothing more:** a border leaf skips the shared bytes like
+  any other prefix, and confirms a hit from its window and length.
+
 ## Measured
 
-### First version: prefixes grown only where inline keys tie
-
-2026-10-08, Ryzen 9 9900X (Zen 5), mimalloc, AVX-512 build, bbtree only,
-against the commit before (8-byte inline keys without stripping). ns per
-call; median of 3 at 1M, one run at 10M. The first version kept
-`prefix_len ≤ LCP(low, high)`, grew a split half's prefix only if two
-neighbouring inline keys in it tied, and gave merged and rebalanced nodes
-their parent's prefix until they split again.
-
-| keys | size | insert_random | get_hit | get_miss |
-|---|---|---|---|---|
-| `str-path` | 1M | 541 → 409 (0.76) | 691 → 481 (0.70) | 706 → 465 (0.66) |
-| BAN addresses | 1M | 324 → 215 (0.67) | 477 → 336 (0.70) | 489 → 301 (0.62) |
-| dblp titles | 1M | 323 → 258 (0.80) | 450 → 342 (0.76) | 438 → 299 (0.68) |
-| Wikipedia titles | 1M | 193 → 179 (0.93) | 318 → 284 (0.89) | 304 → 247 (0.81) |
-| Wikipedia titles | 10M | 461 → 361 (0.78) | 567 → 430 (0.76) | 575 → 366 (0.64) |
-| BAN addresses | 10M | 701 → 410 (0.58) | 838 → 504 (0.60) | 861 → 426 (0.49) |
-| `str-json` | 1M | 126 → 137 (1.09) | 237 → 243 (1.02) | 218 → 220 (1.01) |
-| `str-16` | 1M | 119 → 130 (1.10) | 255 → 258 (1.01) | 221 → 225 (1.02) |
-| `hash32` | 1M | 115 → 122 (1.06) | 159 → 160 (1.01) | 148 → 151 (1.02) |
-| `u64` | 1M | 63 → 63 (1.00) | 66 → 67 (1.03) | 61 → 59 (0.97) |
-
-- **Keys with shared prefixes gain the most,** and more at 10M, where ties
-  grow: a third to a half off at 10M.
-- **Keys that rarely tie keep their gets,** within 2%, and pay 6–10% on
-  inserts: about 100 more instructions each, from the target taken at each
-  node of the insert's search, twice where the search expects an append,
-  and the new key's window taken at its leaf. Taking the target once per
-  node and inlining both searches that use it made gets 22–41% slower
-  instead.
-- **`u64`** has no inline keys, and is unchanged.
-
-### Exact prefixes
-
-2026-10-09, same machine, idle; median of 3 at 1M, ns per call.
-`remove_random` removes every key in random order, so the tree shrinks to
-nothing and merges often.
-
-| keys | operation | no stripping | first version | exact |
-|---|---|---|---|---|
-| `str-16` | insert_random / get_hit / remove_random | 117 / 254 / 295 | 131 / 253 / 297 | 147 / 267 / 364 |
-| `str-json` | same | 127 / 240 / 271 | 134 / 240 / 274 | 157 / 263 / 328 |
-| `hash32` | insert_random / get_hit | 116 / 160 | 123 / 161 | 127 / 168 |
-| `str-path` | insert_random / get_hit / remove_random | 540 / 688 / 602 | 411 / 479 / 537 | 413 / 483 / 522 |
-| Wikipedia titles | same | 194 / 319 / 332 | 175 / 286 / 321 | 177 / 280 / 372 |
-| BAN addresses | insert_random / get_hit | 324 / 481 | 218 / 333 | 215 / 334 |
-
-- **Keys with shared prefixes keep the gains,** and `str-path` removals gain
-  3% more: rebalanced nodes no longer lose their prefixes.
-- **Keys that rarely share prefixes pay more,** against the first version:
-  - inserts +12–17% on `str-16` and `str-json`: a split half whose fences
-    share more reads all its keys, one heap read each, about one per insert;
-  - gets +4–10% on `str-16`, `str-json` and `hash32`: nodes the first version
-    left at prefix 0 have one, and the search takes its target at each of
-    them instead of once;
-  - removals +16–23% on `str-16`, `str-json` and Wikipedia titles: a merged
-    node takes its parent's prefix during the merge, then reads all its keys
-    to fit `min(left, right)`.
-
-### Search from a padded copy, ties without `memcmp`
-
-2026-10-09, same machine; median of 3 at 1M, ns per call: no stripping /
-exact (above) / exact with the search key's padded copy and word-by-word
-ties, and the last against no stripping.
+2026-10-09, Ryzen 9 9900X (Zen 5), mimalloc, AVX-512 build, bbtree only,
+median of 3 at 1M, ns per call: no stripping → stripped, and the ratio.
+The search key was windowed from a padded copy then, before D32.
 
 | keys | insert_random | get_hit | get_miss |
 |---|---|---|---|
-| `str-json` | 127 / 154 / 145 (1.15) | 238 / 258 / 245 (1.03) | 217 / 236 / 218 (1.01) |
-| `str-16` | 116 / 146 / 147 (1.26) | 256 / 268 / 264 (1.03) | 223 / 235 / 221 (0.99) |
-| `hash32` | 118 / 125 / 122 (1.04) | 160 / 169 / 173 (1.09) | 149 / 153 / 161 (1.08) |
-| `str-path` | 541 / 412 / 407 (0.75) | 693 / 475 / 457 (0.66) | 708 / 466 / 446 (0.63) |
-| Wikipedia titles | 193 / 175 / 174 (0.90) | 320 / 284 / 273 (0.85) | 307 / 257 / 237 (0.77) |
-| BAN addresses | 325 / 216 / 210 (0.65) | 478 / 333 / 324 (0.68) | 497 / 306 / 286 (0.58) |
-| `u64` | 62 / 63 / 63 (1.01) | 70 / 66 / 68 (0.96) | 60 / 59 / 58 (0.98) |
+| `str-json` | 127 → 145 (1.15) | 238 → 245 (1.03) | 217 → 218 (1.01) |
+| `str-16` | 116 → 147 (1.26) | 256 → 264 (1.03) | 223 → 221 (0.99) |
+| `hash32` | 118 → 122 (1.04) | 160 → 173 (1.09) | 149 → 161 (1.08) |
+| `str-path` | 541 → 407 (0.75) | 693 → 457 (0.66) | 708 → 446 (0.63) |
+| Wikipedia titles | 193 → 174 (0.90) | 320 → 273 (0.85) | 307 → 237 (0.77) |
+| BAN addresses | 325 → 210 (0.65) | 478 → 324 (0.68) | 497 → 286 (0.58) |
+| `u64` | 62 → 63 (1.01) | 70 → 68 (0.96) | 60 → 58 (0.98) |
 
-- **A `get` calls no library function** (`objdump` of a probe built like the
-  bench): before, it called `memcpy` to pad a short key's window, at the
-  root and at each node, and `memcmp` to confirm a hit or break a tie.
-- **`str-json` gets are back to no stripping's,** within 3%, at fewer
-  instructions (689 a hit, against 692); loads that couldn't take a
-  forwarded store fell from 83M to 20M a run.
-- **Keys with shared prefixes gain more:** ties skip their prefix.
-- **`hash32` gets pay 8–9%,** with fewer instructions and no branch misses:
-  the load per level that the window's address waits on.
-- **Inserts and removals are unchanged:** the keys a fit reads dominate them.
-- **Then, skipping the fence reads where a node's own inline keys settle
-  it** (see "Upkeep"): inserts 143 ns on `str-json`, at no stripping's
-  memory fills (3.07 against 3.03 a call), and 144 on `str-16`. What `str-json`
-  still pays, 13%, is 106 instructions, 1.1 branch misses and the window's
-  load per level; `str-16`, 24%, also re-reads the 0.41 keys an insert's
-  growing halves hold.
+- **Keys with shared prefixes gain the most,** and more at 10M, where ties
+  grow: a third to a half off (BAN addresses at 10M: gets 838 → 504,
+  misses 861 → 426; prefixes then grown only where inline keys tied).
+- **Keys that rarely share prefixes pay:**
+  - inserts 15–26%: a split half whose fences share more reads all its
+    keys, one heap read each. Skipping the fence reads where a node's own
+    inline keys settle it (see "Upkeep") brought `str-json` to 143 ns, at
+    no stripping's memory fills; the rest is 106 instructions, 1.1 branch
+    misses and the window's load per level;
+  - removals 21–23% on `str-16` and `str-json`: a merged node takes its
+    parent's prefix during the merge, then reads all its keys to fit
+    `min(left, right)`;
+  - `hash32` gets 8–9%, with fewer instructions and no branch misses: the
+    load per level that the window's address waits on.
+- **A `get` calls no library function** (`objdump` of a probe built like
+  the bench): no `memcpy` to pad a window, no `memcmp` to confirm a hit or
+  break a tie.
 
 ## Expected benefit (simulation on real keys)
 
@@ -336,7 +309,7 @@ Caveats:
 
 ## Width
 
-8 bytes for every key type for now. Later, each key type chooses its own.
+Windows are 8 bytes; each key type keeps 2, 4 or 8 of them (D18).
 
 Stripped leaf ties by width, same simulation (each width at its own leaf
 capacity: 20 keys a run at 2 bytes, 14 at 16):
@@ -356,8 +329,8 @@ capacity: 20 keys a run at 2 bytes, 14 at 16):
   - A key behind a pointer (`String`, `Vec<u8>`) reads the heap on a tie, a
     dependent cache miss that outweighs any saving in the compares: 8 bytes or
     more.
-  - A key stored in the node (`[u8; N]`) reads a line the search already
-    prefetched (D20), and after stripping 2–4 bytes rarely tie. A narrow word
+  - A key stored in the node (`[u8; N]`) reads a line of the node it is
+    searching, and after stripping 2–4 bytes rarely tie. A narrow word
     shrinks the inline array from 4 lines to 1, and its count vectorizes on
     baseline x86-64, which has 16- and 32-bit vector compares but no 64-bit
     one (04 Q6).
@@ -365,13 +338,12 @@ capacity: 20 keys a run at 2 bytes, 14 at 16):
     the key from the same page.
 - **Per key type, without changing the contract.** The trait's 8-byte windows
   stay what keys give; a node keeps the top bytes of one, which is still a
-  window, or two for 16 bytes. A key type would choose its width in its impl:
-  a defaulted associated const (`const WIDTH: usize = 8`) is stable Rust,
-  unlike a defaulted associated type. `Auto` would choose for the std types
-  it recognizes.
+  window. A key type chooses its width in its impl, a defaulted associated
+  const (`InlineKey::WIDTH`), stable Rust unlike a defaulted associated
+  type; `Auto` chooses for the std types it recognizes.
 - **The node word is not just `Ord`:** the map builds it from bytes, shifts
-  and XORs it, so it would be a sealed unsigned integer. That the encoding
-  orders like the key stays the contract.
+  and XORs it, so it is a sealed unsigned integer (`InlineSlot`). That the
+  encoding orders like the key stays the contract.
 - **Each width needs its own search tuning** (04 Q6: the AVX-512 count is
   three 64-bit compares, and `u128` has no vector compare).
 
@@ -405,10 +377,9 @@ Every set ties 0% at 4 bytes.
   no heap read to save. A 2-byte array would be 4× smaller than the keys,
   for a smaller hot set and a count over independent loads, which
   vectorizes on baseline x86-64; it costs 2 bytes per entry (63 → about 55
-  per leaf), one more array to shift, and the upkeep. Measure against
-  today's branchless search first.
+  per leaf), one more array to shift, and the upkeep. Measured in D31.
 
-### Implemented: 8-byte windows, narrow slots (2026-10-09)
+### Narrow slots
 
 - **The trait is unchanged:** `inline_key_at` gives 8-byte windows, and
   `InlineKey::WIDTH` (an `InlineWidth`: `Two`, `Four`, `Eight`, defaulting
@@ -418,12 +389,12 @@ Every set ties 0% at 4 bytes.
   own (`InlineSlot`: `u16`, `u32`, `u64`). A window read out of a node holds
   only the kept bytes, and moved back to a shorter prefix it still holds at
   least as many right ones; nothing moves a window to a longer prefix.
-- **Prefixes stay in whole bytes.** `Auto` keeps 8 for std byte strings;
+- **Prefixes stay in whole bytes.** `Auto` keeps 8 for std heap strings'
+  leaves and 4 for their internal nodes (D43), 2 for byte arrays (D32);
   `u64`, `i64`, `u128` and `i128` implement `InlineKey` with 2 (signed ones
-  with the sign bit flipped), and get inline keys through `WithInlineKey`
-  only.
-- **What the search needed,** found by profiling the first version, which
-  was 1.5–1.8× slower than no inline keys on `u64`:
+  with the sign bit flipped), and `Auto` uses them (D31).
+- **What the search needs:** without these, inline keys were 1.5–1.8×
+  slower than none on `u64`:
   - slots past `len` hold all ones, so the count needs no mask per slot:
     `filter().count()` over every slot compiles to a few vector compares
     whose masks are counted (`popcnt`), where the masked count took about
@@ -434,8 +405,8 @@ Every set ties 0% at 4 bytes.
   - the count goes through the node's kind, so its trip count, the kind's
     capacity, is a constant;
   - within a run of tied inline keys, keys with their own impl search as
-    D19 picks: the root has prefix 0, and dense integers below 2^48 all tie
-    on their first 2 bytes there.
+    D19 picks: with 2-byte inline keys, dense integers tie wherever a
+    node's keys share more than its prefix.
 - **The count's code depended on the capacity.** LLVM vectorizes
   `filter().count()` well for some slot counts and not others. A `u64 →
   [u64; 4]` leaf has 23 slots: LLVM compared 16 in a vector, then took its
@@ -463,15 +434,23 @@ Every set ties 0% at 4 bytes.
   | explicit, each 32 slots' bits masked by `len` | 131 | 203 | 327 |
   | explicit, 64 slots' bits masked by one `bzhi` | 104 | 144 | 258 |
 
-- **8-byte slots keep LLVM's count.** The explicit one measured slower on
-  string maps: 368 against 341 ns per 10M `str-json` hit, with 56 more
-  instructions per lookup; why is open.
-  Its first version also ran out of line: `LiveSlots::equal_run` is
-  generic over the slot width alone, so every map with 8-byte slots shared
-  one copy, with the capacity a variable; it is `#[inline(always)]` now.
-- **Measured,** `u64` keys with 2-byte inline keys (`bbtree-inline`, opt-in)
-  against none, ns per operation, one repetition; a 1M map sits at the size
-  of the L3 of one CCD, and moves between runs:
+- **8-byte slots keep LLVM's count, but at 28 to 31 slots.** The explicit
+  one measured slower on string maps: 368 against 341 ns per 10M
+  `str-json` hit, with 56 more instructions per lookup; why is open. At 28
+  to 31 slots, LLVM takes the compares' masks apart a bit at a time (195
+  instructions for 28 slots, above), and the 31-slot internal nodes of
+  8-byte inline keys count in explicit AVX-512 vectors instead, through the
+  narrow slots' loop. `memtable16` and `memtable24` → 100-byte values at
+  1M, one run each, ns [instructions] per op: `get_hit` 369 → 294 and 349
+  → 274 [1,102 → 393], `random_insert` 240 → 148 [1,384 → 637], `range64`
+  1,119 → 1,041 [3,119 → 2,418]; `u64` and `str-json` lookups and `String`
+  sets keep their instructions.
+  `InlineKeysOfWidth::equal_range` is `#[inline(always)]`: generic over the slot
+  width alone, out of line it was one copy shared by every map with 8-byte
+  slots, with the capacity a variable.
+- **Measured,** `u64` keys with 2-byte inline keys against none, ns per
+  operation, one repetition; a 1M map sits at the size of the L3 of one CCD,
+  and moves between runs:
 
   | cell | none | 2 B |
   |---|--:|--:|
@@ -488,42 +467,18 @@ Every set ties 0% at 4 bytes.
   | bytes per entry, `u64` → `u64` / set | 23.5 / 11.8 | 26.4 / 14.9 |
 
   The 1 KB values gain even though their tree is a level taller: 12-entry
-  leaves and internal nodes of 56 keys rather than 63 make the 1M map 4
-  levels above its leaves against 3 (counted with the test-only height).
-- **Std byte strings, through the same changes,** against before: `hash32`
-  3–16% faster, `str-path` and `kernel-paths` within 3%, `str-json` within
-  4% at 1M and 8% slower at 10M, and 1k `str-16` and `crate-names` lookups
-  about 20% slower (29 → 35 ns, five repetitions each), all with 8–18%
-  fewer instructions, and none of it from the count: their 8-byte count is
-  the same code as before the explicit one. A candidate, not confirmed:
-  `get` now builds the search key's padded copy with 8-byte stores and
-  then copies it with 64-byte loads, which can't be forwarded from them;
-  before, it built it with vector stores.
-- **So integers stayed opt-in,** until the sequential inserts were
-  understood: the loss was the insert path's append check, which compared
-  the key's window with each node's last inline key (D30). Without it,
-  inline keys win there too, 40.1 against 44.5 ns per 10M insert, and
-  `Auto` gives integers inline keys (D31); every entry takes 2 bytes more.
-
-## Plan
-
-1. **Done.** The trait: `inline_key_at`, and `KeyInliner`'s window and common
-   prefix length for both strategies.
-2. **Done.** Windows per node: the search target per node, windows moved
-   back on every move, and the upkeep in the table.
-3. **Done.** Invariant checks on every test tree, and map-level tests that
-   nodes get long prefixes and keep them fitting when fences move across
-   clusters of keys (`map/prefix_tests.rs`).
-4. **Done.** Fitting after every change of fences.
-5. **Done.** Measured (see "Measured").
-6. **Done (2026-10-09).** Exact prefixes, replacing the first version's
-   `prefix_len ≤ LCP(low, high)` with growth gated on ties: a prefix is a
-   function of the fences, so the invariant is one equality, there is no
-   gate, no test-only rule that grows every prefix, no separate "at least
-   the parent's" invariant, and nothing decays.
-7. **Done (2026-10-09).** Per-type widths: 8-byte windows, of which nodes
-   keep 2, 4 or 8 bytes; integers with 2, under `Auto` since D31 (see
-   "Width").
+  leaves and internal nodes of 56 keys rather than 63 put the 1M map's
+  leaves 4 levels below its root against 3.
+- **Std byte strings, through the same changes:** `hash32` 3–16% faster,
+  `str-path` and `kernel-paths` within 3%, `str-json` within 4% at 1M and
+  8% slower at 10M, and 1k `str-16` and `crate-names` lookups about 20%
+  slower (29 → 35 ns, five repetitions each), all with 8–18% fewer
+  instructions, and none of it from the count: their 8-byte count is the
+  same code as before the explicit one.
+- **Sequential inserts** with integer inline keys lost only to the insert
+  path's append check (D30): without it, 40.1 against 44.5 ns per 10M
+  insert, and `Auto` gives integers inline keys (D31); every entry takes 2
+  bytes more.
 
 ## Open questions
 
@@ -531,20 +486,18 @@ Every set ties 0% at 4 bytes.
   "Measured"). Doing them exactly in place would read one or two keys: the
   merged node's prefix is `min(left, right)`, a shift filled from the
   separator's window there; a receiver's is `min(own, LCP(k, s))`. But
-  that reads in the middle of a rebalance, where a panicking `InlineKey`
-  would have to abort, or leave a node a key under its minimum.
+  that reads in the middle of a rebalance, which with user `InlineKey`
+  impls needs an abort-on-unwind guard (D48).
 - **Inserts on keys that rarely share prefixes** pay 15–26% over no
   stripping: the keys a growing half reads.
 - **The window's load per level** (`hash32`, 8–9%): a target that doesn't
   wait on the node's `prefix_len`, such as the windows at a few prefix
   lengths kept in registers and picked by a shift, might hide it.
-- ~~**The fuzzer fuzzes `u64` keys only.**~~ Resolved 2026-10-11: one
-  fuzz target per row of the node plan, string keys sharing prefixes
-  included (`08-fuzzing-verification.md`).
-- **1k string lookups** (see "Width"): about 20% slower than before the
-  per-type widths, with fewer instructions.
+- **1k string lookups** (see "Narrow slots"): about 20% slower after the
+  narrow-slot changes, with fewer instructions; why is open.
 - **The padding past `len`** (invariant 6) is now needed only by LLVM's
-  counts: 8-byte slots, and every width without AVX-512. Explicit counts
+  counts: 8-byte slots but 28 to 31 of them, and every width without
+  AVX-512. Explicit counts
   for those, masking by `len` as the AVX-512 one does (AVX2's
   `movemask`, NEON's lane compares), would let the nodes drop it, and its
   upkeep on every shrink.

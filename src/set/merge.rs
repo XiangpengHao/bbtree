@@ -3,7 +3,7 @@
 //! leaf's run of keys at a time, and [`MergeSides`], two of them merged.
 //!
 //! A cursor takes its set's keys from the walk a run at a time
-//! (`node/walk.rs`): all the keys left in a leaf, which the walk moves past
+//! (`tree/walk.rs`): all the keys left in a leaf, which the walk moves past
 //! at once, or a separator alone. Stepping through a run touches neither the
 //! walk nor its count. A merge's fold keeps both runs in locals, which live
 //! in registers, and touches each walk once per run; `next` keeps them in the
@@ -28,7 +28,7 @@ use core::ops::ControlFlow;
 
 use super::Iter;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node::handle::KeyRun;
+use crate::tree::node::leaf::KeyRun;
 
 /// A set's elements in order, a leaf's run of keys at a time: the run being
 /// visited, and the walk past it.
@@ -47,7 +47,7 @@ impl<T, S> Clone for SetCursor<'_, T, S> {
 }
 
 impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
-    pub(super) fn new(iter: Iter<'a, T, S>) -> Self {
+    fn new(iter: Iter<'a, T, S>) -> Self {
         Self {
             iter,
             run: KeyRun::EMPTY,
@@ -86,7 +86,7 @@ impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
     }
 
     /// How many elements are left.
-    pub(super) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.run.len() + self.iter.len()
     }
 
@@ -97,7 +97,7 @@ impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
 
     /// The next element, without moving: for printing one std's walk holds
     /// taken out.
-    pub(super) fn first_left(&self) -> Option<&'a T> {
+    pub(super) fn first_remaining(&self) -> Option<&'a T> {
         self.remaining().next()
     }
 
@@ -187,7 +187,7 @@ impl<T, S> Clone for MergeSides<'_, T, S> {
     }
 }
 
-impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
+impl<'a, T, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
     pub(super) fn new(left: Iter<'a, T, S>, right: Iter<'a, T, S>) -> Self {
         Self {
             left: SetCursor::new(left),
@@ -195,6 +195,19 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
         }
     }
 
+    /// How many elements each side has left.
+    pub(super) fn lens(&self) -> (usize, usize) {
+        (self.left.len(), self.right.len())
+    }
+
+    /// The merge, printed as std's `MergeIterInner` is after the same steps,
+    /// holding the element of `held`'s side taken out of its iterator.
+    pub(super) fn printed_as_merge_iter(&self, held: HeldSide) -> PrintedAsMergeIter<'_, 'a, T, S> {
+        PrintedAsMergeIter { sides: self, held }
+    }
+}
+
+impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
     /// The next step of the merge, moving past it, and which side std's
     /// merge would hold an element of then; `None` once both sides are done.
     #[inline]
@@ -321,26 +334,25 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
         }
         ControlFlow::Continue(accumulator)
     }
+}
 
-    /// How many elements each side has left.
-    pub(super) fn lens(&self) -> (usize, usize) {
-        (self.left.len(), self.right.len())
-    }
+/// A merge's sides, which print as std's `MergeIterInner` over them does.
+pub(super) struct PrintedAsMergeIter<'m, 'a, T, S> {
+    sides: &'m MergeSides<'a, T, S>,
+    held: HeldSide,
+}
 
-    /// Prints as std's `MergeIterInner` does after the same steps, holding
-    /// the element of `held`'s side taken out of its iterator.
-    pub(super) fn print_as_std(&self, f: &mut fmt::Formatter<'_>, held: HeldSide) -> fmt::Result
-    where
-        T: fmt::Debug,
-    {
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsMergeIter<'_, '_, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { sides, held } = *self;
         let peeked = match held {
             HeldSide::Neither => None,
-            HeldSide::Left => self.left.first_left().map(Peeked::A),
-            HeldSide::Right => self.right.first_left().map(Peeked::B),
+            HeldSide::Left => sides.left.first_remaining().map(Peeked::A),
+            HeldSide::Right => sides.right.first_remaining().map(Peeked::B),
         };
         f.debug_tuple("MergeIterInner")
-            .field(&self.left.printed_as_iter(held == HeldSide::Left))
-            .field(&self.right.printed_as_iter(held == HeldSide::Right))
+            .field(&sides.left.printed_as_iter(held == HeldSide::Left))
+            .field(&sides.right.printed_as_iter(held == HeldSide::Right))
             .field(&peeked)
             .finish()
     }
