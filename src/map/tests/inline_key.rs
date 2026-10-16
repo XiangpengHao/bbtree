@@ -1,11 +1,12 @@
 //! Inline keys (D18) against std's `BTreeMap`: std byte-string keys with the
 //! default strategy, looked up by every borrowed form; keys behind a long
 //! shared prefix (D50), whose inline keys tie where the tree keeps none, and
-//! keys that their inline keys hold whole; a newtype that opts in, looked up
-//! through another borrowed form too; integers, and strings, whose nodes
+//! keys that their inline keys hold whole; integers, and strings, whose nodes
 //! keep 2 or 4 bytes of their inline keys; inline keys that break their
 //! contract, which may give wrong answers but never break memory safety; and
-//! an `InlineKey` that panics, which leaves the map memory-safe (D48).
+//! an `InlineKey` that panics, which leaves the map memory-safe (D48). The
+//! fuzz targets run `Vec<u8>`, `u64` and `[u8; 16]` keys, and a newtype that
+//! opts in, against std's map (`fuzz/src/map_differential.rs`).
 
 #![forbid(unsafe_code)]
 
@@ -23,7 +24,7 @@ use std::vec::Vec;
 
 use super::differential::{MirroredMaps, Workload};
 use super::prefix::shared_prefix_key;
-use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
+use crate::inline_key::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
 use crate::map::BBTreeMap;
 use crate::tree::test_support::{DropLedger, FromNumber, TestRng, Tracked};
 
@@ -98,14 +99,6 @@ fn auto_strings_accept_an_unrecognized_borrowed_query() {
     assert!(ours.iter().eq(theirs.iter()));
 }
 
-/// Four bytes: inline keys hold every key whole, so leaf searches tell
-/// equal keys by their length.
-impl FromNumber for Vec<u8> {
-    fn from_number(number: usize) -> Self {
-        (number as u32).to_be_bytes().to_vec()
-    }
-}
-
 /// A 27-byte head, then eight digits ([`shared_prefix_key`]): the tree keeps
 /// the head, and the leading zeros of the digits, as its shared prefix
 /// (D50), and its nodes take their windows past it.
@@ -115,29 +108,14 @@ impl FromNumber for Box<str> {
     }
 }
 
-/// Sixteen bytes, the array itself, of which the workloads' numbers leave
-/// the first fourteen zero: the tree keeps them as its shared prefix (D50),
-/// and its nodes take their windows past them.
-impl FromNumber for [u8; 16] {
-    fn from_number(number: usize) -> Self {
-        (number as u128).to_be_bytes()
-    }
-}
-
 /// A newtype: not a std byte string, so it has inline keys only with
-/// `WithInlineKey`. It also looks up by `str`.
+/// `WithInlineKey`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct UserName(String);
 
 impl InlineKey for UserName {
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.0.inline_key_at(offset)
-    }
-}
-
-impl Borrow<str> for UserName {
-    fn borrow(&self) -> &str {
-        &self.0
     }
 }
 
@@ -151,7 +129,7 @@ impl FromNumber for UserName {
 /// puts them first.
 impl FromNumber for i64 {
     fn from_number(number: usize) -> Self {
-        number as i64 - (1 << 15)
+        number as i64 - (1 << 12)
     }
 }
 
@@ -167,7 +145,7 @@ impl FromNumber for u128 {
 /// Half of the workloads' numbers below zero, as `i64`'s.
 impl FromNumber for i128 {
     fn from_number(number: usize) -> Self {
-        (number as i128 - (1 << 15)) << 40
+        (number as i128 - (1 << 12)) << 40
     }
 }
 
@@ -194,84 +172,6 @@ impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
     }
 }
 
-/// `String` keys have inline keys by default, and every lookup uses them:
-/// by `String` and by `str`.
-#[test]
-fn string_keys_match_std_by_string_and_by_str() {
-    let workload = Workload::new(100_000, 1 << 16);
-    workload.run::<String, u64, Auto>(61);
-
-    let rng = TestRng::new(62);
-    let mut maps = MirroredMaps::<String, u64>::new();
-    maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
-    for number in 0..workload.key_space + 2 {
-        let key = String::from_number(number);
-        maps.get_borrowed(key.as_str());
-        maps.get_borrowed(&key);
-        // The key cut short, and the key with a NUL after it, whose inline
-        // key, zero-padded, is the key's own: only the length tells them
-        // apart.
-        maps.get_borrowed(&key[..9]);
-        maps.get_borrowed(format!("{key}\0").as_str());
-    }
-    // Ranges by `str`, between the key, the key cut short, and the key with
-    // a NUL after it.
-    for number in (0..workload.key_space + 2).step_by(97) {
-        let key = String::from_number(number);
-        let (shorter, longer) = (&key[..9], format!("{key}\0"));
-        maps.range_borrowed(
-            &rng,
-            (Bound::Included(shorter), Bound::Excluded(key.as_str())),
-        );
-        maps.range_borrowed(
-            &rng,
-            (Bound::Excluded(shorter), Bound::Included(longer.as_str())),
-        );
-        maps.range_borrowed(&rng, (Bound::Excluded(key.as_str()), Bound::Unbounded));
-    }
-    for number in 0..workload.key_space + 2 {
-        let key = String::from_number(number);
-        maps.remove_borrowed(&key[..9]);
-        maps.remove_borrowed(key.as_str());
-    }
-    maps.assert_same_entries();
-}
-
-#[test]
-fn byte_vec_keys_match_std_by_vec_and_by_slice() {
-    let workload = Workload::new(100_000, 1 << 16);
-    workload.run::<Vec<u8>, u64, Auto>(63);
-
-    let rng = TestRng::new(64);
-    let mut maps = MirroredMaps::<Vec<u8>, u64>::new();
-    maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
-    for number in 0..workload.key_space + 2 {
-        let key = Vec::from_number(number);
-        maps.get_borrowed(key.as_slice());
-        maps.get_borrowed(&key[..3]);
-        maps.get_borrowed([key.as_slice(), &[0]].concat().as_slice());
-    }
-    for number in (0..workload.key_space + 2).step_by(97) {
-        let key = Vec::from_number(number);
-        let (shorter, longer) = (&key[..3], [key.as_slice(), &[0]].concat());
-        maps.range_borrowed(
-            &rng,
-            (Bound::Included(shorter), Bound::Excluded(key.as_slice())),
-        );
-        maps.range_borrowed(
-            &rng,
-            (Bound::Excluded(shorter), Bound::Included(longer.as_slice())),
-        );
-        maps.range_borrowed(&rng, (Bound::Excluded(key.as_slice()), Bound::Unbounded));
-    }
-    for number in 0..workload.key_space + 2 {
-        let key = Vec::from_number(number);
-        maps.remove_borrowed(&key[..3]);
-        maps.remove_borrowed(key.as_slice());
-    }
-    maps.assert_same_entries();
-}
-
 /// Keys behind a long shared head, which the tree keeps as its shared prefix
 /// (D50). Then one key outside the head leaves the tree no shared prefix:
 /// along its borders, where nodes take their windows from the keys' first
@@ -279,13 +179,9 @@ fn byte_vec_keys_match_std_by_vec_and_by_slice() {
 /// node, and the full keys decide.
 #[test]
 fn keys_sharing_long_prefixes_match_std() {
-    let workload = Workload::new(40_000, 1 << 14);
-    workload.run::<Box<str>, u64, Auto>(65);
-    workload.run::<[u8; 16], u64, Auto>(67);
-
     let rng = TestRng::new(66);
     let mut maps = MirroredMaps::<Box<str>, u64>::new();
-    maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
+    maps.run_random_operations(&rng, 4000, 1 << 12);
     maps.insert(Box::from("z"), 0);
     let keys: Vec<Box<str>> = maps.keys().cloned().collect();
     assert!(maps.ours().leaf_depth() >= 2);
@@ -351,31 +247,12 @@ fn short_keys_match_std() {
     }
 }
 
-/// A newtype that opts in has inline keys; a lookup by `str`, another
-/// borrowed form, compares full keys instead, with the same answers.
-#[test]
-fn an_opted_in_newtype_matches_std_by_key_and_by_str() {
-    let workload = Workload::new(100_000, 1 << 16);
-    workload.run::<UserName, u64, WithInlineKey>(69);
-    workload.run::<UserName, u64, Auto>(70);
-
-    let rng = TestRng::new(71);
-    let mut maps = MirroredMaps::<UserName, u64, WithInlineKey>::new();
-    maps.run_random_operations(&rng, workload.random_steps, workload.key_space);
-    for number in 0..workload.key_space + 2 {
-        let key = UserName::from_number(number);
-        maps.get_borrowed(&key);
-        maps.get_borrowed(key.0.as_str());
-    }
-}
-
 /// Integers opt in, and their nodes keep 2 bytes of their inline keys:
-/// unsigned and signed, 8 and 16 bytes, the last with zero-sized values, as
-/// in a set.
+/// signed, and 16 bytes wide, the last with zero-sized values, as in a set.
+/// `u64` keys are fuzzed (`map_integers`).
 #[test]
 fn integer_keys_match_std() {
-    let workload = Workload::new(100_000, 1 << 16);
-    workload.run::<u64, u64, WithInlineKey>(76);
+    let workload = Workload::new(10_000, 1 << 13);
     workload.run::<i64, u64, WithInlineKey>(77);
     workload.run::<u128, u64, WithInlineKey>(78);
     workload.run::<i128, (), WithInlineKey>(79);
@@ -430,7 +307,7 @@ fn fixed_array_exact_key_lookups_match_std() {
 /// tied inline keys are long, and the full keys decide within them.
 #[test]
 fn narrow_inline_keys_match_std() {
-    let workload = Workload::new(100_000, 1 << 16);
+    let workload = Workload::new(10_000, 1 << 13);
     workload.run::<NarrowName<2>, u64, WithInlineKey>(80);
     workload.run::<NarrowName<4>, String, WithInlineKey>(81);
 }

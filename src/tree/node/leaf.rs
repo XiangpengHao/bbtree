@@ -244,7 +244,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// Whether the leaf holds fewer entries than [`Child::min_len`].
-    #[cfg(test)]
     pub(in crate::tree) fn is_underfull(self) -> bool {
         self.len() < <Self as Child<K, V, S>>::min_len()
     }

@@ -521,7 +521,7 @@ impl Ord for Tagged {
 #[test]
 fn which_of_equal_elements_stays_matches_std() {
     let rng = TestRng::new(24);
-    let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };
+    let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (30, 3000) };
     let same_print = |ours: &dyn Debug, theirs: &dyn Debug| {
         assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
     };

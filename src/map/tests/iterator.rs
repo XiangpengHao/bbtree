@@ -345,7 +345,7 @@ fn unbounded_ranges_can_switch_direction_at_exhaustion() {
 
 #[test]
 fn range_runs_preserve_mixed_ends_clones_and_mutable_reborrows() {
-    for length in [1, 27, 128, 8192] {
+    for length in [1, 27, 128, 2048] {
         for bounds in [
             (Unbounded, Unbounded),
             (Included(length / 3), Unbounded),

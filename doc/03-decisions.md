@@ -1124,15 +1124,31 @@ Design in 05-fence-key.md, "The shared prefix".
   a call-site marker and `inline(always)` on four insert helpers; doc 12
   lists what each saved.
 
-**D54. BCTree: the shared tree is bbtree's nodes with a latch word, under a crate-private strategy, synchronized by optimistic lock coupling.** (2026-10-15)
+**D54. BCTree: bbtree's tree, shared through optimistic lock coupling; its tree operations are bbtree's own, run on the nodes it holds.** (2026-10-15)
 Design, protocols and measurements in 09-concurrency.md.
 
 - **What:** `BCTreeMap` keeps its tree with strategy `Latched<S>`, which
   gives `S`'s inline keys and a 16-byte header with a latch word
-  (`node/latch.rs`): leaves, internal nodes, searches, splits and prefix
-  fits are bbtree's. Internal nodes are read optimistically, in place,
+  (`node/latch.rs`). Internal nodes are read optimistically, in place,
   through raw pointers, and changed in place by writers holding them (OLC,
   `node/optimistic.rs`); leaves are latched. Keys need inline keys (D49).
+- **Same tree, same operations:** the shared prefix (D50), prefixes fit to
+  their fences, 4-byte windows of heap strings (D43), appends to the last
+  leaf (D45), a root that grows and shrinks in its page. A split, a
+  rebalancing removal or a shrinking of the shared prefix takes, without
+  waiting, every node bbtree's operation will change or read a separator
+  of, then runs that operation along a node stack from the topmost one
+  (`tree/latched`). BCTree's own code is only what sharing needs: the
+  descent, which nodes to take, type-stable pages, the append pointer.
+- **Why not a tree layer of its own:** the first version had one, and left
+  out the shared prefix, prefix fits after removals, lowering to a leaf,
+  4-byte windows and appends. Each cut needed a special case elsewhere, in
+  the node plan, the invariant check or the root, or made another path
+  hot: dense integers tied at the root, 205 ns a `u64-seq` hit.
+- **Holding a node holds its separators' keys:** a head key changes only
+  while the node holding its separator is held, so bbtree's operations
+  read keys where they are. A reader that holds nothing latches the head's
+  leaf shared: a removed key's memory may be freed at once.
 - **Why the strategy:** every node type already carries it, so no type
   gains a parameter, and the layouts pick their constants from it as they do
   from the plan.
@@ -1140,13 +1156,18 @@ Design, protocols and measurements in 09-concurrency.md.
   reference, so only the version check decides what a read was worth. A
   first version read through atomic copies and wrote through private copies
   of each node: about 30 instructions more per internal level for lookups.
-- **Zero cost to bbtree:** what only BCTree needs lives in BCTree's own
-  functions and its allocator wrapper. Atomic header accessors and a
-  zeroing branch in `FreshPage::allocate`, tried first, changed bbtree's
-  insert paths (an `inline(always)` on `len` moved a `u32` split by 195
-  instructions).
-- **Phase 1** only grows: no removal, so no node is freed and head keys,
-  which ties read without a latch, never change.
+- **Type-stable nodes, not epochs:** a freed node's page goes on the
+  tree's free list for its kind, keeps its latch word, whose version only
+  grows, and goes back to the allocator when the map drops. A racing
+  reader always reads a node of the kind its pointer says, and its check
+  fails; nothing per operation, no guards. The root page alone changes
+  kind, and a reader checks a node's version before following an edge.
+- **Cost to bbtree:** the inline-key searches read through a raw `Slots`
+  view; a node stack can start along a kept path; a removal's fixing reads
+  no node above the last it changes. Atomic header accessors and a zeroing
+  branch in `FreshPage::allocate`, tried first, changed bbtree's insert
+  paths (an `inline(always)` on `len` moved a `u32` split by 195
+  instructions); racing reads have functions of their own instead.
 
 ## Navigation
 

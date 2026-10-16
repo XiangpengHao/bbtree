@@ -1,6 +1,8 @@
 //! `bbtree-scaling`: how throughput grows as threads are added, on maps that
-//! threads share: `BCTreeMap`, and `BBTreeMap` behind a `RwLock`, the way to
-//! share it without one.
+//! threads share: `BCTreeMap`; `BBTreeMap` behind a `RwLock`, the way to
+//! share it without one; and other crates' concurrent ordered maps:
+//! crossbeam's `SkipMap`, scc's `TreeIndex`, Congee, and concurrent-map
+//! (`--maps` picks some).
 //!
 //! Each worker is pinned to a CPU of its own, one per physical core first,
 //! then their SMT siblings, in the order the process's affinity mask allows
@@ -22,21 +24,37 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Barrier, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use bbtree::{BBTreeMap, BCTreeMap};
+use concurrent_map::ConcurrentMap;
+use congee::Congee;
+use crossbeam_skiplist::SkipMap;
+use scc::TreeIndex;
 
 use crate::random::SeededRng;
 
-/// A map that threads share through `&self`.
-trait SharedMap: Sync + Sized {
+/// A map that threads share, each worker through a handle of its own: a
+/// reference for most, a clone for a map whose reclamation keeps state per
+/// handle.
+trait SharedMap: Sized {
     const NAME: &'static str;
+
+    /// What one worker reads and writes the map through.
+    type Handle<'m>: MapHandle + Send
+    where
+        Self: 'm;
 
     fn new() -> Self;
 
+    fn handle(&self) -> Self::Handle<'_>;
+}
+
+/// One worker's way into a shared map.
+trait MapHandle {
     fn insert(&self, key: u64, value: u64);
 
     fn get(&self, key: u64) -> Option<u64>;
@@ -45,13 +63,43 @@ trait SharedMap: Sync + Sized {
     fn bump(&self, key: u64);
 }
 
-impl SharedMap for BCTreeMap<u64, u64> {
-    const NAME: &'static str = "bctree";
-
-    fn new() -> Self {
-        BCTreeMap::new()
+impl<T: MapHandle> MapHandle for &T {
+    fn insert(&self, key: u64, value: u64) {
+        (**self).insert(key, value);
     }
 
+    fn get(&self, key: u64) -> Option<u64> {
+        (**self).get(key)
+    }
+
+    fn bump(&self, key: u64) {
+        (**self).bump(key);
+    }
+}
+
+/// Implements [`SharedMap`] for a map that threads share by reference,
+/// named `$name`.
+macro_rules! shared_by_reference {
+    ($map:ty, $name:literal, $new:expr) => {
+        impl SharedMap for $map {
+            const NAME: &'static str = $name;
+
+            type Handle<'m> = &'m Self;
+
+            fn new() -> Self {
+                $new
+            }
+
+            fn handle(&self) -> &Self {
+                self
+            }
+        }
+    };
+}
+
+shared_by_reference!(BCTreeMap<u64, u64>, "bctree", BCTreeMap::new());
+
+impl MapHandle for BCTreeMap<u64, u64> {
     fn insert(&self, key: u64, value: u64) {
         BCTreeMap::insert(self, key, value);
     }
@@ -65,13 +113,13 @@ impl SharedMap for BCTreeMap<u64, u64> {
     }
 }
 
-impl SharedMap for RwLock<BBTreeMap<u64, u64>> {
-    const NAME: &'static str = "bbtree-rwlock";
+shared_by_reference!(
+    RwLock<BBTreeMap<u64, u64>>,
+    "bbtree-rwlock",
+    RwLock::new(BBTreeMap::new())
+);
 
-    fn new() -> Self {
-        RwLock::new(BBTreeMap::new())
-    }
-
+impl MapHandle for RwLock<BBTreeMap<u64, u64>> {
     fn insert(&self, key: u64, value: u64) {
         self.write().expect("no thread panics").insert(key, value);
     }
@@ -84,6 +132,105 @@ impl SharedMap for RwLock<BBTreeMap<u64, u64>> {
         if let Some(value) = self.write().expect("no thread panics").get_mut(&key) {
             *value += 1;
         }
+    }
+}
+
+// crossbeam's lock-free skiplist. It hands out values shared only, and
+// replaces an entry by removing it and inserting another, which a lookup
+// meanwhile misses: values are atomics, which an update adds to.
+shared_by_reference!(
+    SkipMap<u64, AtomicU64>,
+    "crossbeam-skipmap",
+    SkipMap::new()
+);
+
+impl MapHandle for SkipMap<u64, AtomicU64> {
+    fn insert(&self, key: u64, value: u64) {
+        SkipMap::insert(self, key, AtomicU64::new(value));
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        SkipMap::get(self, &key).map(|entry| entry.value().load(Ordering::Relaxed))
+    }
+
+    fn bump(&self, key: u64) {
+        if let Some(entry) = SkipMap::get(self, &key) {
+            entry.value().fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+// scc's B+-tree, read-optimized, which hands out values shared only:
+// values are atomics, as for the skiplist. Lookups peek, which takes no
+// lock; updates read, which sees every change to a value.
+shared_by_reference!(
+    TreeIndex<u64, AtomicU64>,
+    "scc-treeindex",
+    TreeIndex::new()
+);
+
+impl MapHandle for TreeIndex<u64, AtomicU64> {
+    fn insert(&self, key: u64, value: u64) {
+        self.upsert_sync(key, AtomicU64::new(value));
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        self.peek_with(&key, |_, value| value.load(Ordering::Relaxed))
+    }
+
+    fn bump(&self, key: u64) {
+        self.read_sync(&key, |_, value| value.fetch_add(1, Ordering::Relaxed));
+    }
+}
+
+// Congee, an adaptive radix tree with optimistic lock coupling, for
+// 8-byte keys: each call pins an epoch, as a call that keeps no guard.
+shared_by_reference!(Congee<usize, usize>, "congee", Congee::default());
+
+impl MapHandle for Congee<usize, usize> {
+    fn insert(&self, key: u64, value: u64) {
+        let guard = self.pin();
+        (Congee::insert(self, key as usize, value as usize, &guard)).expect("memory for a node");
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        let guard = self.pin();
+        Congee::get(self, &(key as usize), &guard).map(|value| value as u64)
+    }
+
+    fn bump(&self, key: u64) {
+        let guard = self.pin();
+        self.compute_if_present(&(key as usize), |value| Some(value + 1), &guard);
+    }
+}
+
+// sled's lock-free B+-tree. Its reclamation keeps state per handle, which
+// isn't `Sync`: each worker clones the map.
+impl SharedMap for ConcurrentMap<u64, u64> {
+    const NAME: &'static str = "concurrent-map";
+
+    type Handle<'m> = Self;
+
+    fn new() -> Self {
+        ConcurrentMap::default()
+    }
+
+    fn handle(&self) -> Self {
+        self.clone()
+    }
+}
+
+impl MapHandle for ConcurrentMap<u64, u64> {
+    fn insert(&self, key: u64, value: u64) {
+        ConcurrentMap::insert(self, key, value);
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        ConcurrentMap::get(self, &key)
+    }
+
+    fn bump(&self, key: u64) {
+        self.fetch_and_update(key, |value| value.map(|value| value + 1));
     }
 }
 
@@ -224,6 +371,8 @@ impl Point {
 
 /// The command line's settings, and the points measured so far.
 struct ScalingRun {
+    /// The maps to measure, by name; every one if `None`.
+    maps: Option<Vec<String>>,
     entries: usize,
     duration: Duration,
     cpus: CpuOrder,
@@ -233,9 +382,20 @@ struct ScalingRun {
 }
 
 impl ScalingRun {
+    /// Every map it measures, by name, in the order it measures them.
+    const MAPS: [&'static str; 6] = [
+        <BCTreeMap<u64, u64> as SharedMap>::NAME,
+        <RwLock<BBTreeMap<u64, u64>> as SharedMap>::NAME,
+        <SkipMap<u64, AtomicU64> as SharedMap>::NAME,
+        <TreeIndex<u64, AtomicU64> as SharedMap>::NAME,
+        <Congee<usize, usize> as SharedMap>::NAME,
+        <ConcurrentMap<u64, u64> as SharedMap>::NAME,
+    ];
+
     fn parse(arguments: &[String]) -> Result<Self, String> {
         let cpus = CpuOrder::of_this_process()?;
         let mut run = Self {
+            maps: None,
             entries: 10_000_000,
             duration: Duration::from_millis(500),
             thread_counts: cpus.thread_counts(),
@@ -258,10 +418,22 @@ impl ScalingRun {
                         .collect::<Result<_, _>>()?
                 }
                 "--out" => run.out = PathBuf::from(value()?),
+                "--maps" => {
+                    let maps: Vec<String> = value()?.split(',').map(str::to_owned).collect();
+                    if let Some(unknown) =
+                        maps.iter().find(|map| !Self::MAPS.contains(&map.as_str()))
+                    {
+                        return Err(format!(
+                            "unknown map {unknown}; maps: {}",
+                            Self::MAPS.join(",")
+                        ));
+                    }
+                    run.maps = Some(maps);
+                }
                 _ => {
                     return Err(format!(
                         "unknown option {flag}; options: --entries N, --seconds S, \
-                         --threads 1,2,4, --out DIR"
+                         --threads 1,2,4, --maps A,B, --out DIR"
                     ));
                 }
             }
@@ -283,22 +455,23 @@ impl ScalingRun {
         SeededRng::mix(index as u64)
     }
 
-    /// Runs `work(worker)` on `threads` pinned workers at once, and returns
-    /// their results and the time from their start to the last one's end.
-    fn on_workers<R: Send>(
+    /// Runs `work(worker, handle)` on as many pinned workers as `handles`,
+    /// each with its own, at once, and returns their results and the time
+    /// from their start to the last one's end.
+    fn on_workers<H: MapHandle + Send, R: Send>(
         &self,
-        threads: usize,
-        work: impl Fn(usize) -> R + Sync,
+        handles: Vec<H>,
+        work: impl Fn(usize, &H) -> R + Sync,
     ) -> (Vec<R>, Duration) {
-        let barrier = Barrier::new(threads + 1);
+        let barrier = Barrier::new(handles.len() + 1);
         thread::scope(|scope| {
-            let workers: Vec<_> = (0..threads)
-                .map(|worker| {
+            let workers: Vec<_> = (handles.into_iter().enumerate())
+                .map(|(worker, handle)| {
                     let (barrier, work) = (&barrier, &work);
                     scope.spawn(move || {
                         self.cpus.pin(worker);
                         barrier.wait();
-                        work(worker)
+                        work(worker, &handle)
                     })
                 })
                 .collect();
@@ -318,21 +491,27 @@ impl ScalingRun {
         let mut order: Vec<usize> = (0..self.entries).collect();
         SeededRng::new(crate::random::RandomStream::InsertionOrder).shuffle(&mut order);
         let chunk = self.entries.div_ceil(workers);
-        self.on_workers(workers, |worker| {
+        self.on_workers(Self::handles(&map, workers), |worker, handle| {
             for &index in order.iter().skip(worker * chunk).take(chunk) {
-                map.insert(Self::key(index), index as u64);
+                handle.insert(Self::key(index), index as u64);
             }
         });
         map
+    }
+
+    /// A handle of `map` for each of `workers` workers.
+    fn handles<M: SharedMap>(map: &M, workers: usize) -> Vec<M::Handle<'_>> {
+        (0..workers).map(|_| map.handle()).collect()
     }
 
     /// Runs `operation` on `threads` workers until `self.duration` is up,
     /// and records the point.
     fn time_for_duration<M: SharedMap>(
         &mut self,
+        map: &M,
         workload: Workload,
         threads: usize,
-        operation: impl Fn(&mut IndexStream) -> u64 + Sync,
+        operation: impl Fn(&M::Handle<'_>, &mut IndexStream) -> u64 + Sync,
     ) {
         const BATCH: usize = 256;
         let stop = AtomicBool::new(false);
@@ -342,12 +521,12 @@ impl ScalingRun {
                 thread::sleep(duration);
                 stop.store(true, Ordering::Relaxed);
             });
-            self.on_workers(threads, |worker| {
+            self.on_workers(Self::handles(map, threads), |worker, handle| {
                 let mut stream = IndexStream::new(worker, threads as u64);
                 let (mut operations, mut checksum) = (0_u64, 0_u64);
                 while !stop.load(Ordering::Relaxed) {
                     for _ in 0..BATCH {
-                        checksum = checksum.wrapping_add(operation(&mut stream));
+                        checksum = checksum.wrapping_add(operation(handle, &mut stream));
                     }
                     operations += BATCH as u64;
                 }
@@ -382,24 +561,53 @@ impl ScalingRun {
         self.points.push(point);
     }
 
+    /// Every workload on each map the command line picked, in the order of
+    /// [`Self::MAPS`].
+    fn measure_picked_maps(&mut self) {
+        if self.picks(<BCTreeMap<u64, u64> as SharedMap>::NAME) {
+            self.measure::<BCTreeMap<u64, u64>>();
+        }
+        if self.picks(<RwLock<BBTreeMap<u64, u64>> as SharedMap>::NAME) {
+            self.measure::<RwLock<BBTreeMap<u64, u64>>>();
+        }
+        if self.picks(<SkipMap<u64, AtomicU64> as SharedMap>::NAME) {
+            self.measure::<SkipMap<u64, AtomicU64>>();
+        }
+        if self.picks(<TreeIndex<u64, AtomicU64> as SharedMap>::NAME) {
+            self.measure::<TreeIndex<u64, AtomicU64>>();
+        }
+        if self.picks(<Congee<usize, usize> as SharedMap>::NAME) {
+            self.measure::<Congee<usize, usize>>();
+        }
+        if self.picks(<ConcurrentMap<u64, u64> as SharedMap>::NAME) {
+            self.measure::<ConcurrentMap<u64, u64>>();
+        }
+    }
+
+    /// Whether the command line picked the map named `name`.
+    fn picks(&self, name: &str) -> bool {
+        (self.maps.as_ref()).is_none_or(|maps| maps.iter().any(|map| map == name))
+    }
+
     /// Every workload on `M`, at every thread count.
     fn measure<M: SharedMap>(&mut self) {
         let map: M = self.built();
         let entries = self.entries;
         for threads in self.thread_counts.clone() {
-            self.time_for_duration::<M>(Workload::Get, threads, |stream| {
-                map.get(Self::key(stream.next_below(entries)))
+            self.time_for_duration(&map, Workload::Get, threads, |handle, stream| {
+                handle
+                    .get(Self::key(stream.next_below(entries)))
                     .expect("every key is there")
             });
         }
         for threads in self.thread_counts.clone() {
-            self.time_for_duration::<M>(Workload::Mixed, threads, |stream| {
+            self.time_for_duration(&map, Workload::Mixed, threads, |handle, stream| {
                 let key = Self::key(stream.next_below(entries));
                 if stream.next_below(10) == 0 {
-                    map.bump(key);
+                    handle.bump(key);
                     0
                 } else {
-                    map.get(key).expect("every key is there")
+                    handle.get(key).expect("every key is there")
                 }
             });
         }
@@ -407,9 +615,9 @@ impl ScalingRun {
         for threads in self.thread_counts.clone() {
             let map = M::new();
             let chunk = entries.div_ceil(threads);
-            let (_, elapsed) = self.on_workers(threads, |worker| {
+            let (_, elapsed) = self.on_workers(Self::handles(&map, threads), |worker, handle| {
                 for index in (worker * chunk..entries).take(chunk) {
-                    map.insert(Self::key(index), index as u64);
+                    handle.insert(Self::key(index), index as u64);
                 }
             });
             self.record::<M>(Workload::Insert, threads, entries as u64, elapsed);
@@ -435,37 +643,28 @@ impl ScalingRun {
                 .insert(point.map, point.mops());
         }
         let mut markdown = String::new();
-        let maps = [
-            <BCTreeMap<u64, u64> as SharedMap>::NAME,
-            <RwLock<BBTreeMap<u64, u64>> as SharedMap>::NAME,
-        ];
+        let mut maps: Vec<&str> = Vec::new();
+        for point in &self.points {
+            if !maps.contains(&point.map) {
+                maps.push(point.map);
+            }
+        }
         for workload in Workload::ALL {
             let _ = writeln!(
                 markdown,
-                "\n### {} (Mops/s)\n\n| threads | {} | {} | bctree speedup |\n|--:|--:|--:|--:|",
+                "\n### {} (Mops/s)\n\n| threads | {} |\n|--:|{}",
                 workload.name(),
-                maps[0],
-                maps[1]
+                maps.join(" | "),
+                "--:|".repeat(maps.len())
             );
-            let single = table
-                .get(&(workload, 1))
-                .and_then(|row| row.get(maps[0]).copied());
             for (&(_, threads), row) in table.range((workload, 0)..=(workload, usize::MAX)) {
-                let cell = |map| {
-                    row.get(map)
-                        .map_or("–".to_owned(), |mops| format!("{mops:.2}"))
-                };
-                let speedup = (row.get(maps[0]).copied())
-                    .zip(single)
-                    .map_or("–".to_owned(), |(mops, single)| {
-                        format!("{:.2}×", mops / single)
-                    });
-                let _ = writeln!(
-                    markdown,
-                    "| {threads} | {} | {} | {speedup} |",
-                    cell(maps[0]),
-                    cell(maps[1])
-                );
+                let cells: Vec<String> = (maps.iter())
+                    .map(|map| {
+                        row.get(map)
+                            .map_or("–".to_owned(), |mops| format!("{mops:.2}"))
+                    })
+                    .collect();
+                let _ = writeln!(markdown, "| {threads} | {} |", cells.join(" | "));
             }
         }
         (markdown, csv)
@@ -493,8 +692,7 @@ pub fn run() -> ExitCode {
             "{} entries, {:?} per timed point, CPUs in order {:?}, threads {:?}",
             run.entries, run.duration, run.cpus.cpus, run.thread_counts
         );
-        run.measure::<BCTreeMap<u64, u64>>();
-        run.measure::<RwLock<BBTreeMap<u64, u64>>>();
+        run.measure_picked_maps();
         let (markdown, csv) = run.report();
         println!("{markdown}");
         run.write(&markdown, &csv)

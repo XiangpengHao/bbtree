@@ -16,11 +16,12 @@ use core::mem::size_of;
 #[cfg(any(test, feature = "inspect"))]
 use core::ops::Range;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
-use super::page::{FreshPage, LatchedNodeHeader, NodePtr, PageByType, PageType};
+use super::page::{FreshPage, NodePtr, PageByType, PageType};
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
@@ -171,6 +172,26 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         unsafe { &*self.area() }
     }
 
+    /// [`Self::shared_prefix`] of a latched tree, while a thread holding the
+    /// root may be changing it: a copy, read through the raw pointer, which
+    /// the root's version vouches for once checked (`tree/latched`); `None`
+    /// if, as read first, it has no bytes, which most trees read alone.
+    ///
+    /// # Safety
+    ///
+    /// The page is a latched tree's root page, allocated.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
+        // SAFETY: the root area was written with the page, which is
+        // allocated (caller); its length is a byte, read as an atomic, and a
+        // racing write makes the copy one that the version check throws
+        // away.
+        unsafe {
+            let len = AtomicU8::from_ptr(self.area().byte_add(SharedPrefix::LEN_OFFSET).cast());
+            (len.load(Ordering::Relaxed) != 0).then(|| self.area().read())
+        }
+    }
+
     /// What every key of the tree shares, to change: keeping every node
     /// along the tree's borders at its length is the caller's business
     /// (`tree/prefix.rs`).
@@ -211,36 +232,6 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.
         let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(self.node.page()) };
-        let root = Internal::at(node);
-        root.put_only_child(child);
-        root.set_empty_prefix_len(self.shared_prefix().len());
-        Self { node }
-    }
-
-    /// [`Self::raise`], for a latched tree whose root is a leaf the caller
-    /// holds exclusively (`latch.rs`): the root page keeps its latch word,
-    /// held, and the internal node it becomes starts on zeroed bytes, as a
-    /// latched tree's pages do; the leaf moves to a fresh page, unlatched,
-    /// which no other thread reaches until the tree's pointer to the root
-    /// tells it is internal.
-    pub(in crate::tree) fn raise_latched_leaf(self, alloc: &impl Allocator) -> Self {
-        assert!(NodePtr::<K, V, S>::is_latched() && self.node.is_leaf());
-        let child = self.move_node_out(alloc);
-        let page = self.node.page();
-        let header_size = size_of::<LatchedNodeHeader>();
-        // SAFETY: the leaf moved out, so nothing in the root page needs
-        // dropping; the caller holds it exclusively, and no thread reads a
-        // root page optimistically while the tree's pointer says it is a
-        // leaf, so nothing but its latch word, which stays, races with the
-        // writes. The bytes past the header up to an internal node's size
-        // are in the page.
-        unsafe {
-            child.node_ptr().latch().reset();
-            page.byte_add(header_size)
-                .write_bytes(0, Internal::<K, V, S>::page_layout().size() - header_size);
-        }
-        // SAFETY: as for `Self::raise`; `initialize` leaves the latch word.
-        let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(page) };
         let root = Internal::at(node);
         root.put_only_child(child);
         root.set_empty_prefix_len(self.shared_prefix().len());

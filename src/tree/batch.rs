@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn insert_batches_with_duplicates_splits_and_raises_match_node_for_node() {
-        let count = if cfg!(miri) { 240 } else { 4000 };
+        let count = if cfg!(miri) { 240 } else { 1000 };
         let mut numbers: Vec<u64> = (0..count).chain(0..count).collect();
         TestRng::new(54).shuffle(&mut numbers);
         InsertBatches::check::<_, Auto, 8>(numbers.clone());

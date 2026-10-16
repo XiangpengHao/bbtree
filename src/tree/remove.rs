@@ -145,16 +145,20 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         };
         *length -= 1;
         self.refit_changed_fences(&changed);
-        self.detach_lowering_an_empty_root(alloc);
+        self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
         entry
     }
 
     /// Goes up the node stack from its bottom node, a leaf, which just lost a
-    /// key, and in each node fixes the child the node stack came from if it is
-    /// underfull, as long as the child lost a key; up to depth `must_reach`,
-    /// if given, it goes on regardless, and lets `at_must_reach` change that
-    /// node before it fixes its child. Returns where the fences it changed
-    /// are; every node from `must_reach` down counts as changed.
+    /// key, and in each node fixes the child the node stack came from while
+    /// that child is underfull; up to depth `must_reach`, if given, it goes
+    /// on regardless, and lets `at_must_reach` change that node before it
+    /// fixes its child. Returns where the fences it changed are; every node
+    /// from `must_reach` down counts as changed.
+    ///
+    /// It decides whether to go up from the node it is at, and reads no
+    /// node above the last one it changes: a latched tree's removal holds
+    /// just the nodes it changes (`tree/latched/remove.rs`).
     fn fix_up_the_stack(
         &mut self,
         must_reach: Option<usize>,
@@ -162,9 +166,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
         let mut changed = ChangedFences::new(self.depth(), must_reach);
-        let mut child_lost_a_key = true;
+        let mut child_is_underfull = self.leaf().is_underfull();
         while !self.is_at_root()
-            && (child_lost_a_key || must_reach.is_some_and(|depth| self.depth() > depth))
+            && (child_is_underfull || must_reach.is_some_and(|depth| self.depth() > depth))
         {
             let node = self.ascend();
             let (depth, index) = (self.depth(), self.index());
@@ -172,17 +176,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
             if Some(depth) == must_reach {
                 at_must_reach(node);
             }
-            if child_lost_a_key {
+            if child_is_underfull {
                 let fix = if node.has_leaf_children() {
                     node.fix_underfull_child::<Leaf<K, V, S>>(index, alloc)
                 } else {
                     node.fix_underfull_child::<Internal<K, V, S>>(index, alloc)
                 };
-                child_lost_a_key = matches!(
+                let merged = matches!(
                     fix,
                     ChildFix::MergedIntoLeft { .. } | ChildFix::MergedRightIn
                 );
                 changed.record(depth, fix);
+                child_is_underfull = merged && node.is_underfull();
             }
         }
         changed
@@ -249,6 +254,12 @@ struct ChangedFences {
 }
 
 impl ChangedFences {
+    /// Whether the fixing changed the root's children: only then may it
+    /// have taken the root's last separator.
+    fn reached_root(&self) -> bool {
+        self.top_depth == Some(0)
+    }
+
     /// Nothing fixed yet, up from a leaf at `leaf_depth`, with the children
     /// of the nodes from `top_depth` down counting as changed.
     fn new(leaf_depth: usize, top_depth: Option<usize>) -> Self {

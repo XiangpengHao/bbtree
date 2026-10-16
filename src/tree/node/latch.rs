@@ -149,19 +149,22 @@ impl NodeLatch {
             .store(version.0 + Self::VERSION_UNIT, Ordering::Release);
     }
 
-    /// Lets go of the node, held exclusively since `version` and left as it
-    /// was: back at `version`, so that readers who read it before need not
-    /// start over.
+    /// The node's version, if no thread holds it exclusively now; `None`
+    /// without waiting otherwise.
     #[inline]
-    pub(in crate::tree) fn unlock_unchanged(&self, version: Version) {
-        self.0.store(version.0, Ordering::Release);
+    pub(in crate::tree) fn try_read_version(&self) -> Option<Version> {
+        let word = self.0.load(Ordering::Acquire);
+        (word & Self::EXCLUSIVE == 0).then_some(Version(word & !Self::SHARED_MASK))
     }
 
-    /// Makes the latch unheld, at the first version: for a node just copied
-    /// to a page no other thread reaches yet, with the word of the node it
-    /// was copied from.
-    pub(in crate::tree) fn reset(&self) {
-        self.0.store(0, Ordering::Relaxed);
+    /// Takes the node exclusively if no thread holds it in either mode;
+    /// `None` without waiting otherwise. Returns the version to let go at.
+    #[inline]
+    pub(in crate::tree) fn try_lock_exclusive(&self) -> Option<Version> {
+        let word = self.0.load(Ordering::Relaxed);
+        let version = Version(word);
+        (word & (Self::EXCLUSIVE | Self::SHARED_MASK) == 0 && self.try_lock_at(version))
+            .then_some(version)
     }
 
     /// Takes the node exclusively, once no thread holds it in either mode;

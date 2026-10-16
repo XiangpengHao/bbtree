@@ -13,7 +13,6 @@ use core::cmp::Ordering;
 use core::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
-use super::drops::BudgetedKey;
 use crate::inline_key::Auto;
 use crate::map::{BBTreeMap, Entry};
 use crate::tree::node::Node;
@@ -159,6 +158,49 @@ fn full_leaf_replay_can_find_a_different_fitting_leaf() {
     );
 }
 
+/// A key whose comparisons spend a shared budget, and panic once it is spent.
+///
+/// Padded to 72 bytes so that, with `u64` values, a 1 KB node holds 12
+/// entries in both kinds (D13, D15, D17): tall trees from few entries.
+struct BudgetedKey<'b> {
+    number: u64,
+    budget: &'b Cell<usize>,
+    _padding: [u8; 56],
+}
+
+impl<'b> BudgetedKey<'b> {
+    fn new(number: u64, budget: &'b Cell<usize>) -> Self {
+        Self {
+            number,
+            budget,
+            _padding: [0; 56],
+        }
+    }
+}
+
+impl PartialEq for BudgetedKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for BudgetedKey<'_> {}
+
+impl PartialOrd for BudgetedKey<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for BudgetedKey<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let budget = self.budget.get();
+        assert!(budget > 0, "the comparison budget is spent");
+        self.budget.set(budget - 1);
+        self.number.cmp(&other.number)
+    }
+}
+
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
@@ -175,7 +217,7 @@ fn a_panicking_full_leaf_replay_leaves_the_map_unchanged() {
     assert_eq!(map.leaf_depth(), 0);
     assert!(
         map.iter()
-            .map(|(key, &value)| (key.number(), value))
+            .map(|(key, &value)| (key.number, value))
             .eq((0..count).map(|number| (number, number)))
     );
 }

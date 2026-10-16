@@ -26,8 +26,7 @@ use crate::tree::latched::LatchedTree;
 /// strings have them under [`Auto`]; other keys implement the trait and use
 /// [`WithInlineKey`](crate::WithInlineKey).
 ///
-/// Phase 1 of the design: it only grows. There is no removal yet, and no
-/// iteration.
+/// There is no iteration yet.
 ///
 /// # Deadlocks
 ///
@@ -141,13 +140,44 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BCTreeMap<K, V, S, A> {
     {
         self.tree.insert(key, value, &self.alloc)
     }
+
+    /// Removes the entry whose key equals `key`, and returns its value;
+    /// `None` without one.
+    #[inline]
+    pub fn remove<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.remove_entry(key).map(|(_, value)| value)
+    }
+
+    /// Removes the entry whose key equals `key`, and returns it, with the
+    /// key as the map stored it; `None` without one.
+    ///
+    /// The pages of nodes a removal empties stay with the map, for new
+    /// nodes, until it is dropped: a thread may still be reading them.
+    #[inline]
+    pub fn remove_entry<Q>(&self, key: &Q) -> Option<(K, V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.tree.remove_entry(key, &self.alloc)
+    }
 }
 
 #[cfg(test)]
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> BCTreeMap<K, V, S, A> {
-    /// Panics unless the tree is well formed and holds `length` entries.
+    /// Panics unless the tree is well formed, as a `BBTreeMap`'s, and holds
+    /// `length` entries.
     pub(crate) fn check_invariants(&mut self, length: usize) {
         self.tree.check_invariants(length);
+    }
+
+    /// How many leading bytes every key shares (D50).
+    pub(crate) fn shared_prefix_len(&mut self) -> usize {
+        self.tree.shared_prefix_len()
     }
 }
 

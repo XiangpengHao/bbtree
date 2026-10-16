@@ -451,12 +451,11 @@ pub(crate) struct CountedBCTree<K, V, S: InlineKeyStrategy<K> = bbtree::Auto> {
 impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest<K, V>
     for CountedBCTree<K, V, S>
 {
-    /// Phase 1 of `BCTreeMap`: inserts and lookups only.
+    /// `BCTreeMap` has no iteration yet.
     const UNSUPPORTED: &'static [Operation] = &[
         Operation::BulkBuild,
         Operation::Iterate,
         Operation::Range64,
-        Operation::RandomRemove,
         Operation::EntryUpsert,
         Operation::PopFirst,
         Operation::BatchGetHit32,
@@ -496,5 +495,13 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
 
     fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
         self.map.read(key, |_, value| value.fingerprint())
+    }
+
+    fn remove(&mut self, key: &K) -> Option<V> {
+        let removed = self.map.remove(key);
+        if removed.is_some() {
+            self.entries -= 1;
+        }
+        removed
     }
 }

@@ -153,7 +153,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     /// Whether the node holds fewer separators than [`Child::min_len`].
-    #[cfg(test)]
     pub(in crate::tree) fn is_underfull(self) -> bool {
         self.len() < <Self as Child<K, V, S>>::min_len()
     }

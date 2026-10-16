@@ -81,6 +81,19 @@ impl<'a> NodeInlineKeys<'a> {
         with_inline_keys_of_width!(self, |of_width| of_width.load(index).inline_key())
     }
 
+    /// Whether inline key `index` is above the bytes the node keeps of
+    /// `inline_key`: a key with that inline key sorts before key `index`,
+    /// whatever its bytes past those say.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    #[inline(always)]
+    pub(in crate::tree) fn is_above(self, index: usize, inline_key: InlineWord) -> bool {
+        with_inline_keys_of_width!(self, |of_width| of_width.load(index)
+            > InlineSlot::of_inline_key(inline_key))
+    }
+
     /// The positions of the inline keys equal to the bytes the node keeps
     /// of `inline_key`; see [`InlineKeysOfWidth::equal_range`].
     #[inline(always)]

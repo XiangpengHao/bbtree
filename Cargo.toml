@@ -16,8 +16,3 @@ inspect = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
-
-# Every module with submodules is a folder with its own `mod.rs`, never a
-# `foo.rs` beside a `foo/`.
-[lints.clippy]
-self_named_module_files = "deny"

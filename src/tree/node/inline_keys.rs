@@ -99,6 +99,21 @@ impl<K> KeyInliner<K> {
         }
     }
 
+    /// Whether `K`, under strategy `S`, is ordered by its own bytes alone,
+    /// and every bit pattern of them is a `K`: the std integers and byte
+    /// arrays [`Auto`] recognizes. A copy of such a key, read while a writer
+    /// changes it, compares without reading anything else, which a latched
+    /// tree's optimistic reader relies on (`optimistic.rs`); any other key's
+    /// order may follow pointers it holds.
+    ///
+    /// [`Auto`]: crate::Auto
+    #[inline(always)]
+    pub(in crate::tree) fn orders_by_own_bytes<S: InlineKeyStrategy<K>>() -> bool {
+        matches!(S::SOURCE, InlineKeySource::RecognizedStdTypes)
+            && (StdInteger::<K>::recognize().is_some()
+                || ByteString::<K>::recognize().is_some_and(ByteString::holds_its_bytes))
+    }
+
     /// `key`'s inline key at `offset`: what a node whose keys share their
     /// first `offset` bytes stores beside it. Always inlined, as the
     /// dispatch it is: called from enough places, LLVM outlined it, and

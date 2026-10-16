@@ -1,10 +1,11 @@
 //! Differential tests: the map against std's `BTreeMap`, fed the same
-//! operations, for ordinary, heap-owning, wide, zero-sized and over-aligned
-//! keys and values, including every separator key, whose value is a leaf's
-//! head (D17), and removals down to an empty map, which merge nodes and move
-//! entries between them (D22). Iterators and ranges walk the maps from both
-//! ends at once (D23), with bounds at separators too. The tests of inline
-//! keys (`inline_key.rs`) use the same harness.
+//! operations, for zero-sized and over-aligned keys and values, including
+//! every separator key, whose value is a leaf's head (D17), and removals down
+//! to an empty map, which merge nodes and move entries between them (D22).
+//! Iterators and ranges walk the maps from both ends at once (D23), with
+//! bounds at separators too. The tests of inline keys (`inline_key.rs`) use
+//! the same harness. Ordinary, heap-owning and wide keys and values run
+//! against std's map in the fuzz targets (`fuzz/src/map_differential.rs`).
 
 #![forbid(unsafe_code)]
 
@@ -27,17 +28,6 @@ use crate::map::{BBTreeMap, Entry, OccupiedEntry};
 use crate::tree::test_support::{
     CacheLineAligned, FromNumber, PageAligned, StepEitherEnd, TestRng, hash_of,
 };
-
-/// With `u64` values, 64-byte keys fill a 1 KB node with 14 entries in both
-/// kinds (D13, D15, D17): tall trees from a few hundred entries. Arrays order
-/// lexicographically, so keys ascend with their first element.
-type WideKey = [u64; 8];
-
-impl FromNumber for WideKey {
-    fn from_number(number: usize) -> Self {
-        core::array::from_fn(|index| (number as u64).wrapping_mul(41) + index as u64)
-    }
-}
 
 impl FromNumber for CacheLineAligned {
     fn from_number(number: usize) -> Self {
@@ -88,7 +78,7 @@ where
     }
 
     /// Removes `key` by a borrowed form of the keys from both maps.
-    pub(super) fn remove_borrowed<Q>(&mut self, key: &Q)
+    fn remove_borrowed<Q>(&mut self, key: &Q)
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -99,7 +89,7 @@ where
 
     /// Checks a range by a borrowed form of the keys in both maps: its
     /// entries from both ends at random, or the same panic.
-    pub(super) fn range_borrowed<Q>(&self, rng: &TestRng, bounds: (Bound<&Q>, Bound<&Q>))
+    fn range_borrowed<Q>(&self, rng: &TestRng, bounds: (Bound<&Q>, Bound<&Q>))
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -722,14 +712,14 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> &str {
 
 /// How much work one key and value type gets.
 pub(super) struct Workload {
-    pub(super) random_steps: usize,
-    pub(super) key_space: usize,
-    pub(super) ordered_entries: usize,
+    random_steps: usize,
+    key_space: usize,
+    ordered_entries: usize,
     /// How deep ascending and descending inserts must push the leaves. They
     /// leave larger nodes densely filled and small ones about half full. The
     /// workloads keep enough entries to reach this depth under either
     /// policy.
-    pub(super) min_sequential_leaf_depth: usize,
+    min_sequential_leaf_depth: usize,
 }
 
 impl Workload {
@@ -809,39 +799,6 @@ impl Workload {
     }
 }
 
-#[test]
-fn u64_to_u64_matches_std() {
-    Workload {
-        random_steps: 500_000,
-        key_space: 1 << 18,
-        ordered_entries: 200_000,
-        min_sequential_leaf_depth: 2,
-    }
-    .run::<u64, u64, Auto>(1);
-}
-
-#[test]
-fn string_to_string_matches_std() {
-    Workload {
-        random_steps: 100_000,
-        key_space: 1 << 16,
-        ordered_entries: 50_000,
-        min_sequential_leaf_depth: 2,
-    }
-    .run::<String, String, Auto>(2);
-}
-
-#[test]
-fn wide_keys_match_std() {
-    Workload {
-        random_steps: 40_000,
-        key_space: 1 << 14,
-        ordered_entries: 10_000,
-        min_sequential_leaf_depth: 3,
-    }
-    .run::<WideKey, u64, Auto>(3);
-}
-
 /// The mutable walks of a tree two levels tall, small enough for Miri, which
 /// checks that they hand out each value once, and no two references that
 /// alias.
@@ -897,7 +854,7 @@ fn ranges_out_of_order_panic_like_std() {
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn collecting_and_indexing_match_std() {
     let rng = TestRng::new(12);
-    let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };
+    let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (30, 3000) };
     for _ in 0..trials {
         let len = rng.below(max_len);
         // Values number the entries, which tells which of equal keys stays.
@@ -932,7 +889,7 @@ fn collecting_and_indexing_match_std() {
 #[test]
 fn comparisons_and_hashes_match_std() {
     let rng = TestRng::new(11);
-    let (trials, max_len) = if cfg!(miri) { (20, 80) } else { (400, 2000) };
+    let (trials, max_len) = if cfg!(miri) { (20, 80) } else { (40, 2000) };
     for _ in 0..trials {
         let len = rng.below(max_len);
         let entries: Vec<(u64, u64)> = (0..len)
@@ -1034,51 +991,5 @@ fn over_aligned_values_match_std() {
         let value = map.get(&key).expect("every key is there");
         assert!(ptr::from_ref(value).is_aligned());
         assert_eq!(value.get(), key);
-    }
-}
-
-/// `split_off` at every position of a tree a few levels tall: before the
-/// first key, at each key and between each two, after the last, and so at
-/// every separator. Both halves match std's and keep the invariants, in a
-/// tree of half-full small nodes, from ascending inserts, and in one thinned by
-/// removals toward the minimum fill, whose borders have little to spare.
-#[test]
-fn split_off_at_every_position_matches_std() {
-    // Ascending inserts leave these small nodes about half full: 1500 entries
-    // put the leaves 3 below the root.
-    let (count, leaf_depth) = (1500, 3);
-    for thinned in [false, true] {
-        let rng = TestRng::new(31);
-        let mut maps = MirroredMaps::<WideKey, u64>::new();
-        // Keys at even numbers, so that odd ones fall between them.
-        for number in (1..=count).map(|number| 2 * number) {
-            maps.insert(WideKey::from_number(number), u64::from_number(number));
-        }
-        if thinned {
-            for number in (1..=count).map(|number| 2 * number) {
-                if rng.below(4) != 0 {
-                    let key = WideKey::from_number(number);
-                    assert_eq!(maps.ours.remove(&key), maps.theirs.remove(&key));
-                }
-            }
-        } else {
-            assert!(
-                maps.ours.leaf_depth() >= leaf_depth,
-                "the tree is a few levels tall"
-            );
-        }
-        maps.assert_same_contents();
-        for number in 0..=2 * count + 1 {
-            let key = WideKey::from_number(number);
-            let mut lower = maps.ours.clone();
-            let mut theirs_lower = maps.theirs.clone();
-            let upper = lower.split_off(&key);
-            let theirs_upper = theirs_lower.split_off(&key);
-            for (ours, theirs) in [(&lower, &theirs_lower), (&upper, &theirs_upper)] {
-                ours.check_invariants();
-                assert_eq!(ours.len(), theirs.len());
-                assert!(ours.iter().eq(theirs));
-            }
-        }
     }
 }

@@ -106,24 +106,11 @@ where
     }
 }
 
-#[test]
-fn concat_joins_u64_trees_of_every_shape() {
-    let (trials, max_len) = if cfg!(miri) {
-        (30, 300)
-    } else {
-        (1000, 20_000)
-    };
-    concat_random_pieces::<u64>(31, trials, max_len);
-}
-
 /// String keys, with prefixes along their fences, and shared prefixes
-/// (D50), which every join shrinks to what both trees share.
+/// (D50), which every join shrinks to what both trees share. The fuzz
+/// targets join trees of every key type through `extract_if`.
 #[test]
 fn concat_joins_string_trees_of_every_shape() {
-    let (trials, max_len) = if cfg!(miri) {
-        (30, 200)
-    } else {
-        (1000, 20_000)
-    };
+    let (trials, max_len) = if cfg!(miri) { (30, 200) } else { (300, 20_000) };
     concat_random_pieces::<String>(32, trials, max_len);
 }

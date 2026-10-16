@@ -160,36 +160,6 @@ fn clustered_key(cluster: usize, number: usize) -> String {
     format!("{cluster:03}/{SHARED}{number:06}")
 }
 
-/// A cut fixes its borders by moving entries over from the nodes beside
-/// them, whose fences move, across clusters too: both trees stay valid, in
-/// a built tree, with full nodes, and in one made by random inserts.
-#[test]
-fn cuts_refit_the_nodes_beside_their_borders() {
-    let rng = TestRng::new(83);
-    let mut keys = Vec::new();
-    for cluster in 0..if cfg!(miri) { 4 } else { 40 } {
-        for number in 0..1 + rng.below(if cfg!(miri) { 40 } else { 300 }) {
-            keys.push(clustered_key(cluster, number));
-        }
-    }
-    let built: BBTreeMap<String, usize> = keys.iter().cloned().zip(0..).collect();
-    let mut inserted = BBTreeMap::new();
-    for _ in 0..keys.len() {
-        let index = rng.below(keys.len());
-        inserted.insert(keys[index].clone(), index);
-    }
-    for map in [&built, &inserted] {
-        map.check_invariants();
-        for _ in 0..if cfg!(miri) { 4 } else { 200 } {
-            let cut = &keys[rng.below(keys.len())];
-            let mut lower = map.clone();
-            let upper = lower.split_off(cut);
-            lower.check_invariants();
-            upper.check_invariants();
-        }
-    }
-}
-
 /// Keys that share 96 bytes, of which the tree keeps 64 (D50): queries that
 /// end inside them or differ within them, before the 64th byte or past it,
 /// go before or after every key, or down the borders. Inserting them

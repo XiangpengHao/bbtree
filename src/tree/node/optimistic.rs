@@ -11,25 +11,33 @@
 //!   ([`NodeInlineKeys`] over its slots, edges read from their slots);
 //! - reads the node's length once, and clamps it to the capacity, so that
 //!   whatever it read, the search stays in bounds (D14);
-//! - follows no pointer it read before checking it can: an edge no writer
-//!   wrote is null, as pages start zeroed (`tree/latched`), and a pointer to
-//!   a node is to a live page, as a latched tree frees none while threads
-//!   share it;
-//! - runs no user code on what it read but a separator's key, a leaf's
-//!   head (D49), and only once the node's version vouches for the edge it
-//!   walked down: a head key never changes while its leaf is in a tree that
-//!   only grows.
+//! - follows no edge it read before the node's version vouches for it, and
+//!   then reaches a page of the kind the edge's tag says: every page but
+//!   the root's keeps its kind while threads share the tree, and a node
+//!   moved or freed keeps its page's latch word, whose version only grows
+//!   (`tree/latched/pages.rs`);
+//! - runs no user code on what it read: where inline keys tie, it compares
+//!   a separator's key, a leaf's head (D49), once the node's version vouches
+//!   for the edge it walked down, with that leaf latched shared. A head key
+//!   changes only while its leaf is latched exclusively, and the key a
+//!   removal takes out may be dropped, its memory freed, at once after.
+//!   Keys ordered by their own bytes alone, std integers and byte arrays,
+//!   it compares as a copy instead, unlatched, and checks the node's
+//!   version after: a head changes only while the node holding its
+//!   separator is held.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::mem::ManuallyDrop;
 use core::ops::Range;
 use core::ptr::NonNull;
 
 use super::Node;
 use super::inline_key_search::NodeInlineKeys;
-use super::inline_keys::SearchKey;
+use super::inline_keys::{KeyInliner, SearchKey};
 use super::internal::Internal;
-use super::latch::Version;
+use super::latch::{NodeLatch, Version};
+use super::leaf::Leaf;
 use super::page::NodePtr;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -41,6 +49,61 @@ pub(in crate::tree) struct Routed {
     pub(in crate::tree) edge: usize,
     pub(in crate::tree) at_separator: bool,
     pub(in crate::tree) len: usize,
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
+    /// Whether `key` may sort after every key of this leaf, read in place,
+    /// without its latch, while writers may change it: `false` if the leaf,
+    /// as read, has no key, or a last key whose inline key alone sorts it
+    /// after `key`. A hint for an append, which latches the leaf to know
+    /// (`tree/latched/append.rs`), so that an insert that won't append
+    /// writes nothing to the last leaf.
+    #[inline(always)]
+    pub(in crate::tree) fn may_go_last_racing<Q>(self, key: &SearchKey<'_, K, S, Q>) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let page = self.node_ptr();
+        let capacity = Self::capacity();
+        // SAFETY: the page is a leaf's, allocated while threads share the
+        // tree; the fields are read once each and the length clamped, and
+        // every inline-key slot up to the capacity is initialized, read
+        // through its pointer, as for an internal node (`route_racing`).
+        let (len, prefix_len, inline_keys) = unsafe {
+            let (len, prefix_len) = page.load_racing_header();
+            let len = len.min(capacity);
+            let slots = page
+                .key_columns::<Self>()
+                .inline_keys()
+                .expect("a latched tree's keys have inline keys");
+            (len, prefix_len, NodeInlineKeys::new(slots, capacity, len))
+        };
+        let Some(last) = len.checked_sub(1) else {
+            return false;
+        };
+        key.inline_target(prefix_len)
+            .is_none_or(|target| !inline_keys.is_above(last, target.inline_key()))
+    }
+
+    /// A copy of the head's key, read in place while writers may change it,
+    /// for keys ordered by their own bytes alone
+    /// ([`KeyInliner::orders_by_own_bytes`]): whatever bytes it holds make a
+    /// key that compares by them, and a version check after tells whether
+    /// the comparison held. `None` if the leaf, as read, has no head.
+    #[inline(always)]
+    fn load_racing_head_key(self) -> Option<ManuallyDrop<K>> {
+        debug_assert!(KeyInliner::<K>::orders_by_own_bytes::<S>());
+        let page = self.node_ptr();
+        // SAFETY: the page is a leaf's, allocated while threads share the
+        // tree, in a map whose separator keys are heads (D49); its head key
+        // slot is in the page, and initialized once the leaf had a head,
+        // which every bit pattern of such a key is.
+        unsafe {
+            page.load_racing_has_head()
+                .then(|| ManuallyDrop::new(page.head_key_slot().read()))
+        }
+    }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
@@ -114,7 +177,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let (mut low, mut high) = (candidates.start, candidates.end);
         while low < high {
             let middle = low + (high - low) / 2;
-            match cmp(self.racing_separator_key(middle, version)?) {
+            match self.cmp_separator(middle, version, &cmp)? {
                 Ordering::Less => high = middle,
                 Ordering::Greater => low = middle + 1,
                 Ordering::Equal => {
@@ -133,28 +196,50 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         })
     }
 
-    /// Separator `index`'s key, the head key of the leftmost leaf right of
-    /// it (D49), if the node, read at `version`, still is: its edge is read,
-    /// then the version checked, before the walk down first edges, which a
-    /// published node never changes. `None` if the node changed, or the walk
-    /// meets a null edge or a leaf without a head.
+    /// `cmp` of separator `index`'s key, the head key of the leftmost leaf
+    /// right of it (D49), read with that leaf latched shared, or as a copy
+    /// for keys ordered by their own bytes, if the node, read at `version`,
+    /// still is: its edge is read, then the version checked, before the walk
+    /// down first edges, which only a thread holding the node changes; and
+    /// checked again once the head is read. `None` if the node changed, or
+    /// the walk meets a null edge or a leaf without a head.
     ///
-    /// The reference stays valid while threads share the tree: a head key
-    /// never changes while its leaf is in a tree that only grows.
-    fn racing_separator_key<'a>(self, index: usize, version: Version) -> Option<&'a K> {
+    /// The caller holds no latch, so waiting for the leaf's waits for no
+    /// thread that waits for it.
+    fn cmp_separator(
+        self,
+        index: usize,
+        version: Version,
+        cmp: &impl Fn(&K) -> Ordering,
+    ) -> Option<Ordering> {
+        // SAFETY: the tree is latched (`route_racing`'s caller), and its
+        // pages stay node pages of their kind (`tree/latched`).
+        let latch_of = |node: NodePtr<K, V, S>| unsafe { node.latch() };
         let child = self.racing_child(index + 1)?;
-        // SAFETY: the tree is latched (`route_racing`'s caller), and the page
-        // allocated.
-        if !unsafe { self.node_ptr().latch() }.is_unchanged(version) {
+        if !latch_of(self.node_ptr()).is_unchanged(version) {
             return None;
         }
         let mut node = child;
-        loop {
+        let leaf = loop {
             node = match node {
-                Node::Leaf(leaf) => return leaf.has_head().then(|| leaf.head_key()),
+                Node::Leaf(leaf) => break leaf,
                 Node::Internal(internal) => internal.racing_child(0)?,
             };
+        };
+        if KeyInliner::<K>::orders_by_own_bytes::<S>() {
+            // Without the latch: the head changes only while this node is
+            // held (`tree/latched/held.rs`), which its version tells.
+            let head = leaf.load_racing_head_key()?;
+            let ordering = cmp(&head);
+            return latch_of(self.node_ptr())
+                .is_unchanged(version)
+                .then_some(ordering);
         }
+        let latched = SharedLatch::lock(latch_of(leaf.node_ptr()));
+        let ordering = (latch_of(self.node_ptr()).is_unchanged(version) && leaf.has_head())
+            .then(|| cmp(leaf.head_key()));
+        drop(latched);
+        ordering
     }
 
     /// The child at edge `index`, read in place while writers may change
@@ -176,5 +261,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             let tagged = slot.cast::<*mut u8>().read();
             NonNull::new(tagged).map(|tagged| Node::at(NodePtr::from_tagged(tagged)))
         }
+    }
+}
+
+/// A node latched shared until dropped, unwinding included.
+struct SharedLatch<'a>(&'a NodeLatch);
+
+impl<'a> SharedLatch<'a> {
+    fn lock(latch: &'a NodeLatch) -> Self {
+        latch.lock_shared();
+        Self(latch)
+    }
+}
+
+impl Drop for SharedLatch<'_> {
+    fn drop(&mut self) {
+        self.0.unlock_shared();
     }
 }

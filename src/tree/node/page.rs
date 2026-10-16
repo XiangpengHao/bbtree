@@ -8,7 +8,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::offset_of;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use super::internal::Internal;
 use super::latch::NodeLatch;
@@ -219,6 +219,45 @@ pub(in crate::tree) struct LatchedNodeHeader {
     latch: NodeLatch,
 }
 
+impl LatchedNodeHeader {
+    /// Initializes the latch word of the latched tree's page at `page`, a
+    /// fresh page, unheld at the first version.
+    ///
+    /// # Safety
+    ///
+    /// `page` is a latched tree's page, allocated, which no other thread
+    /// reaches yet.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn initialize_latch(page: NonNull<u8>) {
+        // SAFETY: the latch word lies in the allocated page, aligned
+        // (caller); nothing else accesses it yet.
+        unsafe {
+            page.byte_add(offset_of!(Self, latch))
+                .cast::<u64>()
+                .write(0);
+        }
+    }
+
+    /// The latch word of the latched tree's page at `page`, a node's of
+    /// either kind or the root's, for as long as the caller picks.
+    ///
+    /// # Safety
+    ///
+    /// `page` is a latched tree's page, allocated while the caller uses the
+    /// latch, its latch word initialized (`tree/latched/pages.rs`).
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn latch_of<'a>(page: NonNull<u8>) -> &'a NodeLatch {
+        // SAFETY: a latched page's header is a `LatchedNodeHeader`, aligned,
+        // in the allocated page (caller), whose latch word every thread
+        // accesses as an atomic only, through `NodeLatch`.
+        unsafe {
+            page.byte_add(offset_of!(Self, latch))
+                .cast::<NodeLatch>()
+                .as_ref()
+        }
+    }
+}
+
 /// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
 /// strategy `S`, that tells the node's kind in its lowest bit, which every
 /// page leaves 0, being aligned to 512 B at least (D15, D49). Internal nodes
@@ -295,7 +334,7 @@ impl<K, V, S> NodePtr<K, V, S> {
     /// The page's address: the pointer without its tag, which every access
     /// to the node starts from.
     #[inline(always)]
-    pub(super) fn page(self) -> NonNull<u8> {
+    pub(in crate::tree) fn page(self) -> NonNull<u8> {
         // SAFETY: clearing the tag gives back the page's address, which is
         // not null.
         unsafe {
@@ -400,15 +439,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) unsafe fn latch<'a>(self) -> &'a NodeLatch {
         debug_assert!(Self::is_latched());
-        // SAFETY: a latched node's header is a `LatchedNodeHeader`, aligned,
-        // in the allocated page (caller), whose latch word every thread
-        // accesses as an atomic only, through `NodeLatch`.
-        unsafe {
-            self.page()
-                .byte_add(offset_of!(LatchedNodeHeader, latch))
-                .cast::<NodeLatch>()
-                .as_ref()
-        }
+        // SAFETY: the page is a latched tree's, allocated (caller), its latch
+        // word initialized with it.
+        unsafe { LatchedNodeHeader::latch_of(self.page()) }
     }
 
     /// The `len` and `prefix_len` header fields of a latched tree's internal
@@ -433,6 +466,22 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 usize::from(prefix_len.load(Ordering::Relaxed)),
             )
         }
+    }
+
+    /// The `has_head` header field of a latched tree's leaf, while a writer
+    /// may be changing it, for an optimistic read (`optimistic.rs`): read
+    /// once, as a relaxed atomic.
+    ///
+    /// # Safety
+    ///
+    /// The tree is latched, and the page allocated, its header initialized.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn load_racing_has_head(self) -> bool {
+        debug_assert!(Self::is_latched());
+        // SAFETY: the field is a `bool` of the allocated, initialized header
+        // (caller), which writers only ever set to a `bool`, read through
+        // the raw pointer.
+        unsafe { AtomicBool::from_ptr(&raw mut (*self.header()).has_head).load(Ordering::Relaxed) }
     }
 
     /// The width of the inline keys nodes of `Kind` hold, or `None` if they
@@ -559,11 +608,22 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         let size = Kind::page_layout().size();
         // SAFETY: both pages are allocated with at least `size` bytes, and
         // distinct (the caller); a byte copy carries uninitialized bytes as
-        // they are.
+        // they are. In a latched tree, the latch word stays the
+        // destination's: a page keeps one latch word for as long as threads
+        // share the tree, whose version only grows (`latch.rs`), so a reader
+        // that read the page before can't find its version again.
         unsafe {
-            self.page()
-                .as_ptr()
-                .copy_to_nonoverlapping(dest.as_ptr(), size);
+            let (source, dest) = (self.page().as_ptr(), dest.as_ptr());
+            if Self::is_latched() {
+                let latch = offset_of!(LatchedNodeHeader, latch);
+                let latch_end = latch + size_of::<NodeLatch>();
+                source.copy_to_nonoverlapping(dest, latch);
+                source
+                    .add(latch_end)
+                    .copy_to_nonoverlapping(dest.add(latch_end), size - latch_end);
+            } else {
+                source.copy_to_nonoverlapping(dest, size);
+            }
         }
         Self::tagged_as::<Kind>(dest)
     }
