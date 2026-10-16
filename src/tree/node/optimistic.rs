@@ -37,8 +37,8 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{KeyInliner, SearchKey};
 use super::internal::Internal;
 use super::latch::{NodeLatch, Version};
-use super::leaf::Leaf;
-use super::page::NodePtr;
+use super::leaf::{CandidateLine, Leaf};
+use super::page::{NodeKind, NodePtr};
 use crate::inline_key::InlineKeyStrategy;
 
 /// Where a key goes from an internal node read optimistically: down `edge`,
@@ -64,26 +64,43 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let page = self.node_ptr();
-        let capacity = Self::capacity();
         // SAFETY: the page is a leaf's, allocated while threads share the
-        // tree; the fields are read once each and the length clamped, and
-        // every inline-key slot up to the capacity is initialized, read
-        // through its pointer, as for an internal node (`route_racing`).
-        let (len, prefix_len, inline_keys) = unsafe {
-            let (len, prefix_len) = page.load_racing_header();
-            let len = len.min(capacity);
-            let slots = page
-                .key_columns::<Self>()
-                .inline_keys()
-                .expect("a latched tree's keys have inline keys");
-            (len, prefix_len, NodeInlineKeys::new(slots, capacity, len))
-        };
+        // tree.
+        let (len, prefix_len, inline_keys) =
+            unsafe { self.node_ptr().load_racing_inline_keys::<Self>() };
         let Some(last) = len.checked_sub(1) else {
             return false;
         };
         key.inline_target(prefix_len)
             .is_none_or(|target| !inline_keys.is_above(last, target.inline_key()))
+    }
+
+    /// [`Self::candidate_line`], read in place while writers may change the
+    /// leaf, and the prefix length it read the leaf at: both hold only if
+    /// the leaf's version is unchanged after. A batch's lane reads it
+    /// before it latches the leaf, to fetch the candidate's entry first
+    /// (`tree/latched/batch.rs`).
+    ///
+    /// `key` shares the leaf's prefix if it routed here through nodes whose
+    /// versions held.
+    #[inline(always)]
+    pub(in crate::tree) fn candidate_line_racing<Q>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> (CandidateLine, usize)
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        // SAFETY: the page is a leaf's, allocated while threads share the
+        // tree.
+        let (len, prefix_len, inline_keys) =
+            unsafe { self.node_ptr().load_racing_inline_keys::<Self>() };
+        let candidate = match key.inline_target(prefix_len) {
+            Some(target) => self.candidate_line_among(target, inline_keys, len),
+            None => CandidateLine::Unknown,
+        };
+        (candidate, prefix_len)
     }
 
     /// A copy of the head's key, read in place while writers may change it,
@@ -125,23 +142,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let page = self.node_ptr();
-        let capacity = Self::capacity();
         // SAFETY: the page is an internal node's, allocated while threads
-        // share the tree. The fields are read once each, and the length
-        // clamped: a search over any inline keys, up to the capacity, stays
-        // in bounds. Every inline-key slot up to the capacity is
-        // initialized (invariant 4), and the view reads them through their
-        // pointer.
-        let (len, prefix_len, inline_keys) = unsafe {
-            let (len, prefix_len) = page.load_racing_header();
-            let len = len.min(capacity);
-            let slots = page
-                .key_columns::<Self>()
-                .inline_keys()
-                .expect("a latched tree's keys have inline keys");
-            (len, prefix_len, NodeInlineKeys::new(slots, capacity, len))
-        };
+        // share the tree.
+        let (len, prefix_len, inline_keys) =
+            unsafe { self.node_ptr().load_racing_inline_keys::<Self>() };
         if let Some(target) = key.inline_target(prefix_len) {
             let candidates = inline_keys.equal_range(target.inline_key());
             // Most searches tie with no separator, and go no further than
@@ -253,6 +257,15 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         len.min(Self::capacity())
     }
 
+    /// The node's prefix length, read in place while writers may change it:
+    /// what it holds only if the node's version is unchanged after.
+    #[inline(always)]
+    pub(in crate::tree) fn racing_prefix_len(self) -> usize {
+        // SAFETY: as for `racing_len`.
+        let (_, prefix_len) = unsafe { self.node_ptr().load_racing_header() };
+        prefix_len
+    }
+
     /// The child at edge `index`, read in place while writers may change
     /// it: what a writer stored there, or `None` for an edge none has.
     ///
@@ -271,6 +284,36 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             let slot = self.node_ptr().edge_slots().slot(index);
             let tagged = slot.cast::<*mut u8>().read();
             NonNull::new(tagged).map(|tagged| Node::at(NodePtr::from_tagged(tagged)))
+        }
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
+    /// The length and prefix length of the `Kind` node on this page, and
+    /// its inline keys, read in place while writers may change them: each
+    /// field read once, and the length clamped to the capacity, so that a
+    /// search over the inline keys stays in bounds whatever it read (D14).
+    ///
+    /// # Safety
+    ///
+    /// The page is a `Kind` node's, allocated while threads share the tree.
+    #[inline(always)]
+    unsafe fn load_racing_inline_keys<'a, Kind: NodeKind>(
+        self,
+    ) -> (usize, usize, NodeInlineKeys<'a>) {
+        let capacity = Self::capacity::<Kind>();
+        // SAFETY: the page is an allocated `Kind` node's, its header
+        // initialized (caller); every inline-key slot up to the capacity is
+        // initialized (invariant 4), and the view reads them through their
+        // pointer.
+        unsafe {
+            let (len, prefix_len) = self.load_racing_header();
+            let len = len.min(capacity);
+            let slots = self
+                .key_columns::<Kind>()
+                .inline_keys()
+                .expect("a latched tree's keys have inline keys");
+            (len, prefix_len, NodeInlineKeys::new(slots, capacity, len))
         }
     }
 }

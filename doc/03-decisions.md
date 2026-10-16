@@ -1169,6 +1169,24 @@ Design, protocols and measurements in 09-concurrency.md.
   paths (an `inline(always)` on `len` moved a `u32` split by 195
   instructions); racing reads have functions of their own instead.
 
+**D55. BCTree's batched lookups hold no latch across a yield.** (2026-10-16)
+Design and measurements in 09-concurrency.md, "Batches".
+
+- **What:** `read_many` and `get_many_cloned` run one lane a key on
+  bbtree's executor and `Prefetcher` (D53). A lane reads internal nodes and
+  its leaf's inline keys optimistically, prefetching each line first; it
+  latches the leaf, searches it, runs the closure and lets go within one
+  poll. A miss the inline keys decide is confirmed by the leaf's version,
+  unlatched. A heap key's bytes are fetched after reading their address
+  under a moment's latch. Batches go one key at a time on trees with fewer
+  than three internal levels, about an L2 of leaves.
+- **Why:** a latch held across a yield would make lanes wait for one
+  another, and a writer for a whole batch. Prefetching before latching
+  keeps the latch to the poll that needs it.
+- **Cost:** at 10M, 1.3–2.3× faster than one key a call on one thread,
+  1.2–1.4× at 24 threads. Misses batch within 11% of bbtree's; hits trail
+  by 24–28%: each latches its leaf, two locked atomics and a dirtied line.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a node stack.** (2026-10-07)

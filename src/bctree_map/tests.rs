@@ -39,6 +39,8 @@ where
             Some((key.clone(), value))
         );
     }
+    assert_batches_match_reads(&map, keys);
+    assert_batches_match_reads(&map, absent);
     for key in absent {
         assert_eq!(
             map.get_cloned(key),
@@ -55,6 +57,37 @@ where
     for (key, &value) in &std_map {
         assert_eq!(map.get_cloned(key), Some(value + 1));
     }
+}
+
+/// Looks `queries` up in batches, 8 and 65 at a time, the last batch
+/// filled with repeats, and checks that they give what separate reads do,
+/// running the closure once per entry found.
+fn assert_batches_match_reads<K: Ord + Clone + core::fmt::Debug>(
+    map: &BCTreeMap<K, usize>,
+    queries: &[K],
+) {
+    fn check<K: Ord + Clone + core::fmt::Debug, const N: usize>(
+        map: &BCTreeMap<K, usize>,
+        queries: &[K],
+    ) {
+        for chunk in queries.chunks(N) {
+            let batch: [&K; N] = core::array::from_fn(|lane| &chunk[lane % chunk.len()]);
+            let mut calls = 0;
+            let entries = map.read_many(batch, |key, &value| {
+                calls += 1;
+                (key.clone(), value)
+            });
+            let expected = batch.map(|key| map.read(key, |key, &value| (key.clone(), value)));
+            assert_eq!(entries, expected, "looking up {batch:?}");
+            assert_eq!(calls, expected.iter().flatten().count());
+            assert_eq!(
+                map.get_many_cloned(batch),
+                batch.map(|key| map.get_cloned(key))
+            );
+        }
+    }
+    check::<K, 8>(map, queries);
+    check::<K, 65>(map, queries);
 }
 
 /// `count` random numbers below `universe`, some repeated.
@@ -86,10 +119,12 @@ fn strings_match_std() {
         .into_iter()
         .map(path)
         .collect();
-    let absent: Vec<String> = random_numbers(&rng, 500, 50_000)
+    let mut absent: Vec<String> = random_numbers(&rng, 500, 50_000)
         .into_iter()
         .map(path)
         .collect();
+    // Keys that lack what every key shares, before and after them all.
+    absent.extend(["", "/usr", "/usr/shared", "a", "zz"].map(String::from));
     assert_matches_std(&keys, &absent);
 }
 
@@ -281,7 +316,10 @@ fn a_small_map_matches_std() {
     let keys = random_numbers(&rng, 300, 1_000);
     let absent = random_numbers(&rng, 50, 1_000);
     assert_matches_std(&keys, &absent);
-    assert_eq!(BCTreeMap::<u64, u64>::new().get_cloned(&1), None);
+    let empty = BCTreeMap::<u64, u64>::new();
+    assert_eq!(empty.get_cloned(&1), None);
+    assert_eq!(empty.get_many_cloned([&1, &2]), [None, None]);
+    assert_eq!(empty.get_many_cloned::<u64, 0>([]), []);
 }
 
 /// Threads insert their own keys while others read: every key a writer
@@ -757,6 +795,72 @@ fn scans_visit_every_steady_key_once_while_others_change_the_map() {
             });
         }
     });
+}
+
+/// Batches of lookups while other threads insert and remove: every key
+/// present throughout is found, with its value, and a key that comes and
+/// goes is found with its own value or not at all. With a map of a few
+/// steady keys, the writers raise the root from a leaf and lower it again
+/// under the lanes.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn batches_find_steady_keys_while_others_change_the_map() {
+    for steady in [30_000_u64, 8] {
+        let (writers, readers) = (3, 3);
+        let map = BCTreeMap::<u64, u64>::new();
+        // Even keys stay for the whole test; odd ones come and go.
+        for number in 0..steady {
+            map.insert(number * 2, number);
+        }
+        let changing = steady.max(300);
+        let barrier = Barrier::new(writers + readers);
+        thread::scope(|scope| {
+            for writer in 0..writers {
+                let (map, barrier) = (&map, &barrier);
+                scope.spawn(move || {
+                    let rng = TestRng::new(700 + writer as u64);
+                    barrier.wait();
+                    for _ in 0..100_000 {
+                        let key = rng.below_u64(changing) * 2 + 1;
+                        if rng.below(2) == 0 {
+                            map.insert(key, key);
+                        } else {
+                            map.remove(&key);
+                        }
+                    }
+                });
+            }
+            for reader in 0..readers {
+                let (map, barrier) = (&map, &barrier);
+                scope.spawn(move || {
+                    let rng = TestRng::new(800 + reader as u64);
+                    barrier.wait();
+                    for _ in 0..20_000 {
+                        let keys: [u64; 16] = core::array::from_fn(|lane| {
+                            if lane % 2 == 0 {
+                                rng.below_u64(steady) * 2
+                            } else {
+                                rng.below_u64(changing) * 2 + 1
+                            }
+                        });
+                        let values = map.get_many_cloned(keys.each_ref());
+                        for (key, value) in keys.into_iter().zip(values) {
+                            if key % 2 == 0 {
+                                assert_eq!(value, Some(key / 2), "steady key {key}");
+                            } else {
+                                assert!(value.is_none_or(|value| value == key), "{key}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let mut map = map;
+        let odd = (0..changing)
+            .filter(|number| map.contains_key(&(number * 2 + 1)))
+            .count();
+        map.check_invariants(steady as usize + odd);
+    }
 }
 
 /// `get_or_insert` leaves an entry the map holds as it is, and runs its

@@ -90,6 +90,12 @@ pub(crate) trait MapHandle<K> {
 
     fn get(&self, key: &K) -> Option<u64>;
 
+    /// The values of `keys`, in one batch where the map has a batch API,
+    /// by separate lookups otherwise.
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        keys.map(|key| self.get(key))
+    }
+
     /// Adds one to the value of `key`, if the map holds it.
     fn bump(&self, key: &K);
 
@@ -108,6 +114,10 @@ impl<K, T: MapHandle<K>> MapHandle<K> for &T {
 
     fn get(&self, key: &K) -> Option<u64> {
         (**self).get(key)
+    }
+
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        (**self).get_batch(keys)
     }
 
     fn bump(&self, key: &K) {
@@ -162,6 +172,10 @@ impl<K: ScalingKey> MapHandle<K> for BCTreeMap<K, u64> {
         self.read(key, |_, &value| value)
     }
 
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        self.read_many(keys, |_, &value| value)
+    }
+
     fn bump(&self, key: &K) {
         self.update(key, |_, value| *value += 1);
     }
@@ -194,6 +208,11 @@ shared_by_reference!(
 impl<K: ScalingKey> MapHandle<K> for RwLock<BBTreeMap<K, u64>> {
     fn insert(&self, key: K, value: u64) {
         self.write().expect("no thread panics").insert(key, value);
+    }
+
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        let map = self.read().expect("no thread panics");
+        map.get_many(keys).map(Option::<&u64>::copied)
     }
 
     fn get(&self, key: &K) -> Option<u64> {

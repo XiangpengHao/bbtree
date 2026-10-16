@@ -232,23 +232,48 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
         let map: M = self.built_map();
         let probes = self.probes(if hit { &sample } else { &self.absent });
         let (batches, remainder) = probes.as_chunks::<N>();
-        let (hits, _checksum) = stopwatch.time(|| {
-            let mut hits = 0;
-            let mut checksum = 0_u64;
-            for keys in batches {
-                for value in map.get_batch(*keys).into_iter().flatten() {
-                    hits += 1;
-                    checksum = checksum.wrapping_add(value.fingerprint());
+        // As `time_lookups`: maps that lend no references read through a
+        // closure.
+        let (hits, _checksum) = if M::LENDS_REFERENCES {
+            stopwatch.time(|| {
+                let mut hits = 0;
+                let mut checksum = 0_u64;
+                for keys in batches {
+                    for value in map.get_batch(*keys).into_iter().flatten() {
+                        hits += 1;
+                        checksum = checksum.wrapping_add(value.fingerprint());
+                    }
                 }
-            }
-            for key in remainder {
-                if let Some(value) = map.get_batch([*key])[0] {
-                    hits += 1;
-                    checksum = checksum.wrapping_add(value.fingerprint());
+                for key in remainder {
+                    if let Some(value) = map.get_batch([*key])[0] {
+                        hits += 1;
+                        checksum = checksum.wrapping_add(value.fingerprint());
+                    }
                 }
-            }
-            (hits, checksum)
-        });
+                (hits, checksum)
+            })
+        } else {
+            stopwatch.time(|| {
+                let mut hits = 0;
+                let mut checksum = 0_u64;
+                for keys in batches {
+                    for fingerprint in map.lookup_fingerprint_batch(*keys).into_iter().flatten() {
+                        hits += 1;
+                        checksum = checksum.wrapping_add(fingerprint);
+                    }
+                }
+                // Through the batch method, as the other maps' remainder:
+                // a second call of `lookup_fingerprint` outlined it from
+                // `time_lookups`, 14 instructions more a lookup.
+                for key in remainder {
+                    if let Some(fingerprint) = map.lookup_fingerprint_batch([*key])[0] {
+                        hits += 1;
+                        checksum = checksum.wrapping_add(fingerprint);
+                    }
+                }
+                (hits, checksum)
+            })
+        };
         assert_eq!(hits, if hit { probes.len() } else { 0 });
         probes.len()
     }

@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod batch;
 mod range;
 #[cfg(test)]
 mod tests;

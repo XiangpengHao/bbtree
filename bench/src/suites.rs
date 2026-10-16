@@ -101,10 +101,12 @@ impl Suite {
     /// The maps the suite's workloads run on. The real-keys suite compares
     /// the ordered maps only: at 10M entries of long strings, building each
     /// map takes seconds, and the hash maps wouldn't fit its time budget. CI
-    /// compares bbtree with its baseline, std's `BTreeMap`.
+    /// compares bbtree with its baseline, std's `BTreeMap`; the batches,
+    /// the maps with a batch API with it too.
     pub(crate) fn maps(self) -> &'static [MapKind] {
         match self {
-            Self::RealKeys | Self::Ci | Self::Batch => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::RealKeys | Self::Ci => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::Batch => &[MapKind::BBTree, MapKind::BCTree, MapKind::StdBTree],
             Self::Headline
             | Self::Keys
             | Self::Values

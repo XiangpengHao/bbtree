@@ -135,10 +135,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         self.node.page().as_ptr()
     }
 
-    /// The chosen edge's line, for a batch's follow stage.
+    /// The chosen edge's line, for a batch's follow stage. Reads nothing of
+    /// the node: a latched tree's lane asks for it while writers may change
+    /// the node (`tree/latched/batch.rs`).
     #[inline(always)]
     pub(in crate::tree) fn edge_line(self, index: usize) -> *const u8 {
-        debug_assert!(index <= self.len());
+        debug_assert!(index <= Self::capacity());
         let layout = NodePtr::<K, V, S>::internal_layout();
         self.node
             .page()

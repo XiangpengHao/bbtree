@@ -35,6 +35,7 @@ use super::super::node::internal::Internal;
 use super::super::node::latch::{Latched, NodeLatch, Version};
 use super::super::node::leaf::Leaf;
 use super::super::node::optimistic::Routed;
+use super::super::node::root_page::RootPage;
 use super::super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::super::root::Tree;
 use super::LatchedTree;
@@ -116,6 +117,18 @@ impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> Drop for HeldLeaf<K, V, S, M> 
 /// `M`, and whether the key is that leaf's head; or, for a key that lacks
 /// what every key shares, where it sorts against them all.
 pub(super) type Descent<K, V, S, M> = Result<(HeldLeaf<K, V, S, M>, bool), KeyOrdering>;
+
+/// What a descent reads at an internal root ([`LatchedTree::read_root`]).
+pub(super) enum RootRead {
+    /// The root's version, which vouches for what it read of the shared
+    /// prefix.
+    At(Version),
+    /// The key lacks what every key shares: where it sorts against all of
+    /// them.
+    Outside(KeyOrdering),
+    /// The root changed meanwhile: start over.
+    Changed,
+}
 
 /// What a descent keeps of the internal nodes it goes through: nothing, for
 /// most operations, or each node, for a split or a removal that rebalances
@@ -287,7 +300,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         'restart: loop {
             path.clear();
             let root_page = self.root_page().expect("a tree to descend");
-            let mut node = match root_page.node() {
+            let (mut node, mut version) = match root_page.node() {
                 Node::Leaf(leaf) => {
                     let held = HeldLeaf::lock(leaf);
                     // A split that raised the tree changed the tag first.
@@ -301,24 +314,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     }
                     return Ok((held, false));
                 }
-                Node::Internal(internal) => internal,
+                Node::Internal(root) => match self.read_root(root_page, root, key) {
+                    RootRead::At(version) => (root, version),
+                    RootRead::Outside(outside) => return Err(outside),
+                    RootRead::Changed => continue 'restart,
+                },
             };
-            let mut version = node.latch().read_version();
-            // A lowering that turned the root into a leaf may have finished
-            // between the two reads: it retags the pointer before letting go,
-            // so the pointer tells.
-            if self.root.load(Ordering::Acquire) != node.node_ptr().tagged().as_ptr() {
-                continue 'restart;
-            }
-            // SAFETY: the tree is latched, and its root page allocated; the
-            // copy is checked by the root's version below.
-            let shared = unsafe { root_page.load_racing_shared_prefix() };
-            if let Some(outside) = shared.and_then(|shared| shared.place_outside(key)) {
-                if node.latch().is_unchanged(version) {
-                    return Err(outside);
-                }
-                continue 'restart;
-            }
             let mut at_separator = false;
             loop {
                 let Some(routed) = node.route_racing(key, version) else {
@@ -359,10 +360,51 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
+    /// `root`'s version, for a descent from it, `root` being the root
+    /// page's internal node; or, for a key that lacks what every key of the
+    /// tree shares (D50), where it sorts against all of them, once the
+    /// root's version vouches for the shared prefix read.
+    #[inline(always)]
+    pub(super) fn read_root<Q>(
+        &self,
+        root_page: RootPage<K, V, Latched<S>>,
+        root: Internal<K, V, Latched<S>>,
+        key: &SearchKey<'_, K, Latched<S>, Q>,
+    ) -> RootRead
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let Some(version) = self.root_version(root) else {
+            return RootRead::Changed;
+        };
+        // SAFETY: the tree is latched, and its root page allocated; the
+        // copy is checked by the root's version below.
+        let shared = unsafe { root_page.load_racing_shared_prefix() };
+        match shared.and_then(|shared| shared.place_outside(key)) {
+            None => RootRead::At(version),
+            Some(outside) if root.latch().is_unchanged(version) => RootRead::Outside(outside),
+            Some(_) => RootRead::Changed,
+        }
+    }
+
+    /// `root`'s version, `root` being the root page's internal node, if the
+    /// tree's root pointer still tags it internal once the version is read:
+    /// a lowering that turned the root into a leaf may have finished
+    /// between the two reads, and it retags the pointer before letting go.
+    #[inline(always)]
+    pub(super) fn root_version(&self, root: Internal<K, V, Latched<S>>) -> Option<Version> {
+        let version = root.latch().read_version();
+        (self.root.load(Ordering::Acquire) == root.node_ptr().tagged().as_ptr()).then_some(version)
+    }
+
     /// Whether `leaf`, latched, has `key` as its head's key.
     #[cold]
     #[inline(never)]
-    fn is_head<Q>(leaf: Leaf<K, V, Latched<S>>, key: &SearchKey<'_, K, Latched<S>, Q>) -> bool
+    pub(super) fn is_head<Q>(
+        leaf: Leaf<K, V, Latched<S>>,
+        key: &SearchKey<'_, K, Latched<S>, Q>,
+    ) -> bool
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,

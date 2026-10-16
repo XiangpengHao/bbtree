@@ -2,9 +2,10 @@
 
 Status: built (2026-10-15, 2026-10-16): `BCTreeMap` with `read`,
 `update`, `get_cloned`, `contains_key`, `insert`, `get_or_insert`,
-`remove`, `remove_entry`, `remove_if`, `scan`, `scan_rev` and
-`range_cloned`: bbtree's tree, shared through optimistic lock coupling,
-its tree operations bbtree's own. No `entry` yet. `BBTreeMap` stays
+`remove`, `remove_entry`, `remove_if`, `scan`, `scan_rev`,
+`range_cloned`, and batched lookups, `read_many` and `get_many_cloned`:
+bbtree's tree, shared through optimistic lock coupling, its tree
+operations bbtree's own. No `entry` yet. `BBTreeMap` stays
 single-threaded (D4).
 
 ## Scope
@@ -56,6 +57,13 @@ impl<K: Ord, V> BCTreeMap<K, V> {
     fn get_cloned<Q>(&self, key: &Q) -> Option<V> where V: Clone {
         self.read(key, |_, v| v.clone())
     }
+
+    /// Runs `f` on each key's entry, as `read`s would, the lookups'
+    /// waits for memory overlapped (Batches, below).
+    fn read_many<Q, R, const N: usize>(&self, keys: [&Q; N],
+                                       f: impl FnMut(&K, &V) -> R) -> [Option<R>; N];
+    fn get_many_cloned<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]
+    where V: Clone;
 }
 ```
 
@@ -455,6 +463,82 @@ a stopped scan keeps: `enumerate` over the chained head-and-keys iterator
 cost about 1,450 instructions more a 100-entry scan, 12% of the closure
 scan's throughput.
 
+## Batches
+
+`read_many` looks up a fixed array of keys at once, as
+`BBTreeMap::get_many` does (doc 12), and `get_many_cloned` is `read_many`
+with a clone (`tree/latched/batch.rs`, `bctree_map/batch.rs`). Each key
+descends in its own lane, an async block that prefetches the line it
+reads next and yields, on bbtree's executor and its `Prefetcher`, the one
+place that prefetches (D46). Results come in input order; the closure runs
+once per entry found, in the order the lanes reach them.
+
+A suspended lane holds no latch. So the lanes of a batch never wait for
+one another, and no yield falls between latching and letting go: a lane
+latches its leaf, searches it, runs the closure and lets go within one
+poll. On the way down it reads the internal nodes as the descent does,
+optimistically, each stage after fetching the line it needs: the chosen
+edge, then the child's header, whose version it reads before checking the
+parent's again. At the leaf it reads the inline keys, unlatched, at the
+version it read:
+
+- **No inline key equals the key's:** absent, if the leaf's version is
+  still the same. A miss writes nothing.
+- **One candidate:** the lane fetches its entry. For a heap key it then
+  latches the leaf a moment to read where the key's bytes are, lets go,
+  and fetches them: a pointer into a key is read only under the latch,
+  and a prefetch of a stale one is harmless. Then, latched shared, the
+  leaf still at the version read, it compares the candidate and runs the
+  closure.
+- **Ties**, and keys equal to a separator, go to the leaf's own search, or
+  to its head, latched, as `read`.
+
+A failed check starts the lane over from the root, alone.
+
+Below about an L2 of leaf pages, the lanes find their lines in cache and
+cost more than they save: at 10k `u64` keys, 28.3 ns a batched hit against
+17.7 alone. There batches go one key at a time, as bbtree's do. BCTree has
+no length to estimate that from, so its height tells: three internal
+levels or more, which a tree grown by splits reaches only past 2·m²
+leaves, m half an internal node's capacity, about 1,150 pages for `u64`
+keys.
+
+Measured (2026-10-16): 10M entries, `u64` values, 64 keys a batch, one
+run each. One thread pinned to a core, ns per key (`bbtree-bench batch`):
+
+| keys | | one key a call | batch | speedup | bbtree's batch |
+|---|---|--:|--:|--:|--:|
+| `u64` | hit | 137 | 98.8 | 1.39× | 74.9 |
+| `u64` | miss | 101 | 77.8 | 1.30× | 63.5 |
+| JSON | hit | 249 | 111 | 2.24× | 90.0 |
+| JSON | miss | 184 | 81.9 | 2.25× | 71.7 |
+
+Threads (`bbtree-scaling`, whole machine), millions of lookups a second at
+1 / 12 / 24 threads; bbtree's batch runs under a `RwLock`'s read lock,
+taken once a batch:
+
+| keys | | one key a call | batch | bbtree's batch |
+|---|---|--:|--:|--:|
+| `u64` | hit | 8.03 / 75.4 / 84.1 | 13.4 / 102.9 / 107.9 | 17.3 / 138.7 / 148.3 |
+| `u64` | miss | 11.1 / 101.5 / 111.4 | 17.0 / 147.6 / 153.9 | 20.2 / 164.4 / 173.2 |
+| JSON | hit | 5.03 / 49.2 / 63.4 | 10.2 / 75.3 / 76.9 | 12.8 / 99.4 / 106.3 |
+| JSON | miss | 8.31 / 75.5 / 86.4 | 14.8 / 113.3 / 118.8 | 16.2 / 114.3 / 118.1 |
+
+At 12 and 24 threads, JSON misses batch as well as bbtree's and `u64`
+misses within 11%; hits trail by 24–28%. A hit latches its leaf: two locked atomics, each a full barrier
+that the lanes' later loads wait for, and a dirtied leaf header line,
+which goes back to memory when evicted. At 24 threads, batched `u64` hits
+read 22.7 GB/s from memory (3.29 lines a lookup), bbtree's 30.9 GB/s
+(3.26), near the 32 GB/s that scans reach; a dirtied line a hit would add
+about 7 GB/s of writes, which no counter of one process sees here. At one
+thread the lane runs about 230 instructions a key more than bbtree's: the
+versions read and checked at each level, and the state kept across
+yields.
+
+Batches don't fetch fewer lines (3.8 a 10M `u64` hit on one thread,
+batched or not): they keep more in flight, until the reads near what
+memory delivers.
+
 ## Panics
 
 Whatever is simplest. The latch guard unlatches on unwind; there is no
@@ -490,7 +574,13 @@ interleavings, match std's `range`; a `range_cloned` iterator hands out a
 key inserted ahead of it in a leaf it copied, and not one removed;
 `get_or_insert` matches std's `entry().or_insert`, and threads racing to
 `get_or_insert` the same keys all see the entry the map keeps;
-`remove_if` removes only what its condition holds of.
+`remove_if` removes only what its condition holds of. Batched lookups,
+8 and 65 keys at a time, on every key the differential tests insert and
+look up, keys outside the shared prefix included, match separate `read`s
+and run the closure once per entry found; and batches of steady and
+changing keys, while threads insert and remove, find every steady key,
+also while the root grows from a leaf and lowers back (tests run lanes on
+every tree with an internal root).
 
 Races that need a narrow schedule escape them, and a 12-thread release
 stress run outside the crate found two: a removal that left the path below

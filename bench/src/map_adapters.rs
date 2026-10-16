@@ -150,6 +150,12 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
         keys.map(|key| self.get(key))
     }
 
+    /// [`Self::get_batch`]'s fingerprints, for a map that lends no
+    /// references.
+    fn lookup_fingerprint_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        keys.map(|key| self.lookup_fingerprint(key))
+    }
+
     /// Visits every entry, in key order for ordered maps, and returns their
     /// checksum.
     fn checksum_all(&self) -> u64 {
@@ -451,17 +457,13 @@ pub(crate) struct CountedBCTree<K, V, S: InlineKeyStrategy<K> = bbtree::Auto> {
 impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest<K, V>
     for CountedBCTree<K, V, S>
 {
-    /// `BCTreeMap` has no iteration yet.
+    /// `BCTreeMap` has no iteration yet, and batches only lookups.
     const UNSUPPORTED: &'static [Operation] = &[
         Operation::BulkBuild,
         Operation::Iterate,
         Operation::Range64,
         Operation::EntryUpsert,
         Operation::PopFirst,
-        Operation::BatchGetHit32,
-        Operation::BatchGetMiss32,
-        Operation::BatchGetHit64,
-        Operation::BatchGetMiss64,
         Operation::BatchRandomInsert,
         Operation::BatchSequentialInsert,
         Operation::ExtendRandom,
@@ -495,6 +497,10 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
 
     fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
         self.map.read(key, |_, value| value.fingerprint())
+    }
+
+    fn lookup_fingerprint_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        self.map.read_many(keys, |_, value| value.fingerprint())
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {

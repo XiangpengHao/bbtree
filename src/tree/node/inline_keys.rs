@@ -707,7 +707,7 @@ where
         })
     }
 
-    pub(super) fn key(&self) -> &Q {
+    pub(in crate::tree) fn key(&self) -> &Q {
         self.key
     }
 

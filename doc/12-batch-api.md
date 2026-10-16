@@ -4,7 +4,9 @@ Status: built (2026-10-15). Lanes, their executor and the only software
 prefetch are in `src/tree/batch.rs`; the API in `src/map/batch.rs` and
 `src/set/mod.rs`; batched `extend` in `src/map/from_entries.rs`; the set
 operations' batched lookups in `src/set/lookups.rs`. D53. Prefetch is
-allowed here and nowhere else: D46's exception.
+allowed here and nowhere else: D46's exception. `BCTreeMap::read_many`
+(2026-10-16) runs lanes of its own on this executor and `Prefetcher`
+(`src/tree/latched/batch.rs`, doc 09, D55).
 
 ## Problem
 

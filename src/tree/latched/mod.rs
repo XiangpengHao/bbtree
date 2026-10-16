@@ -42,6 +42,7 @@
 //! it with its leaf latched shared (`node/optimistic.rs`).
 
 mod append;
+mod batch;
 mod descent;
 mod held;
 mod insert;

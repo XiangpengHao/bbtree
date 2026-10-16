@@ -10,6 +10,9 @@
 //!
 //! - `get`: lookups of keys the map holds, for `--seconds`;
 //! - `get-miss`: lookups of keys it doesn't, for `--seconds`;
+//! - `get-batch`, `get-miss-batch`: the same, [`LOOKUP_BATCH`] keys a call,
+//!   through the batch API of the maps that have one (`BCTreeMap`,
+//!   `BBTreeMap`), separate lookups on the others;
 //! - `mixed`: 90% lookups, 10% updates of their values, for `--seconds`;
 //! - `scan`: scans of [`SCAN_LENGTH`] entries from keys the map holds, for
 //!   `--seconds`, on the maps that keep order;
@@ -57,6 +60,10 @@ use crate::random::SeededRng;
 /// How many entries a scan visits.
 const SCAN_LENGTH: usize = 100;
 
+/// How many keys a batched lookup takes: as many as bbtree's executor
+/// tracks with one bit each.
+const LOOKUP_BATCH: usize = 64;
+
 /// How many keys each worker's lookup list holds, a power of two.
 const QUERIES_PER_WORKER: usize = 1 << 18;
 
@@ -68,6 +75,8 @@ const MAX_ABSENT_KEYS: usize = 1 << 20;
 enum Workload {
     Get,
     GetMiss,
+    GetBatch,
+    GetMissBatch,
     Mixed,
     Scan,
     Churn,
@@ -75,9 +84,11 @@ enum Workload {
 }
 
 impl Workload {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Get,
         Self::GetMiss,
+        Self::GetBatch,
+        Self::GetMissBatch,
         Self::Mixed,
         Self::Scan,
         Self::Churn,
@@ -97,6 +108,8 @@ impl Workload {
         match self {
             Self::Get => "get",
             Self::GetMiss => "get-miss",
+            Self::GetBatch => "get-batch",
+            Self::GetMissBatch => "get-miss-batch",
             Self::Mixed => "mixed",
             Self::Scan => "scan",
             Self::Churn => "churn",
@@ -312,6 +325,15 @@ impl<K: Clone> WorkerQueries<K> {
         &self.keys[index]
     }
 
+    /// The next `N` keys, as `N` calls to [`Self::next_key`] give them.
+    #[inline(always)]
+    fn next_keys<const N: usize>(&mut self) -> [&K; N] {
+        let start = self.next;
+        self.next = (start + N) & (QUERIES_PER_WORKER - 1);
+        let keys = &self.keys;
+        std::array::from_fn(|lane| &keys[(start + lane) & (QUERIES_PER_WORKER - 1)])
+    }
+
     /// Whether to update rather than look up: one time in ten.
     #[inline(always)]
     fn updates(&mut self) -> bool {
@@ -351,6 +373,21 @@ impl WorkerTally {
                     "an absent key found"
                 );
             }
+            Workload::GetBatch => {
+                let keys = queries.next_keys::<LOOKUP_BATCH>();
+                for value in handle.get_batch(keys) {
+                    self.checksum = self
+                        .checksum
+                        .wrapping_add(value.expect("every key is there"));
+                }
+            }
+            Workload::GetMissBatch => {
+                let keys = queries.next_keys::<LOOKUP_BATCH>();
+                assert!(
+                    handle.get_batch(keys).iter().all(Option::is_none),
+                    "an absent key found"
+                );
+            }
             Workload::Mixed if queries.updates() => handle.bump(queries.next_key()),
             Workload::Mixed => {
                 let value = handle.get(queries.next_key());
@@ -376,9 +413,13 @@ impl WorkerTally {
 
 impl Workload {
     /// How many operations one iteration of it does: two for the churn, a
-    /// removal and an insert.
+    /// removal and an insert; a batch's keys for a batched lookup.
     fn operations_per_iteration(self) -> u64 {
-        if self == Self::Churn { 2 } else { 1 }
+        match self {
+            Self::Churn => 2,
+            Self::GetBatch | Self::GetMissBatch => LOOKUP_BATCH as u64,
+            _ => 1,
+        }
     }
 }
 
@@ -794,6 +835,8 @@ impl ScalingRun {
         for workload in [
             Workload::Get,
             Workload::GetMiss,
+            Workload::GetBatch,
+            Workload::GetMissBatch,
             Workload::Mixed,
             Workload::Scan,
             Workload::Churn,
@@ -801,7 +844,7 @@ impl ScalingRun {
             if !self.workloads.contains(&workload) || (workload == Workload::Scan && !M::ORDERED) {
                 continue;
             }
-            let queried = if workload == Workload::GetMiss {
+            let queried = if matches!(workload, Workload::GetMiss | Workload::GetMissBatch) {
                 &keys.absent
             } else {
                 &keys.present
@@ -944,7 +987,9 @@ impl ScalingRun {
                 handle.insert(copy, 0);
                 histogram.record(clock.now() - start);
             }
-            Workload::Scan | Workload::Insert => unreachable!("not timed one at a time"),
+            Workload::GetBatch | Workload::GetMissBatch | Workload::Scan | Workload::Insert => {
+                unreachable!("not timed one at a time")
+            }
         }
     }
 

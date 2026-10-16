@@ -38,7 +38,7 @@ use crate::inline_key::InlineKeyStrategy;
 /// Separates the batch's leaf searches from the single-key `get`'s in
 /// compilation, without changing node layouts: sharing one search
 /// outlined the single-key one.
-struct BatchSearch;
+pub(in crate::tree) struct BatchSearch;
 
 /// What a lane fetches: the line it reads next, which it may not have, so
 /// it prefetches the line and yields (doc 12).
@@ -299,12 +299,12 @@ impl<K, V, S> Destination<K, V, S> {
 /// Polls a batch's lanes round-robin until all finish. A lane yields only
 /// after prefetching what it reads next, so none needs waking: the executor
 /// polls every live lane again. No allocation, vtable or runtime.
-struct Executor;
+pub(in crate::tree) struct Executor;
 
 impl Executor {
     /// Up to 64 lanes, a bit per live lane, so that a finished lane needs no
     /// second discriminant beside its state.
-    fn run<F: Future<Output = ()>, const N: usize>(lanes: [F; N]) {
+    pub(in crate::tree) fn run<F: Future<Output = ()>, const N: usize>(lanes: [F; N]) {
         if N > u64::BITS as usize {
             return Self::run_slots(lanes);
         }
@@ -352,7 +352,7 @@ impl Executor {
 /// The only software prefetch (D46): a hint about a line of a live node,
 /// the query or a chosen candidate, which reads nothing. Other targets and
 /// Miri do nothing.
-struct Prefetcher {
+pub(in crate::tree) struct Prefetcher {
     yielded: bool,
 }
 
@@ -360,7 +360,7 @@ impl Prefetcher {
     /// Prefetches `line` and yields once, on the first poll: the lane
     /// resumes once the others have had a turn while the line arrives.
     #[inline(always)]
-    fn fetch(line: *const u8) -> Self {
+    pub(in crate::tree) fn fetch(line: *const u8) -> Self {
         Self::hint(line);
         Self { yielded: false }
     }
