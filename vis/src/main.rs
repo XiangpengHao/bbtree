@@ -35,6 +35,7 @@ use dioxus::prelude::*;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::batch_view::{BatchView, Batcher, ModeSwitch};
+use crate::descent::Descent;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::{InspectorTab, NodeInspector};
@@ -76,8 +77,7 @@ fn App() -> Element {
         error,
         seed,
         replay,
-        use_signal(|| 0),
-        use_signal(|| true),
+        use_signal(Descent::default),
     );
     let batcher = Batcher::new(use_signal(|| false), use_signal(|| None), seed);
     let builder = Builder::new(
@@ -98,6 +98,7 @@ fn App() -> Element {
     let current = tracer.trace();
     let at = tracer.inspected();
     let replayed = tracer.replay_count();
+    let descent = tracer.descent();
     let batch = batcher.is_shown();
     rsx! {
         document::Link { rel: "preconnect", href: "https://fonts.googleapis.com" }
@@ -139,13 +140,19 @@ fn App() -> Element {
             } else if let (Some(loaded), Some(current)) = (loaded.clone(), current) {
                 main { class: "workspace",
                     div { class: "path-column",
-                        PathSummary { tree: loaded.clone(), trace: current.clone(), tracer, replay: replayed }
+                        PathSummary {
+                            tree: loaded.clone(),
+                            trace: current.clone(),
+                            descent: descent.clone(),
+                            tracer,
+                            replay: replayed,
+                        }
                         PathTree {
                             tree: loaded.clone(),
                             trace: current.clone(),
                             inspected: at,
                             replay: replayed,
-                            shown: tracer.shown(),
+                            descent: descent.clone(),
                             tracer,
                             spotlight,
                         }
@@ -161,6 +168,7 @@ fn App() -> Element {
                             at,
                             trace: current.clone(),
                             replay: replayed,
+                            descent,
                             tab,
                             tracer,
                             spotlight,

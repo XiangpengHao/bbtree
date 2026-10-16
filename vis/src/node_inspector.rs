@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 
 use crate::concepts::{Concept, Term};
 use crate::count_text::Group;
-use crate::descent::DescentPlan;
+use crate::descent::Descent;
 use crate::fences::{FenceStrip, NodeFences};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
@@ -359,6 +359,9 @@ pub(crate) fn NodeInspector(
     at: NodeAt,
     trace: Trace,
     replay: u64,
+    /// How far the way down has played: the inspector marks the step it
+    /// is at, if it is at this node.
+    descent: Descent,
     tab: Signal<InspectorTab>,
     tracer: Tracer,
     spotlight: Spotlight,
@@ -428,10 +431,7 @@ pub(crate) fn NodeInspector(
                 SearchSteps {
                     key: "{replay}-{at.level()}-{at.index()}",
                     steps,
-                    current: DescentPlan::of(&tree, &trace)
-                        .current(tracer.shown())
-                        .filter(|&(row, _)| trace.steps().get(row).map(TraceStep::at) == Some(at))
-                        .map(|(_, index)| index),
+                    current: descent.step_in(at),
                     detail: detail.clone(),
                     kind,
                     spotlight,

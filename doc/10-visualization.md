@@ -208,7 +208,8 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   last one (the right border, no fence prefixes), and for URLs a missing
   key between two (where an insert would go). Keys: `/` to type, `R`
   random, `[` `]` the leaves beside, `↑` `↓` along the path, `←` `→`
-  back and forward through the lookups (`shortcuts.rs`).
+  back and forward through the lookups, Space to play or pause the way
+  down, `,` `.` to step it (`shortcuts.rs`).
 - **The toolbar**: the search, as the current key and its outcome
   (`trace.rs`); the tree's build controls (`workload.rs`); both open
   panels (`popover.rs`); and the repository's GitHub mark. A credit line
@@ -251,11 +252,16 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   new places.
 - **Above the path** (`path_summary.rs`), the controls a batch has: play
   or pause the way down, or step it a search step at a time. The way down
-  is one number, the steps shown, which the tracer keeps; the cards, the
-  key and the inspector's current step draw from it, and CSS transitions
-  carry each change, so nothing remounts. Playing adds a step every 700
-  ms. Where the lookup ended is in the toolbar's search button, and read
-  out for screen readers.
+  is one value the tracer keeps (`Descent`): each node's steps, how many
+  are shown, and, while it plays, the node it stops after. The cards, the
+  key and the inspector draw from it, and CSS transitions carry each
+  change, so nothing remounts within a node. Playing adds a step every
+  700 ms. Each step selects its node, so the inspector follows the way
+  down; picking a node yourself pauses it there, and playing on returns
+  to the way down's node. A lookup asked for through a node (a key or a
+  child picked in a page, a link naming a level) plays down to that node
+  and pauses after its search. Where the lookup ended is in the toolbar's
+  search button, and read out for screen readers.
 - **The key** (`query_key.rs`), above the path, highlighted, a cell per
   byte of its encoding (hex, or characters for URLs; a `u64` also as its
   number). It walks down with the path, step by step: once a node skips
@@ -269,8 +275,8 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   `inline_key_width`). It has no hover: a strip of the key in every card,
   with a hint per part, flickered under the pointer and repeated the key
   four times, so the key is drawn once.
-- **The inspector** (`node_inspector.rs`), for the card you pick, the root
-  after each lookup, right of the path: a header line with its place, keys,
+- **The inspector** (`node_inspector.rs`), for the node the way down is
+  at, or the card you pick, right of the path: a header line with its place, keys,
   page size and address; its fences, its search, then a tab for the page
   and one for the slots:
   - Its fences (`fences.rs`): the low and high fence, the node's first and

@@ -17,7 +17,7 @@ use bbtree::inspect::TraceOutcome;
 use dioxus::prelude::*;
 
 use crate::count_text::Group;
-use crate::descent::DescentPlan;
+use crate::descent::Descent;
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::PageMarks;
 use crate::path_summary::PathLegend;
@@ -309,12 +309,11 @@ pub(crate) fn PathTree(
     inspected: Option<NodeAt>,
     /// Changes with every lookup, so the way down replays.
     replay: u64,
-    /// How many steps of the way down are shown (`descent.rs`).
-    shown: usize,
+    /// How far the way down has played.
+    descent: Descent,
     tracer: Tracer,
     spotlight: Spotlight,
 ) -> Element {
-    let plan = DescentPlan::of(&tree, &trace);
     let mut size = use_signal(|| (0.0f64, 0.0f64));
     let mounted: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut pointed_gauge = use_signal(|| None::<usize>);
@@ -369,7 +368,7 @@ pub(crate) fn PathTree(
                     }
                     // An edge draws once its parent's search has gone down it.
                     for (row, way) in layout.taken.iter().enumerate().skip(1) {
-                        if plan.phase(row - 1, shown) >= 4 {
+                        if descent.phase(row - 1) >= 4 {
                             if layout.value_way[row] {
                                 path {
                                     key: "{replay}-{row}",
@@ -402,7 +401,7 @@ pub(crate) fn PathTree(
                                         PathCard {
                         key: "card-{card.row}",
                         tree: tree.clone(),
-                        phase: plan.phase(card.row, shown),
+                        phase: descent.phase(card.row),
                         selected: inspected == Some(card.step.at()),
                         card,
                         replay,
@@ -473,7 +472,7 @@ fn Gauge(
 fn PathCard(
     tree: LoadedTree,
     /// How far the node's search has gone: the part of the search of its
-    /// last step shown, 0 before any (`DescentPlan::phase`).
+    /// last step shown, 0 before any (`Descent::phase`).
     phase: u8,
     card: CardSpot,
     selected: bool,

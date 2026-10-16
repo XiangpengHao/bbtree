@@ -8,6 +8,7 @@ use std::ops::Range;
 use bbtree::inspect::TraceOutcome;
 use dioxus::prelude::*;
 
+use crate::descent::Descent;
 use crate::fences::KeyBytes;
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
@@ -189,12 +190,10 @@ pub(crate) struct Tracer {
     inspected: Signal<Option<NodeAt>>,
     error: Signal<Option<String>>,
     seed: Signal<u64>,
-    /// Counts lookups and replays, so animations of the way down restart.
+    /// Counts lookups, so animations of the way down restart.
     replay: Signal<u64>,
-    /// How many steps of the way down the page shows (`descent.rs`), and
-    /// whether it plays on.
-    shown: Signal<usize>,
-    playing: Signal<bool>,
+    /// The lookup's way down, and how far it has played.
+    descent: Signal<Descent>,
 }
 
 impl Tracer {
@@ -204,8 +203,7 @@ impl Tracer {
         error: Signal<Option<String>>,
         seed: Signal<u64>,
         replay: Signal<u64>,
-        shown: Signal<usize>,
-        playing: Signal<bool>,
+        descent: Signal<Descent>,
     ) -> Self {
         Self {
             trace,
@@ -213,36 +211,46 @@ impl Tracer {
             error,
             seed,
             replay,
-            shown,
-            playing,
+            descent,
         }
     }
 
-    /// How many steps of the way down the page shows.
-    pub(crate) fn shown(&self) -> usize {
-        *self.shown.read()
+    pub(crate) fn descent(&self) -> Descent {
+        self.descent.read().clone()
     }
 
-    pub(crate) fn playing(&self) -> bool {
-        *self.playing.read()
+    /// Whether the way down plays, read without following it, for the loop
+    /// that plays it.
+    pub(crate) fn descent_playing_now(&self) -> bool {
+        self.descent.peek().playing()
     }
 
-    /// [`Self::shown`] and [`Self::playing`], read without following them,
-    /// for the loop that plays the way down.
-    pub(crate) fn shown_now(&self) -> usize {
-        *self.shown.peek()
+    /// Shows the way down's next step, while it plays.
+    pub(crate) fn play_descent_on(&mut self) {
+        self.move_descent(Descent::play_on);
     }
 
-    pub(crate) fn playing_now(&self) -> bool {
-        *self.playing.peek()
+    /// Pauses the way down, or plays it on.
+    pub(crate) fn toggle_descent(&mut self) {
+        self.move_descent(Descent::toggle_playing);
     }
 
-    pub(crate) fn show_steps(&mut self, shown: usize) {
-        self.shown.set(shown);
+    /// Pauses the way down and steps it `delta` steps, back if negative.
+    pub(crate) fn step_descent(&mut self, delta: isize) {
+        self.move_descent(|descent| descent.step_by(delta));
     }
 
-    pub(crate) fn set_playing(&mut self, playing: bool) {
-        self.playing.set(playing);
+    /// Moves the way down by `change`, and inspects the node it is then
+    /// at: the inspector follows the way down.
+    fn move_descent(&mut self, change: impl FnOnce(&mut Descent)) {
+        let at = {
+            let mut descent = self.descent.write();
+            change(&mut descent);
+            descent.node()
+        };
+        if at.is_some() && *self.inspected.peek() != at {
+            self.inspected.set(at);
+        }
     }
 
     pub(crate) fn trace(&self) -> Option<Trace> {
@@ -261,15 +269,16 @@ impl Tracer {
         *self.replay.read()
     }
 
-    /// Looks up the key `query` names, and inspects the root, where the
-    /// lookup starts; says whether `query` named a key.
+    /// Looks up the key `query` names, and plays its way down from the
+    /// root; says whether `query` named a key.
     pub(crate) fn run(&mut self, tree: &LoadedTree, query: &str) -> bool {
         match tree.trace(query) {
             Ok(trace) => {
                 self.inspected.set(trace.steps().first().map(TraceStep::at));
+                self.descent.set(Descent::of(tree, &trace));
                 self.trace.set(Some(trace));
                 self.error.set(None);
-                self.replay();
+                *self.replay.write() += 1;
                 true
             }
             Err(error) => {
@@ -280,21 +289,21 @@ impl Tracer {
     }
 
     /// Looks up the key `query` names, picked in the node at `at`, which
-    /// holds it, and inspects that node.
+    /// holds it, and plays its way down to that node.
     pub(crate) fn run_in(&mut self, tree: &LoadedTree, query: &str, at: NodeAt) {
         if self.run(tree, query) {
-            self.inspect(at);
+            self.descent.write().play_to(at);
         }
     }
 
-    /// Looks up the key a link names and inspects the node it names, or,
-    /// with no link or a key it can't read, a key at random.
+    /// Looks up the key a link names and plays its way down to the node it
+    /// names, or, with no link or a key it can't read, a key at random.
     pub(crate) fn start(&mut self, tree: &LoadedTree, linked: Option<&LinkedLookup>) {
         if let Some(linked) = linked
             && self.run(tree, linked.key())
         {
             if let Some(level) = linked.level() {
-                self.inspect_level(level);
+                self.play_to_level(level);
             }
             return;
         }
@@ -315,12 +324,12 @@ impl Tracer {
     }
 
     /// Looks up the first key under the node at `at`, so the lookup goes
-    /// through it, and inspects that node.
+    /// through it, and plays its way down to that node.
     pub(crate) fn run_into(&mut self, tree: &LoadedTree, at: NodeAt) {
         if let Some(key) = tree.first_key_under(at)
             && self.run(tree, &key)
         {
-            self.inspect(at);
+            self.descent.write().play_to(at);
         }
     }
 
@@ -340,20 +349,26 @@ impl Tracer {
         }
     }
 
+    /// Inspects the node at `at`, which a reader picked: the way down
+    /// pauses, so the inspector stays on it.
     pub(crate) fn inspect(&mut self, at: NodeAt) {
+        if self.descent.peek().playing() {
+            self.descent.write().pause();
+        }
         self.inspected.set(Some(at));
     }
 
-    /// Inspects the lookup's node at `level`, if it reached that level.
-    fn inspect_level(&mut self, level: usize) {
+    /// Plays the way down to the lookup's node at `level`, if it reaches
+    /// that level.
+    fn play_to_level(&mut self, level: usize) {
         let at = self
             .trace
             .peek()
             .as_ref()
             .and_then(|trace| trace.steps().iter().find(|step| step.at.level() == level))
             .map(TraceStep::at);
-        if at.is_some() {
-            self.inspected.set(at);
+        if let Some(at) = at {
+            self.descent.write().play_to(at);
         }
     }
 
@@ -377,22 +392,15 @@ impl Tracer {
                 .map(TraceStep::at)
         };
         if let Some(next) = next {
-            self.inspected.set(Some(next));
+            self.inspect(next);
         }
-    }
-
-    /// Plays the lookup's way down again, from its first step.
-    pub(crate) fn replay(&mut self) {
-        self.shown.set(0);
-        self.playing.set(true);
-        let count = *self.replay.peek();
-        self.replay.set(count + 1);
     }
 
     pub(crate) fn clear(&mut self) {
         self.trace.set(None);
         self.inspected.set(None);
         self.error.set(None);
+        self.descent.set(Descent::default());
     }
 }
 

@@ -5,7 +5,7 @@
 use dioxus::prelude::*;
 
 use crate::concepts::{Concept, Term};
-use crate::descent::{DescentControls, DescentPlan};
+use crate::descent::{Descent, DescentControls};
 use crate::inspected_tree::LoadedTree;
 use crate::query_key::QueryKey;
 use crate::spotlight::Spotlight;
@@ -15,21 +15,16 @@ use crate::trace::{Trace, Tracer};
 pub(crate) fn PathSummary(
     tree: LoadedTree,
     trace: Trace,
+    descent: Descent,
     tracer: Tracer,
-    /// Changes with every lookup and replay.
+    /// Changes with every lookup.
     replay: u64,
 ) -> Element {
     let outcome = trace.outcome_text(tree.shape());
-    let plan = DescentPlan::of(&tree, &trace);
     rsx! {
         div { class: "path-summary",
-            DescentControls { key: "{replay}", total: plan.total(), tracer }
-            QueryKey {
-                tree: tree.clone(),
-                trace: trace.clone(),
-                plan,
-                shown: tracer.shown(),
-            }
+            DescentControls { key: "{replay}", descent: descent.clone(), tracer }
+            QueryKey { tree: tree.clone(), trace: trace.clone(), descent }
             p { class: "sr-only", role: "status", {outcome} }
         }
     }

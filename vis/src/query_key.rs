@@ -9,7 +9,7 @@
 
 use dioxus::prelude::*;
 
-use crate::descent::DescentPlan;
+use crate::descent::Descent;
 use crate::inspected_tree::LoadedTree;
 use crate::trace::Trace;
 use crate::workload::KeyKind;
@@ -82,22 +82,22 @@ impl KeyWalk {
         }
     }
 
-    /// The window of the last node whose search has compared, once
-    /// `shown` steps are shown.
-    fn frame(&self, plan: &DescentPlan, shown: usize) -> Option<WindowStop> {
+    /// The window of the last node whose search has compared, as far as
+    /// the way down has played.
+    fn frame(&self, descent: &Descent) -> Option<WindowStop> {
         self.stops
             .iter()
             .rev()
-            .find(|stop| plan.phase(stop.row, shown) >= 2)
+            .find(|stop| descent.phase(stop.row) >= 2)
             .copied()
     }
 
     /// The bytes the last node to skip its prefix skips.
-    fn skipped(&self, plan: &DescentPlan, shown: usize) -> usize {
+    fn skipped(&self, descent: &Descent) -> usize {
         self.stops
             .iter()
             .rev()
-            .find(|stop| plan.phase(stop.row, shown) >= 1)
+            .find(|stop| descent.phase(stop.row) >= 1)
             .map_or(0, |stop| stop.skipped)
     }
 }
@@ -108,19 +108,18 @@ impl KeyWalk {
 pub(crate) fn QueryKey(
     tree: LoadedTree,
     trace: Trace,
-    plan: DescentPlan,
-    /// How many steps of the way down are shown.
-    shown: usize,
+    /// How far the way down has played.
+    descent: Descent,
 ) -> Element {
     let walk = KeyWalk::of(&tree, &trace);
     let kind = tree.key_kind();
     let text = trace.query().to_string();
-    let frame = walk.frame(&plan, shown);
-    let skipped = walk.skipped(&plan, shown);
+    let frame = walk.frame(&descent);
+    let skipped = walk.skipped(&descent);
     // A node comparing tied keys in full reads on past its window.
-    let tie_from = plan
-        .current(shown)
-        .filter(|&(row, _)| plan.phase(row, shown) == 3)
+    let tie_from = descent
+        .current()
+        .filter(|&(row, _)| descent.phase(row) == 3)
         .and(frame)
         .map(|stop| stop.skipped + stop.width);
     let read_to = frame.map_or(0, |stop| stop.skipped + stop.width);
@@ -186,10 +185,12 @@ mod tests {
                 .all(|pair| pair[0].skipped <= pair[1].skipped)
         );
         // The bytes every key shares are skipped from the root on.
-        let plan = DescentPlan::of(&tree, &tree.trace("123455").unwrap());
-        assert_eq!(walk.skipped(&plan, 0), 0);
-        assert!(walk.skipped(&plan, 1) > 0);
-        assert!(walk.frame(&plan, 1).is_none());
-        assert_eq!(walk.frame(&plan, plan.total()), walk.stops.last().copied());
+        let mut descent = Descent::of(&tree, &tree.trace("123455").unwrap());
+        assert_eq!(walk.skipped(&descent), 0);
+        descent.step_by(1);
+        assert!(walk.skipped(&descent) > 0);
+        assert!(walk.frame(&descent).is_none());
+        descent.step_by(descent.total() as isize);
+        assert_eq!(walk.frame(&descent), walk.stops.last().copied());
     }
 }

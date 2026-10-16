@@ -47,8 +47,8 @@ the left, the inspected node on the right.
   go down. Play, pause or step it with the buttons above the path; the key
   beside them dims the bytes each node skips and frames the bytes it
   compares, stepping right as the prefixes grow.
-- **Inspect a node** by clicking its card (or `↑` `↓`); a lookup starts at
-  the root. First its fences, the separators either side of the way down to
+- **Inspect a node** by clicking its card (or `↑` `↓`). While the lookup
+  plays (Space; `,` `.` step it), the inspector follows it down. First its fences, the separators either side of the way down to
   it, with its first and last keys and the key looked up, byte by byte: the
   bytes the fences share are its prefix, and the inline keys are the bytes
   after. Then its search, a line a step (click one for the whole
@@ -81,9 +81,10 @@ By feature, in `src/`:
   history, read at start and kept in step;
 - `popover.rs`: the panels the toolbar's buttons open;
 - `scenarios.rs`: lookups worth seeing, on the tree that is built;
-- `path_summary.rs`: the lookup in one line, replay, the path's legend;
+- `path_summary.rs`: the controls and the key above the path, its legend;
+- `descent.rs`: the way down, played a search step at a time;
 - `path_tree.rs`: the path, its cards and the siblings' gauges;
-- `node_inspector.rs`: the picked node, its search as steps;
+- `node_inspector.rs`: the inspected node, its search as steps;
 - `fences.rs`: a node's fences and keys as bytes, and its prefix;
 - `memory_map.rs`: a page drawn as cache lines, with what a lookup read;
 - `slot_table.rs`: a node's slots, one row each;

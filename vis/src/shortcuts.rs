@@ -1,9 +1,9 @@
 //! Keys for the common moves, anywhere but in a text field: `/` to search,
 //! `R` for a random key, `[` and `]` for the leaves beside the last one,
 //! the arrows up and down the path, and left and right back and forward
-//! through the lookups. `B` switches between one key and a batch; in a
-//! batch, `R` picks new keys, Space plays or pauses, `,` and `.` step a
-//! poll back or on.
+//! through the lookups. Space plays or pauses the way down, or the batch,
+//! and `,` and `.` step it back or on. `B` switches between one key and a
+//! batch; in a batch, `R` picks new keys.
 
 use dioxus::prelude::*;
 
@@ -38,10 +38,8 @@ pub(crate) fn Shortcuts(
                 const pageScrolls = document.documentElement.scrollHeight > window.innerHeight + 1;
                 if (vertical && pageScrolls) return;
                 if (event.key.startsWith('Arrow') && target.closest?.('.slot-scroll, .fence-scroll, [role=dialog], [role=tablist]')) return;
-                // Space presses a focused control; the batch's keys need a batch.
+                // Space presses a focused control.
                 if (event.key === ' ' && target.closest?.('button, a, [role=tab]')) return;
-                const batch = !!document.getElementById('batch-board');
-                if ([' ', ',', '.'].includes(event.key) && !batch) return;
                 const keys = ['/', 'r', 'R', '[', ']', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', ',', '.', 'b', 'B'];
                 if (!keys.includes(event.key)) return;
                 event.preventDefault();
@@ -63,10 +61,13 @@ pub(crate) fn Shortcuts(
                 }
                 "b" | "B" => batcher.start(),
                 "r" | "R" if batch => batcher.reseed(),
-                " " => Playback::send(PlaybackCommand::Toggle),
-                "," => Playback::send(PlaybackCommand::Back),
-                "." => Playback::send(PlaybackCommand::Forward),
+                " " if batch => Playback::send(PlaybackCommand::Toggle),
+                "," if batch => Playback::send(PlaybackCommand::Back),
+                "." if batch => Playback::send(PlaybackCommand::Forward),
                 _ if batch => {}
+                " " => tracer.toggle_descent(),
+                "," => tracer.step_descent(-1),
+                "." => tracer.step_descent(1),
                 "/" => search_open.set(true),
                 "r" | "R" => tracer.run_scenario(&tree, Scenario::Random),
                 "[" => tracer.run_beside(&tree, -1),
