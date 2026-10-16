@@ -16,7 +16,7 @@ use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
 use crate::memory_map::{MemoryMap, PageMarks};
 use crate::slot_table::SlotTable;
-use crate::spotlight::{NodePart, Spotlight};
+use crate::spotlight::{Light, NodePart, Spotlight};
 use crate::trace::{Trace, TraceStep, Tracer};
 use crate::tree_shape::NodeAt;
 use crate::workload::KeyKind;
@@ -303,24 +303,22 @@ impl SearchStep {
     }
 
     /// What lights up while the reader points at this step.
-    fn light(&self, at: NodeAt, spotlight: &mut Spotlight) {
+    fn light(&self, at: NodeAt) -> Option<Light> {
         match self {
             SearchStep::SkipPrefix {
                 on_border: true, ..
-            } => spotlight.light_concept(Some(Concept::SharedPrefix)),
-            SearchStep::SkipPrefix { .. } => spotlight.light_concept(Some(Concept::FencePrefix)),
-            SearchStep::CompareInlineKeys { .. } => {
-                spotlight.light_concept(Some(Concept::InlineKey))
-            }
-            SearchStep::CompareFullKeys => spotlight.clear(),
-            SearchStep::SearchTies { .. } => spotlight.light_concept(Some(Concept::Tie)),
+            } => Some(Light::Concept(Concept::SharedPrefix)),
+            SearchStep::SkipPrefix { .. } => Some(Light::Concept(Concept::FencePrefix)),
+            SearchStep::CompareInlineKeys { .. } => Some(Light::Concept(Concept::InlineKey)),
+            SearchStep::CompareFullKeys => None,
+            SearchStep::SearchTies { .. } => Some(Light::Concept(Concept::Tie)),
             SearchStep::Outcome(outcome) => match *outcome {
-                TraceOutcome::Found { index } => spotlight.light_part(at, NodePart::Entry(index)),
+                TraceOutcome::Found { index } => Some(Light::Part(at, NodePart::Entry(index))),
                 TraceOutcome::Descend { edge } | TraceOutcome::ToHead { edge } => {
-                    spotlight.light_part(at, NodePart::Child(edge))
+                    Some(Light::Part(at, NodePart::Child(edge)))
                 }
-                TraceOutcome::Head => spotlight.light_part(at, NodePart::Head),
-                TraceOutcome::Absent { .. } => spotlight.clear(),
+                TraceOutcome::Head => Some(Light::Part(at, NodePart::Head)),
+                TraceOutcome::Absent { .. } => None,
             },
         }
     }
@@ -512,7 +510,8 @@ pub(crate) fn NodeInspector(
     }
 }
 
-/// The node's search, a line a step; a step opens to say it in full.
+/// The node's search, a line a step; a step opens to say it in full. The
+/// way down's current step lights what it names, as pointing at it does.
 #[component]
 fn SearchSteps(
     steps: Vec<SearchStep>,
@@ -523,6 +522,14 @@ fn SearchSteps(
     spotlight: Spotlight,
 ) -> Element {
     let mut opened = use_signal(|| None::<usize>);
+    let current_light = current
+        .and_then(|index| steps.get(index))
+        .and_then(|step| step.light(detail.at()));
+    let mut lighting = spotlight;
+    use_effect(use_reactive!(|current_light| {
+        lighting.light_current_step(current_light)
+    }));
+    use_drop(move || lighting.light_current_step(None));
     rsx! {
         section { class: "search-section", "aria-label": "The node's search",
             h3 { class: "panel-heading", "Search" }
@@ -562,7 +569,7 @@ fn SearchStepItem(
     spotlight: Spotlight,
 ) -> Element {
     let at = detail.at();
-    let hover_step = search_step.clone();
+    let lights = search_step.light(at);
     let mut hover = spotlight;
     let mut leave = spotlight;
     let fact = search_step.fact(&detail);
@@ -574,7 +581,7 @@ fn SearchStepItem(
                 if current { " current" } else { "" },
             ),
             style: "--step:{number};",
-            onmouseenter: move |_| hover_step.light(at, &mut hover),
+            onmouseenter: move |_| hover.light(lights),
             onmouseleave: move |_| leave.clear(),
             button {
                 class: "step-row",

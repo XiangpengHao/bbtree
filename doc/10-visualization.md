@@ -294,8 +294,10 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
     places the key, and only the equal ones, if any, are searched in full;
     and the outcome: the edge taken with the keys either side, the slot
     found, a separator's way to its head (D17), or the slot an insert would
-    take. Pointing at a step lights up what it read in the page and the
-    rulers.
+    take. Pointing at a step lights up what it read in the page, the
+    fences and the rulers, and dims the rest; the way down's current step
+    does the same while the pointer is on nothing, so playing walks the
+    lighting through each node's search.
   - The page as 16 rows of 64-byte cache lines (`memory_map.rs`), rows
     numbered 0 to 15 and bytes across. Every
     slot sits where the layout puts it, empty slots are faint, and the slots

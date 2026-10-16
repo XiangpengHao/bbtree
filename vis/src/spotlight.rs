@@ -1,6 +1,8 @@
 //! What the reader points at, shared by every panel: a part of one node, or
 //! one of bbtree's ideas, so that each panel showing it lights it up; and
-//! the hint by the pointer that says what it is.
+//! the hint by the pointer that says what it is. While the reader points at
+//! nothing, the panels light what the way down's current search step does,
+//! as pointing at that step would (`descent.rs`).
 
 use dioxus::prelude::*;
 
@@ -17,6 +19,13 @@ pub(crate) enum NodePart {
     Child(usize),
     /// A leaf's head.
     Head,
+}
+
+/// What the panels light up: a part of one node, or an idea.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Light {
+    Part(NodeAt, NodePart),
+    Concept(Concept),
 }
 
 /// What a hint says, and the point it hangs from.
@@ -61,6 +70,8 @@ pub(crate) struct Spotlight {
     /// it stood, still saying what it said.
     hint: Signal<Option<Hint>>,
     hint_shown: Signal<bool>,
+    /// What the way down's current search step lights.
+    current_step: Signal<Option<Light>>,
 }
 
 impl Spotlight {
@@ -69,21 +80,34 @@ impl Spotlight {
         concept: Signal<Option<Concept>>,
         hint: Signal<Option<Hint>>,
         hint_shown: Signal<bool>,
+        current_step: Signal<Option<Light>>,
     ) -> Self {
         Self {
             part,
             concept,
             hint,
             hint_shown,
+            current_step,
         }
     }
 
-    /// The part of the node at `at` the reader points at, if any.
+    /// What the panels light: what the reader points at, or, pointing at
+    /// nothing, what the way down's current step lights.
+    fn lit(&self) -> Option<Light> {
+        let pointed = match (*self.part.read(), *self.concept.read()) {
+            (Some((at, part)), _) => Some(Light::Part(at, part)),
+            (None, Some(concept)) => Some(Light::Concept(concept)),
+            (None, None) => None,
+        };
+        pointed.or(*self.current_step.read())
+    }
+
+    /// The part of the node at `at` lit, if any.
     pub(crate) fn part_of(&self, at: NodeAt) -> Option<NodePart> {
-        self.part
-            .read()
-            .filter(|(pointed, _)| *pointed == at)
-            .map(|(_, part)| part)
+        match self.lit() {
+            Some(Light::Part(lit_at, part)) if lit_at == at => Some(part),
+            _ => None,
+        }
     }
 
     /// The part of the node at `at` the reader points at, read without
@@ -95,8 +119,30 @@ impl Spotlight {
             .map(|(_, part)| part)
     }
 
+    /// The idea lit, if any.
     pub(crate) fn concept(&self) -> Option<Concept> {
-        *self.concept.read()
+        match self.lit() {
+            Some(Light::Concept(concept)) => Some(concept),
+            _ => None,
+        }
+    }
+
+    /// Lights what a step of the search names, without a hint, as the
+    /// reader points at the step; or nothing.
+    pub(crate) fn light(&mut self, light: Option<Light>) {
+        match light {
+            Some(Light::Part(at, part)) => self.light_part(at, part),
+            Some(Light::Concept(concept)) => self.light_concept(Some(concept)),
+            None => self.clear(),
+        }
+    }
+
+    /// Lights what the way down's current step names, while the reader
+    /// points at nothing.
+    pub(crate) fn light_current_step(&mut self, light: Option<Light>) {
+        if *self.current_step.peek() != light {
+            self.current_step.set(light);
+        }
     }
 
     /// Points at `part` of the node at `at`, with what to say about it.
