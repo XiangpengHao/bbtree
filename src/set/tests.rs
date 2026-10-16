@@ -364,7 +364,6 @@ where
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn u64_set_matches_std() {
     let rng = TestRng::new(21);
     MirroredSets::<u64>::new().run(&rng, 100_000, 1 << 14);
@@ -454,7 +453,6 @@ impl MirroredSets<u64> {
 /// and of each shape: overlapping, apart, touching at one end, and one
 /// inside the other with or without its ends.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn set_operations_match_std() {
     let rng = TestRng::new(25);
     for (a_len, b_len) in PAIR_LENS {
@@ -470,7 +468,6 @@ fn set_operations_match_std() {
 /// a set large enough to look them up a batch at a time (`lookups.rs`):
 /// whole batches and a partial one, all found or some.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn set_operations_with_batched_lookups_match_std() {
     let rng = TestRng::new(26);
     let universe = 400_000;
@@ -522,7 +519,6 @@ impl Ord for Tagged {
 /// new one; `get` and `take` hand back the one in; the operations on two
 /// sets hand out one set's or the other's: all as std's do.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn which_of_equal_elements_stays_matches_std() {
     let rng = TestRng::new(24);
     let (trials, max_len) = if cfg!(miri) { (20, 60) } else { (300, 3000) };

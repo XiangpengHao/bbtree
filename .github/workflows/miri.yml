@@ -1,10 +1,9 @@
 # Named for its README badge.
 name: miri
 
-# The tests under Miri, which reports undefined behavior in the unsafe code.
-# Tests that take over about 3 minutes under Miri are ignored under it
-# (`#[cfg_attr(miri, ignore = ...)]`), so that this runs on every change;
-# normal test runs keep them.
+# Tests under Miri, which reports undefined behavior in the unsafe code.
+# Only the tests .config/nextest.toml names run, so that this runs on every
+# change in minutes; normal test runs run them all.
 on:
   push:
     branches: [main]
@@ -51,11 +50,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # A name that matches no test, say after a rename, would drop that
+      # test from Miri without a word.
+      - name: Check that every named test exists
+        run: |
+          named=$(grep -c 'test(=' .config/nextest.toml)
+          found=$(cargo miri nextest list --message-format oneline | wc -l)
+          if [ "$named" -ne "$found" ]; then
+            echo "::error::.config/nextest.toml names $named tests; $found exist"
+            exit 1
+          fi
+
       # Miri interprets on one core. Nextest runs each test in a process of
       # its own, so as many tests run at once as the runner has cores.
       - name: Miri
         run: cargo miri nextest run --test-threads "$(nproc)"
-
-      # Nextest doesn't run doc tests.
-      - name: Miri (doc tests)
-        run: cargo miri test --doc

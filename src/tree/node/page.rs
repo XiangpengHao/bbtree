@@ -1146,7 +1146,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn slots_are_aligned_and_disjoint() {
         assert_slots_are_aligned_and_disjoint::<u64, u64, Auto>();
         assert_slots_are_aligned_and_disjoint::<u8, (), Auto>();

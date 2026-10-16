@@ -88,7 +88,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn two_matches_keep_their_order_and_stay_among_the_candidates() {
         for capacity in 0..=65 {
             let mut slots = vec![7; capacity];

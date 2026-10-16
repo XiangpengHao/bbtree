@@ -530,7 +530,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn vector_boundaries_ignore_stale_tails() {
         assert_vector_boundaries::<u16>();
         assert_vector_boundaries::<u32>();
@@ -692,7 +691,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn equality_masks_bound_live_matches_across_lane_edges() {
         assert_equality_mask_boundaries::<u16>();
         assert_equality_mask_boundaries::<u32>();

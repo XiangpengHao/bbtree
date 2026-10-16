@@ -157,8 +157,9 @@ jobs:
         run: cargo test
 
   # The library's tests on other platforms. On ARM, the portable code runs
-  # where x86 has SIMD. On wasm, pointers are 32 bits and a panic aborts,
-  # so tests that assume 64-bit pointers or need unwinding are ignored there.
+  # where x86 has SIMD. On wasm, pointers are 32 bits, a panic aborts and
+  # there are no threads, so tests that assume 64-bit pointers, need
+  # unwinding or spawn threads are ignored there.
   test-aarch64:
     name: test (aarch64)
     runs-on: ubuntu-24.04-arm

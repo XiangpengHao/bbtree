@@ -37,6 +37,7 @@
 ## Verification
 
 - Never run Miri (`cargo miri test`, any mode) in a coding session or a subagent. Miri runs in CI only. Local checks are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.
+- Miri runs only the tests `.config/nextest.toml` names. Don't mark tests `#[cfg_attr(miri, ignore)]`; to run a test under Miri, name it there.
 
 ## Benchmark rule
 

@@ -945,6 +945,11 @@ mod tests {
         if !cfg!(miri) {
             PinnedLane::check::<257>(false);
         }
+    }
+
+    #[test]
+    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
+    fn executor_drops_each_lane_once_after_a_lane_panics() {
         PinnedLane::check::<4>(true);
         PinnedLane::check::<65>(true);
     }

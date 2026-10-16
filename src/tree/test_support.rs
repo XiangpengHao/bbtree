@@ -38,13 +38,19 @@ impl TestRng {
 
     /// A uniformly distributed index in `0..bound` (up to modulo bias).
     pub(crate) fn below(&self, bound: usize) -> usize {
+        self.below_u64(bound as u64) as usize
+    }
+
+    /// A uniformly distributed number in `0..bound` (up to modulo bias),
+    /// for bounds past `usize` on 32-bit targets.
+    pub(crate) fn below_u64(&self, bound: u64) -> u64 {
         assert!(bound > 0);
         let mut state = self.0.get();
         state ^= state >> 12;
         state ^= state << 25;
         state ^= state >> 27;
         self.0.set(state);
-        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) % bound as u64) as usize
+        state.wrapping_mul(0x2545_F491_4F6C_DD1D) % bound
     }
 
     /// Puts `items` in a random order.

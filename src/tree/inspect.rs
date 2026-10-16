@@ -984,7 +984,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn integer_keys_walk_in_order_with_inline_keys() {
         let mut map = BBTreeMap::new();
         for number in shuffled(20_000, 1) {
@@ -1005,7 +1004,6 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn string_keys_keep_prefixes_and_length_tags() {
         let mut map = BBTreeMap::new();
         for number in shuffled(20_000, 2) {
@@ -1035,7 +1033,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn keys_without_inline_keys_walk_without_them() {
         let mut map = BBTreeMap::new();
         for number in shuffled(5_000, 3) {
@@ -1114,7 +1111,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn traces_follow_lookups() {
         let mut integers = BBTreeMap::new();
         for number in shuffled(20_000, 4) {

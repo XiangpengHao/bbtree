@@ -330,7 +330,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
     fn equal_ranges_of_sorted_inline_keys() {
         assert_equal_ranges_of_sorted_inline_keys::<u16>(51);
         assert_equal_ranges_of_sorted_inline_keys::<u32>(53);

@@ -161,7 +161,6 @@ fn random_operations<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>>(
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn random_operations_match_a_model() {
     let ledger = DropLedger::new();
     let steps = if cfg!(miri) { 200 } else { 10_000 };

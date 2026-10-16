@@ -89,7 +89,6 @@ fn two_length_candidates_check_hits_and_misses_on_either_side() {
 /// Two candidates whose lengths differ by 65 536 have the same tag: equal
 /// tags only let a lookup go on to compare the keys.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn two_length_candidates_confirm_modulo_collisions() {
     let mut map = BBTreeMap::<String, u64>::new();
     let short = String::from("shared-prefix/c0");
@@ -121,7 +120,6 @@ fn two_length_candidates_confirm_modulo_collisions() {
 /// one candidate, two, or more; then through inserts that split, removals,
 /// a cut, a join and a copy, which must keep every length tag right.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn length_collisions_and_mutations_preserve_exact_key_lookups() {
     // Tails of lengths that one key has, then two, three, and so on.
     let tails = (0..).flat_map(|len| iter::repeat_n(len, len + 1));

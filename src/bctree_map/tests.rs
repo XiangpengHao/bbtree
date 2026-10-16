@@ -55,12 +55,11 @@ where
 }
 
 /// `count` random numbers below `universe`, some repeated.
-fn random_numbers(rng: &TestRng, count: usize, universe: usize) -> Vec<u64> {
-    (0..count).map(|_| rng.below(universe) as u64).collect()
+fn random_numbers(rng: &TestRng, count: usize, universe: u64) -> Vec<u64> {
+    (0..count).map(|_| rng.below_u64(universe)).collect()
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn integers_match_std() {
     let rng = TestRng::new(91);
     let keys = random_numbers(&rng, 20_000, 1 << 40);
@@ -77,7 +76,6 @@ fn integers_match_std() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn strings_match_std() {
     let rng = TestRng::new(92);
     let path = |number: u64| format!("/usr/share/{}/{:x}", number % 7, number);
@@ -93,7 +91,6 @@ fn strings_match_std() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_arrays_match_std() {
     let rng = TestRng::new(93);
     let array = |number: u64| {
@@ -126,10 +123,7 @@ fn a_small_map_matches_std() {
 /// has inserted is there for every reader from then on, and at the end
 /// every key holds its writer's value, in a well-formed tree.
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "optimistic lock coupling reads nodes writers are changing, which Miri reports as data races"
-)]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
 fn threads_find_what_other_threads_inserted() {
     let (writers, per_writer) = (4, 20_000);
     let map = BCTreeMap::<u64, u64>::new();
@@ -186,10 +180,7 @@ fn threads_find_what_other_threads_inserted() {
 /// Threads insert the same keys, in different orders, and count with
 /// `update`: each key ends with one writer's value and every count.
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "optimistic lock coupling reads nodes writers are changing, which Miri reports as data races"
-)]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
 fn threads_racing_on_the_same_keys_agree() {
     let (threads, key_count) = (4, 10_000);
     let map = BCTreeMap::<String, (usize, u64)>::new();

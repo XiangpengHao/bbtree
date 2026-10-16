@@ -196,7 +196,6 @@ fn cuts_refit_the_nodes_beside_their_borders() {
 /// shrinks the shared prefix; removals, cuts and rebuilds keep it right,
 /// including for embedded zeros.
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn queries_outside_the_shared_prefix_match_std() {
     use std::collections::BTreeMap;
     use std::ops::Bound::{Included, Unbounded};
@@ -287,7 +286,6 @@ fn queries_outside_the_shared_prefix_match_std() {
 /// their windows apart at prefix 0, where the nodes along the borders take
 /// them: one key shares none, which leaves the tree no shared prefix (D50).
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn windows_internal_nodes_hand_out_are_read_again_from_their_keys() {
     use std::collections::BTreeMap;
 
@@ -402,7 +400,6 @@ fn dense_fixed_width_keys_match_std<K: Ord + Copy + core::fmt::Debug>(key: impl 
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn dense_integer_keys_match_std() {
     dense_fixed_width_keys_match_std(|index| index);
     dense_fixed_width_keys_match_std(|index| u128::from(index) | (7 << 100));
@@ -410,7 +407,6 @@ fn dense_integer_keys_match_std() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn byte_arrays_behind_a_shared_head_match_std() {
     dense_fixed_width_keys_match_std(|index| {
         let mut key = [0x5A; 16];
@@ -429,7 +425,6 @@ fn byte_arrays_behind_a_shared_head_match_std() {
 /// one by one, appended in order by a build, or joined from another tree;
 /// removals leave it. Every node along the borders follows it (D50).
 #[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
 fn keys_that_share_less_shrink_the_shared_prefix() {
     let shared_len = |map: &BBTreeMap<String, usize>| map.inspect().shared_prefix().len();
     let mut map: BBTreeMap<String, usize> = (0..key_count())
