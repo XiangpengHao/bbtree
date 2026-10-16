@@ -805,8 +805,8 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   In leaves, 4 bytes would more than double JSON's heap comparisons, so
   leaves stay at 8.
 - **Search on baseline x86-64:** 17–32 four-byte summaries use one SSE2
-  packing step and trailing-one counts; above 32, a branchless binary
-  search. A second packing step for 33–64 cut instructions but was slower
+  packing step and trailing-one counts; above 32, the compiler's count
+  (04 Q6). A second packing step for 33–64 cut instructions but was slower
   on borrowed JSON, so it was dropped.
 - **Measured,** 10M native: JSON inserts 314.1 → 282.5 ns, hits
   343.8 → 320.4, misses 282.3 → 235.4; paths about 1.3% faster. Baseline
@@ -1186,6 +1186,30 @@ Design and measurements in 09-concurrency.md, "Batches".
 - **Cost:** at 10M, 1.3–2.3× faster than one key a call on one thread,
   1.2–1.4× at 24 threads. Misses batch within 11% of bbtree's; hits trail
   by 24–28%: each latches its leaf, two locked atomics and a dirtied line.
+
+**D56. AArch64 counts inline keys in NEON, relying on invariant 4.** (2026-10-16)
+
+- **What:** on AArch64, every width of inline key counts in explicit NEON
+  vectors (`NeonCount` in `vector_count.rs`): per 16 bytes of slots, one
+  `cmhi` and one `cmeq` against the broadcast target, their all-ones lanes
+  subtracted into counters of the slots' width, one `addv` each at the end;
+  a capacity that isn't a multiple of the vector ends with an overlapping
+  load, its counted lanes masked out. The exact-key equality mask (D41) and
+  the length-tag filter (D36) stay x86-only: the count already tells none
+  from one from many, and length tags only filter ties.
+- **Why:** the compiler's own count there widened each compared lane to 64
+  bits, one at a time, to add it to a `usize`. A 10M `u64` hit on an M1 Pro
+  ran 1,678 instructions, against 228 on Rocket Lake with AVX-512, and
+  bbtree was 1.06× std's speed.
+- **Slots past `len` count:** the counts are exact where those hold the
+  greatest inline key (invariant 4), as the compiler's count already
+  required, and clipped to `0..len` for any contents. x86's masks ignore
+  them; masking them per vector on NEON cost 8–18% of a lookup.
+- **Measured** (M1 Pro, 10M entries, probe `bench/diagnostics/portable`,
+  one run each), ns before → after: `u64` hit 389.5 → 173.5, miss 308.1 →
+  137.3; `hash32` hit 398.7 → 185.2, miss 270.7 → 119.9; borrowed JSON hit
+  428.7 → 267.3, miss 306.8 → 198.2. Instructions per `u64` hit 1,678 →
+  407.
 
 ## Navigation
 

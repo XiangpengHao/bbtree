@@ -416,9 +416,8 @@ Without POPCNT, LLVM counts mask bits in software, with multiplies.
   297.3, despite 140–166 more instructions per operation.
 - **4-byte summaries, 33–64 slots** (borrowed `&str`, capacity 36): a
   second packing step cut the reduction from 130 to 94 instructions, but
-  borrowed JSON stayed slower than with 8-byte internals. Rejected. A
-  branchless binary search is used instead: borrowed JSON hit 223.7 →
-  218.7, miss 102.1 → 99.3; borrowed path miss 541.2 → 553.2 (+2.2%).
+  borrowed JSON stayed slower than with 8-byte internals. Rejected; the
+  compiler's count is used (04 Q6).
 - **Sign-biased summary storage** (codegen only): would remove a few XORs
   per search, but the cached-insert path grows 43 instructions. Rejected
   before timing.

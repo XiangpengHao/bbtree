@@ -222,6 +222,7 @@ mod tests {
 
     use super::{InlineKeySlots, InlineKeysOfWidth, InlineSlot, NodeInlineKeys, Slots};
     use crate::inline_key::{InlineWidth, InlineWord};
+    use crate::tree::node::vector_count::EXACT_PAST_LEN;
     use crate::tree::test_support::TestRng;
 
     /// `stale_count` random slots after `live`, as no node holds past its
@@ -244,7 +245,7 @@ mod tests {
     /// wherever they are and however many, over several words of slots, the
     /// greatest too, by every way of finding it, with the slots past `len`
     /// holding the greatest (invariant 4), and by the vector count whatever
-    /// they hold.
+    /// they hold where it masks them out (`EXACT_PAST_LEN`).
     fn assert_equal_ranges_of_sorted_inline_keys<W: InlineSlot + From<u8>>(seed: u64) {
         let rng = TestRng::new(seed);
         for _ in 0..if cfg!(miri) { 50 } else { 2000 } {
@@ -266,11 +267,18 @@ mod tests {
                 let end = inline_keys.partition_point(|&probe| probe <= target);
                 assert_eq!(node.equal_range(target), start..end);
                 assert_eq!(node.equal_range_by_count(target), start..end);
-                for slots in [&slots, &unpadded] {
-                    if let Some(equal_range) =
-                        W::equal_range_in_vectors(Slots::of_slice(slots), len, target)
-                    {
+                if let Some(equal_range) =
+                    W::equal_range_in_vectors(Slots::of_slice(&slots), len, target)
+                {
+                    assert_eq!(equal_range, start..end);
+                }
+                if let Some(equal_range) =
+                    W::equal_range_in_vectors(Slots::of_slice(&unpadded), len, target)
+                {
+                    if EXACT_PAST_LEN {
                         assert_eq!(equal_range, start..end);
+                    } else {
+                        assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
             }

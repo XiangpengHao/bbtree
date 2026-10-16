@@ -131,7 +131,10 @@ Left open.
 ## Prefetch policy and cost model
 
 Only `Prefetcher` in `src/tree/batch.rs` issues a hint: x86-64
-`prefetcht0`, nothing on other targets or under Miri. Single-key
+`prefetcht0`, AArch64 `prfm pldl1keep` (through `asm!`, since its
+intrinsic isn't stable), nothing on other targets or under Miri. Without
+it, an M1 Pro's 10M batched hits took 283 ns a `u64` key against 200 with
+it, and 276 against 191 a JSON key (2026-10-16). Single-key
 operations never call it. Each hinted address is the next thing its lane
 reads; no unchosen edges, whole-node scans, whole heap keys or full shift
 spans. Node searches load their inline-key columns themselves.
