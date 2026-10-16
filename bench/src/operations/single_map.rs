@@ -191,14 +191,27 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
     ) -> (usize, usize) {
         let map: M = self.built_map();
         let probes = self.probes(pool);
-        let (hits, _checksum) = stopwatch.time(|| {
-            probes
-                .iter()
-                .fold((0, 0_u64), |(hits, sum), key| match map.get(key) {
-                    Some(value) => (hits + 1, sum.wrapping_add(value.fingerprint())),
-                    None => (hits, sum),
+        // Maps that lend no references (`BCTreeMap`) read through a closure;
+        // the others keep their loop as it was.
+        let (hits, _checksum) = if M::LENDS_REFERENCES {
+            stopwatch.time(|| {
+                probes
+                    .iter()
+                    .fold((0, 0_u64), |(hits, sum), key| match map.get(key) {
+                        Some(value) => (hits + 1, sum.wrapping_add(value.fingerprint())),
+                        None => (hits, sum),
+                    })
+            })
+        } else {
+            stopwatch.time(|| {
+                probes.iter().fold((0, 0_u64), |(hits, sum), key| {
+                    match map.lookup_fingerprint(key) {
+                        Some(fingerprint) => (hits + 1, sum.wrapping_add(fingerprint)),
+                        None => (hits, sum),
+                    }
                 })
-        });
+            })
+        };
         (probes.len(), hits)
     }
 

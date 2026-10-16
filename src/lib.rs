@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate std;
 
 mod allocator;
+mod bctree_map;
 mod inline_key;
 mod map;
 mod set;
@@ -20,6 +21,7 @@ mod set;
 mod tree;
 
 pub use allocator::{AllocError, Allocator, Global};
+pub use bctree_map::BCTreeMap;
 pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
 pub use map::BBTreeMap;
 pub use set::BBTreeSet;

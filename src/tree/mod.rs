@@ -20,6 +20,9 @@
 //!   parent, its fences, as the bytes every key shares (D50, D52,
 //!   `node/root_page.rs`, `shared_prefix.rs`), and the last leaf an append
 //!   went to (D45). Every operation on a whole tree starts there.
+//! - [`latched`] is a tree that threads share (`BCTreeMap`): the same
+//!   nodes with a latch word each (`node/latch.rs`), read optimistically
+//!   above the leaves (`node/optimistic.rs`) (D54).
 //! - The rest of this module is the tree's operations, each in its own
 //!   feature's module. Node stacks from the root and the iterators' walks
 //!   along them (`node_stack.rs`, `walk.rs`), and searches that need no node
@@ -38,9 +41,9 @@
 //! `unsafe` code is in the node modules that touch pages or erase types
 //! (`node/mod.rs`, `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`,
 //! `root_page.rs`, `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`,
-//! `type_identity.rs`), and in `root.rs`, `node_stack.rs`, `search.rs`,
-//! `walk.rs` and `batch.rs`, where a contract the type system doesn't check
-//! is relied on.
+//! `type_identity.rs`, `optimistic.rs`), and in `root.rs`, `node_stack.rs`,
+//! `search.rs`, `walk.rs`, `batch.rs` and `latched/`, where a contract the
+//! type system doesn't check is relied on.
 //! Every other module is `#![forbid(unsafe_code)]`. What only the tree
 //! uses, such as making a node handle from a pointer, is
 //! `pub(in crate::tree)`; the map and the set see the rest.
@@ -55,6 +58,7 @@ pub(crate) mod inspect;
 #[cfg(any(test, fuzzing))]
 mod invariants;
 pub(crate) mod join;
+pub(crate) mod latched;
 pub(crate) mod node;
 pub(crate) mod node_stack;
 mod prefix;

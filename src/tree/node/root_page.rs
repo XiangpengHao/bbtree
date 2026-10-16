@@ -20,7 +20,7 @@ use core::ptr::NonNull;
 use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
-use super::page::{FreshPage, NodePtr, PageByType, PageType};
+use super::page::{FreshPage, LatchedNodeHeader, NodePtr, PageByType, PageType};
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
@@ -211,6 +211,36 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.
         let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(self.node.page()) };
+        let root = Internal::at(node);
+        root.put_only_child(child);
+        root.set_empty_prefix_len(self.shared_prefix().len());
+        Self { node }
+    }
+
+    /// [`Self::raise`], for a latched tree whose root is a leaf the caller
+    /// holds exclusively (`latch.rs`): the root page keeps its latch word,
+    /// held, and the internal node it becomes starts on zeroed bytes, as a
+    /// latched tree's pages do; the leaf moves to a fresh page, unlatched,
+    /// which no other thread reaches until the tree's pointer to the root
+    /// tells it is internal.
+    pub(in crate::tree) fn raise_latched_leaf(self, alloc: &impl Allocator) -> Self {
+        assert!(NodePtr::<K, V, S>::is_latched() && self.node.is_leaf());
+        let child = self.move_node_out(alloc);
+        let page = self.node.page();
+        let header_size = size_of::<LatchedNodeHeader>();
+        // SAFETY: the leaf moved out, so nothing in the root page needs
+        // dropping; the caller holds it exclusively, and no thread reads a
+        // root page optimistically while the tree's pointer says it is a
+        // leaf, so nothing but its latch word, which stays, races with the
+        // writes. The bytes past the header up to an internal node's size
+        // are in the page.
+        unsafe {
+            child.node_ptr().latch().reset();
+            page.byte_add(header_size)
+                .write_bytes(0, Internal::<K, V, S>::page_layout().size() - header_size);
+        }
+        // SAFETY: as for `Self::raise`; `initialize` leaves the latch word.
+        let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(page) };
         let root = Internal::at(node);
         root.put_only_child(child);
         root.set_empty_prefix_len(self.shared_prefix().len());

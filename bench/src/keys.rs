@@ -11,6 +11,7 @@ use bytes::Bytes;
 use crate::cell_runner::{CellMeasurement, CellRun};
 use crate::command_line::Named;
 use crate::datasets::DataFile;
+use crate::map_adapters::CountedBCTree;
 use crate::operations::PreparedCell;
 use crate::random::{RandomStream, SeededRng};
 use crate::values::BenchValue;
@@ -186,6 +187,15 @@ pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
         run.measure::<BBTreeMap<Self, V>, Self, V>(prepared)
     }
 
+    /// Measures `prepared` on `bctree`, a `BCTreeMap` with the strategy
+    /// `bbtree` uses for the key type, on one thread.
+    fn measure_on_bctree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<CountedBCTree<Self, V>, Self, V>(prepared)
+    }
+
     /// Measures `prepared` on `bbtree-inline`, a `BBTreeMap` whose keys have
     /// inline keys through their `InlineKey` impl: for the key types of
     /// [`KeyKind::is_inline_keyed_integer`] only.
@@ -241,6 +251,13 @@ impl BenchKey for SequencedKey {
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
         run.measure::<BBTreeMap<Self, V, WithInlineKey>, Self, V>(prepared)
+    }
+
+    fn measure_on_bctree<V: BenchValue>(
+        run: &CellRun,
+        prepared: impl PreparedCell<Self, V>,
+    ) -> Result<CellMeasurement, String> {
+        run.measure::<CountedBCTree<Self, V, WithInlineKey>, Self, V>(prepared)
     }
 }
 

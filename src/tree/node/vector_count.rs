@@ -29,6 +29,8 @@
 use core::num::NonZeroU64;
 use core::ops::Range;
 
+use super::slots::Slots;
+
 /// Which of a lookup's candidates have its length tag: none, one, two (at
 /// these positions), or more.
 pub(super) enum SlotMatches {
@@ -114,13 +116,13 @@ pub(in crate::tree) struct U64EqualityMask {
 
 impl U64EqualityMask {
     #[inline(always)]
-    fn matching(slots: &[u64], target: u64) -> Option<Self> {
+    fn matching(slots: Slots<u64>, target: u64) -> Option<Self> {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
         {
             use core::arch::x86_64::{
                 _mm512_mask_cmpeq_epi64_mask, _mm512_maskz_loadu_epi64, _mm512_set1_epi64,
             };
-            if slots.len() > 64 {
+            if slots.capacity() > 64 {
                 return None;
             }
             const LANES: usize = 8;
@@ -130,8 +132,8 @@ impl U64EqualityMask {
             // eight lanes per load, and capacity <= 64 bounds every shift.
             unsafe {
                 let target = _mm512_set1_epi64(target as i64);
-                for start in (0..slots.len()).step_by(LANES) {
-                    let lanes = (slots.len() - start).min(LANES);
+                for start in (0..slots.capacity()).step_by(LANES) {
+                    let lanes = (slots.capacity() - start).min(LANES);
                     let in_slots = ((1_u64 << lanes) - 1) as u8;
                     let chunk =
                         _mm512_maskz_loadu_epi64(in_slots, slots.as_ptr().add(start).cast());
@@ -194,7 +196,7 @@ pub(in crate::tree) trait VectorCount: Copy {
     /// An equality mask for exact-key lookup where it avoids ordered work.
     /// Narrow slots and unsupported targets retain the ordered reduction.
     #[inline(always)]
-    fn equality_mask_in_vectors(_slots: &[Self], _target: Self) -> Option<U64EqualityMask> {
+    fn equality_mask_in_vectors(_slots: Slots<Self>, _target: Self) -> Option<U64EqualityMask> {
         None
     }
 
@@ -207,7 +209,8 @@ pub(in crate::tree) trait VectorCount: Copy {
     /// constant per node kind, so their masks are constants and they don't
     /// wait for `len`, which clips the results. Slots past `len` are read,
     /// but their contents do not affect the answer.
-    fn equal_range_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>>;
+    fn equal_range_in_vectors(slots: Slots<Self>, len: usize, target: Self)
+    -> Option<Range<usize>>;
 }
 
 /// The AVX-512 count of `$slots`' first `$len` slots below and equal to
@@ -230,12 +233,12 @@ macro_rules! count_avx512_lanes {
         // reads only the lanes it selects.
         unsafe {
             let target = $set1($target as $lane);
-            while word_start < $slots.len() {
+            while word_start < $slots.capacity() {
                 let (mut below_bits, mut equal_bits) = (0_u64, 0_u64);
                 let mut offset = 0;
-                while offset < WORD_LANES && word_start + offset < $slots.len() {
+                while offset < WORD_LANES && word_start + offset < $slots.capacity() {
                     let start = word_start + offset;
-                    let lanes = ($slots.len() - start).min(LANES);
+                    let lanes = ($slots.capacity() - start).min(LANES);
                     let in_slots = ((1_u64 << lanes) - 1) as $mask;
                     let chunk = $load(in_slots, $slots.as_ptr().add(start).cast());
                     below_bits |= u64::from($below(in_slots, chunk, target)) << offset;
@@ -260,7 +263,7 @@ macro_rules! vector_count {
         impl VectorCount for $slot {
             #[inline(always)]
             fn equal_range_in_vectors(
-                slots: &[Self],
+                slots: Slots<Self>,
                 len: usize,
                 target: Self,
             ) -> Option<Range<usize>> {
@@ -289,13 +292,13 @@ macro_rules! vector_count {
                     // One packing stage doubles the slots that fit in a
                     // single mask. Leave shorter arrays unchanged; larger
                     // ones would need another packing stage or mask word.
-                    let packed = slots.len() > UNPACKED_MAX_SLOTS;
+                    let packed = slots.capacity() > UNPACKED_MAX_SLOTS;
                     let max_slots = if packed {
                         2 * UNPACKED_MAX_SLOTS
                     } else {
                         UNPACKED_MAX_SLOTS
                     };
-                    if slots.len() < LANES || slots.len() > max_slots {
+                    if slots.capacity() < LANES || slots.capacity() > max_slots {
                         return None;
                     }
                     let bits_per_slot = if packed { SLOT_BYTES / 2 } else { SLOT_BYTES };
@@ -315,8 +318,8 @@ macro_rules! vector_count {
                         let target = $sse_set1((target ^ sign_bit) as $lane);
                         let mut offset = 0;
                         if packed {
-                            while offset < slots.len() {
-                                let start = offset.min(slots.len() - 2 * LANES);
+                            while offset < slots.capacity() {
+                                let start = offset.min(slots.capacity() - 2 * LANES);
                                 let first = _mm_loadu_si128(slots.as_ptr().add(start).cast());
                                 let second =
                                     _mm_loadu_si128(slots.as_ptr().add(start + LANES).cast());
@@ -337,8 +340,8 @@ macro_rules! vector_count {
                                 offset += 2 * LANES;
                             }
                         } else {
-                            while offset < slots.len() {
-                                let start = offset.min(slots.len() - LANES);
+                            while offset < slots.capacity() {
+                                let start = offset.min(slots.capacity() - LANES);
                                 let chunk = _mm_loadu_si128(slots.as_ptr().add(start).cast());
                                 let chunk = _mm_xor_si128(chunk, flip_sign);
                                 let lower = _mm_movemask_epi8($sse_greater(target, chunk)) as u64;
@@ -407,16 +410,20 @@ vector_count!(
 /// goes the narrow slots' way.
 impl VectorCount for u64 {
     #[inline(always)]
-    fn equality_mask_in_vectors(slots: &[Self], target: Self) -> Option<U64EqualityMask> {
+    fn equality_mask_in_vectors(slots: Slots<Self>, target: Self) -> Option<U64EqualityMask> {
         U64EqualityMask::matching(slots, target)
     }
 
     #[inline(always)]
-    fn equal_range_in_vectors(slots: &[Self], len: usize, target: Self) -> Option<Range<usize>> {
+    fn equal_range_in_vectors(
+        slots: Slots<Self>,
+        len: usize,
+        target: Self,
+    ) -> Option<Range<usize>> {
         // The capacity is a constant per node kind, so the check folds.
         #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
         {
-            if !(28..=31).contains(&slots.len()) {
+            if !(28..=31).contains(&slots.capacity()) {
                 return None;
             }
             count_avx512_lanes!(
@@ -443,7 +450,7 @@ impl VectorCount for u64 {
 mod tests {
     use std::vec::Vec;
 
-    use super::{SlotMatches, U64EqualityMask};
+    use super::{SlotMatches, Slots, U64EqualityMask};
     use crate::tree::node::inline_keys::InlineSlot;
 
     #[test]
@@ -492,13 +499,17 @@ mod tests {
                 for target in values {
                     let start = slots[..len].partition_point(|&slot| slot < target);
                     let end = slots[..len].partition_point(|&slot| slot <= target);
-                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                    if let Some(equal_range) =
+                        W::equal_range_in_vectors(Slots::of_slice(&slots), len, target)
+                    {
                         assert_eq!(equal_range, start..end, "capacity {capacity}, live {len}");
                     }
                 }
                 slots[..len].reverse();
                 for target in values {
-                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                    if let Some(equal_range) =
+                        W::equal_range_in_vectors(Slots::of_slice(&slots), len, target)
+                    {
                         assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
@@ -508,7 +519,9 @@ mod tests {
                     *slot = values[(index * 5 + 2) % values.len()];
                 }
                 for target in values {
-                    if let Some(equal_range) = W::equal_range_in_vectors(&slots, len, target) {
+                    if let Some(equal_range) =
+                        W::equal_range_in_vectors(Slots::of_slice(&slots), len, target)
+                    {
                         assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
@@ -533,7 +546,8 @@ mod tests {
 
         for capacity in 0..=64 {
             let slots = std::vec![u64::MAX; capacity];
-            let equal_range = u64::equal_range_in_vectors(&slots, capacity, u64::MAX);
+            let equal_range =
+                u64::equal_range_in_vectors(Slots::of_slice(&slots), capacity, u64::MAX);
             assert_eq!(equal_range.is_some(), (28..=31).contains(&capacity));
             if let Some(equal_range) = equal_range {
                 assert_eq!(equal_range, 0..capacity);
@@ -561,7 +575,7 @@ mod tests {
                         let start = slots[..len].partition_point(|&slot| slot < target);
                         let end = slots[..len].partition_point(|&slot| slot <= target);
                         assert_eq!(
-                            u16::equal_range_in_vectors(&slots, len, target),
+                            u16::equal_range_in_vectors(Slots::of_slice(&slots), len, target),
                             Some(start..end),
                             "capacity {capacity}, live {len}, value {value}, target {target}"
                         );
@@ -599,7 +613,7 @@ mod tests {
                         let start = slots[..len].partition_point(|&slot| slot < target);
                         let end = slots[..len].partition_point(|&slot| slot <= target);
                         assert_eq!(
-                            u32::equal_range_in_vectors(&slots, len, target),
+                            u32::equal_range_in_vectors(Slots::of_slice(&slots), len, target),
                             Some(start..end),
                             "capacity {capacity}, live {len}, uniform {uniform:?}, target {target}"
                         );
@@ -611,7 +625,9 @@ mod tests {
                         *slot = values[(index * 5 + 2) % values.len()];
                     }
                     for target in values {
-                        let equal_range = u32::equal_range_in_vectors(&slots, len, target).unwrap();
+                        let equal_range =
+                            u32::equal_range_in_vectors(Slots::of_slice(&slots), len, target)
+                                .unwrap();
                         assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                     }
                 }
@@ -620,7 +636,10 @@ mod tests {
         // Another packing stage or mask word is a separate policy.
         for capacity in [33, 36, 64] {
             let slots = std::vec![0; capacity];
-            assert_eq!(u32::equal_range_in_vectors(&slots, capacity, 0), None);
+            assert_eq!(
+                u32::equal_range_in_vectors(Slots::of_slice(&slots), capacity, 0),
+                None
+            );
         }
     }
 
@@ -651,7 +670,7 @@ mod tests {
                         slots[..len].rotate_left(len / 2);
                     }
                     for target in values {
-                        let result = W::equality_mask_in_vectors(&slots, target);
+                        let result = W::equality_mask_in_vectors(Slots::of_slice(&slots), target);
                         assert_eq!(result.is_some(), supported, "capacity {capacity}");
                         if let Some(mask) = result {
                             let equal_range = mask.equal_range(len).unwrap_or(0..0);

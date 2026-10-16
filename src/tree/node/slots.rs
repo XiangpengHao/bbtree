@@ -39,7 +39,7 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 /// Invariant: `stride` is at least `size_of::<T>()` and a multiple of
 /// `align_of::<T>()`, and the `capacity` slots are aligned for `T` and lie
 /// inside one allocation.
-pub(super) struct Slots<T> {
+pub(in crate::tree) struct Slots<T> {
     anchor: NonNull<T>,
     capacity: usize,
     /// Bytes from one slot to the next.
@@ -85,6 +85,44 @@ impl<T> Slots<T> {
     /// Whether the slots sit side by side, with nothing between them.
     fn is_contiguous(self) -> bool {
         self.stride == size_of::<T>()
+    }
+
+    /// How many slots there are.
+    #[inline(always)]
+    pub(super) fn capacity(self) -> usize {
+        self.capacity
+    }
+
+    /// Slot 0 of slots side by side: where a vector load over them starts.
+    #[inline(always)]
+    pub(super) fn as_ptr(self) -> *const T {
+        debug_assert!(self.is_contiguous());
+        self.anchor.as_ptr()
+    }
+
+    /// A copy of slot `index`'s value, loaded through the slots' pointer,
+    /// which forms no reference: in a latched tree, a reader may load the
+    /// slots of an internal node a writer is changing, and its version check
+    /// throws away what it loaded then (`optimistic.rs`).
+    ///
+    /// # Safety
+    ///
+    /// `index < capacity`, and slot `index` is initialized.
+    #[inline(always)]
+    pub(super) unsafe fn load(self, index: usize) -> T
+    where
+        T: Copy,
+    {
+        // SAFETY: forwarded.
+        unsafe { self.slot(index).read() }
+    }
+
+    /// The slots of `slice`, for tests of code that reads slots.
+    #[cfg(test)]
+    pub(super) fn of_slice(slice: &[T]) -> Self {
+        // SAFETY: a slice's elements are aligned, side by side, in one
+        // allocation, which outlives the borrow the caller keeps.
+        unsafe { Self::new(NonNull::from(slice).cast(), slice.len()) }
     }
 
     /// A pointer to slot `index`.

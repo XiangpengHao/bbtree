@@ -247,6 +247,7 @@ impl CellRun {
         match self.request.cell().map() {
             MapKind::BBTree => K::measure_on_bbtree(self, prepared),
             MapKind::BBTreeInline => K::measure_with_inline_keys(self, prepared),
+            MapKind::BCTree => K::measure_on_bctree(self, prepared),
             MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
             MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
             MapKind::StdHash => self.measure::<HashMap<K, V>, K, V>(prepared),

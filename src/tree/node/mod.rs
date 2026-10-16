@@ -58,9 +58,14 @@
 //! # Safety argument
 //!
 //! This module, `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`,
-//! `root_page.rs`, `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`
-//! and `type_identity.rs` hold all of `tree/node/`'s `unsafe` code; the
-//! other node modules are `#![forbid(unsafe_code)]`.
+//! `root_page.rs`, `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`,
+//! `type_identity.rs`, `latch.rs` and `optimistic.rs` hold all of
+//! `tree/node/`'s `unsafe` code; the other node modules are
+//! `#![forbid(unsafe_code)]`. In a latched tree (`latch.rs`), the handles'
+//! access contract holds through latches: a leaf is read under its latch,
+//! and an internal node that threads share is changed only under its
+//! latch, and read without one only through `optimistic.rs`, whose reads
+//! are checked by the node's version (optimistic lock coupling).
 //! Given the handles' contracts, each `// SAFETY:` comment relies on these
 //! invariants:
 //!
@@ -111,10 +116,12 @@
 pub(in crate::tree) mod inline_key_search;
 pub(crate) mod inline_keys;
 pub(in crate::tree) mod internal;
+pub(crate) mod latch;
 pub(super) mod layout;
 pub(crate) mod leaf;
 mod length_tags;
 pub(super) mod node_plan;
+pub(in crate::tree) mod optimistic;
 pub(crate) mod page;
 pub(in crate::tree) mod root_page;
 pub(in crate::tree) mod siblings;

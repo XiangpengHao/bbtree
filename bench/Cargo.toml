@@ -10,6 +10,8 @@ default-run = "bbtree-bench"
 bbtree = { path = ".." }
 bytes = "1"
 hashbrown = "0.17"
+# Pins `bbtree-scaling`'s workers to CPUs (`sched_setaffinity`).
+libc = "0.2"
 mimalloc = "0.1"
 # Runs a cell's untimed setup on all cores; timed regions stay on one thread.
 rayon = "1"
@@ -38,6 +40,11 @@ path = "src/bin/bbtree-bench.rs"
 [[bin]]
 name = "bbtree-bench-memory"
 path = "src/bin/bbtree-bench-memory.rs"
+
+# Throughput as threads are added, on maps threads share (`scaling.rs`).
+[[bin]]
+name = "bbtree-scaling"
+path = "src/bin/bbtree-scaling.rs"
 
 # Counts separators and the ties lookups meet in internal nodes, untimed
 # (`doc/11-separator-key.md`).

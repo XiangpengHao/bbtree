@@ -322,6 +322,11 @@ pub(crate) mod sealed {
 
     pub trait Sealed<K> {
         const SOURCE: InlineKeySource<K>;
+
+        /// Whether the nodes keep a latch word in their header, for a tree
+        /// that threads share (`tree/node/latch.rs`): only the strategy a
+        /// `BCTreeMap` wraps its own in, never a public one.
+        const LATCHED: bool = false;
     }
 
     impl<K> Sealed<K> for Auto {

@@ -72,6 +72,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         rightmost_leaf: None,
     };
 
+    /// The tree on `root_page`, which it owns from now on, with every node
+    /// under it: a latched tree's, once no other thread reaches it, to take
+    /// apart (`tree/latched`).
+    pub(in crate::tree) fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
+        Self {
+            root_page: Some(root_page),
+            rightmost_leaf: None,
+        }
+    }
+
     /// The tree's root page, to read the tree from; `None` without a tree.
     #[inline(always)]
     pub(crate) fn root_page(&self) -> Option<RootPage<K, V, S>> {

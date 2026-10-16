@@ -5,10 +5,11 @@
 //! search, as the build target and the width call for.
 
 use core::hint;
+use core::marker::PhantomData;
 use core::ops::Range;
 
 use super::inline_keys::InlineSlot;
-use super::slots::InlineKeySlots;
+use super::slots::{InlineKeySlots, Slots};
 use super::vector_count::U64EqualityMask;
 use crate::inline_key::InlineWord;
 
@@ -47,27 +48,24 @@ macro_rules! with_inline_keys_of_width {
 impl<'a> NodeInlineKeys<'a> {
     /// The first `capacity` of `slots`, of which the first `len` are live.
     ///
+    /// The view reads the slots through their pointer, forming no
+    /// reference to them, so a latched tree's optimistic reader may read an
+    /// internal node a writer is changing (`optimistic.rs`): it gets some
+    /// answer in bounds, which its version check then keeps or throws away.
+    ///
     /// # Safety
     ///
-    /// `capacity` is the slots' own, all of them are initialized, and none
-    /// changes for `'a`.
+    /// `capacity` is the slots' own, `len <= capacity`, and all of them are
+    /// initialized and stay allocated for `'a`.
     #[inline(always)]
     pub(super) unsafe fn new(slots: InlineKeySlots, capacity: usize, len: usize) -> Self {
+        debug_assert_eq!(capacity, slots.capacity());
         // SAFETY: forwarded, at the slots' width.
         unsafe {
             match slots {
-                InlineKeySlots::Two(slots) => Self::Two(InlineKeysOfWidth::new(
-                    slots.slice_ptr(capacity).as_ref(),
-                    len,
-                )),
-                InlineKeySlots::Four(slots) => Self::Four(InlineKeysOfWidth::new(
-                    slots.slice_ptr(capacity).as_ref(),
-                    len,
-                )),
-                InlineKeySlots::Eight(slots) => Self::Eight(InlineKeysOfWidth::new(
-                    slots.slice_ptr(capacity).as_ref(),
-                    len,
-                )),
+                InlineKeySlots::Two(slots) => Self::Two(InlineKeysOfWidth::new(slots, len)),
+                InlineKeySlots::Four(slots) => Self::Four(InlineKeysOfWidth::new(slots, len)),
+                InlineKeySlots::Eight(slots) => Self::Eight(InlineKeysOfWidth::new(slots, len)),
             }
         }
     }
@@ -80,7 +78,7 @@ impl<'a> NodeInlineKeys<'a> {
     /// If `index >= len`.
     #[inline(always)]
     pub(in crate::tree) fn inline_key(self, index: usize) -> InlineWord {
-        with_inline_keys_of_width!(self, |of_width| of_width.live()[index].inline_key())
+        with_inline_keys_of_width!(self, |of_width| of_width.load(index).inline_key())
     }
 
     /// The positions of the inline keys equal to the bytes the node keeps
@@ -109,28 +107,49 @@ impl<'a> NodeInlineKeys<'a> {
 }
 
 /// A node's inline keys at one width, as [`NodeInlineKeys`] reads them:
-/// `slots` up to the capacity, of which the first `len` are live.
+/// `slots` up to the capacity, of which the first `len` are live, read
+/// through their pointer ([`Slots::load`]).
+///
+/// Invariant: `len <= slots.capacity()`, and every slot is initialized and
+/// stays allocated for `'a`.
 #[derive(Clone, Copy)]
 pub(in crate::tree) struct InlineKeysOfWidth<'a, W> {
-    slots: &'a [W],
+    slots: Slots<W>,
     len: usize,
+    _node: PhantomData<&'a W>,
 }
 
-impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
-    fn new(slots: &'a [W], len: usize) -> Self {
-        debug_assert!(len <= slots.len());
-        Self { slots, len }
+impl<W: InlineSlot> InlineKeysOfWidth<'_, W> {
+    /// # Safety
+    ///
+    /// As for the type invariant.
+    unsafe fn new(slots: Slots<W>, len: usize) -> Self {
+        debug_assert!(len <= slots.capacity());
+        Self {
+            slots,
+            len,
+            _node: PhantomData,
+        }
     }
 
-    /// The live slots.
-    fn live(self) -> &'a [W] {
-        &self.slots[..self.len]
+    /// Inline key `index`.
+    ///
+    /// # Panics
+    ///
+    /// If `index >= len`.
+    #[inline(always)]
+    fn load(self, index: usize) -> W {
+        assert!(index < self.len, "inline key index out of bounds");
+        // SAFETY: `index < len <= capacity`, initialized (type invariant).
+        unsafe { self.slots.load(index) }
     }
 
     #[cfg(any(test, fuzzing))]
     fn pads_with_greatest(self) -> bool {
         let greatest = W::of_inline_key(InlineWord::MAX);
-        self.slots[self.len..].iter().all(|&slot| slot == greatest)
+        // SAFETY: every slot up to the capacity is initialized (type
+        // invariant).
+        (self.len..self.slots.capacity()).all(|index| unsafe { self.slots.load(index) } == greatest)
     }
 
     /// The positions of the inline keys equal to `target`: exactly those
@@ -157,7 +176,7 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
             not(target_feature = "avx512bw"),
             not(target_feature = "popcnt")
         )) && size_of::<W>() == 4
-            && self.slots.len() > 32
+            && self.slots.capacity() > 32
         {
             return self.equal_range_by_search(target);
         }
@@ -189,8 +208,15 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// cuts.
     #[inline(always)]
     fn equal_range_by_count(self, target: W) -> Range<usize> {
-        let below = self.slots.iter().filter(|&&slot| slot < target).count();
-        let equal = self.slots.iter().filter(|&&slot| slot == target).count();
+        // SAFETY: every slot up to the capacity is initialized (type
+        // invariant).
+        let slot = |index| unsafe { self.slots.load(index) };
+        let below = (0..self.slots.capacity())
+            .filter(|&index| slot(index) < target)
+            .count();
+        let equal = (0..self.slots.capacity())
+            .filter(|&index| slot(index) == target)
+            .count();
         let below = below.min(self.len);
         below..(below + equal).min(self.len)
     }
@@ -202,23 +228,23 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
     /// slots: the search and the scan stay within the live slots.
     #[inline(always)]
     fn equal_range_by_search(self, target: W) -> Range<usize> {
-        let live = self.live();
-        let start = Self::count_below(live, target);
+        let start = self.count_below(target);
         let mut end = start;
-        while live.get(end) == Some(&target) {
+        // SAFETY: `end < len <= capacity`, initialized (type invariant).
+        while end < self.len && unsafe { self.slots.load(end) } == target {
             end += 1;
         }
         start..end
     }
 
-    /// How many of `inline_keys`, sorted, are below `target`, by a
+    /// How many of the live inline keys, sorted, are below `target`, by a
     /// branchless binary search, as in `KeyList::branchless_search_index`;
     /// in `0..=len` for any inline keys, by construction: the loop keeps
     /// `base + size <= len`, and probes only `mid = base + size / 2 < base +
     /// size`.
     #[inline(always)]
-    fn count_below(inline_keys: &[W], target: W) -> usize {
-        let mut size = inline_keys.len();
+    fn count_below(self, target: W) -> usize {
+        let mut size = self.len;
         if size == 0 {
             return 0;
         }
@@ -226,14 +252,14 @@ impl<'a, W: InlineSlot> InlineKeysOfWidth<'a, W> {
         while size > 1 {
             let half = size / 2;
             let mid = base + half;
-            // SAFETY: `mid < base + size <= inline_keys.len()`.
-            let probe = unsafe { *inline_keys.get_unchecked(mid) };
+            // SAFETY: `mid < base + size <= len <= capacity`, initialized
+            // (type invariant).
+            let probe = unsafe { self.slots.load(mid) };
             base = hint::select_unpredictable(probe < target, mid, base);
             size -= half;
         }
-        // SAFETY: `base < base + size <= inline_keys.len()`, with `size == 1`
-        // here.
-        let last = unsafe { *inline_keys.get_unchecked(base) };
+        // SAFETY: `base < base + size <= len`, with `size == 1` here.
+        let last = unsafe { self.slots.load(base) };
         base + usize::from(last < target)
     }
 }
@@ -245,7 +271,7 @@ mod tests {
     use core::ptr::NonNull;
     use std::vec;
 
-    use super::{InlineKeySlots, InlineKeysOfWidth, InlineSlot, NodeInlineKeys};
+    use super::{InlineKeySlots, InlineKeysOfWidth, InlineSlot, NodeInlineKeys, Slots};
     use crate::inline_key::{InlineWidth, InlineWord};
     use crate::tree::test_support::TestRng;
 
@@ -283,7 +309,8 @@ mod tests {
             inline_keys.sort_unstable();
             let stale = core::iter::repeat_n(greatest(), rng.below(8));
             let slots: Vec<W> = inline_keys.iter().copied().chain(stale).collect();
-            let node = InlineKeysOfWidth::new(&slots, len);
+            // SAFETY: the slots are initialized, and outlive `node`.
+            let node = unsafe { InlineKeysOfWidth::new(Slots::of_slice(&slots), len) };
             let unpadded = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
             for target in (0..18).map(W::from).chain([greatest()]) {
                 let start = inline_keys.partition_point(|&probe| probe < target);
@@ -292,7 +319,9 @@ mod tests {
                 assert_eq!(node.equal_range_by_count(target), start..end);
                 assert_eq!(node.equal_range_by_search(target), start..end);
                 for slots in [&slots, &unpadded] {
-                    if let Some(equal_range) = W::equal_range_in_vectors(slots, len, target) {
+                    if let Some(equal_range) =
+                        W::equal_range_in_vectors(Slots::of_slice(slots), len, target)
+                    {
                         assert_eq!(equal_range, start..end);
                     }
                 }
@@ -315,17 +344,19 @@ mod tests {
             let len = rng.below(40);
             let inline_keys: Vec<W> = (0..len).map(|_| W::from(rng.below(4) as u8)).collect();
             let slots = slots_with_stale_tail(&rng, &inline_keys, rng.below(8));
-            let node = InlineKeysOfWidth::new(&slots, len);
+            // SAFETY: the slots are initialized, and outlive `node`.
+            let node = unsafe { InlineKeysOfWidth::new(Slots::of_slice(&slots), len) };
             for target in (0..5).map(W::from) {
                 let equal_ranges = [
                     node.equal_range(target),
                     node.equal_range_by_count(target),
                     node.equal_range_by_search(target),
                 ];
-                for equal_range in equal_ranges
-                    .into_iter()
-                    .chain(W::equal_range_in_vectors(&slots, len, target))
-                {
+                for equal_range in equal_ranges.into_iter().chain(W::equal_range_in_vectors(
+                    Slots::of_slice(&slots),
+                    len,
+                    target,
+                )) {
                     assert!(equal_range.start <= equal_range.end && equal_range.end <= len);
                 }
             }

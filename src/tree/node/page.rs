@@ -6,15 +6,19 @@ use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::offset_of;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use super::internal::Internal;
+use super::latch::NodeLatch;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
 use super::leaf::Leaf;
 use super::node_plan::NodePlan;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
 use crate::allocator::Allocator;
+use crate::inline_key::sealed::Sealed;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What pages are allocated for: a leaf, an internal node ([`NodeKind`]s), or
@@ -206,6 +210,15 @@ impl InlineKeyNodeHeader {
     pub(super) const MAX_PREFIX_LEN: usize = u16::MAX as usize;
 }
 
+/// The header of a node of a latched tree, one that threads share
+/// (`latch.rs`): the inline-key node header, then the node's latch word,
+/// which only atomics access. Its inline keys start after it, 16 bytes in.
+#[repr(C)]
+pub(in crate::tree) struct LatchedNodeHeader {
+    header: InlineKeyNodeHeader,
+    latch: NodeLatch,
+}
+
 /// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
 /// strategy `S`, that tells the node's kind in its lowest bit, which every
 /// page leaves 0, being aligned to 512 B at least (D15, D49). Internal nodes
@@ -246,6 +259,28 @@ impl<K, V, S> NodePtr<K, V, S> {
         debug_assert_eq!(page.addr().get() & Self::LEAF_TAG, 0);
         Self {
             tagged: page.map_addr(|addr| addr | (usize::from(Kind::IS_LEAF) * Self::LEAF_TAG)),
+            _marker: PhantomData,
+            _strategy: PhantomData,
+        }
+    }
+
+    /// The pointer as it is stored, tag and all: for a word that threads
+    /// share, which holds one (`optimistic.rs`, `tree/latched`).
+    #[inline(always)]
+    pub(in crate::tree) fn tagged(self) -> NonNull<u8> {
+        self.tagged
+    }
+
+    /// The pointer [`Self::tagged`] gave.
+    ///
+    /// # Safety
+    ///
+    /// `tagged` is what [`Self::tagged`] returned for a node of this map
+    /// type.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn from_tagged(tagged: NonNull<u8>) -> Self {
+        Self {
+            tagged,
             _marker: PhantomData,
             _strategy: PhantomData,
         }
@@ -348,6 +383,58 @@ impl<K, V, S> NodePtr<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
+    /// Whether the map's nodes keep a latch word, in a tree that threads
+    /// share ([`LatchedNodeHeader`]).
+    #[inline(always)]
+    pub(in crate::tree) fn is_latched() -> bool {
+        <S as Sealed<K>>::LATCHED
+    }
+
+    /// The node's latch word, in a latched tree, for as long as the caller
+    /// picks: the node's page is never freed while threads share the tree
+    /// (`latch.rs`).
+    ///
+    /// # Safety
+    ///
+    /// The tree is latched, and the page allocated.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn latch<'a>(self) -> &'a NodeLatch {
+        debug_assert!(Self::is_latched());
+        // SAFETY: a latched node's header is a `LatchedNodeHeader`, aligned,
+        // in the allocated page (caller), whose latch word every thread
+        // accesses as an atomic only, through `NodeLatch`.
+        unsafe {
+            self.page()
+                .byte_add(offset_of!(LatchedNodeHeader, latch))
+                .cast::<NodeLatch>()
+                .as_ref()
+        }
+    }
+
+    /// The `len` and `prefix_len` header fields of a latched tree's internal
+    /// node, while a writer may be changing them, for an optimistic read
+    /// (`optimistic.rs`): each read once, as a relaxed atomic, so that the
+    /// compiler loads it once, and what the read checks is what it uses.
+    ///
+    /// # Safety
+    ///
+    /// The tree is latched, and the page allocated, its header initialized.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn load_racing_header(self) -> (usize, usize) {
+        debug_assert!(Self::is_latched());
+        // SAFETY: both fields are aligned `u16`s of the allocated,
+        // initialized header (caller), read through the raw pointer.
+        unsafe {
+            let header = self.page().cast::<InlineKeyNodeHeader>().as_ptr();
+            let len = AtomicU16::from_ptr(&raw mut (*header).header.len);
+            let prefix_len = AtomicU16::from_ptr(&raw mut (*header).prefix_len);
+            (
+                usize::from(len.load(Ordering::Relaxed)),
+                usize::from(prefix_len.load(Ordering::Relaxed)),
+            )
+        }
+    }
+
     /// The width of the inline keys nodes of `Kind` hold, or `None` if they
     /// hold none (D18).
     #[inline]
@@ -371,11 +458,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
         let plan = NodePlan::of::<S, Leaf<K, V, S>>();
-        NodeLayout::<K, V>::leaf(plan.inline_width(), plan.has_length_tags())
+        NodeLayout::<K, V>::leaf(
+            plan.inline_width(),
+            plan.has_length_tags(),
+            Self::is_latched(),
+        )
     }
 
     pub(in crate::tree) fn internal_layout() -> InternalLayout {
-        NodeLayout::<K, V>::internal(Self::inline_width::<Internal<K, V, S>>())
+        NodeLayout::<K, V>::internal(
+            Self::inline_width::<Internal<K, V, S>>(),
+            Self::is_latched(),
+        )
     }
 
     /// Where the keys and inline keys of a node of kind `Kind` sit.

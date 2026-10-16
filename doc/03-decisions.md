@@ -16,7 +16,8 @@ optional features.
 
 **D3. `no_std`.**
 
-**D4. Single-threaded**, like std.
+**D4. Single-threaded**, like std. The map threads share is a separate
+type, `BCTreeMap` (D54).
 
 **D5. Differential fuzzing against std's btree.** Formal verification with
 Verus is optional but welcome.
@@ -1122,6 +1123,30 @@ Design in 05-fence-key.md, "The shared prefix".
   ceiling. Async keeps fewer misses in flight at the leaves. Single-key paths keep their compilation through
   a call-site marker and `inline(always)` on four insert helpers; doc 12
   lists what each saved.
+
+**D54. BCTree: the shared tree is bbtree's nodes with a latch word, under a crate-private strategy, synchronized by optimistic lock coupling.** (2026-10-15)
+Design, protocols and measurements in 09-concurrency.md.
+
+- **What:** `BCTreeMap` keeps its tree with strategy `Latched<S>`, which
+  gives `S`'s inline keys and a 16-byte header with a latch word
+  (`node/latch.rs`): leaves, internal nodes, searches, splits and prefix
+  fits are bbtree's. Internal nodes are read optimistically, in place,
+  through raw pointers, and changed in place by writers holding them (OLC,
+  `node/optimistic.rs`); leaves are latched. Keys need inline keys (D49).
+- **Why the strategy:** every node type already carries it, so no type
+  gains a parameter, and the layouts pick their constants from it as they do
+  from the plan.
+- **Why OLC, no copies:** racing reads go through raw pointers and form no
+  reference, so only the version check decides what a read was worth. A
+  first version read through atomic copies and wrote through private copies
+  of each node: about 30 instructions more per internal level for lookups.
+- **Zero cost to bbtree:** what only BCTree needs lives in BCTree's own
+  functions and its allocator wrapper. Atomic header accessors and a
+  zeroing branch in `FreshPage::allocate`, tried first, changed bbtree's
+  insert paths (an `inline(always)` on `len` moved a `u32` split by 195
+  instructions).
+- **Phase 1** only grows: no removal, so no node is freed and head keys,
+  which ties read without a latch, never change.
 
 ## Navigation
 

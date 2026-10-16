@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use bbtree::{BBTreeMap, InlineKey, WithInlineKey};
+use bbtree::{BBTreeMap, BCTreeMap, InlineKey, InlineKeyStrategy, WithInlineKey};
 
 use crate::command_line::Named;
 use crate::keys::{BenchKey, KeyKind};
@@ -20,6 +20,10 @@ pub(crate) enum MapKind {
     /// through their own `InlineKey` impl. Runs only when `--map` names it,
     /// and only on the keys that `bbtree` gives none, the integers.
     BBTreeInline,
+    /// `BCTreeMap`, the map threads share, with the strategy `bbtree` uses,
+    /// on one thread. Runs only when `--map` names it, on keys with inline
+    /// keys.
+    BCTree,
     StdBTree,
     /// hashbrown's `HashMap` with its default hasher (foldhash).
     Hashbrown,
@@ -31,6 +35,7 @@ impl Named for MapKind {
     const ALL: &'static [Self] = &[
         Self::BBTree,
         Self::BBTreeInline,
+        Self::BCTree,
         Self::StdBTree,
         Self::Hashbrown,
         Self::StdHash,
@@ -40,6 +45,7 @@ impl Named for MapKind {
         match self {
             Self::BBTree => "bbtree",
             Self::BBTreeInline => "bbtree-inline",
+            Self::BCTree => "bctree",
             Self::StdBTree => "std-btree",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std-hash",
@@ -53,6 +59,7 @@ impl MapKind {
         match self {
             Self::BBTree => "bbtree",
             Self::BBTreeInline => "bbtree, inline keys",
+            Self::BCTree => "bctree",
             Self::StdBTree => "std BTreeMap",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std HashMap",
@@ -64,17 +71,19 @@ impl MapKind {
     }
 
     /// Whether the map runs on keys of `key`: `bbtree-inline` only on those
-    /// whose type has an `InlineKey` impl that `bbtree` doesn't use.
+    /// whose type has an `InlineKey` impl that `bbtree` doesn't use, and
+    /// `bctree` on those with inline keys.
     pub(crate) fn supports_key(self, key: KeyKind) -> bool {
         match self {
             Self::BBTreeInline => key.is_inline_keyed_integer(),
+            Self::BCTree => key != KeyKind::U32,
             Self::BBTree | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
         }
     }
 
     /// Whether the map runs only when `--map` names it.
     pub(crate) fn is_opt_in(self) -> bool {
-        matches!(self, Self::BBTreeInline)
+        matches!(self, Self::BBTreeInline | Self::BCTree)
     }
 
     /// The adapter's list, read at `u64 → u64`: the lists don't depend on
@@ -86,6 +95,7 @@ impl MapKind {
             Self::BBTreeInline => {
                 <BBTreeMap<u64, u64, WithInlineKey> as MapUnderTest<u64, u64>>::UNSUPPORTED
             }
+            Self::BCTree => <CountedBCTree<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
             Self::StdBTree => <BTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
             Self::Hashbrown => {
                 <hashbrown::HashMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED
@@ -101,7 +111,9 @@ impl MapKind {
 /// operations that some maps lack: an adapter overrides the ones its map has
 /// and lists the others in `UNSUPPORTED`, which keeps them from running. So
 /// enabling an operation is one change in one adapter: implement its method
-/// and take it off the list.
+/// and take it off the list. `get`, which hands out a reference, is one: a
+/// map that hands out none says so ([`MapUnderTest::LENDS_REFERENCES`]) and
+/// looks up through [`MapUnderTest::lookup_fingerprint`].
 pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
     const UNSUPPORTED: &'static [Operation];
 
@@ -119,7 +131,19 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
 
     fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>);
 
-    fn get(&self, key: &K) -> Option<&V>;
+    /// Whether the map hands out references to its values ([`Self::get`]);
+    /// if not, lookups read through [`Self::lookup_fingerprint`].
+    const LENDS_REFERENCES: bool = true;
+
+    fn get(&self, _key: &K) -> Option<&V> {
+        unreachable!("a map that lends no references looks up through lookup_fingerprint")
+    }
+
+    /// The fingerprint of `key`'s value, if the map holds `key`, for a map
+    /// that lends no references.
+    fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
+        self.get(key).map(BenchValue::fingerprint)
+    }
 
     /// A batch on maps that have it, separate lookups on the others.
     fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
@@ -412,5 +436,65 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for HashMap<K, V> {
 
     fn from_sorted_entries(entries: Vec<(K, V)>) -> Self {
         entries.into_iter().collect()
+    }
+}
+
+/// `BCTreeMap` with strategy `S`, and the count of entries it has taken,
+/// which the map itself doesn't keep: a shared counter would cost every
+/// insert an atomic. Lookups read through a closure, as the map hands out no
+/// references.
+pub(crate) struct CountedBCTree<K, V, S: InlineKeyStrategy<K> = bbtree::Auto> {
+    map: BCTreeMap<K, V, S>,
+    entries: usize,
+}
+
+impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest<K, V>
+    for CountedBCTree<K, V, S>
+{
+    /// Phase 1 of `BCTreeMap`: inserts and lookups only.
+    const UNSUPPORTED: &'static [Operation] = &[
+        Operation::BulkBuild,
+        Operation::Iterate,
+        Operation::Range64,
+        Operation::RandomRemove,
+        Operation::EntryUpsert,
+        Operation::PopFirst,
+        Operation::BatchGetHit32,
+        Operation::BatchGetMiss32,
+        Operation::BatchGetHit64,
+        Operation::BatchGetMiss64,
+        Operation::BatchRandomInsert,
+        Operation::BatchSequentialInsert,
+        Operation::ExtendRandom,
+        Operation::ExtendSequential,
+    ];
+
+    const LENDS_REFERENCES: bool = false;
+
+    fn new() -> Self {
+        Self {
+            map: BCTreeMap::with_strategy(S::default()),
+            entries: 0,
+        }
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entries
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        if self.map.insert(key, value).is_none() {
+            self.entries += 1;
+        }
+    }
+
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        for (key, value) in entries {
+            self.insert(key, value);
+        }
+    }
+
+    fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
+        self.map.read(key, |_, value| value.fingerprint())
     }
 }
