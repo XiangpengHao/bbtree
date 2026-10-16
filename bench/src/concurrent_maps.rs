@@ -1,15 +1,22 @@
-//! The maps threads share that `bbtree-scaling` measures (`scaling.rs`), each
-//! as its crate ships it: `BCTreeMap`; `BBTreeMap` behind a `RwLock`, the way
-//! to share it without one; other crates' concurrent ordered maps:
-//! crossbeam's `SkipMap`, scc's `TreeIndex`, surrealdb's artmap and
+//! The maps that `bbtree-scaling` measures (`scaling.rs`), each as its crate
+//! ships it. Maps threads share: `BCTreeMap`; `BBTreeMap` and std's
+//! `BTreeMap` behind a `RwLock`, the way to share them without one; other
+//! crates' concurrent ordered maps: crossbeam's `SkipMap`, scc's
+//! `TreeIndex`, surrealdb's artmap (with epochs, and in an arena) and
 //! concurrent-map; and DashMap, a hash map, which keeps no order and so
-//! scans nothing. Values are `u64`; keys any [`ScalingKey`].
+//! scans nothing. Maps one thread owns, measured at one thread: `BBTreeMap`
+//! and std's `BTreeMap` as they are used without threads (`Owned`). Values
+//! are `u64`; keys any [`ScalingKey`].
 
+use std::cell::{Cell, UnsafeCell};
+use std::collections::BTreeMap;
 use std::hash::Hash;
+use std::marker::PhantomData;
 use std::ops::{Bound, ControlFlow};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use artmap::arena::{ArenaArtMap, MAX_ARENA_SIZE};
 use artmap::{ArtMap, AsBytes};
 use bbtree::{BBTreeMap, BCTreeMap};
 use concurrent_map::{ConcurrentMap, Minimum};
@@ -17,7 +24,7 @@ use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
 use scc::{Guard, TreeIndex};
 
-/// A key the maps are measured with: `u64`, `u128` or `String`.
+/// A key the maps are measured with: `u64`, `u128`, `[u8; 16]` or `String`.
 pub(crate) trait ScalingKey: Ord + Hash + Clone + Minimum + Send + Sync + 'static {
     /// The key as artmap keeps it: bytes in the key's order, big-endian
     /// for an integer.
@@ -27,6 +34,10 @@ pub(crate) trait ScalingKey: Ord + Hash + Clone + Minimum + Send + Sync + 'stati
 
     /// Runs `f` on the bytes of [`Self::into_art_key`], without making it.
     fn with_art_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R;
+
+    /// Runs `f` on [`Self::into_art_key`]'s key, without allocating: the
+    /// key itself, or its bytes on the stack.
+    fn with_art_key<R>(&self, f: impl FnOnce(&Self::ArtKey) -> R) -> R;
 }
 
 impl ScalingKey for u64 {
@@ -37,6 +48,10 @@ impl ScalingKey for u64 {
     }
 
     fn with_art_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.to_be_bytes())
+    }
+
+    fn with_art_key<R>(&self, f: impl FnOnce(&Self::ArtKey) -> R) -> R {
         f(&self.to_be_bytes())
     }
 }
@@ -51,6 +66,26 @@ impl ScalingKey for u128 {
     fn with_art_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         f(&self.to_be_bytes())
     }
+
+    fn with_art_key<R>(&self, f: impl FnOnce(&Self::ArtKey) -> R) -> R {
+        f(&self.to_be_bytes())
+    }
+}
+
+impl ScalingKey for [u8; 16] {
+    type ArtKey = [u8; 16];
+
+    fn into_art_key(self) -> [u8; 16] {
+        self
+    }
+
+    fn with_art_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(self)
+    }
+
+    fn with_art_key<R>(&self, f: impl FnOnce(&Self::ArtKey) -> R) -> R {
+        f(self)
+    }
 }
 
 impl ScalingKey for String {
@@ -63,16 +98,24 @@ impl ScalingKey for String {
     fn with_art_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
         f(self.as_bytes())
     }
+
+    fn with_art_key<R>(&self, f: impl FnOnce(&Self::ArtKey) -> R) -> R {
+        f(self)
+    }
 }
 
 /// A map from `K` to `u64` that threads share, each worker through a handle
 /// of its own: a reference for most, a clone for a map whose reclamation
-/// keeps state per handle.
+/// keeps state per handle; or that one worker owns ([`Owned`]).
 pub(crate) trait SharedMap<K>: Sized {
     const NAME: &'static str;
 
     /// Whether it keeps its keys in order, to scan a range of them.
     const ORDERED: bool = true;
+
+    /// Whether threads share it. A map one thread owns runs at one thread
+    /// only, and that thread builds it.
+    const SHARED: bool = true;
 
     /// What one worker reads and writes the map through.
     type Handle<'m>: MapHandle<K> + Send
@@ -444,5 +487,248 @@ impl<K: ScalingKey> MapHandle<K> for DashMap<K, u64> {
 
     fn scan(&self, _start: &K, _count: usize) -> (usize, u64) {
         unreachable!("a hash map keeps no order to scan")
+    }
+}
+
+// std's B-tree behind a reader-writer lock, as `BBTreeMap` above: the way to
+// share a map that has no concurrent version.
+shared_by_reference!(
+    RwLock<BTreeMap<K, u64>>,
+    "std-btree-rwlock",
+    RwLock::new(BTreeMap::new())
+);
+
+impl<K: ScalingKey> MapHandle<K> for RwLock<BTreeMap<K, u64>> {
+    fn insert(&self, key: K, value: u64) {
+        self.write().expect("no thread panics").insert(key, value);
+    }
+
+    fn get(&self, key: &K) -> Option<u64> {
+        self.read().expect("no thread panics").get(key).copied()
+    }
+
+    fn bump(&self, key: &K) {
+        if let Some(value) = self.write().expect("no thread panics").get_mut(key) {
+            *value += 1;
+        }
+    }
+
+    fn remove(&self, key: &K) -> bool {
+        self.write()
+            .expect("no thread panics")
+            .remove(key)
+            .is_some()
+    }
+
+    fn scan(&self, start: &K, count: usize) -> (usize, u64) {
+        let map = self.read().expect("no thread panics");
+        sum_of_first(map.range(start..).map(|(_, &value)| value), count)
+    }
+}
+
+// artmap's arena map: the same adaptive radix tree in one allocation, with
+// 32-bit offsets for links and no reclamation, its fastest form. Nothing is
+// freed while the map lives, so each map reserves the most an arena holds,
+// 4 GiB, which the system pages in as the map grows: its memory isn't
+// measured. Values are atomics, as for the skiplist.
+
+/// artmap's arena map, keyed by the bytes of a [`ScalingKey`].
+pub(crate) struct ArenaArtOf<K: ScalingKey>(ArenaArtMap<K::ArtKey, AtomicU64>);
+
+impl<K: ScalingKey> SharedMap<K> for ArenaArtOf<K> {
+    const NAME: &'static str = "artmap-arena";
+
+    type Handle<'m> = &'m Self;
+
+    fn new() -> Self {
+        Self(ArenaArtMap::with_capacity(MAX_ARENA_SIZE))
+    }
+
+    fn handle(&self) -> &Self {
+        self
+    }
+}
+
+impl<K: ScalingKey> MapHandle<K> for ArenaArtOf<K> {
+    fn insert(&self, key: K, value: u64) {
+        self.0.insert(key.into_art_key(), AtomicU64::new(value));
+    }
+
+    fn get(&self, key: &K) -> Option<u64> {
+        key.with_art_key(|key| {
+            (self.0.get_entry(key)).map(|entry| entry.value().load(Ordering::Relaxed))
+        })
+    }
+
+    fn bump(&self, key: &K) {
+        key.with_art_key(|key| {
+            if let Some(entry) = self.0.get_entry(key) {
+                entry.value().fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn remove(&self, key: &K) -> bool {
+        key.with_art_key(|key| self.0.remove(key).is_some())
+    }
+
+    fn scan(&self, start: &K, count: usize) -> (usize, u64) {
+        let (mut visited, mut sum) = (0, 0_u64);
+        start.with_art_bytes(|bytes| {
+            let from = (Bound::Included(bytes), Bound::Unbounded);
+            self.0.scan::<_, [u8], _>(from, |_, value| {
+                sum = sum.wrapping_add(value.load(Ordering::Relaxed));
+                visited += 1;
+                visited < count
+            });
+        });
+        (visited, sum)
+    }
+}
+
+/// A map one worker owns, as a map is used without threads: no lock, no
+/// atomics. It hands out one handle at a time, which is then the only way
+/// into the map, and the harness runs it at one thread.
+pub(crate) struct Owned<M> {
+    map: UnsafeCell<M>,
+    handed_out: AtomicBool,
+}
+
+// SAFETY: the map is reached only through an `OwnedHandle`, of which at most
+// one exists at a time (`only_handle` panics otherwise), and a handle isn't
+// `Sync`: one thread at a time reaches the map, as if it owned it, which a
+// `Send` map allows.
+unsafe impl<M: Send> Sync for Owned<M> {}
+
+impl<M> Owned<M> {
+    fn new(map: M) -> Self {
+        Self {
+            map: UnsafeCell::new(map),
+            handed_out: AtomicBool::new(false),
+        }
+    }
+
+    /// The map's one handle, while no other is out.
+    fn only_handle(&self) -> OwnedHandle<'_, M> {
+        let other_out = self.handed_out.swap(true, Ordering::Acquire);
+        assert!(!other_out, "a map one thread owns has one handle at a time");
+        OwnedHandle {
+            owner: self,
+            one_thread: PhantomData,
+        }
+    }
+}
+
+/// The one way into an [`Owned`] map while it lives.
+pub(crate) struct OwnedHandle<'m, M> {
+    owner: &'m Owned<M>,
+    /// Keeps the handle from being `Sync`: one thread uses it.
+    one_thread: PhantomData<Cell<()>>,
+}
+
+// SAFETY: the handle is the map's only way in while it lives, so sending it
+// moves the map's use to another thread, as sending the map would.
+unsafe impl<M: Send> Send for OwnedHandle<'_, M> {}
+
+impl<M> OwnedHandle<'_, M> {
+    /// Runs `f` on the map.
+    #[inline(always)]
+    fn with<R>(&self, f: impl FnOnce(&mut M) -> R) -> R {
+        // SAFETY: this handle is the only one (`Owned::only_handle`), it
+        // isn't `Sync`, and nothing `f` gets calls back into it: no other
+        // reference to the map exists while `f` runs.
+        f(unsafe { &mut *self.owner.map.get() })
+    }
+}
+
+impl<M> Drop for OwnedHandle<'_, M> {
+    fn drop(&mut self) {
+        self.owner.handed_out.store(false, Ordering::Release);
+    }
+}
+
+impl<K: ScalingKey> SharedMap<K> for Owned<BBTreeMap<K, u64>> {
+    const NAME: &'static str = "bbtree";
+    const SHARED: bool = false;
+
+    type Handle<'m> = OwnedHandle<'m, BBTreeMap<K, u64>>;
+
+    fn new() -> Self {
+        Owned::new(BBTreeMap::new())
+    }
+
+    fn handle(&self) -> Self::Handle<'_> {
+        self.only_handle()
+    }
+}
+
+impl<K: ScalingKey> MapHandle<K> for OwnedHandle<'_, BBTreeMap<K, u64>> {
+    fn insert(&self, key: K, value: u64) {
+        self.with(|map| map.insert(key, value));
+    }
+
+    fn get(&self, key: &K) -> Option<u64> {
+        self.with(|map| map.get(key).copied())
+    }
+
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
+        self.with(|map| map.get_many(keys).map(Option::<&u64>::copied))
+    }
+
+    fn bump(&self, key: &K) {
+        self.with(|map| {
+            if let Some(value) = map.get_mut(key) {
+                *value += 1;
+            }
+        });
+    }
+
+    fn remove(&self, key: &K) -> bool {
+        self.with(|map| map.remove(key).is_some())
+    }
+
+    fn scan(&self, start: &K, count: usize) -> (usize, u64) {
+        self.with(|map| sum_of_first(map.range(start..).map(|(_, &value)| value), count))
+    }
+}
+
+impl<K: ScalingKey> SharedMap<K> for Owned<BTreeMap<K, u64>> {
+    const NAME: &'static str = "std-btree";
+    const SHARED: bool = false;
+
+    type Handle<'m> = OwnedHandle<'m, BTreeMap<K, u64>>;
+
+    fn new() -> Self {
+        Owned::new(BTreeMap::new())
+    }
+
+    fn handle(&self) -> Self::Handle<'_> {
+        self.only_handle()
+    }
+}
+
+impl<K: ScalingKey> MapHandle<K> for OwnedHandle<'_, BTreeMap<K, u64>> {
+    fn insert(&self, key: K, value: u64) {
+        self.with(|map| map.insert(key, value));
+    }
+
+    fn get(&self, key: &K) -> Option<u64> {
+        self.with(|map| map.get(key).copied())
+    }
+
+    fn bump(&self, key: &K) {
+        self.with(|map| {
+            if let Some(value) = map.get_mut(key) {
+                *value += 1;
+            }
+        });
+    }
+
+    fn remove(&self, key: &K) -> bool {
+        self.with(|map| map.remove(key).is_some())
+    }
+
+    fn scan(&self, start: &K, count: usize) -> (usize, u64) {
+        self.with(|map| sum_of_first(map.range(start..).map(|(_, &value)| value), count))
     }
 }

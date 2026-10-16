@@ -44,6 +44,11 @@ impl<K: BenchKey> SingleMapKeys<K> {
         Self { present, absent }
     }
 
+    /// The keys a map holds, and those its misses probe with.
+    pub(crate) fn into_parts(self) -> (Vec<K>, Vec<K>) {
+        (self.present, self.absent)
+    }
+
     #[cfg(test)]
     pub(crate) fn present(&self) -> &[K] {
         &self.present

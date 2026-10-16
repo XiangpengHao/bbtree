@@ -4,13 +4,18 @@
 
 use std::time::{Duration, Instant};
 
-/// A clock for timing one operation: the time-stamp counter on x86-64,
-/// which a read costs a few nanoseconds of, else nanoseconds since the
-/// clock was made; with the nanoseconds per tick, measured against
-/// `Instant` when made.
+/// A clock for timing one operation alone: it reads the processor's
+/// counter, and fences the reads so that the operation is done between
+/// them, its loads included. Without the fences an out-of-order core reads
+/// the end before a lookup's cache misses come back, and half of all
+/// lookups looked free. The time-stamp counter on x86-64, the virtual
+/// counter on aarch64, else nanoseconds since the clock was made; with the
+/// nanoseconds per tick, measured against `Instant` when made. The fences
+/// cost a few nanoseconds, the same for every map, and keep consecutive
+/// operations from overlapping, which is what a latency means.
 #[derive(Clone, Copy)]
 pub(crate) struct TickClock {
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     made: Instant,
     nanos_per_tick: f64,
 }
@@ -19,26 +24,74 @@ impl TickClock {
     /// The clock, calibrated over `calibration`.
     pub(crate) fn calibrated(calibration: Duration) -> Self {
         let mut clock = Self {
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             made: Instant::now(),
             nanos_per_tick: 1.0,
         };
-        let (start, start_ticks) = (Instant::now(), clock.now());
+        let (start, start_ticks) = (Instant::now(), clock.start());
         while start.elapsed() < calibration {}
-        let ticks = clock.now() - start_ticks;
+        let ticks = clock.stop() - start_ticks;
         clock.nanos_per_tick = start.elapsed().as_nanos() as f64 / ticks as f64;
         clock
     }
 
-    /// The time now, in ticks.
+    /// The time an operation starts, in ticks: read after everything
+    /// before it is done, and before anything after it starts.
     #[inline(always)]
-    pub(crate) fn now(&self) -> u64 {
+    pub(crate) fn start(&self) -> u64 {
         #[cfg(target_arch = "x86_64")]
-        {
-            // SAFETY: every x86-64 CPU has the time-stamp counter.
-            unsafe { core::arch::x86_64::_rdtsc() }
+        // SAFETY: every x86-64 CPU has SSE2's `lfence` and the time-stamp
+        // counter.
+        unsafe {
+            use core::arch::x86_64::{_mm_lfence, _rdtsc};
+            _mm_lfence();
+            let ticks = _rdtsc();
+            _mm_lfence();
+            ticks
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ticks: u64;
+            // SAFETY: `isb` and reading the virtual counter, which Linux and
+            // macOS let user code read, touch no memory.
+            unsafe {
+                core::arch::asm!("isb", "mrs {ticks}, cntvct_el0", "isb", ticks = out(reg) ticks,
+                    options(nostack, nomem));
+            }
+            ticks
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            self.made.elapsed().as_nanos() as u64
+        }
+    }
+
+    /// The time an operation ends, in ticks: read once its instructions
+    /// are done and its loads have come back.
+    #[inline(always)]
+    pub(crate) fn stop(&self) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: every x86-64 CPU this runs on has `rdtscp`, which waits
+        // for the instructions before it and their loads.
+        unsafe {
+            use core::arch::x86_64::{__rdtscp, _mm_lfence};
+            let mut processor = 0;
+            let ticks = __rdtscp(&mut processor);
+            _mm_lfence();
+            ticks
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let ticks: u64;
+            // SAFETY: `dsb` waits for the memory accesses before it, `isb`
+            // for the instructions; then the counter, as in `start`.
+            unsafe {
+                core::arch::asm!("dsb ish", "isb", "mrs {ticks}, cntvct_el0", "isb",
+                    ticks = out(reg) ticks, options(nostack));
+            }
+            ticks
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             self.made.elapsed().as_nanos() as u64
         }

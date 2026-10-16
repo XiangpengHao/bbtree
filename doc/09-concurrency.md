@@ -340,7 +340,15 @@ descends.
 
 Latency, each operation timed alone with the time-stamp counter (10 ns
 resolution here), ns, p50 / p99 / p99.9 at 1 and 24 threads (`--measure
-latency`):
+latency`). These were read with a bare `rdtsc` on each side, which an
+out-of-order core reads before a lookup's cache misses return: they
+understate. Since 2026-10-16 the reads are fenced (`lfence; rdtsc;
+lfence` before, `rdtscp; lfence` after; `latency.rs`), which adds 20–25 ns
+to every operation and keeps consecutive ones from overlapping; the blog
+post's runs (`bench/tools/blog-runs.sh`) use it. At 10M `u64`, one thread,
+fenced: bbtree's get 240 / 541 / 711, std's 281 / 581 / 681, artmap's
+arena 210 / 561 / 601; back to back the same gets average 109, 277 and
+84 ns, since bbtree's branchless search lets independent lookups overlap.
 
 | map | get, 1 thread | get, 24 | insert, 1 thread | insert, 24 |
 |---|--:|--:|--:|--:|

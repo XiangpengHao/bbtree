@@ -1,7 +1,8 @@
 //! `bbtree-scaling`: maps that threads share (`concurrent_maps.rs`) as
-//! threads are added: `BCTreeMap`, `BBTreeMap` behind a `RwLock`, and other
-//! crates' concurrent maps (`--maps` picks some), with `u64`, `u128` or
-//! string keys (`--keys`).
+//! threads are added: `BCTreeMap`, `BBTreeMap` and std's `BTreeMap` behind a
+//! `RwLock`, and other crates' concurrent maps (`--maps` picks some); and,
+//! at one thread, `BBTreeMap` and `BTreeMap` without threads; with `u64`,
+//! `u128`, UUID, string or Wikipedia-title keys (`--keys`).
 //!
 //! Each worker is pinned to a CPU of its own, one per physical core first,
 //! then their SMT siblings, in the order the process's affinity mask allows
@@ -36,6 +37,7 @@
 //! worker gets its own list of keys to look up, in random order, which it
 //! reads front to back: making or finding a key costs no map anything.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -51,11 +53,14 @@ use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
 use scc::TreeIndex;
 
-use crate::concurrent_maps::{ArtMapOf, MapHandle, ScalingKey, SharedMap};
+use crate::command_line::Named;
+use crate::concurrent_maps::{ArenaArtOf, ArtMapOf, MapHandle, Owned, ScalingKey, SharedMap};
+use crate::datasets::{DataDirectory, DataFile, KeyList};
 use crate::keys::KeyMaker;
 use crate::latency::{LatencyHistogram, TickClock};
 use crate::memory::{CountingAllocator, ResidentSet};
 use crate::random::SeededRng;
+use crate::workload::{MapSize, Scale};
 
 /// How many entries a scan visits.
 const SCAN_LENGTH: usize = 100;
@@ -154,23 +159,39 @@ enum KeyKind {
     U64,
     /// Random `u128`s.
     U128,
+    /// Random UUIDs (version 4) as the `uuid` crate keeps them, 16 bytes in
+    /// an array.
+    Uuid,
     /// JSON object keys, short identifiers, as the bench's `str-json`
     /// (`keys.rs`).
     JsonStrings,
     /// Source paths in cargo's registry, about 100 bytes sharing a long
     /// prefix, as the bench's `str-path`.
     PathStrings,
+    /// English Wikipedia's article titles, as the bench's `wiki-titles`: a
+    /// seeded sample, and titles held out of every sample for misses
+    /// (`datasets/key_list.rs`). Maps of 1M or 10M entries.
+    WikiTitles,
 }
 
 impl KeyKind {
-    const ALL: [Self; 4] = [Self::U64, Self::U128, Self::JsonStrings, Self::PathStrings];
+    const ALL: [Self; 6] = [
+        Self::U64,
+        Self::U128,
+        Self::Uuid,
+        Self::JsonStrings,
+        Self::PathStrings,
+        Self::WikiTitles,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::U64 => "u64",
             Self::U128 => "u128",
+            Self::Uuid => "uuid",
             Self::JsonStrings => "str-json",
             Self::PathStrings => "str-path",
+            Self::WikiTitles => "wiki-titles",
         }
     }
 
@@ -192,6 +213,32 @@ impl KeyKind {
     /// `entries` strings from `maker`, each distinct.
     fn strings(entries: usize, mut maker: KeyMaker<String>) -> Vec<String> {
         (0..entries as u64).map(|index| maker.key(index)).collect()
+    }
+
+    /// The UUID of index `index`: 128 random bits, but for the version
+    /// (4) and the variant, distinct for distinct indexes, as either half
+    /// alone is.
+    fn uuid(index: u64) -> [u8; 16] {
+        let mut bytes =
+            (u128::from(SeededRng::mix(index)) << 64 | u128::from(SeededRng::mix(!index)))
+                .to_be_bytes();
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        bytes
+    }
+
+    /// `entries` Wikipedia titles for a map, and titles it doesn't hold.
+    fn wiki_titles(entries: usize) -> Result<KeySet<String>, String> {
+        let size = (MapSize::ALL.iter().copied())
+            .find(|size| {
+                (size.fixed_shape(Scale::Full)).is_some_and(|shape| {
+                    shape.map_count() == 1 && shape.entries_per_map() == entries
+                })
+            })
+            .ok_or_else(|| format!("wiki titles come in maps of 1M or 10M, not {entries}"))?;
+        let list = KeyList::load(&DataDirectory::from_environment()?, DataFile::WikiTitles)?;
+        let (present, absent) = list.single_map_keys(size, Scale::Full)?.into_parts();
+        Ok(KeySet { present, absent })
     }
 }
 
@@ -504,12 +551,16 @@ struct ScalingRun {
 
 impl ScalingRun {
     /// Every map it measures, by name, in the order it measures them.
-    const MAPS: [&'static str; 7] = [
+    const MAPS: [&'static str; 11] = [
+        <Owned<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
+        <Owned<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <BCTreeMap<u64, u64> as SharedMap<u64>>::NAME,
         <RwLock<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
+        <RwLock<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <SkipMap<u64, AtomicU64> as SharedMap<u64>>::NAME,
         <TreeIndex<u64, AtomicU64> as SharedMap<u64>>::NAME,
         <ArtMapOf<u64> as SharedMap<u64>>::NAME,
+        <ArenaArtOf<u64> as SharedMap<u64>>::NAME,
         <ConcurrentMap<u64, u64> as SharedMap<u64>>::NAME,
         <DashMap<u64, u64> as SharedMap<u64>>::NAME,
     ];
@@ -592,7 +643,7 @@ impl ScalingRun {
                 _ => {
                     return Err(format!(
                         "unknown option {flag}; options: --entries N, --seconds S, \
-                         --threads 1,2,4, --maps A,B, --keys u64|u128|str-json|str-path, \
+                         --threads 1,2,4, --maps A,B, --keys u64|u128|uuid|str-json|str-path|wiki-titles, \
                          --workloads get,get-miss,mixed,scan,churn,insert, \
                          --measure throughput|latency|memory, --out DIR"
                     ));
@@ -630,6 +681,18 @@ impl ScalingRun {
                 self.report_keys(&keys.present, started, |_| 16);
                 self.measure_picked_maps(&keys);
             }
+            KeyKind::Uuid => {
+                let keys = KeySet::split(KeyKind::integers(all, KeyKind::uuid), entries);
+                self.report_keys(&keys.present, started, |_| 16);
+                self.measure_picked_maps(&keys);
+            }
+            KeyKind::WikiTitles => match KeyKind::wiki_titles(entries) {
+                Ok(keys) => {
+                    self.report_keys(&keys.present, started, String::len);
+                    self.measure_picked_maps(&keys);
+                }
+                Err(message) => eprintln!("error: {message}"),
+            },
             KeyKind::JsonStrings => {
                 let keys = KeySet::split(KeyKind::strings(all, KeyMaker::json_keys()), entries);
                 self.report_keys(&keys.present, started, String::len);
@@ -660,11 +723,20 @@ impl ScalingRun {
     /// Every map the command line picked, in the order of [`Self::MAPS`],
     /// with `keys`.
     fn measure_picked_maps<K: ScalingKey>(&mut self, keys: &KeySet<K>) {
+        if self.picks(<Owned<BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, Owned<BBTreeMap<K, u64>>>(keys);
+        }
+        if self.picks(<Owned<BTreeMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, Owned<BTreeMap<K, u64>>>(keys);
+        }
         if self.picks(<BCTreeMap<K, u64> as SharedMap<K>>::NAME) {
             self.measure::<K, BCTreeMap<K, u64>>(keys);
         }
         if self.picks(<RwLock<BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, RwLock<BBTreeMap<K, u64>>>(keys);
+        }
+        if self.picks(<RwLock<BTreeMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, RwLock<BTreeMap<K, u64>>>(keys);
         }
         if self.picks(<SkipMap<K, AtomicU64> as SharedMap<K>>::NAME) {
             self.measure::<K, SkipMap<K, AtomicU64>>(keys);
@@ -675,12 +747,23 @@ impl ScalingRun {
         if self.picks(<ArtMapOf<K> as SharedMap<K>>::NAME) {
             self.measure::<K, ArtMapOf<K>>(keys);
         }
+        if self.picks(<ArenaArtOf<K> as SharedMap<K>>::NAME) {
+            self.measure::<K, ArenaArtOf<K>>(keys);
+        }
         if self.picks(<ConcurrentMap<K, u64> as SharedMap<K>>::NAME) {
             self.measure::<K, ConcurrentMap<K, u64>>(keys);
         }
         if self.picks(<DashMap<K, u64> as SharedMap<K>>::NAME) {
             self.measure::<K, DashMap<K, u64>>(keys);
         }
+    }
+
+    /// The thread counts to run `M` at: every one picked, or only one
+    /// thread for a map one thread owns.
+    fn thread_counts_of<K: ScalingKey, M: SharedMap<K>>(&self) -> Vec<usize> {
+        (self.thread_counts.iter().copied())
+            .filter(|&threads| M::SHARED || threads == 1)
+            .collect()
     }
 
     /// Whether the command line picked the map named `name`.
@@ -690,6 +773,10 @@ impl ScalingRun {
 
     /// What the run measures, of `M`, with `keys`.
     fn measure<K: ScalingKey, M: SharedMap<K>>(&mut self, keys: &KeySet<K>) {
+        if self.thread_counts_of::<K, M>().is_empty() {
+            println!("{:<18} runs at one thread only, which --threads leaves out", M::NAME);
+            return;
+        }
         match self.measure {
             Measure::Throughput => self.throughput::<K, M>(keys),
             Measure::Latency(clock) => self.latency::<K, M>(keys, clock),
@@ -726,11 +813,11 @@ impl ScalingRun {
         })
     }
 
-    /// A map of every key, inserted by all the CPUs, each every so many:
-    /// in random key order, as the keys are.
+    /// A map of every key, inserted by all the CPUs, each every so many, or
+    /// by one if one thread owns it: in random key order, as the keys are.
     fn built<K: ScalingKey, M: SharedMap<K>>(&self, keys: &[K]) -> M {
         let map = M::new();
-        let workers = self.cpus.cpus.len();
+        let workers = if M::SHARED { self.cpus.cpus.len() } else { 1 };
         let handles = (0..workers).map(|_| map.handle()).collect();
         self.on_workers(handles, |worker, handle| {
             for (index, key) in keys.iter().enumerate().skip(worker).step_by(workers) {
@@ -873,7 +960,7 @@ impl ScalingRun {
             } else {
                 &keys.present
             };
-            for threads in self.thread_counts.clone() {
+            for threads in self.thread_counts_of::<K, M>() {
                 let (done, elapsed) = self.for_duration(
                     &map,
                     queried,
@@ -898,7 +985,7 @@ impl ScalingRun {
         }
         drop(map);
         let insert_threads = if self.workloads.contains(&Workload::Insert) {
-            self.thread_counts.clone()
+            self.thread_counts_of::<K, M>()
         } else {
             Vec::new()
         };
@@ -935,7 +1022,7 @@ impl ScalingRun {
             } else {
                 &keys.present
             };
-            for threads in self.thread_counts.clone() {
+            for threads in self.thread_counts_of::<K, M>() {
                 let (done, _) = self.for_duration(
                     &map,
                     queried,
@@ -951,7 +1038,7 @@ impl ScalingRun {
         }
         drop(map);
         let insert_threads = if self.workloads.contains(&Workload::Insert) {
-            self.thread_counts.clone()
+            self.thread_counts_of::<K, M>()
         } else {
             Vec::new()
         };
@@ -961,9 +1048,9 @@ impl ScalingRun {
             let (histograms, _) = self.on_workers(shares, |worker, (handle, share)| {
                 let mut histogram = LatencyHistogram::new();
                 for (index, key) in share.into_iter().enumerate() {
-                    let start = clock.now();
+                    let start = clock.start();
                     handle.insert(key, (worker + index) as u64);
-                    histogram.record(clock.now() - start);
+                    histogram.record(clock.stop() - start);
                 }
                 histogram
             });
@@ -986,9 +1073,9 @@ impl ScalingRun {
         match workload {
             Workload::Get | Workload::GetMiss => {
                 let key = queries.next_key();
-                let start = clock.now();
+                let start = clock.start();
                 let value = handle.get(key);
-                histogram.record(clock.now() - start);
+                histogram.record(clock.stop() - start);
                 assert_eq!(
                     value.is_some(),
                     workload == Workload::Get,
@@ -998,18 +1085,18 @@ impl ScalingRun {
             Workload::Mixed if queries.updates() => handle.bump(queries.next_key()),
             Workload::Mixed => {
                 let key = queries.next_key();
-                let start = clock.now();
+                let start = clock.start();
                 let value = handle.get(key);
-                histogram.record(clock.now() - start);
+                histogram.record(clock.stop() - start);
                 black_box(value.expect("every key is there"));
             }
             Workload::Churn => {
                 let key = queries.next_key();
                 let copy = key.clone();
-                let start = clock.now();
+                let start = clock.start();
                 handle.remove(key);
                 handle.insert(copy, 0);
-                histogram.record(clock.now() - start);
+                histogram.record(clock.stop() - start);
             }
             Workload::GetBatch | Workload::GetMissBatch | Workload::Scan | Workload::Insert => {
                 unreachable!("not timed one at a time")
