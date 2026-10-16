@@ -162,6 +162,20 @@ impl U64EqualityMask {
         Some(start..end)
     }
 
+    /// A batch needs only a unique live position, not both ends of a range.
+    /// Ignore stale matching slots before testing whether one bit remains.
+    #[inline(always)]
+    pub(super) fn unique(self, len: usize) -> SlotMatches {
+        let bits = Self::keep_low_bits(self.bits, len.min(64) as u32);
+        if bits == 0 {
+            SlotMatches::None
+        } else if bits.is_power_of_two() {
+            SlotMatches::One(bits.trailing_zeros() as usize)
+        } else {
+            SlotMatches::Many
+        }
+    }
+
     /// `bits` with all but its `count` lowest cleared, `count <= 64`: one
     /// `bzhi` where BMI2 is there.
     #[inline(always)]
@@ -429,7 +443,25 @@ impl VectorCount for u64 {
 mod tests {
     use std::vec::Vec;
 
+    use super::{SlotMatches, U64EqualityMask};
     use crate::tree::node::inline_keys::InlineSlot;
+
+    #[test]
+    fn unique_matches_ignore_bits_past_len() {
+        for bits in [0, 1, 1 << 63, 3, 3 << 31, u64::MAX] {
+            for len in 0..=80 {
+                let matches: Vec<_> = (0..len.min(64))
+                    .filter(|index| bits & (1 << index) != 0)
+                    .collect();
+                match (U64EqualityMask { bits }).unique(len) {
+                    SlotMatches::None => assert!(matches.is_empty()),
+                    SlotMatches::One(index) => assert_eq!(matches, [index]),
+                    SlotMatches::Many => assert!(matches.len() > 1),
+                    SlotMatches::Two { .. } => unreachable!("only uniqueness is tested"),
+                }
+            }
+        }
+    }
 
     /// Every short capacity and live length, including vector and mask
     /// boundaries. The tail is unsorted and alternates the extreme values;

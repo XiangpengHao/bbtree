@@ -83,7 +83,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// shared, returning where it stopped as a `ControlFlow`, hid the leaf's
     /// kind from the value read after it, which then cleared the pointer's
     /// tag, an instruction more per hit.
-    pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Found<K, V, S>>
+    /// `CallSite` separates scalar and batch lookup compilation without
+    /// changing node layouts; sharing their leaf search outlined scalar get.
+    pub(in crate::tree) fn find<Q, CallSite>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+        call_site: CallSite,
+    ) -> Option<Found<K, V, S>>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -101,7 +107,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 }
             },
         };
-        leaf.find(key).map(|index| Found::InLeaf(leaf, index))
+        leaf.find(key, call_site)
+            .map(|index| Found::InLeaf(leaf, index))
     }
 
     /// Searches in key order, returning an existing key or the leaf and edge
@@ -111,6 +118,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// a node stack for splitting. As for [`Self::find`], `key` must share
     /// what every key of the tree shares, which [`Tree::insert`] shrinks to
     /// first.
+    #[inline(always)]
     pub(crate) fn search_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
     where
         K: Borrow<Q>,
@@ -164,7 +172,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root_page.node().find(&key).map(Found::key_value)
+        root_page.node().find(&key, ()).map(Found::key_value)
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
@@ -179,7 +187,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
-        root_page.node().find(&key).map(Found::value_mut)
+        root_page.node().find(&key, ()).map(Found::value_mut)
     }
 }
 
@@ -268,7 +276,7 @@ mod tests {
         assert!(!separators.is_empty());
         for &(key, value_id) in &separators {
             assert_eq!(value_id, value_ids[&key]);
-            let found = tree.root().find(&SearchKey::new(&key));
+            let found = tree.root().find(&SearchKey::new(&key), ());
             let Some(found @ Found::Separator(..)) = found else {
                 panic!("a separator is found where it lives, above the leaves");
             };

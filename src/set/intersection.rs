@@ -13,6 +13,7 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::BitAnd;
 
+use super::lookups::LookupsAhead;
 use super::merge::{MergeSides, MergeStep};
 use super::{BBTreeSet, Iter};
 use crate::allocator::{Allocator, Global};
@@ -39,10 +40,12 @@ enum IntersectionStrategy<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> 
     /// Walks both sets, of similar sizes, side by side, a leaf's run of
     /// each at a time (`merge.rs`).
     Stitch(MergeSides<'a, T, S>),
-    /// Walks the small set and looks each element up in the large one.
+    /// Walks the small set and looks each element up in the large one, a
+    /// batch ahead.
     Search {
         small_iter: Iter<'a, T, S>,
         large_set: &'a BBTreeSet<T, S, A>,
+        lookups: LookupsAhead,
     },
     /// The one element left, or none.
     Answer(Option<&'a T>),
@@ -73,7 +76,12 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
             IntersectionStrategy::Search {
                 small_iter,
                 large_set,
-            } => small_iter.find(|&small_next| large_set.contains(small_next)),
+                lookups,
+            } => loop {
+                if let (small_next, true) = lookups.next(small_iter, large_set)? {
+                    return Some(small_next);
+                }
+            },
             IntersectionStrategy::Answer(answer) => answer.take(),
         }
     }
@@ -102,15 +110,18 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
                 })
             }
             IntersectionStrategy::Search {
-                small_iter,
+                mut small_iter,
                 large_set,
-            } => small_iter.fold(accumulator, |accumulator, element| {
-                if large_set.contains(element) {
-                    fold(accumulator, element)
-                } else {
-                    accumulator
+                mut lookups,
+            } => {
+                let mut accumulator = accumulator;
+                while let Some((element, found)) = lookups.next(&mut small_iter, large_set) {
+                    if found {
+                        accumulator = fold(accumulator, element);
+                    }
                 }
-            }),
+                accumulator
+            }
             IntersectionStrategy::Answer(answer) => answer.into_iter().fold(accumulator, fold),
         }
     }
@@ -132,9 +143,11 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Intersection<'_
             IntersectionStrategy::Search {
                 small_iter,
                 large_set,
+                lookups,
             } => IntersectionStrategy::Search {
                 small_iter: small_iter.clone(),
                 large_set,
+                lookups: *lookups,
             },
             IntersectionStrategy::Answer(answer) => IntersectionStrategy::Answer(*answer),
         };
@@ -164,6 +177,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
             Self::Search {
                 small_iter,
                 large_set,
+                ..
             } => f
                 .debug_struct("Search")
                 .field("small_iter", small_iter)
@@ -213,10 +227,12 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
                 _ if other.prefers_lookups(self.len()) => IntersectionStrategy::Search {
                     small_iter: self.iter(),
                     large_set: other,
+                    lookups: LookupsAhead::default(),
                 },
                 _ if self.prefers_lookups(other.len()) => IntersectionStrategy::Search {
                     small_iter: other.iter(),
                     large_set: self,
+                    lookups: LookupsAhead::default(),
                 },
                 _ => IntersectionStrategy::Stitch(MergeSides::new(self.iter(), other.iter())),
             }

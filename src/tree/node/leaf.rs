@@ -88,6 +88,14 @@ impl<K, V, S> Leaf<K, V, S> {
     }
 }
 
+/// What the batch can do before the final leaf search: finish an absent
+/// query, prefetch its unique candidate's metadata, or search normally.
+pub(in crate::tree) enum CandidateLine {
+    Absent,
+    One(usize, *const u8),
+    Unknown,
+}
+
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// A new, empty leaf in `page`, without a head, at `prefix_len`: what
     /// its fences share, or on the tree's border, what every key of the
@@ -123,6 +131,110 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) fn plan() -> NodePlan<K> {
         NodePlan::of::<S, Self>()
+    }
+
+    /// The header's line, for the batch's next leaf search.
+    #[inline(always)]
+    pub(in crate::tree) fn search_line(self) -> *const u8 {
+        self.node.page().as_ptr()
+    }
+
+    /// An initialized key slot that the batch's pending shift will read.
+    #[inline(always)]
+    pub(in crate::tree) fn entry_line(self, index: usize) -> *const u8 {
+        core::ptr::from_ref(self.key(index)).cast()
+    }
+
+    /// An inline-key search can reject a query or identify one entry
+    /// whose first line the next comparison reads. Ties and searches
+    /// without inline keys give no address to speculate about.
+    #[inline(always)]
+    pub(in crate::tree) fn candidate_line<Q>(self, key: &SearchKey<'_, K, S, Q>) -> CandidateLine
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let Some(target) = self.inline_target(key) else {
+            return CandidateLine::Unknown;
+        };
+        let Some(inline_keys) = self.inline_keys() else {
+            return CandidateLine::Unknown;
+        };
+        let index = if let Some(mask) = inline_keys.equality_mask(target.inline_key()) {
+            match mask.unique(self.len()) {
+                SlotMatches::None => return CandidateLine::Absent,
+                SlotMatches::One(index) => index,
+                _ => return CandidateLine::Unknown,
+            }
+        } else {
+            let candidates = inline_keys.equal_range(target.inline_key());
+            if candidates.is_empty() {
+                return CandidateLine::Absent;
+            }
+            if candidates.len() != 1 {
+                return CandidateLine::Unknown;
+            }
+            candidates.start
+        };
+        // SAFETY: both searches clip to len; a unique match names an
+        // initialized key of this live leaf.
+        let entry = unsafe { self.key_slots().keys().slot(index) }.cast::<u8>();
+        CandidateLine::One(index, entry.as_ptr())
+    }
+
+    /// The first heap line a unique candidate's comparison reads. The
+    /// batch calls this only after prefetching that candidate's metadata.
+    ///
+    /// # Safety
+    ///
+    /// `index` and `prefix_len` were saved by a search of this leaf, which
+    /// has not changed since. `index` names an initialized key.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn candidate_bytes_line<Q>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+        index: usize,
+        prefix_len: usize,
+    ) -> Option<*const u8>
+    where
+        K: Borrow<Q>,
+        Q: ?Sized,
+    {
+        // SAFETY: the saved index names an initialized key of this leaf.
+        let stored = unsafe { self.key_slots().keys().slot(index).as_ref() };
+        key.tied_bytes_line::<Self>(prefix_len, stored)
+    }
+
+    /// Confirms the unique candidate kept by a batch's earlier mask step.
+    /// Saving the prefix avoids a dependent header read after the entry
+    /// prefetch, especially when a batch's headers compete in L1.
+    ///
+    /// # Safety
+    ///
+    /// `index` and `prefix_len` were saved by a search of this leaf, which
+    /// has not changed since. `index` names an initialized key.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn find_candidate<Q>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+        index: usize,
+        prefix_len: usize,
+    ) -> Option<usize>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let target = key.inline_target(prefix_len)?;
+        // SAFETY: the saved index names an initialized key of this leaf.
+        let stored = unsafe { self.key_slots().keys().slot(index).as_ref() };
+        let matches = if Self::plan().has_whole_key_equality()
+            && let Some(equal) = key.equals_whole_bytes(stored)
+        {
+            equal
+        } else {
+            key.cmp_tied::<Self>(target, stored) == Ordering::Equal
+        };
+        matches.then_some(index)
     }
 
     /// The most entries a leaf holds.
@@ -480,7 +592,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// lookup, which may reject unequal lengths among the candidates (D36) and
     /// confirm a lone candidate by equality alone (D38). Ordered searches
     /// still use [`Self::search`]: a length tag gives no edge.
-    pub(in crate::tree) fn find<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<usize>
+    pub(in crate::tree) fn find<Q, CallSite>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+        _call_site: CallSite,
+    ) -> Option<usize>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,

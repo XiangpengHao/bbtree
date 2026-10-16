@@ -353,6 +353,7 @@ impl Window {
 /// The bytes of a std byte string being searched for. Windows read these
 /// bytes directly: a search visits only a few prefix lengths, so preparing
 /// every possible window would copy mostly bytes that it never reads.
+#[derive(Clone, Copy)]
 struct SearchBytes<'q> {
     bytes: &'q [u8],
 }
@@ -361,6 +362,30 @@ impl<'q> SearchBytes<'q> {
     #[inline]
     fn new(bytes: &'q [u8]) -> Self {
         Self { bytes }
+    }
+
+    /// A query window, checking the key's length before the window's fit.
+    /// Short queries need the padded word at every level; testing for a full
+    /// window first adds a branch on each node's prefix. Long queries keep
+    /// their direct load. Fixed arrays use their constant-length path.
+    #[inline(always)]
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        let Some(last) = self.bytes.last_chunk::<WINDOW_LEN>() else {
+            return self.bytes.inline_key_at(offset);
+        };
+        let last_start = self.bytes.len() - WINDOW_LEN;
+        if offset <= last_start {
+            // The whole window fits, including when it ends at the last byte.
+            return InlineWord::from_be_bytes(
+                *self.bytes[offset..]
+                    .first_chunk::<WINDOW_LEN>()
+                    .expect("a whole word fits"),
+            );
+        }
+        let shift = (offset - last_start).min(WINDOW_LEN);
+        InlineWord::from_be_bytes(*last)
+            .checked_shl((8 * shift) as u32)
+            .unwrap_or(0)
     }
 
     /// The chunk of `bytes` at `offset`, if they have all of it.
@@ -624,7 +649,14 @@ where
     #[inline(always)]
     pub(super) fn inline_target(&self, prefix_len: usize) -> Option<InlineTarget> {
         let inline_key = match KeyInliner::<K>::resolve::<S>()? {
-            KeyInliner::ByteString(_) => self.recognized_bytes()?.bytes.inline_key_at(prefix_len),
+            KeyInliner::ByteString(_) => {
+                let query = self.recognized_bytes()?;
+                if Self::query_byte_string()?.holds_its_bytes() {
+                    query.bytes.inline_key_at(prefix_len)
+                } else {
+                    query.inline_key_at(prefix_len)
+                }
+            }
             inliner @ KeyInliner::InlineKeyTrait { .. } => {
                 let key = SameType::<K, Q>::recognize()?.cast(self.key);
                 inliner.inline_key_at(key, prefix_len)
@@ -648,10 +680,16 @@ where
         ByteString::<Q>::recognize()
     }
 
+    /// Keep fixed-array lengths visible even in an outlined search. Heap
+    /// strings keep their cached slice, avoiding another metadata load.
     #[inline]
-    fn recognized_bytes(&self) -> Option<&SearchBytes<'q>> {
-        Self::query_byte_string()?;
-        Some(&self.bytes)
+    fn recognized_bytes(&self) -> Option<SearchBytes<'q>> {
+        let byte_string = Self::query_byte_string()?;
+        Some(if byte_string.holds_its_bytes() {
+            SearchBytes::new(byte_string.bytes(self.key))
+        } else {
+            self.bytes
+        })
     }
 
     pub(super) fn key(&self) -> &Q {
@@ -687,11 +725,53 @@ where
         Some(self.recognized_bytes()?.bytes == byte_string.bytes(stored))
     }
 
+    /// The first line read to form the next search window. Short tails use
+    /// the last whole word, as `inline_key_at` does; an empty tail reads none.
+    #[inline(always)]
+    pub(in crate::tree) fn window_line(&self, prefix_len: usize) -> Option<*const u8> {
+        let bytes = self.recognized_bytes()?.bytes;
+        if prefix_len >= bytes.len() {
+            return None;
+        }
+        let offset = prefix_len.min(bytes.len().saturating_sub(WINDOW_LEN));
+        bytes.get(offset).map(core::ptr::from_ref)
+    }
+
     /// The query's length tag, if it is a recognized byte string (D36).
     #[inline]
     pub(super) fn length_tag(&self) -> Option<u16> {
         self.recognized_bytes()
             .map(|query| LengthTags::tag_of(query.bytes.len()))
+    }
+
+    /// The first stored byte read by `cmp_tied`, after its entry metadata
+    /// is ready. A short key ending inside the known prefix reads none.
+    #[inline(always)]
+    pub(super) fn tied_bytes_line<Kind: NodeKind>(
+        &self,
+        prefix_len: usize,
+        stored: &K,
+    ) -> Option<*const u8> {
+        let plan = NodePlan::<K>::of::<S, Kind>();
+        let KeyInliner::ByteString(byte_string) = plan.inliner()? else {
+            return None;
+        };
+        let query = self.recognized_bytes()?;
+        let equal_len = prefix_len + plan.inline_width()?.byte_len();
+        if query.bytes.len() <= equal_len {
+            return None;
+        }
+        let stored = byte_string.bytes(stored);
+        let both_len = query.bytes.len().min(stored.len());
+        if equal_len >= both_len {
+            return None;
+        }
+        // cmp_from's last word ends at the shorter string's end; short
+        // strings start at zero. This selects that same first load.
+        let offset = (equal_len + WINDOW_LEN)
+            .min(both_len)
+            .saturating_sub(WINDOW_LEN);
+        stored.get(offset).map(core::ptr::from_ref)
     }
 
     /// How this key orders against every key of a tree, all of whose
@@ -762,6 +842,32 @@ mod tests {
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
     use crate::tree::test_support::TestRng;
+
+    #[test]
+    fn query_windows_match_zero_padded_bytes_at_every_offset() {
+        let max_len = if cfg!(miri) { 16 } else { 64 };
+        let rng = TestRng::new(42);
+        for len in 0..=max_len {
+            for bytes in [
+                (0..len).map(|_| rng.below(256) as u8).collect::<Vec<_>>(),
+                std::vec![0; len],
+                std::vec![u8::MAX; len],
+            ] {
+                let query = SearchBytes::new(&bytes);
+                for offset in (0..=len + WINDOW_LEN).chain([usize::MAX]) {
+                    let mut expected = [0; WINDOW_LEN];
+                    for (slot, byte) in expected.iter_mut().zip(bytes.get(offset..).unwrap_or(&[]))
+                    {
+                        *slot = *byte;
+                    }
+                    assert_eq!(
+                        query.inline_key_at(offset),
+                        InlineWord::from_be_bytes(expected)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn complete_comparisons_respect_short_zero_bytes_and_strategy_proofs() {

@@ -13,6 +13,7 @@ use core::fmt;
 use core::iter::FusedIterator;
 use core::ops::Sub;
 
+use super::lookups::LookupsAhead;
 use super::merge::{MergeSides, MergeStep, SetCursor};
 use super::{BBTreeSet, Iter};
 use crate::allocator::{Allocator, Global};
@@ -44,10 +45,11 @@ enum DifferenceStrategy<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> {
         /// `Peekable`, holds it peeked: for printing as std's does.
         other_peeked: bool,
     },
-    /// Walks `self` and looks each element up in `other`.
+    /// Walks `self` and looks each element up in `other`, a batch ahead.
     Search {
         self_iter: Iter<'a, T, S>,
         other_set: &'a BBTreeSet<T, S, A>,
+        lookups: LookupsAhead,
     },
     /// Walks `self`, whose elements left are not in `other`.
     Iterate(Iter<'a, T, S>),
@@ -91,7 +93,12 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
-            } => self_iter.find(|&self_next| !other_set.contains(self_next)),
+                lookups,
+            } => loop {
+                if let (self_next, false) = lookups.next(self_iter, other_set)? {
+                    return Some(self_next);
+                }
+            },
             DifferenceStrategy::Iterate(iter) => iter.next(),
         }
     }
@@ -102,6 +109,7 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
+                ..
             } => (self_iter.len(), other_set.len()),
             DifferenceStrategy::Iterate(iter) => (iter.len(), 0),
         };
@@ -120,15 +128,18 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
                 })
             }
             DifferenceStrategy::Search {
-                self_iter,
+                mut self_iter,
                 other_set,
-            } => self_iter.fold(accumulator, |accumulator, element| {
-                if other_set.contains(element) {
-                    accumulator
-                } else {
-                    fold(accumulator, element)
+                mut lookups,
+            } => {
+                let mut accumulator = accumulator;
+                while let Some((element, found)) = lookups.next(&mut self_iter, other_set) {
+                    if !found {
+                        accumulator = fold(accumulator, element);
+                    }
                 }
-            }),
+                accumulator
+            }
             DifferenceStrategy::Iterate(iter) => iter.fold(accumulator, fold),
         }
     }
@@ -156,9 +167,11 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Difference<'_, 
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
+                lookups,
             } => DifferenceStrategy::Search {
                 self_iter: self_iter.clone(),
                 other_set,
+                lookups: *lookups,
             },
             DifferenceStrategy::Iterate(iter) => DifferenceStrategy::Iterate(iter.clone()),
         };
@@ -198,6 +211,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
             Self::Search {
                 self_iter,
                 other_set,
+                ..
             } => f
                 .debug_struct("Search")
                 .field("self_iter", self_iter)
@@ -272,6 +286,7 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
                 _ if other.prefers_lookups(self.len()) => DifferenceStrategy::Search {
                     self_iter: self.iter(),
                     other_set: other,
+                    lookups: LookupsAhead::default(),
                 },
                 _ => DifferenceStrategy::Stitch {
                     sides: MergeSides::new(self.iter(), other.iter()),

@@ -18,6 +18,7 @@
 mod difference;
 mod intersection;
 mod iter;
+mod lookups;
 mod merge;
 mod subset;
 mod symmetric_difference;
@@ -109,6 +110,11 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// (`--cfg fuzzing`, which `cargo fuzz` sets), for the fuzz targets.
     pub fn check_invariants(&self) {
         self.map.check_invariants();
+    }
+
+    /// Checks tree shape, keys and prefixes against individual inserts.
+    pub fn check_same_nodes(&self, other: &Self) {
+        self.map.check_same_nodes(&other.map);
     }
 }
 
@@ -213,6 +219,28 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// ```
     pub fn clear(&mut self) {
         self.map.clear();
+    }
+
+    /// Tests each value in input order, as separate calls to `contains`
+    /// would. Values may repeat; an empty batch returns an empty array.
+    pub fn contains_many<Q, const N: usize>(&self, values: [&Q; N]) -> [bool; N]
+    where
+        T: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        self.map.get_many(values).map(|value| value.is_some())
+    }
+
+    /// Inserts each value in order, returning whether it was newly added.
+    /// A repeated value returns `false` after its first insertion and keeps
+    /// the existing value, as `insert` does.
+    pub fn insert_many<const N: usize>(&mut self, values: [T; N]) -> [bool; N]
+    where
+        T: Ord,
+    {
+        self.map
+            .insert_many(values.map(|value| (value, SetValZST)))
+            .map(|old| old.is_none())
     }
 
     /// Returns `true` if the set contains an element equal to the value.
@@ -730,9 +758,8 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Extend<T> for BBTree
     /// Inserts each element in turn, as `insert` does: of equal elements,
     /// the set keeps the first.
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        for element in iter {
-            self.insert(element);
-        }
+        self.map
+            .extend(iter.into_iter().map(|element| (element, SetValZST)));
     }
 }
 

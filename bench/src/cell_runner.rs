@@ -14,7 +14,7 @@ use crate::keys::{BenchKey, KeyKind, KeyMaker};
 use crate::map_adapters::{MapKind, MapUnderTest};
 use crate::memory::{ResidentSet, RunMode};
 use crate::operations::{
-    ManyMapsCell, ManyMapsKeys, PreparedCell, SingleMapCell, SingleMapKeys, Stopwatch,
+    BatchCell, ManyMapsCell, ManyMapsKeys, PreparedCell, SingleMapCell, SingleMapKeys, Stopwatch,
 };
 use crate::perf_counters::PerfControl;
 use crate::values::{BenchValue, InlineRecord, ValueKind, ValueMaker};
@@ -229,7 +229,12 @@ impl CellRun {
         match keys {
             CellKeys::SingleMap(keys) => {
                 let budget = self.request.scale().operation_budget();
-                self.with_map_type(SingleMapCell::new(keys, values, budget))
+                let prepared = SingleMapCell::new(keys, values, budget);
+                if self.request.cell().workload().operation().is_batch() {
+                    self.with_map_type(BatchCell::from(prepared))
+                } else {
+                    self.with_map_type(prepared)
+                }
             }
             CellKeys::ManyMaps(keys) => self.with_map_type(ManyMapsCell::new(keys, values)),
         }

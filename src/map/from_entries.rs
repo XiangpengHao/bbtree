@@ -1,11 +1,11 @@
 //! Building a map from entries, as std's map does: [`FromIterator`], `From`
 //! an array, and [`Extend`].
 //!
-//! `extend` inserts each entry in turn. `collect` and `from` sort the
-//! entries by key, stably, and keep only the last of each run of equal keys,
-//! key and value, dropping the others in order; then they build the tree
-//! from the sorted entries, into full nodes, comparing no more keys
-//! (`tree/build.rs`).
+//! `extend` inserts in input order, batching descents on large trees.
+//! `collect` and `from` sort entries by key, stably, and keep only the last
+//! key and value of each run of equal keys, dropping the others in order;
+//! then they build the tree from sorted entries, into full nodes, comparing
+//! no more keys (`tree/build.rs`).
 //!
 //! Like `new` and `Default`, `collect` and `from` make maps of the default
 //! strategy only, as std's make maps of the global allocator only: with a
@@ -20,6 +20,7 @@ use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::build::TreeBuilder;
+use crate::tree::root::Tree;
 
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// A map of `entries`, sorted by key, of which only the last of each run
@@ -33,6 +34,26 @@ impl<K: Ord, V> BBTreeMap<K, V> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
+    /// Keeps chunking and lane state out of callers of `extend`. A partial
+    /// chunk is consumed before stopping, including non-fused iterators.
+    #[inline(never)]
+    fn extend_batches(&mut self, entries: impl Iterator<Item = (K, V)>)
+    where
+        K: Ord,
+    {
+        let mut entries = entries.fuse();
+        loop {
+            let batch: [_; 16] = core::array::from_fn(|_| entries.next());
+            if batch[15].is_none() {
+                for (key, value) in batch.into_iter().flatten() {
+                    self.tree.insert(key, value, &self.alloc, &mut self.length);
+                }
+                return;
+            }
+            self.insert_many(batch.map(|entry| entry.expect("a full batch")));
+        }
+    }
+
     /// A map of `entries`, whose keys ascend strictly, built into full nodes
     /// comparing no keys (`tree/build.rs`), on pages from `alloc`. Keys out
     /// of order make a map whose searches give wrong answers, but that is
@@ -102,10 +123,29 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Extend<(K, V)>
     for BBTreeMap<K, V, S, A>
 {
     /// Inserts each entry in turn, as `insert` does.
+    /// Large trees may pull sixteen entries ahead; a panic can drop entries
+    /// already pulled from the iterator but not yet inserted.
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
-        for (key, value) in iter {
-            self.insert(key, value);
+        let mut entries = iter.into_iter();
+        // Automatic batching must not put large inline values in several
+        // temporary arrays. Keep its input buffer within one 4 KiB page.
+        if core::mem::size_of::<[Option<(K, V)>; 16]>() > 4096
+            || entries.size_hint().1.is_some_and(|remaining| {
+                !Tree::<K, V, S>::batches(self.length.saturating_add(remaining))
+            })
+        {
+            for (key, value) in entries {
+                self.tree.insert(key, value, &self.alloc, &mut self.length);
+            }
+            return;
         }
+        while !Tree::<K, V, S>::batches(self.length) {
+            let Some((key, value)) = entries.next() else {
+                return;
+            };
+            self.tree.insert(key, value, &self.alloc, &mut self.length);
+        }
+        self.extend_batches(entries);
     }
 }
 

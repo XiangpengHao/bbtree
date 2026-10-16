@@ -8,12 +8,14 @@ use crate::operations::Operation;
 use crate::values::ValueKind;
 use crate::workload::{MapSize, Workload};
 
-/// A suite runs within 10 minutes at full scale, one repetition, on the
-/// benchmark machine (Ryzen 9 9900X).
+/// Named collections of workloads. Select cells to keep each run below
+/// five minutes on the benchmark machine (Ryzen 9 9900X).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Suite {
     /// `u64 → u64` at 10M, every operation.
     Headline,
+    /// Fixed batches on generated and real keys, at cache and DRAM scales.
+    Batch,
     /// Each generated key kind → `u64`, at 1M, and the fixed-size keys and
     /// JSON keys at 10M too: inserts and lookups.
     Keys,
@@ -44,6 +46,7 @@ pub(crate) enum Suite {
 impl Named for Suite {
     const ALL: &'static [Self] = &[
         Self::Headline,
+        Self::Batch,
         Self::Keys,
         Self::RealKeys,
         Self::Values,
@@ -57,6 +60,7 @@ impl Named for Suite {
     fn name(self) -> &'static str {
         match self {
             Self::Headline => "headline",
+            Self::Batch => "batch",
             Self::Keys => "keys",
             Self::RealKeys => "realkeys",
             Self::Values => "values",
@@ -100,7 +104,7 @@ impl Suite {
     /// compares bbtree with its baseline, std's `BTreeMap`.
     pub(crate) fn maps(self) -> &'static [MapKind] {
         match self {
-            Self::RealKeys | Self::Ci => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::RealKeys | Self::Ci | Self::Batch => &[MapKind::BBTree, MapKind::StdBTree],
             Self::Headline
             | Self::Keys
             | Self::Values
@@ -119,6 +123,21 @@ impl Suite {
             Operation::GetMiss,
         ];
         match self {
+            Self::Batch => Workload::product(
+                &[
+                    KeyKind::U64Random,
+                    KeyKind::JsonString,
+                    KeyKind::Hash32,
+                    KeyKind::WikiTitles,
+                ],
+                &[ValueKind::U64],
+                &[
+                    MapSize::TenThousand,
+                    MapSize::OneMillion,
+                    MapSize::TenMillion,
+                ],
+                Operation::BATCH,
+            ),
             Self::Headline => Workload::product(
                 &[KeyKind::U64Random],
                 &[ValueKind::U64],

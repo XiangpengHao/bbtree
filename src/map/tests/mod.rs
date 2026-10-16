@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod allocator;
+mod batch;
 mod concat;
 mod differential;
 mod drops;

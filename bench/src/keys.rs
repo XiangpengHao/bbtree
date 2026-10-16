@@ -153,9 +153,11 @@ impl KeyKind {
         match self {
             Self::CrateNames => &[MapSize::OneThousand, MapSize::HundredThousand, MapSize::All],
             Self::KernelPaths => &[MapSize::OneThousand, MapSize::All],
-            Self::WikiTitles | Self::Urls | Self::Addresses => {
-                &[MapSize::OneMillion, MapSize::TenMillion]
-            }
+            Self::WikiTitles | Self::Urls | Self::Addresses => &[
+                MapSize::TenThousand,
+                MapSize::OneMillion,
+                MapSize::TenMillion,
+            ],
             // TODO(phase 2): GeoNames' count decides whether 10M or `all`.
             Self::GeoNames | Self::DblpTitles => &[MapSize::OneMillion, MapSize::All],
             Self::JsonObjectKeys => &[MapSize::RealJsonObjects],

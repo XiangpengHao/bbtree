@@ -89,7 +89,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         loop {
             match view.node {
                 Node::Leaf(leaf) => {
-                    let outcome = match leaf.find(&search) {
+                    let outcome = match leaf.find(&search, ()) {
                         Some(index) => TraceOutcome::Found { index },
                         None => TraceOutcome::Absent {
                             insert_at: match leaf.search(&search) {

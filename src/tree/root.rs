@@ -273,8 +273,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// An append of `key` to the remembered last leaf, if it has room, and
     /// `key` is greater than its last key and has what every key shares
     /// (D50); or else `key` back, for the ordinary search. Forgets the leaf
-    /// before comparing.
-    #[inline]
+    /// before comparing. Always inline: the batch's caller must not outline
+    /// the scalar insert's append check.
+    #[inline(always)]
     pub(crate) fn rightmost_append(&mut self, key: K) -> Result<RightmostAppend<'_, K, V, S>, K>
     where
         K: Ord,

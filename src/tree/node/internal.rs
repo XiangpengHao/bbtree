@@ -129,6 +129,23 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         NodePlan::of::<S, Self>()
     }
 
+    /// The header's line, for the batch's next internal search.
+    #[inline(always)]
+    pub(in crate::tree) fn search_line(self) -> *const u8 {
+        self.node.page().as_ptr()
+    }
+
+    /// The chosen edge's line, for a batch's follow stage.
+    #[inline(always)]
+    pub(in crate::tree) fn edge_line(self, index: usize) -> *const u8 {
+        debug_assert!(index <= self.len());
+        let layout = NodePtr::<K, V, S>::internal_layout();
+        self.node
+            .page()
+            .as_ptr()
+            .wrapping_add(layout.edges_offset + index * layout.edge_stride)
+    }
+
     /// The most separators an internal node holds.
     #[inline(always)]
     pub(in crate::tree) fn capacity() -> usize {

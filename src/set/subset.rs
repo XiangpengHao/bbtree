@@ -10,6 +10,7 @@ use core::cmp::Ordering;
 use core::ops::ControlFlow;
 
 use super::BBTreeSet;
+use super::lookups::LookupsAhead;
 use super::merge::{MergeSides, MergeStep};
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -62,7 +63,13 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
             Ordering::Less => {}
         }
         if other.prefers_lookups(self_iter.len()) {
-            return self_iter.all(|element| other.contains(element));
+            let mut lookups = LookupsAhead::default();
+            while let Some((_, found)) = lookups.next(&mut self_iter, other) {
+                if !found {
+                    return false;
+                }
+            }
+            return true;
         }
         let mut other_iter = other.iter();
         other_iter.next();

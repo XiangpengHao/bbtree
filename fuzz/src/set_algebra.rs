@@ -84,6 +84,18 @@ enum CombinationFinish {
 /// One operation on both pairs of sets.
 #[derive(Arbitrary, Debug)]
 enum SetOperation {
+    ContainsBatch {
+        side: Side,
+        elements: [KeyRecipe; 8],
+    },
+    InsertBatch {
+        side: Side,
+        elements: [KeyRecipe; 8],
+    },
+    Extend {
+        side: Side,
+        elements: Vec<KeyRecipe>,
+    },
     Insert {
         side: Side,
         element: KeyRecipe,
@@ -194,6 +206,43 @@ impl<'i, T: FuzzKey> MirroredSets<'i, T> {
 
     fn apply(&mut self, operation: &SetOperation) {
         match *operation {
+            SetOperation::ContainsBatch { side, elements } => {
+                let elements = elements.map(|element| self.element(element));
+                let pair = self.side_mut(side);
+                let queries = elements.each_ref();
+                assert_eq!(
+                    pair.ours.contains_many(queries),
+                    queries.map(|element| pair.theirs.contains(element))
+                );
+            }
+            SetOperation::InsertBatch { side, elements } => {
+                let elements = elements.map(|element| self.element(element));
+                self.change(side, |pair| {
+                    let mut individual = pair.ours.clone();
+                    let expected = elements.clone().map(|element| pair.theirs.insert(element));
+                    assert_eq!(
+                        elements.clone().map(|element| individual.insert(element)),
+                        expected
+                    );
+                    assert_eq!(pair.ours.insert_many(elements), expected);
+                    pair.ours.check_same_nodes(&individual);
+                });
+            }
+            SetOperation::Extend { side, ref elements } => {
+                let elements: Vec<_> = elements
+                    .iter()
+                    .map(|&element| self.element(element))
+                    .collect();
+                self.change(side, |pair| {
+                    let mut individual = pair.ours.clone();
+                    for element in elements.iter().cloned() {
+                        individual.insert(element);
+                    }
+                    pair.ours.extend(elements.iter().cloned());
+                    pair.theirs.extend(elements);
+                    pair.ours.check_same_nodes(&individual);
+                });
+            }
             SetOperation::Insert { side, element } => {
                 let element = self.element(element);
                 self.change(side, |pair| {

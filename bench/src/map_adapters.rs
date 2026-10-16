@@ -111,7 +111,20 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
 
     fn insert(&mut self, key: K, value: V);
 
+    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
+        for (key, value) in entries {
+            self.insert(key, value);
+        }
+    }
+
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>);
+
     fn get(&self, key: &K) -> Option<&V>;
+
+    /// A batch on maps that have it, separate lookups on the others.
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
+        keys.map(|key| self.get(key))
+    }
 
     /// Visits every entry, in key order for ordered maps, and returns their
     /// checksum.
@@ -170,6 +183,10 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
         BBTreeMap::new()
     }
 
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        self.extend(entries);
+    }
+
     fn entry_count(&self) -> usize {
         BBTreeMap::len(self)
     }
@@ -178,8 +195,16 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
         BBTreeMap::insert(self, key, value);
     }
 
+    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
+        self.insert_many(entries);
+    }
+
     fn get(&self, key: &K) -> Option<&V> {
         BBTreeMap::get(self, key)
+    }
+
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
+        self.get_many(keys)
     }
 
     fn checksum_all(&self) -> u64 {
@@ -215,6 +240,10 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K,
         BBTreeMap::with_strategy(WithInlineKey)
     }
 
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        self.extend(entries);
+    }
+
     fn entry_count(&self) -> usize {
         BBTreeMap::len(self)
     }
@@ -223,8 +252,16 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K,
         BBTreeMap::insert(self, key, value);
     }
 
+    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
+        self.insert_many(entries);
+    }
+
     fn get(&self, key: &K) -> Option<&V> {
         BBTreeMap::get(self, key)
+    }
+
+    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
+        self.get_many(keys)
     }
 
     fn checksum_all(&self) -> u64 {
@@ -253,6 +290,10 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BTreeMap<K, V> {
 
     fn new() -> Self {
         BTreeMap::new()
+    }
+
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        self.extend(entries);
     }
 
     fn entry_count(&self) -> usize {
@@ -300,6 +341,10 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for hashbrown::HashMap<K, V>
         hashbrown::HashMap::new()
     }
 
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        self.extend(entries);
+    }
+
     fn entry_count(&self) -> usize {
         hashbrown::HashMap::len(self)
     }
@@ -335,6 +380,10 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for HashMap<K, V> {
 
     fn new() -> Self {
         HashMap::new()
+    }
+
+    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
+        self.extend(entries);
     }
 
     fn entry_count(&self) -> usize {

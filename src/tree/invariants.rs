@@ -19,6 +19,22 @@ use super::shared_prefix::SharedPrefix;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// Checks the keys and prefixes node by node, not just the ordered
+    /// entries: batched inserts must make the same splits as individual ones.
+    pub(crate) fn check_same_nodes(&self, other: &Self) {
+        match (self.root_page(), other.root_page()) {
+            (Some(left), Some(right)) => {
+                assert_eq!(
+                    left.shared_prefix().as_bytes(),
+                    right.shared_prefix().as_bytes()
+                );
+                left.node().check_same_nodes(right.node());
+            }
+            (None, None) => {}
+            _ => panic!("only one tree has a root"),
+        }
+    }
+
     /// Panics unless this is a well-formed B+-tree of `length` entries
     /// (D17):
     ///
@@ -354,3 +370,30 @@ pub(in crate::tree) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>:
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> NodeChecks<K, V, S> for C {}
+
+impl<K: Ord, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    fn check_same_nodes(self, other: Self) {
+        assert_eq!(self.prefix_len(), other.prefix_len());
+        assert_eq!(self.len(), other.len());
+        match (self, other) {
+            (Node::Leaf(left), Node::Leaf(right)) => {
+                assert_eq!(left.has_head(), right.has_head());
+                if left.has_head() && NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                    assert!(left.head_key() == right.head_key());
+                }
+                for index in 0..left.len() {
+                    assert!(left.key(index) == right.key(index));
+                }
+            }
+            (Node::Internal(left), Node::Internal(right)) => {
+                for index in 0..left.len() {
+                    assert!(left.separator_key(index) == right.separator_key(index));
+                }
+                for edge in 0..=left.len() {
+                    left.child(edge).check_same_nodes(right.child(edge));
+                }
+            }
+            _ => panic!("nodes differ in kind"),
+        }
+    }
+}

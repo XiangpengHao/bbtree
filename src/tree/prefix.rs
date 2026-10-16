@@ -296,8 +296,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///
     /// Every insert does this, and almost every one changes nothing: the
     /// check is inline, and making the tree or starting or shrinking the
-    /// prefix is not.
-    #[inline]
+    /// prefix is not. Always inline: the batch's inserts, more callers,
+    /// outlined it, which cost a 10M JSON random insert about 75 ns.
+    #[inline(always)]
     pub(in crate::tree) fn shrink_shared_prefix_for(
         &mut self,
         key: K,

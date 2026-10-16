@@ -160,6 +160,12 @@ enum WalkFinish {
 /// One operation on both maps.
 #[derive(Arbitrary, Debug)]
 enum MapOperation {
+    GetBatch {
+        keys: [KeyRecipe; 8],
+    },
+    InsertBatch {
+        entries: [(KeyRecipe, u16); 8],
+    },
     Insert {
         key: KeyRecipe,
         value: u16,
@@ -377,6 +383,28 @@ where
 
     fn apply(&mut self, operation: &MapOperation) {
         match *operation {
+            MapOperation::GetBatch { keys } => {
+                let keys = keys.map(|key| self.key(key));
+                let queries = keys.each_ref();
+                assert_eq!(
+                    self.ours.get_many(queries),
+                    queries.map(|key| self.theirs.get(key))
+                );
+            }
+            MapOperation::InsertBatch { entries } => {
+                let entries = entries.map(|(key, value)| (self.key(key), V::from_input(value)));
+                let mut individual = self.ours.clone();
+                let expected = entries
+                    .clone()
+                    .map(|(key, value)| self.theirs.insert(key, value));
+                let sequential = entries
+                    .clone()
+                    .map(|(key, value)| individual.insert(key, value));
+                assert_eq!(self.ours.insert_many(entries), expected);
+                assert_eq!(sequential, expected);
+                self.ours.check_same_nodes(&individual);
+                assert!(self.ours.iter().eq(individual.iter()));
+            }
             MapOperation::Insert { key, value } => {
                 self.insert(self.key(key), V::from_input(value));
             }
@@ -537,8 +565,14 @@ where
             }
             MapOperation::Extend { ref entries } => {
                 let entries = self.entries(entries);
+                let mut individual = self.ours.clone();
+                for (key, value) in entries.iter().cloned() {
+                    individual.insert(key, value);
+                }
                 self.ours.extend(entries.iter().cloned());
                 self.theirs.extend(entries);
+                self.ours.check_same_nodes(&individual);
+                assert!(self.ours.iter().eq(individual.iter()));
             }
             MapOperation::IntoIter { ends, count } => {
                 let empty = BBTreeMap::with_strategy(S::default());

@@ -842,10 +842,12 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 
 **D46. No software prefetch.** (2026-10-10)
 
-- **What:** the library issues no prefetch instructions and has no
-  `prefetch` feature. Hardware prefetchers work as they do. AGENTS.md
-  forbids explicit prefetching anywhere, including benchmarks and
-  prototypes.
+- **What:** the library issues no prefetch instructions but in the batch
+  lanes (D53), which prefetch, through one wrapper in `tree/batch.rs`,
+  only the line each lane reads next; single-key operations never do.
+  There is no `prefetch` feature. Hardware prefetchers work as they do.
+  AGENTS.md forbids explicit prefetching anywhere else, benchmarks and
+  prototypes included.
 - **Why:**
   - Prefetch hides what the layout does with memory: the same layout moved
     by ±5–10% depending only on what was prefetched, so layout changes
@@ -1093,6 +1095,33 @@ Design in 05-fence-key.md, "The shared prefix".
   by 2 to 6%: the root's kind is read from its header, a leaf's pointer
   loses its tag, and balancing reads a child's tag where D51 kept the
   level in a register.
+
+**D53. Batches descend in async lanes, each prefetching what it reads next.** (2026-10-15)
+
+- **What:** map `get_many` and `insert_many`, and set `contains_many` and
+  `insert_many`, take fixed arrays and return one result per key in input
+  order. Each key descends in a lane, an async block that prefetches the
+  line it reads next (D46's exception) and yields; a private executor
+  polls up to 64 lanes by a live-bit mask, more in `Option` slots, with a
+  no-op waker. Nothing async is public. `extend` batches sixteen entries at
+  a time; set operations that look a small set up in a large one batch 32
+  lookups ahead of their iterator. Below an estimated L2 of leaf pages,
+  everything goes one key at a time. Doc 12.
+- **Why:** a lookup is a chain of dependent misses, and one operation's
+  chain doesn't overlap the next one's. Lanes overlap them without
+  allocation. A lane reads like the single-key search, so lanes extend to
+  inserts and set operations without a new schedule.
+- **Correctness:** inserts apply in input order and shrink the shared
+  prefix just before each entry. A saved leaf length detects insertions
+  that fit; a split drops that leaf's destinations and every separator;
+  an insertion from the root drops them all. Trees match individual
+  inserts node by node. Panics are outside the contract (D48).
+- **Cost:** at 10M, 1.4–2.5× faster than one key a call, but 10–15 ns per
+  lookup slower (24–30 on wiki titles) than level-by-level lanes, which
+  search every lane at one depth and then follow: they stay the measured
+  ceiling. Async keeps fewer misses in flight at the leaves. Single-key paths keep their compilation through
+  a call-site marker and `inline(always)` on four insert helpers; doc 12
+  lists what each saved.
 
 ## Navigation
 

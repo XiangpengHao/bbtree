@@ -55,6 +55,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// after the leaf has changed: a failed allocation calls
     /// `handle_alloc_error`, which aborts by default, and one that panics
     /// leaves a memory-safe tree that is missing entries.
+    #[inline(always)]
     pub(crate) fn insert(
         &mut self,
         key: K,
@@ -103,7 +104,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// now find an existing key or a different leaf with room, both handled
     /// by the ordinary path.
     #[inline(never)]
-    fn insert_with_stack(
+    pub(in crate::tree) fn insert_with_stack(
         &mut self,
         key: PrefixedKey<K>,
         value: V,

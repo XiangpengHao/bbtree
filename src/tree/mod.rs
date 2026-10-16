@@ -38,12 +38,14 @@
 //! `unsafe` code is in the node modules that touch pages or erase types
 //! (`node/mod.rs`, `page.rs`, `slots.rs`, `leaf.rs`, `internal.rs`,
 //! `root_page.rs`, `siblings.rs`, `inline_key_search.rs`, `vector_count.rs`,
-//! `type_identity.rs`), and in `root.rs`, `node_stack.rs`, `search.rs` and
-//! `walk.rs`, where a contract the type system doesn't check is relied on.
+//! `type_identity.rs`), and in `root.rs`, `node_stack.rs`, `search.rs`,
+//! `walk.rs` and `batch.rs`, where a contract the type system doesn't check
+//! is relied on.
 //! Every other module is `#![forbid(unsafe_code)]`. What only the tree
 //! uses, such as making a node handle from a pointer, is
 //! `pub(in crate::tree)`; the map and the set see the rest.
 
+mod batch;
 pub(crate) mod build;
 mod clone;
 mod cut;

@@ -289,6 +289,29 @@ where
         }
     }
 
+    /// The operations that look this set's elements up in `large`, which
+    /// has at least 16 times as many, against std's.
+    fn assert_same_lookups_in(&self, large: &Self, rng: &TestRng) {
+        let (ours, theirs) = ((&self.ours, &large.ours), (&self.theirs, &large.theirs));
+        for (ours, theirs) in [
+            (ours.0.intersection(ours.1), theirs.0.intersection(theirs.1)),
+            (ours.1.intersection(ours.0), theirs.1.intersection(theirs.0)),
+        ] {
+            Self::assert_same_combination(rng, ours, theirs, false);
+        }
+        let difference = (ours.0.difference(ours.1), theirs.0.difference(theirs.1));
+        Self::assert_same_combination(rng, difference.0, difference.1, false);
+        assert_eq!(ours.0.is_subset(ours.1), theirs.0.is_subset(theirs.1));
+        assert_eq!(ours.1.is_superset(ours.0), theirs.1.is_superset(theirs.0));
+        assert_eq!(ours.0.is_disjoint(ours.1), theirs.0.is_disjoint(theirs.1));
+        for (ours, theirs) in [
+            (ours.0 & ours.1, theirs.0 & theirs.1),
+            (ours.0 - ours.1, theirs.0 - theirs.1),
+        ] {
+            assert!(ours.iter().eq(&theirs));
+        }
+    }
+
     /// Steps `ours` and `theirs`, over the same combination of two sets,
     /// alike to their ends: the same items and size hints, and the same
     /// prints while `printed`. Their `min` and `fold` from the start, and
@@ -390,14 +413,11 @@ const PAIR_LENS: [(usize, usize); 13] = [
     (20, 6000),
 ];
 
-/// Every operation on two sets, on pairs of each length in [`PAIR_LENS`],
-/// and of each shape: overlapping, apart, touching at one end, and one
-/// inside the other with or without its ends.
-#[test]
-#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
-fn set_operations_match_std() {
-    let rng = TestRng::new(25);
-    for (a_len, b_len) in PAIR_LENS {
+impl MirroredSets<u64> {
+    /// Every operation on two sets, a set of `a_len` elements in each shape
+    /// against one of `b_len`: overlapping, apart, touching at one end, and
+    /// inside it with or without its ends.
+    fn assert_same_operations_of_every_shape(a_len: usize, b_len: usize, rng: &TestRng) {
         let universe = 2 * (a_len + b_len) + 2;
         let b_numbers = rng.distinct_numbers(b_len, universe);
         let b = MirroredSets::<u64>::from_numbers(b_numbers.iter().copied());
@@ -425,13 +445,48 @@ fn set_operations_match_std() {
             MirroredSets::from_numbers(inside_without_ends),
         ];
         for a in &shapes {
-            a.assert_same_set_operations(&b, &rng);
+            a.assert_same_set_operations(&b, rng);
         }
+    }
+}
+
+/// Every operation on two sets, on pairs of each length in [`PAIR_LENS`],
+/// and of each shape: overlapping, apart, touching at one end, and one
+/// inside the other with or without its ends.
+#[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
+fn set_operations_match_std() {
+    let rng = TestRng::new(25);
+    for (a_len, b_len) in PAIR_LENS {
+        MirroredSets::<u64>::assert_same_operations_of_every_shape(a_len, b_len, &rng);
     }
     // Strings, with inline keys of another width.
     let a = MirroredSets::<String>::from_numbers(rng.distinct_numbers(300, 1000).into_iter());
     let b = MirroredSets::<String>::from_numbers(rng.distinct_numbers(600, 1000).into_iter());
     a.assert_same_set_operations(&b, &rng);
+}
+
+/// The operations that look a small set's elements up in a large one, on
+/// a set large enough to look them up a batch at a time (`lookups.rs`):
+/// whole batches and a partial one, all found or some.
+#[test]
+#[cfg_attr(miri, ignore = "takes over 3 minutes under Miri")]
+fn set_operations_with_batched_lookups_match_std() {
+    let rng = TestRng::new(26);
+    let universe = 400_000;
+    let large_numbers = rng.distinct_numbers(130_000, universe);
+    let large = MirroredSets::<u64>::from_numbers(large_numbers.iter().copied());
+    assert!(large.ours.map.batches(), "large enough to batch");
+    for small_len in [33, 2000] {
+        let overlapping = rng.distinct_numbers(small_len, universe);
+        let inside = large_numbers.iter().copied().step_by(7).take(small_len);
+        for small in [
+            MirroredSets::from_numbers(overlapping.iter().copied()),
+            MirroredSets::from_numbers(inside),
+        ] {
+            small.assert_same_lookups_in(&large, &rng);
+        }
+    }
 }
 
 /// An element ordered by its key alone, whose tag, which it prints, tells

@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 mod append;
+mod batch;
 mod entry;
 mod extract_if;
 mod from_entries;
@@ -545,6 +546,13 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
     /// break their contracts fails it.
     pub fn check_invariants(&self) {
         self.tree.check_invariants(self.length);
+    }
+
+    /// Checks identical tree shape, keys and prefix lengths, for batch
+    /// equivalence tests and fuzzing. Values are compared through iteration.
+    pub fn check_same_nodes(&self, other: &Self) {
+        assert_eq!(self.length, other.length);
+        self.tree.check_same_nodes(&other.tree);
     }
 
     /// Panics unless no node's prefix length is shorter than its parent's

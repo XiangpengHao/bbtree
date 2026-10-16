@@ -52,3 +52,22 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - The agent's memory
 - Rebuilt data infra for AI agents
+
+## Before release checklist
+
+- [ ] Optimized on Apple M-series chips.
+- [x] Optimized on x86-64 with AVX512.
+- [ ] Good visualization for both tree layout and the batch interleaved search.
+- [ ] Compare with std Btree, Hashbrown.
+- [ ] Workload sort: fastest sorting is to build a bbtree. 
+- [ ] Workload sort-merge join: no need to pre-sort.
+- [ ] Workload hashjoin: bbtree is faster than hashbrown in hash join.
+- [ ] Workload aggregation (not sure). bbtree is faster on high cardinality aggregation. maybe is't faster only when we need a later sort?
+- [ ] Workload LSM-tree: bbtree is the best memtable. (not sure, because we are not multi-threaded yet, but we can probably wrap a large rw-lock)
+- [ ] Specialize key for: UUID, IP address, etc. But need to under a feature gate.
+
+#### Debating
+
+- Should we make it concurrent? Let's see what the batched version can do. If it's good enough and clost to a hash table, we don't need to make it concurrent for the initial release.
+
+
