@@ -1,7 +1,0 @@
-# WebAssembly as a crate built for the web gets it: wasm32-unknown-unknown
-# at its default features, not the native bench's `target-cpu=native`.
-[build]
-target = "wasm32-unknown-unknown"
-
-[target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-cpu=generic"]

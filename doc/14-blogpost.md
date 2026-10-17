@@ -7,8 +7,7 @@ mark where a figure or the charts sit.
 
 Title: bbtree: fastest ordered map in the world
 
-> B-trees are by far the most important access path structure in database and file systems.
-> — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
+> B-trees are by far the most important access path structure in database and file systems. — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
 
 **bbtree** is by far the fastest btree (ordered map):
 1. 5x faster than std's `BTreeMap` at single thread, 7x faster than `crossbeam-skiplist` at 12 threads.
@@ -24,9 +23,15 @@ Title: bbtree: fastest ordered map in the world
 
 #### Prefix key to improve comparisons 
 
+[Figure: one lookup's way down]
+
+[Figure: the leaf]
+
 #### AVX512/NEON SIMD to improve search speed
 
 #### Batching to improve throughput
+
+[Figure: four lookups on one thread]
 
 #### Careful layouts to improve cache locality
 
@@ -44,18 +49,19 @@ author's.
   (`performance_cards.rs`) and charts (`single_thread_chart.rs`,
   `concurrent_chart.rs`, `end_to_end_chart.rs`, `memory_chart.rs`,
   `architectures_chart.rs`; the grouped bars in `baseline_bars.rs`)
-  compile in the CSVs of `vis/data/<machine>/` (`measurements.rs`). `bench/tools/blog-runs.sh` runs
-  every chart's cells on a machine into the ignored `bench/results/blog/`,
-  and `bench/tools/blog-collect.sh` merges them into `vis/data/`; a cell
-  rerun (`reruns/`) replaces the first run of it. On AWS,
-  `bench/tools/aws-blog-runs.sh` runs `blog-runs.sh` on a spot instance it
-  launches and terminates.
+  compile in the CSVs of `vis/data/<machine>/` (`measurements.rs`). The
+  runs live in [bbtree-eval](https://github.com/XiangpengHao/bbtree-eval):
+  its `blog/runs.sh` runs every chart's cells on a machine into its
+  `blog/results/`, and `blog/collect.sh` merges them into this
+  repository's `vis/data/`; a cell rerun (`reruns/`) replaces the first run
+  of it. On AWS, `blog/aws-runs.sh` runs `blog/runs.sh` on a spot instance
+  it launches and terminates.
 - **One bbtree map (2026-10-17).** The post shows `bbtree::BBTreeMap`,
   the map threads share, as "bbtree" in every tab, one thread included;
   the single-thread `bbtree::unsync::BBTreeMap` runs in none (doc 03,
   D4). Every cell was re-run for it on 2026-10-17, on every machine and in
   every integration.
-- **Harness** (`bbtree-scaling`): `uuid` (`[u8; 16]`, version 4) and
+- **Harness** (bbtree-eval's `bbtree-scaling`): `uuid` (`[u8; 16]`, version 4) and
   `wiki-titles` keys; std's `BTreeMap` and `HashMap` owned by one thread
   (`Owned`, at one thread only); `RwLock<BTreeMap>`;
   lookups half of which miss (`get-half`, `get-half-batch`); `update`;
@@ -105,14 +111,14 @@ author's.
     reference (the author's call, 2026-10-17): a faint, dotted line that
     fades in, "DashMap (unordered, hashtable)" in italics, a dotted swatch
     in the phone's key; no scans, so no line under 90/10 scan/update. Its
-    cells come from `blog-runs.sh tab2-extra` (DashMap and bbtree's
+    cells come from `blog/runs.sh tab2-extra` (DashMap and bbtree's
     batched inserts, the latter not shown) on the same machine type the
-    same day, copied into the card's results before `blog-collect.sh`,
+    same day, copied into the card's results before `blog/collect.sh`,
     which keeps DashMap's rows. It is the one card not run on the 9900X, whose 12 cores made a
     cramped chart and whose second hardware threads bent its lines: it
     runs on AWS's c8a.metal-24xl (AMD EPYC 9R45, Zen 5, 96 cores, one
     socket, 12 × 32 MiB L3; AWS's AMD instances run a thread a core), at
-    1 thread and every 8 to 96 (`THREADS=1,8,…,96 aws-blog-runs.sh
+    1 thread and every 8 to 96 (`THREADS=1,8,…,96 blog/aws-runs.sh
     c8a.metal-24xl,c8a.24xlarge aws-c8a tab2 <keys>`), about $0.90 on
     spot. 10M entries still measure memory there: no map fits the 32 MiB
     L3 of an 8-core group, as on the 9900X.
@@ -136,15 +142,15 @@ author's.
     or its name when built elsewhere: pittsburgh's `rocketlake`). The
     machines: the Ryzen 9 9900X, pittsburgh's Core i5-11400, the M1 Pro,
     and AWS's C8i (Xeon 6) and C9g (Graviton5); the note names the AWS
-    instances. Cells come from `blog-runs.sh arch` (UUIDs unless
-    other keys are named; Linux or macOS), merged by `blog-collect.sh`;
-    on AWS, `bench/tools/aws-blog-runs.sh <types> <name>` runs them on a
+    instances. Cells come from `blog/runs.sh arch` (UUIDs unless
+    other keys are named; Linux or macOS), merged by `blog/collect.sh`;
+    on AWS, `blog/aws-runs.sh <types> <name>` runs them on a
     throwaway spot instance (c8i.large and c9g.large, 2 vCPUs, about a
     cent a run in us-west-2) and terminates it, the instance also
     shutting itself down two hours after boot. A machine joins the card in
     `ArchitectureMachine::ALL`. WebAssembly and the ESP32-P4 are left out:
     WebAssembly until Rust builds wasm32 with SIMD (`simd128`) by default
-    (its harness stays in `bench/wasm`, on keys from `bbtree-scaling
+    (its harness is bbtree-eval's `wasm/`, on keys from `bbtree-scaling
     --dump-keys`).
   - Motion: bars grow from their baseline at one speed, each taking the
     time its length takes on its chart's scale (`LinearScale::growth_ms`,
@@ -198,13 +204,13 @@ author's.
     against 3.01); about a cent for both AWS runs, on spot. This C8i
     instance ran std 25% slower than the first round's, so its absolute
     times don't compare across rounds. All four keys on pittsburgh and the
-    M1 too (`bench/results/blog/*-20261017`): pittsburgh 2.6/2.8/1.8/4.5×,
+    M1 too (bbtree-eval's `blog/results/*-20261017`): pittsburgh 2.6/2.8/1.8/4.5×,
     M1 1.8/2.3/1.8/4.4× (`u64`, UUID, titles, JSON). WebAssembly at its
     default features, measured in the first round on the single-thread
     map, is the exception: 0.45/0.66/1.18/1.20×, its fixed-size-key gets
     1.5–2.2× slower than std's, as without SIMD bbtree counts a node's
     inline keys one at a time; with `+simd128` 1.04/1.27/1.82/2.44× (raw
-    runs in `bench/results/blog/wasm*-pittsburgh-20261016`; neither is in
+    runs in bbtree-eval's `blog/results/wasm*-pittsburgh-20261016`; neither is in
     the post). A wasm SIMD count, like the NEON one (D56), is the fix to
     consider.
   - Hash maps, for reference: std's `HashMap` takes 23 ns a `u64` get
@@ -215,7 +221,7 @@ author's.
     UUID, titles, JSON), std 27.1 / 38.9 / 71.6 / 59.1: even on
     fixed-size keys, 13–16% more on strings (inline keys and length tags).
 - **Integrations**, single thread only (with more, each system is bound by
-  its own locks): `~/coding/bbtree-integrations/{fjall,slatedb,turso,tonbo,lance}`,
+  its own locks): bbtree-eval's `integrations/{fjall,slatedb,turso,tonbo,lance}`,
   the shipped skiplist against bbtree, re-run on 2026-10-17 with the
   renamed library, each with its RESULTS.md. Only the map changed, and
   where a system writes a batch, the call that hands it to the map whole

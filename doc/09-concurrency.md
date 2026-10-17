@@ -272,8 +272,8 @@ reads are formally a data race, as the internal nodes' are, and crossbeam's
 `AtomicCell` sequence lock's; the threads tests stay out of Miri for that
 (`.config/nextest.toml`).
 
-Measured (2026-10-17, 9900X, 10M `u64`, `bbtree-scaling`, against the
-latched lookups of 2026-10-16, millions a second): lookups half of which
+Measured (2026-10-17, 9900X, 10M `u64`, bbtree-eval's `bbtree-scaling`,
+against the latched lookups of 2026-10-16, millions a second): lookups half of which
 miss, 9.16 → 8.84 on one thread, 83.4 → 86.9 at 12, 98.0 → 113.6 at 24;
 batched, 13.5 → 13.8, 115.5 → 130.6, 121.5 → 145.9. A hit no longer
 writes its leaf's latch word, a line each reader of the leaf took in turn.

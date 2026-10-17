@@ -22,7 +22,7 @@ pub(crate) struct RunHeader {
     started_at: String,
     commit: String,
     cpu: String,
-    allocator: String,
+    allocator: &'static str,
     vector_extensions: &'static str,
     settings: String,
     command_line: String,

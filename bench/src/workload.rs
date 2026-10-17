@@ -22,7 +22,6 @@ pub(crate) enum MapSize {
     /// reused until the cell has timed enough operations.
     OneThousand,
     TenThousand,
-    HundredThousand,
     OneMillion,
     /// DRAM-resident: memtables and indexes.
     TenMillion,
@@ -37,7 +36,6 @@ impl Named for MapSize {
         Self::RealJsonObjects,
         Self::OneThousand,
         Self::TenThousand,
-        Self::HundredThousand,
         Self::OneMillion,
         Self::TenMillion,
         Self::All,
@@ -50,7 +48,6 @@ impl Named for MapSize {
             Self::RealJsonObjects => "1Mxreal",
             Self::OneThousand => "1k",
             Self::TenThousand => "10k",
-            Self::HundredThousand => "100k",
             Self::OneMillion => "1M",
             Self::TenMillion => "10M",
             Self::All => "all",
@@ -65,7 +62,6 @@ impl MapSize {
         Self::ThirtyTwoEntryMaps,
         Self::OneThousand,
         Self::TenThousand,
-        Self::HundredThousand,
         Self::OneMillion,
         Self::TenMillion,
     ];
@@ -82,7 +78,6 @@ impl MapSize {
             Self::ThirtyTwoEntryMaps => (scale.shrink(100_000), 32),
             Self::OneThousand => (1, scale.shrink(1_000)),
             Self::TenThousand => (1, scale.shrink(10_000)),
-            Self::HundredThousand => (1, scale.shrink(100_000)),
             Self::OneMillion => (1, scale.shrink(1_000_000)),
             Self::TenMillion => (1, scale.shrink(10_000_000)),
             Self::RealJsonObjects | Self::All => return None,
@@ -119,16 +114,6 @@ impl MapShape {
 
     pub(crate) fn entries_per_map(self) -> usize {
         self.entries_per_map
-    }
-
-    /// How many distinct keys a cell of this shape inserts: one map's
-    /// entries, or the vocabulary that many maps draw from.
-    pub(crate) fn distinct_keys(self) -> usize {
-        if self.map_count == 1 {
-            self.entries_per_map
-        } else {
-            Self::VOCABULARY_SIZE
-        }
     }
 }
 

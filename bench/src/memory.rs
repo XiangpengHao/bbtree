@@ -4,13 +4,7 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(not(feature = "jemalloc"))]
 pub use mimalloc::MiMalloc as BaseAllocator;
-#[cfg(feature = "jemalloc")]
-pub use tikv_jemallocator::Jemalloc as BaseAllocator;
-// The jemalloc build leaves mimalloc, the default, unused.
-#[cfg(feature = "jemalloc")]
-use mimalloc as _;
 
 /// What each cell measures, which the binary decides by its global
 /// allocator.
@@ -35,25 +29,18 @@ impl RunMode {
     }
 
     /// The global allocator, for report headers.
-    pub(crate) fn allocator_description(self) -> String {
-        let base = if cfg!(feature = "jemalloc") {
-            "jemalloc"
-        } else {
-            "mimalloc"
-        };
+    pub(crate) fn allocator_description(self) -> &'static str {
         match self {
-            Self::Timing => base.to_owned(),
-            Self::Memory(_) => format!("{base}, wrapped in a live-byte counter"),
+            Self::Timing => "mimalloc",
+            Self::Memory(_) => "mimalloc, wrapped in a live-byte counter",
         }
     }
 }
 
-/// The base allocator, counting the bytes it has live, and the most it
-/// has had live since the peak was last reset.
+/// The base allocator, counting the bytes it has live.
 pub struct CountingAllocator {
     base: BaseAllocator,
     live_bytes: AtomicUsize,
-    peak_bytes: AtomicUsize,
 }
 
 impl CountingAllocator {
@@ -62,28 +49,7 @@ impl CountingAllocator {
         Self {
             base: BaseAllocator,
             live_bytes: AtomicUsize::new(0),
-            peak_bytes: AtomicUsize::new(0),
         }
-    }
-
-    pub(crate) fn live_bytes(&self) -> usize {
-        self.live_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Starts the peak over from the bytes live now.
-    pub(crate) fn reset_peak(&self) {
-        self.peak_bytes.store(self.live_bytes(), Ordering::Relaxed);
-    }
-
-    /// The most bytes live at once since the peak was last reset.
-    pub(crate) fn peak_bytes(&self) -> usize {
-        self.peak_bytes.load(Ordering::Relaxed)
-    }
-
-    /// Counts `bytes` more live, and the peak with them.
-    fn add_live(&self, bytes: usize) {
-        let live = self.live_bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        self.peak_bytes.fetch_max(live, Ordering::Relaxed);
     }
 
     /// The bytes that dropping `value` frees, which are the bytes it held
@@ -108,7 +74,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // SAFETY: the caller upholds `alloc`'s contract, which is the base's.
         let pointer = unsafe { self.base.alloc(layout) };
         if !pointer.is_null() {
-            self.add_live(layout.size());
+            self.live_bytes.fetch_add(layout.size(), Ordering::Relaxed);
         }
         pointer
     }
@@ -117,7 +83,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // SAFETY: as for `alloc`.
         let pointer = unsafe { self.base.alloc_zeroed(layout) };
         if !pointer.is_null() {
-            self.add_live(layout.size());
+            self.live_bytes.fetch_add(layout.size(), Ordering::Relaxed);
         }
         pointer
     }
@@ -134,7 +100,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // contract on `new_size`.
         let new_pointer = unsafe { self.base.realloc(pointer, layout, new_size) };
         if !new_pointer.is_null() {
-            self.add_live(new_size);
+            self.live_bytes.fetch_add(new_size, Ordering::Relaxed);
             self.live_bytes.fetch_sub(layout.size(), Ordering::Relaxed);
         }
         new_pointer

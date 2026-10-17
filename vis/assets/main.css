@@ -2401,7 +2401,29 @@
   .post > p {
     margin: 0 0 20px;
   }
+  .post > ol {
+    margin: 0 0 24px;
+    padding-left: 1.5em;
+    list-style: decimal;
+  }
+  .post > ol > li + li {
+    margin-top: 4px;
+  }
+  .post > p a,
+  .post > ol a,
+  .post-quote a {
+    color: var(--link);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
+    text-underline-offset: 3px;
+  }
+  .post > p a:hover,
+  .post > ol a:hover,
+  .post-quote a:hover {
+    text-decoration-color: var(--link);
+  }
   .post > p code,
+  .post > ol code,
   .figure-text code {
     font: 0.9em var(--font-data);
     background: var(--well);
@@ -2513,6 +2535,11 @@
   }
   .post-quote p {
     margin: 0;
+  }
+  .post-quote footer {
+    margin-top: 6px;
+    font-style: normal;
+    font-size: 15px;
   }
 
   /* The performance cards: tabs over a card, wider than the text. */

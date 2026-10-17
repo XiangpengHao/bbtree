@@ -1,6 +1,6 @@
-//! The post's measurements, as `bench/tools/blog-runs.sh` took them on a
-//! machine and `bench/tools/blog-collect.sh` merged them: compiled in from
-//! the CSVs, so a new run is a rebuild. Each map keeps one name and one
+//! The post's measurements, as bbtree-eval's `blog/runs.sh` took them on a
+//! machine and its `blog/collect.sh` merged them: compiled in from the
+//! CSVs, so a new run is a rebuild. Each map keeps one name and one
 //! color across every chart.
 
 /// A map the bench measured.
@@ -268,7 +268,7 @@ struct MemoryRow {
 
 /// One workload of a real system, before and after one of its maps became
 /// bbtree's: the system's own benchmark on one thread, run by an
-/// integration in `~/coding/bbtree-integrations` (outside the repository).
+/// integration in bbtree-eval (`integrations/<system>`).
 /// The CSV keeps the thread count it ran at; the post shows one thread.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct IntegrationRow {
@@ -286,11 +286,6 @@ pub(crate) struct IntegrationRow {
 }
 
 impl IntegrationRow {
-    /// How many times faster the system ran with bbtree's map.
-    pub(crate) fn speedup(&self) -> f64 {
-        self.before_nanos / self.after_nanos
-    }
-
     /// Where the system's code lives.
     pub(crate) fn repository(&self) -> Option<&'static str> {
         match self.system.as_str() {
@@ -301,36 +296,6 @@ impl IntegrationRow {
             "Lance" => Some("https://github.com/lance-format/lance"),
             _ => None,
         }
-    }
-}
-
-/// The least and the most of some speedups, shown as "1.9–4.7×".
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct SpeedupRange {
-    least: f64,
-    most: f64,
-}
-
-impl SpeedupRange {
-    fn of(speedups: impl Iterator<Item = f64>) -> Option<Self> {
-        speedups.fold(None, |range: Option<Self>, speedup| {
-            Some(match range {
-                Some(range) => Self {
-                    least: range.least.min(speedup),
-                    most: range.most.max(speedup),
-                },
-                None => Self {
-                    least: speedup,
-                    most: speedup,
-                },
-            })
-        })
-    }
-}
-
-impl std::fmt::Display for SpeedupRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.1}–{:.1}×", self.least, self.most)
     }
 }
 
@@ -364,7 +329,7 @@ impl Measurements {
         )
     }
 
-    /// The concurrent card's runs (`blog-runs.sh tab2`), on AWS's
+    /// The concurrent card's runs (`blog/runs.sh tab2`), on AWS's
     /// c8a.metal-24xl: 96 cores and a thread a core, so that each thread
     /// added is a core added.
     pub(crate) fn of_epyc_9r45() -> Self {
@@ -378,7 +343,7 @@ impl Measurements {
     }
 
     /// A machine's throughput runs alone, without memory or integrations:
-    /// the architectures card's single-thread runs (`blog-runs.sh arch`),
+    /// the architectures card's single-thread runs (`blog/runs.sh arch`),
     /// or the concurrent card's.
     pub(crate) fn of_throughput(machine: Machine, throughput: &str) -> Self {
         Self::parse(machine, throughput, "", "")
@@ -484,28 +449,6 @@ impl Measurements {
         (self.memory.iter())
             .find(|row| row.map == map && row.keys == keys)
             .map(|row| row.memory)
-    }
-
-    /// How many times faster `faster` ran than `slower` on one thread,
-    /// each a map and the operation it ran, the least and the most across
-    /// the kinds of keys.
-    pub(crate) fn single_thread_speedups(
-        &self,
-        faster: (MeasuredMap, MeasuredOperation),
-        slower: (MeasuredMap, MeasuredOperation),
-    ) -> Option<SpeedupRange> {
-        SpeedupRange::of(MeasuredKeys::ALL.into_iter().filter_map(|keys| {
-            Some(
-                self.single_thread_nanos(slower.0, keys, slower.1)?
-                    / self.single_thread_nanos(faster.0, keys, faster.1)?,
-            )
-        }))
-    }
-
-    /// How many times faster the systems ran with bbtree, the least and
-    /// the most across their workloads.
-    pub(crate) fn integration_speedups(&self) -> Option<SpeedupRange> {
-        SpeedupRange::of(self.integrations.iter().map(IntegrationRow::speedup))
     }
 
     /// The systems measured before and after, in the order of their rows.

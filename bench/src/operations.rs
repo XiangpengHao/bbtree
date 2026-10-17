@@ -16,7 +16,7 @@ use crate::values::BenchValue;
 use crate::workload::MapSize;
 
 pub(crate) use many_maps::{ManyMapsCell, ManyMapsKeys, PicksPerMap};
-pub(crate) use single_map::{BatchCell, SingleMapCell, SingleMapKeys};
+pub(crate) use single_map::{SingleMapCell, SingleMapKeys};
 
 /// What a cell does. Time is reported per operation, which is one call of
 /// the map's API unless noted.
@@ -54,36 +54,11 @@ pub(crate) enum Operation {
     /// visiting the maps in random order. The keys are the other maps', so
     /// they mix like those of `GetMany`.
     GetManyMiss,
-    /// `RandomInsert` through `insert_many`, 16 entries a call. Per entry.
-    BatchRandomInsert,
-    /// `SequentialInsert` through `insert_many`, 16 entries a call. Per
-    /// entry.
-    BatchSequentialInsert,
-    /// `RandomInsert` through one `extend`. Per entry.
-    ExtendRandom,
-    /// `SequentialInsert` through one `extend`. Per entry.
-    ExtendSequential,
-    /// `GetHit` through `get_many`, 32 keys a call. Per key.
-    BatchGetHit32,
-    /// `GetMiss` through `get_many`, 32 keys a call. Per key.
-    BatchGetMiss32,
-    /// `GetHit` through `get_many`, 64 keys a call. Per key.
-    BatchGetHit64,
-    /// `GetMiss` through `get_many`, 64 keys a call. Per key.
-    BatchGetMiss64,
 }
 
 impl Named for Operation {
     const ALL: &'static [Self] = &[
         Self::RandomInsert,
-        Self::BatchRandomInsert,
-        Self::BatchSequentialInsert,
-        Self::ExtendRandom,
-        Self::ExtendSequential,
-        Self::BatchGetHit32,
-        Self::BatchGetMiss32,
-        Self::BatchGetHit64,
-        Self::BatchGetMiss64,
         Self::SequentialInsert,
         Self::GetHit,
         Self::GetMiss,
@@ -101,15 +76,6 @@ impl Named for Operation {
     fn name(self) -> &'static str {
         match self {
             Self::RandomInsert => "random_insert",
-            Self::BatchRandomInsert => "batch_random_insert",
-            Self::BatchSequentialInsert => "batch_sequential_insert",
-            Self::ExtendRandom => "extend_random",
-            Self::ExtendSequential => "extend_sequential",
-            Self::BatchGetHit32 => "batch_get_hit32",
-            Self::BatchGetMiss32 => "batch_get_miss32",
-            Self::BatchGetHit64 => "batch_get_hit64",
-            Self::BatchGetMiss64 => "batch_get_miss64",
-
             Self::SequentialInsert => "sequential_insert",
             Self::GetHit => "get_hit",
             Self::GetMiss => "get_miss",
@@ -127,7 +93,7 @@ impl Named for Operation {
 }
 
 impl Operation {
-    /// The operations on one map, all of which the headline suite runs.
+    /// The operations on one map, all of which the small and ci suites run.
     pub(crate) const ON_ONE_MAP: &'static [Self] = &[
         Self::RandomInsert,
         Self::SequentialInsert,
@@ -139,22 +105,6 @@ impl Operation {
         Self::EntryUpsert,
         Self::PopFirst,
         Self::BulkBuild,
-    ];
-
-    /// Batches, and the single-key operations they compare with.
-    pub(crate) const BATCH: &'static [Self] = &[
-        Self::GetHit,
-        Self::GetMiss,
-        Self::RandomInsert,
-        Self::SequentialInsert,
-        Self::BatchRandomInsert,
-        Self::BatchSequentialInsert,
-        Self::ExtendRandom,
-        Self::ExtendSequential,
-        Self::BatchGetHit32,
-        Self::BatchGetMiss32,
-        Self::BatchGetHit64,
-        Self::BatchGetMiss64,
     ];
 
     /// The operations on many tiny maps: build them, then read them as a
@@ -174,22 +124,7 @@ impl Operation {
         } else {
             Self::ON_ONE_MAP
         };
-        operations.contains(&self) || (!size.has_many_maps() && Self::BATCH.contains(&self))
-    }
-
-    /// Whether the operation calls a batch API, which `BatchCell` times.
-    pub(crate) fn is_batch(self) -> bool {
-        matches!(
-            self,
-            Self::BatchRandomInsert
-                | Self::BatchSequentialInsert
-                | Self::ExtendRandom
-                | Self::ExtendSequential
-                | Self::BatchGetHit32
-                | Self::BatchGetMiss32
-                | Self::BatchGetHit64
-                | Self::BatchGetMiss64
-        )
+        operations.contains(&self)
     }
 
     /// Whether the operation builds maps from inputs made beforehand: the
@@ -197,14 +132,7 @@ impl Operation {
     pub(crate) fn builds_maps(self) -> bool {
         matches!(
             self,
-            Self::RandomInsert
-                | Self::SequentialInsert
-                | Self::BulkBuild
-                | Self::BuildMany
-                | Self::BatchRandomInsert
-                | Self::BatchSequentialInsert
-                | Self::ExtendRandom
-                | Self::ExtendSequential
+            Self::RandomInsert | Self::SequentialInsert | Self::BulkBuild | Self::BuildMany
         )
     }
 }

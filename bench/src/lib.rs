@@ -1,8 +1,12 @@
-//! bbtree's benchmark suite: `bbtree::unsync::BBTreeMap` (`bbtree-unsync`),
+//! bbtree's CI benchmarks: `bbtree::unsync::BBTreeMap` (`bbtree-unsync`),
 //! and `bbtree::BBTreeMap` (`bbtree`, the map threads share, where `--map`
 //! names it), against std's `BTreeMap`, hashbrown's `HashMap` and std's
-//! `HashMap`, on the key types, value types, sizes and operations that
-//! `doc/02-field_study.md` §6 derives from how Rust code uses maps.
+//! `HashMap`, in the suites that CI runs: to keep the bench building as the
+//! library's API changes, and to report each pull request's change
+//! (`.github/workflows/perf.yml`). The evaluation, on the key types, value
+//! types, sizes and operations that `doc/02-field_study.md` §6 derives from
+//! how Rust code uses maps, and on threads, lives in bbtree-eval
+//! (https://github.com/XiangpengHao/bbtree-eval).
 //!
 //! - A *workload* is a key kind, a value kind, a size and an operation; a
 //!   *cell* is a workload on one map. Suites are lists of workloads
@@ -13,8 +17,6 @@
 //! - The binary fixes the global allocator: `bbtree-bench` times cells on
 //!   plain mimalloc, and `bbtree-bench-memory` counts live bytes instead
 //!   (`memory.rs`).
-//! - `bbtree-scaling` measures throughput as threads are added, on maps
-//!   threads share (`scaling.rs`).
 //! - Some key kinds are read from real-world datasets (`datasets.rs`), which
 //!   live outside the repository: `fetch` downloads them and `verify-data`
 //!   checks them.
@@ -23,10 +25,8 @@ use std::process::ExitCode;
 
 mod cell_runner;
 mod command_line;
-mod concurrent_maps;
 mod datasets;
 mod keys;
-mod latency;
 mod map_adapters;
 mod memory;
 mod operations;
@@ -35,9 +35,6 @@ mod perf_counters;
 mod random;
 mod report;
 mod run_comparison;
-mod scaling;
-#[cfg(feature = "inspect")]
-pub mod separator_census;
 mod suite_runner;
 mod suites;
 mod values;
@@ -51,7 +48,6 @@ use run_comparison::RunComparison;
 use suite_runner::SuiteRunner;
 
 pub use memory::{BaseAllocator, CountingAllocator};
-pub use scaling::run as run_scaling;
 
 /// Runs either binary's command line. The memory binary passes its global
 /// allocator, whose live-byte count its cells report.

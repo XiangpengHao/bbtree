@@ -1231,8 +1231,8 @@ Design and measurements in 09-concurrency.md, "Batches".
   greatest inline key (invariant 4), as the compiler's count already
   required, and clipped to `0..len` for any contents. x86's masks ignore
   them; masking them per vector on NEON cost 8–18% of a lookup.
-- **Measured** (M1 Pro, 10M entries, probe `bench/diagnostics/portable`,
-  one run each), ns before → after: `u64` hit 389.5 → 173.5, miss 308.1 →
+- **Measured** (M1 Pro, 10M entries, probe bbtree-eval's
+  `diagnostics/portable`, one run each), ns before → after: `u64` hit 389.5 → 173.5, miss 308.1 →
   137.3; `hash32` hit 398.7 → 185.2, miss 270.7 → 119.9; borrowed JSON hit
   428.7 → 267.3, miss 306.8 → 198.2. Instructions per `u64` hit 1,678 →
   407.
@@ -1256,9 +1256,9 @@ Design and measurements in 09-concurrency.md, "Lookups".
   the check. A `Copy` value has no `Drop` and no interior mutability, so a
   torn copy is thrown away unused. Closures (`read`, `update`, scans) keep
   the latch.
-- **Measured** (9900X, 10M `u64`, `bbtree-scaling`, against the latched
-  lookups of 2026-10-16): get-half at 24 threads 98.0 → 113.6 M/s, batched
-  121.5 → 145.9; one thread within 4%. A hit no longer writes its leaf's
+- **Measured** (9900X, 10M `u64`, bbtree-eval's `bbtree-scaling`, against
+  the latched lookups of 2026-10-16): get-half at 24 threads 98.0 → 113.6
+  M/s, batched 121.5 → 145.9; one thread within 4%. A hit no longer writes its leaf's
   latch word, a line every reader of the leaf took in turn.
 
 ## Navigation

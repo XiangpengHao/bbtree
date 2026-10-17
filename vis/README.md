@@ -94,8 +94,9 @@ so internal nodes hold more keys than on a 64-bit target, and `String` leaves
 differ (no length tags fit). Leaves of fixed-size keys and values match.
 
 The post's charts compile in the measurements under `data/<machine>/`:
-`bench/tools/blog-runs.sh` measures them on a machine, and
-`bench/tools/blog-collect.sh` writes them there (doc 14).
+[bbtree-eval](https://github.com/XiangpengHao/bbtree-eval)'s `blog/runs.sh`
+measures them on a machine, and its `blog/collect.sh` writes them there
+(doc 14).
 
 ## Code
 

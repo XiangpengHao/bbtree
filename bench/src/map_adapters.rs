@@ -14,13 +14,11 @@ use crate::values::BenchValue;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MapKind {
-    /// `BBTreeMap`, the map threads share, with the strategy its users would
-    /// pick for the key type (`BenchKey::measure_on_bbtree`), on one thread.
-    /// Runs only when `--map` names it, on keys with inline keys.
+    /// `BBTreeMap`, the map threads share, with the default strategy,
+    /// `Auto`, on one thread. Runs only when `--map` names it.
     BBTree,
-    /// `unsync::BBTreeMap`, the map for one thread, with the strategy its
-    /// users would pick for the key type (`BenchKey::measure_on_unsync`):
-    /// `WithInlineKey` for memtable keys, `Auto` for the others.
+    /// `unsync::BBTreeMap`, the map for one thread, with the default
+    /// strategy, `Auto`.
     Unsync,
     /// `unsync::BBTreeMap` with the `WithInlineKey` strategy: keys with
     /// inline keys through their own `InlineKey` impl. Runs only when
@@ -75,12 +73,11 @@ impl MapKind {
 
     /// Whether the map runs on keys of `key`: `bbtree-unsync-inline` only on
     /// those whose type has an `InlineKey` impl that `bbtree-unsync` doesn't
-    /// use, and `bbtree` on those with inline keys.
+    /// use.
     pub(crate) fn supports_key(self, key: KeyKind) -> bool {
         match self {
             Self::UnsyncInline => key.is_inline_keyed_integer(),
-            Self::BBTree => key != KeyKind::U32,
-            Self::Unsync | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
+            Self::BBTree | Self::Unsync | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
         }
     }
 
@@ -89,9 +86,8 @@ impl MapKind {
         matches!(self, Self::UnsyncInline | Self::BBTree)
     }
 
-    /// The adapter's list, read at `u64 → u64`: the lists don't depend on
-    /// the value type, nor on the key type unless it picks another adapter,
-    /// which `CellRun::measure` checks.
+    /// The adapter's list, read at `u64 → u64`: the lists depend on neither
+    /// the key type nor the value type.
     fn unsupported_operations(self) -> &'static [Operation] {
         match self {
             Self::BBTree => <CountedBBTree<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
@@ -126,14 +122,6 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
 
     fn insert(&mut self, key: K, value: V);
 
-    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
-        for (key, value) in entries {
-            self.insert(key, value);
-        }
-    }
-
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>);
-
     /// Whether the map hands out references to its values ([`Self::get`]);
     /// if not, lookups read through [`Self::lookup_fingerprint`].
     const LENDS_REFERENCES: bool = true;
@@ -146,17 +134,6 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
     /// that lends no references.
     fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
         self.get(key).map(BenchValue::fingerprint)
-    }
-
-    /// A batch on maps that have it, separate lookups on the others.
-    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
-        keys.map(|key| self.get(key))
-    }
-
-    /// [`Self::get_batch`]'s fingerprints, for a map that lends no
-    /// references.
-    fn lookup_fingerprint_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
-        keys.map(|key| self.lookup_fingerprint(key))
     }
 
     /// Visits every entry, in key order for ordered maps, and returns their
@@ -216,10 +193,6 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for unsync::BBTreeMap<K, V> 
         unsync::BBTreeMap::new()
     }
 
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        self.extend(entries);
-    }
-
     fn entry_count(&self) -> usize {
         unsync::BBTreeMap::len(self)
     }
@@ -228,16 +201,8 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for unsync::BBTreeMap<K, V> 
         unsync::BBTreeMap::insert(self, key, value);
     }
 
-    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
-        self.insert_many(entries);
-    }
-
     fn get(&self, key: &K) -> Option<&V> {
         unsync::BBTreeMap::get(self, key)
-    }
-
-    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
-        self.get_many(keys)
     }
 
     fn checksum_all(&self) -> u64 {
@@ -275,10 +240,6 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V>
         unsync::BBTreeMap::with_strategy(WithInlineKey)
     }
 
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        self.extend(entries);
-    }
-
     fn entry_count(&self) -> usize {
         unsync::BBTreeMap::len(self)
     }
@@ -287,16 +248,8 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V>
         unsync::BBTreeMap::insert(self, key, value);
     }
 
-    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
-        self.insert_many(entries);
-    }
-
     fn get(&self, key: &K) -> Option<&V> {
         unsync::BBTreeMap::get(self, key)
-    }
-
-    fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
-        self.get_many(keys)
     }
 
     fn checksum_all(&self) -> u64 {
@@ -325,10 +278,6 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BTreeMap<K, V> {
 
     fn new() -> Self {
         BTreeMap::new()
-    }
-
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        self.extend(entries);
     }
 
     fn entry_count(&self) -> usize {
@@ -376,10 +325,6 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for hashbrown::HashMap<K, V>
         hashbrown::HashMap::new()
     }
 
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        self.extend(entries);
-    }
-
     fn entry_count(&self) -> usize {
         hashbrown::HashMap::len(self)
     }
@@ -415,10 +360,6 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for HashMap<K, V> {
 
     fn new() -> Self {
         HashMap::new()
-    }
-
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        self.extend(entries);
     }
 
     fn entry_count(&self) -> usize {
@@ -468,8 +409,6 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
         Operation::BulkBuild,
         Operation::EntryUpsert,
         Operation::PopFirst,
-        Operation::ExtendRandom,
-        Operation::ExtendSequential,
     ];
 
     const LENDS_REFERENCES: bool = false;
@@ -491,23 +430,8 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
         }
     }
 
-    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
-        let replaced = self.map.insert_many(entries);
-        self.entries += replaced.iter().filter(|value| value.is_none()).count();
-    }
-
-    fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
-        for (key, value) in entries {
-            self.insert(key, value);
-        }
-    }
-
     fn lookup_fingerprint(&self, key: &K) -> Option<u64> {
         self.map.read(key, |_, value| value.fingerprint())
-    }
-
-    fn lookup_fingerprint_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
-        self.map.read_many(keys, |_, value| value.fingerprint())
     }
 
     fn checksum_all(&self) -> u64 {

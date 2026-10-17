@@ -1,5 +1,6 @@
-//! The suites: lists of workloads, each of which runs on every map. Together
-//! they cover doc/02-field_study.md §6 without its full cross product.
+//! The suites CI runs: lists of workloads, each of which runs on every map
+//! of its suite. The evaluation's suites, which cover doc/02-field_study.md
+//! §6, live in bbtree-eval.
 
 use crate::command_line::{CellFilter, Named};
 use crate::keys::KeyKind;
@@ -8,29 +9,19 @@ use crate::operations::Operation;
 use crate::values::ValueKind;
 use crate::workload::{MapSize, Workload};
 
-/// Named collections of workloads. Select cells to keep each run below
+/// Named collections of workloads, all of which CI runs: `small`, and
+/// `realkeys` and `tiny` without their datasets, to keep the bench building
+/// and running (.github/workflows/ci.yml); `ci` to report each change's
+/// timings (.github/workflows/perf.yml). Select cells to keep each run below
 /// five minutes on the benchmark machine (Ryzen 9 9900X).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Suite {
-    /// `u64 → u64` at 10M, every operation.
-    Headline,
-    /// Fixed batches on generated and real keys, at cache and DRAM scales.
-    Batch,
-    /// Each generated key kind → `u64`, at 1M, and the fixed-size keys and
-    /// JSON keys at 10M too: inserts and lookups.
-    Keys,
     /// Each large real-world key set → `u64`, at 1M and 10M (`all` for sets
     /// of fewer keys), on the ordered maps: inserts and lookups.
     RealKeys,
-    /// `u64` → each value kind, at 1M: inserts and lookups.
-    Values,
     /// Many tiny JSON-object-like maps: JSON keys → 32-byte structs, in
     /// maps of generated keys and in the objects of real JSON documents.
     Tiny,
-    /// LSM memtables: `(Bytes, u64)` → 100-byte records, at 1M.
-    Memtable,
-    /// `u64` and JSON-key sets, at 1M.
-    Sets,
     /// `u64 → u64` and `String → u64` at 1k, every operation; and crate names
     /// and kernel paths → `u64` at 1k: inserts and lookups.
     Small,
@@ -44,29 +35,12 @@ pub(crate) enum Suite {
 }
 
 impl Named for Suite {
-    const ALL: &'static [Self] = &[
-        Self::Headline,
-        Self::Batch,
-        Self::Keys,
-        Self::RealKeys,
-        Self::Values,
-        Self::Tiny,
-        Self::Memtable,
-        Self::Sets,
-        Self::Small,
-        Self::Ci,
-    ];
+    const ALL: &'static [Self] = &[Self::RealKeys, Self::Tiny, Self::Small, Self::Ci];
 
     fn name(self) -> &'static str {
         match self {
-            Self::Headline => "headline",
-            Self::Batch => "batch",
-            Self::Keys => "keys",
             Self::RealKeys => "realkeys",
-            Self::Values => "values",
             Self::Tiny => "tiny",
-            Self::Memtable => "memtable",
-            Self::Sets => "sets",
             Self::Small => "small",
             Self::Ci => "ci",
         }
@@ -74,19 +48,6 @@ impl Named for Suite {
 }
 
 impl Suite {
-    /// The key kinds the keys suite also runs at 10M: the fixed-size ones,
-    /// whose 1M maps fit in the L3 cache or nearly, and JSON keys, the
-    /// commonest strings. The other strings and the memtable keys outgrow
-    /// L3 at 1M already, and at 10M they would add about 15 minutes, mostly
-    /// building their trees.
-    const KEYS_AT_TEN_MILLION: [KeyKind; 5] = [
-        KeyKind::U64Random,
-        KeyKind::U64Sequential,
-        KeyKind::U32,
-        KeyKind::Hash32,
-        KeyKind::JsonString,
-    ];
-
     /// The key kinds read from large datasets of one key per line: those of
     /// the string-index literature (LITS, HOPE, HOT), but Wikipedia's titles
     /// of today.
@@ -101,62 +62,21 @@ impl Suite {
     /// The maps the suite's workloads run on. The real-keys suite compares
     /// the ordered maps only: at 10M entries of long strings, building each
     /// map takes seconds, and the hash maps wouldn't fit its time budget. CI
-    /// compares bbtree's unsync map with its baseline, std's `BTreeMap`; the
-    /// batches, both bbtree maps, which have a batch API, with it too.
+    /// compares bbtree's unsync map with its baseline, std's `BTreeMap`.
     pub(crate) fn maps(self) -> &'static [MapKind] {
         match self {
             Self::RealKeys | Self::Ci => &[MapKind::Unsync, MapKind::StdBTree],
-            Self::Batch => &[MapKind::Unsync, MapKind::BBTree, MapKind::StdBTree],
-            Self::Headline
-            | Self::Keys
-            | Self::Values
-            | Self::Tiny
-            | Self::Memtable
-            | Self::Sets
-            | Self::Small => MapKind::ALL,
+            Self::Tiny | Self::Small => MapKind::ALL,
         }
     }
 
     pub(crate) fn workloads(self) -> Vec<Workload> {
-        let inserts_and_lookups = [Operation::RandomInsert, Operation::GetHit];
         let inserts_hits_and_misses = [
             Operation::RandomInsert,
             Operation::GetHit,
             Operation::GetMiss,
         ];
         match self {
-            Self::Batch => Workload::product(
-                &[
-                    KeyKind::U64Random,
-                    KeyKind::JsonString,
-                    KeyKind::Hash32,
-                    KeyKind::WikiTitles,
-                ],
-                &[ValueKind::U64],
-                &[
-                    MapSize::TenThousand,
-                    MapSize::OneMillion,
-                    MapSize::TenMillion,
-                ],
-                Operation::BATCH,
-            ),
-            Self::Headline => Workload::product(
-                &[KeyKind::U64Random],
-                &[ValueKind::U64],
-                &[MapSize::TenMillion],
-                Operation::ON_ONE_MAP,
-            ),
-            Self::Keys => (KeyKind::ALL.iter())
-                .filter(|key| key.is_generated())
-                .flat_map(|&key| {
-                    let sizes: &[MapSize] = if Self::KEYS_AT_TEN_MILLION.contains(&key) {
-                        &[MapSize::OneMillion, MapSize::TenMillion]
-                    } else {
-                        &[MapSize::OneMillion]
-                    };
-                    Workload::product(&[key], &[ValueKind::U64], sizes, &inserts_hits_and_misses)
-                })
-                .collect(),
             Self::RealKeys => (Self::REAL_KEYS.iter())
                 .flat_map(|&key| {
                     Workload::product(
@@ -167,12 +87,6 @@ impl Suite {
                     )
                 })
                 .collect(),
-            Self::Values => Workload::product(
-                &[KeyKind::U64Random],
-                ValueKind::ALL,
-                &[MapSize::OneMillion],
-                &inserts_and_lookups,
-            ),
             Self::Tiny => {
                 let mut workloads = Workload::product(
                     &[KeyKind::JsonString],
@@ -188,22 +102,6 @@ impl Suite {
                 ));
                 workloads
             }
-            Self::Memtable => Workload::product(
-                &[KeyKind::Memtable16, KeyKind::Memtable24],
-                &[ValueKind::Bytes100],
-                &[MapSize::OneMillion],
-                &[
-                    Operation::RandomInsert,
-                    Operation::GetHit,
-                    Operation::Range64,
-                ],
-            ),
-            Self::Sets => Workload::product(
-                &[KeyKind::U64Random, KeyKind::JsonString],
-                &[ValueKind::Unit],
-                &[MapSize::OneMillion],
-                &inserts_and_lookups,
-            ),
             Self::Small => {
                 let mut workloads = Workload::product(
                     &[KeyKind::U64Random, KeyKind::CrateString],

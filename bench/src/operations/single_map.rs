@@ -44,11 +44,6 @@ impl<K: BenchKey> SingleMapKeys<K> {
         Self { present, absent }
     }
 
-    /// The keys a map holds, and those its misses probe with.
-    pub(crate) fn into_parts(self) -> (Vec<K>, Vec<K>) {
-        (self.present, self.absent)
-    }
-
     #[cfg(test)]
     pub(crate) fn present(&self) -> &[K] {
         &self.present
@@ -110,21 +105,6 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
         let mut map = M::new();
         for (key, value) in entries {
             map.insert(key, value);
-        }
-        map
-    }
-
-    #[inline(never)]
-    fn insert_batches<M: MapUnderTest<K, V>, const N: usize>(input: Vec<(K, V)>) -> M {
-        let mut map = M::new();
-        let mut entries = input.into_iter();
-        while entries.len() >= N {
-            let batch =
-                core::array::from_fn::<_, N, _>(|_| entries.next().expect("a full batch remains"));
-            map.insert_batch(batch);
-        }
-        for entry in entries {
-            map.insert_batch([entry]);
         }
         map
     }
@@ -218,69 +198,6 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
             })
         };
         (probes.len(), hits)
-    }
-
-    /// The same map, probe order and checksum as individual lookups.
-    #[inline(never)]
-    fn time_batch_lookups<M: MapUnderTest<K, V>, const N: usize>(
-        &self,
-        hit: bool,
-        stopwatch: &mut Stopwatch,
-    ) -> usize {
-        let sample = if hit {
-            self.present_sample()
-        } else {
-            Vec::new()
-        };
-        // Match time_lookups' allocation order too: sample first, then
-        // build the map, so mimalloc gives both paths comparable layouts.
-        let map: M = self.built_map();
-        let probes = self.probes(if hit { &sample } else { &self.absent });
-        let (batches, remainder) = probes.as_chunks::<N>();
-        // As `time_lookups`: maps that lend no references read through a
-        // closure.
-        let (hits, _checksum) = if M::LENDS_REFERENCES {
-            stopwatch.time(|| {
-                let mut hits = 0;
-                let mut checksum = 0_u64;
-                for keys in batches {
-                    for value in map.get_batch(*keys).into_iter().flatten() {
-                        hits += 1;
-                        checksum = checksum.wrapping_add(value.fingerprint());
-                    }
-                }
-                for key in remainder {
-                    if let Some(value) = map.get_batch([*key])[0] {
-                        hits += 1;
-                        checksum = checksum.wrapping_add(value.fingerprint());
-                    }
-                }
-                (hits, checksum)
-            })
-        } else {
-            stopwatch.time(|| {
-                let mut hits = 0;
-                let mut checksum = 0_u64;
-                for keys in batches {
-                    for fingerprint in map.lookup_fingerprint_batch(*keys).into_iter().flatten() {
-                        hits += 1;
-                        checksum = checksum.wrapping_add(fingerprint);
-                    }
-                }
-                // Through the batch method, as the other maps' remainder:
-                // a second call of `lookup_fingerprint` outlined it from
-                // `time_lookups`, 14 instructions more a lookup.
-                for key in remainder {
-                    if let Some(fingerprint) = map.lookup_fingerprint_batch([*key])[0] {
-                        hits += 1;
-                        checksum = checksum.wrapping_add(fingerprint);
-                    }
-                }
-                (hits, checksum)
-            })
-        };
-        assert_eq!(hits, if hit { probes.len() } else { 0 });
-        probes.len()
     }
 
     fn time_iteration<M: MapUnderTest<K, V>>(&self, stopwatch: &mut Stopwatch) -> usize {
@@ -395,82 +312,6 @@ impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for SingleMapCell<K, V> {
             Operation::RandomInsert => self.entries_in_insertion_order(),
             Operation::SequentialInsert | Operation::BulkBuild => self.entries_in_key_order(),
             _ => unreachable!("{} doesn't build a map", operation.name()),
-        }
-    }
-
-    fn build<M: MapUnderTest<K, V>>(&self, operation: Operation, input: Vec<(K, V)>) -> Vec<M> {
-        vec![Self::build_map(operation, input)]
-    }
-}
-
-/// Separate dispatch keeps the new cells out of the individual-operation
-/// runner: putting them in its match changed register allocation in the
-/// removal and entry loops, invalidating instruction comparisons.
-pub(crate) struct BatchCell<K, V> {
-    individual: SingleMapCell<K, V>,
-}
-
-impl<K, V> From<SingleMapCell<K, V>> for BatchCell<K, V> {
-    fn from(individual: SingleMapCell<K, V>) -> Self {
-        Self { individual }
-    }
-}
-
-impl<K: BenchKey, V: BenchValue> BatchCell<K, V> {
-    fn build_map<M: MapUnderTest<K, V>>(operation: Operation, input: Vec<(K, V)>) -> M {
-        match operation {
-            Operation::BatchRandomInsert | Operation::BatchSequentialInsert => {
-                SingleMapCell::insert_batches::<M, 16>(input)
-            }
-            Operation::ExtendRandom | Operation::ExtendSequential => {
-                let mut map = M::new();
-                map.extend_entries(input.into_iter());
-                map
-            }
-            _ => unreachable!("{} doesn't build a batch", operation.name()),
-        }
-    }
-}
-
-impl<K: BenchKey, V: BenchValue> PreparedCell<K, V> for BatchCell<K, V> {
-    fn time<M: MapUnderTest<K, V>>(
-        &mut self,
-        operation: Operation,
-        stopwatch: &mut Stopwatch,
-    ) -> usize {
-        match operation {
-            Operation::BatchGetHit32 => {
-                self.individual.time_batch_lookups::<M, 32>(true, stopwatch)
-            }
-            Operation::BatchGetMiss32 => self
-                .individual
-                .time_batch_lookups::<M, 32>(false, stopwatch),
-            Operation::BatchGetHit64 => {
-                self.individual.time_batch_lookups::<M, 64>(true, stopwatch)
-            }
-            Operation::BatchGetMiss64 => self
-                .individual
-                .time_batch_lookups::<M, 64>(false, stopwatch),
-            _ => {
-                for _ in 0..self.individual.rounds() {
-                    let input = self.build_input(operation);
-                    let map: M = stopwatch.time(|| Self::build_map(operation, input));
-                    assert_eq!(map.entry_count(), self.individual.entry_count());
-                }
-                self.individual.rounds() * self.individual.entry_count()
-            }
-        }
-    }
-
-    fn build_input(&self, operation: Operation) -> Vec<(K, V)> {
-        match operation {
-            Operation::BatchRandomInsert | Operation::ExtendRandom => {
-                self.individual.entries_in_insertion_order()
-            }
-            Operation::BatchSequentialInsert | Operation::ExtendSequential => {
-                self.individual.entries_in_key_order()
-            }
-            _ => unreachable!("{} doesn't build a batch", operation.name()),
         }
     }
 
