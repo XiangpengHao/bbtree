@@ -1,0 +1,18 @@
+system,workload,detail,threads,before,before_ns,after,after_ns
+fjall,Lookup,get through fjall's API,1,crossbeam SkipMap,956.1,BCTree,380.8
+fjall,Insert,insert through fjall's API,1,crossbeam SkipMap,956.2,BCTree,599.4
+fjall,90/10 mix,90% gets and 10% updates,1,crossbeam SkipMap,1043.9,BCTree,426.6
+Turso,Lookup,point SELECT by rowid,1,crossbeam SkipMap,2220,BCTree,1915
+Turso,Index lookup,indexed point SELECT,1,crossbeam SkipMap,5513,BCTree,2814
+Turso,Insert,INSERT of random rowids,1,crossbeam SkipMap,7668,BCTree,3345
+Turso,Update,UPDATE in BEGIN CONCURRENT,1,crossbeam SkipMap,2773,BCTree,2267
+SlateDB,Lookup,get of a key in the memtable,1,crossbeam SkipMap,2769,BCTree,1615
+SlateDB,Insert,put (slatedb-bencher),1,crossbeam SkipMap,3555,BCTree,2134
+SlateDB,80/20 mix,80% gets and 20% puts (slatedb-bencher),1,crossbeam SkipMap,2968,BCTree,2197
+Tonbo,Insert,16K-row write batches at 10M rows,1,crossbeam SkipMap,8292,BCTree,1187
+Tonbo,Transaction,conflict-checked write transaction at 10M rows,1,crossbeam SkipMap,14734,BCTree,3507
+Tonbo,Write-heavy,Tonbo's write_heavy_no_sst_sweep with 16K-row batches,1,crossbeam SkipMap,163000000,BCTree,75300000
+Lance,Lookup,point lookup of a primary key at 10M rows,1,arena skiplist,2478,BCTree,1075
+Lance,Multi-get,lookup_many of 100 keys (per key),1,arena skiplist,1995,BCTree,522
+Lance,Insert,put of 1000-row batches (per row),1,arena skiplist,1170,BCTree,364
+Lance,Update,put of existing keys (per row),1,arena skiplist,1663,BCTree,665

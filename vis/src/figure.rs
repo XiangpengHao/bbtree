@@ -85,14 +85,31 @@ pub(crate) struct Figure {
     seen: Signal<bool>,
     /// Whether the figure's lookup has started.
     started: Signal<bool>,
+    /// Whether it opens at the end of its lookup's way down, for a figure
+    /// whose way down another figure has played.
+    still: bool,
     ids: ElementIds,
 }
 
 impl Figure {
     /// The figure of what `link` names, on a tree of `trees`, saying what
-    /// is pointed at in the page's `hint`: a hook, for the figure's
-    /// component.
+    /// is pointed at in the page's `hint`, playing its lookup's way down: a
+    /// hook, for the figure's component.
     pub(crate) fn use_new(link: ExplorerLink, trees: TreeStore, hint: PointerHint) -> Self {
+        Self::use_playing_or_still(link, trees, hint, false)
+    }
+
+    /// The same, opening at the end of its lookup's way down.
+    pub(crate) fn use_still(link: ExplorerLink, trees: TreeStore, hint: PointerHint) -> Self {
+        Self::use_playing_or_still(link, trees, hint, true)
+    }
+
+    fn use_playing_or_still(
+        link: ExplorerLink,
+        trees: TreeStore,
+        hint: PointerHint,
+        still: bool,
+    ) -> Self {
         // A figure shows what its link names, the same at every visit.
         let seed = use_signal(|| 1);
         let figure = Self {
@@ -105,6 +122,7 @@ impl Figure {
             near: use_signal(|| false),
             seen: use_signal(|| false),
             started: use_signal(|| false),
+            still,
             ids: ElementIds::of_current(),
         };
         let advancing = figure.clone();
@@ -123,6 +141,15 @@ impl Figure {
 
     pub(crate) fn spotlight(&self) -> Spotlight {
         self.spotlight
+    }
+
+    pub(crate) fn batcher(&self) -> Batcher {
+        self.batcher
+    }
+
+    /// The inspector's tab, which the figure owns.
+    pub(crate) fn tab(&self) -> Signal<InspectorTab> {
+        self.tab
     }
 
     /// Whether the figure's lookup has started, so its panels draw.
@@ -149,11 +176,17 @@ impl Figure {
             started.set(true);
             self.link
                 .start_on(&tree, self.tracer, self.batcher, self.tab);
+            if self.still {
+                let mut tracer = self.tracer;
+                tracer.step_descent(isize::MAX);
+            }
         }
     }
 
     /// Hears when the reader comes within a screen of the figure's frame,
-    /// and when a third of it is in view.
+    /// and when it comes into view: its panels replace their room while
+    /// only its top edge shows, so what grows pushes down what the reader
+    /// can't yet see.
     fn watch_reader(&self) {
         let (mut near, mut seen) = (self.near, self.seen);
         let frame = self.frame_id();
@@ -171,7 +204,7 @@ impl Figure {
                     observer.observe(frame);
                 };
                 tell({ rootMargin: '100% 0px' }, 'near');
-                tell({ threshold: 0.33 }, 'seen');
+                tell({ threshold: 0 }, 'seen');
                 "#,
             );
             let _ = heard.send(frame);
@@ -189,9 +222,15 @@ impl Figure {
 
 /// A figure's frame: its panels (`children`) once its lookup starts, room
 /// for them until then, its caption, and the link that opens it in the
-/// explorer.
+/// explorer. `room` is about how tall the panels draw, on a desk and on a
+/// phone, so that the page barely moves when they replace the room.
 #[component]
-pub(crate) fn FigureFrame(figure: Figure, caption: Element, children: Element) -> Element {
+pub(crate) fn FigureFrame(
+    figure: Figure,
+    room: (u32, u32),
+    caption: Element,
+    children: Element,
+) -> Element {
     let started = figure.is_started();
     let building = figure.trees.is_building(figure.link.workload());
     let explorer = figure.link.href();
@@ -201,7 +240,9 @@ pub(crate) fn FigureFrame(figure: Figure, caption: Element, children: Element) -
             id: figure.frame_id(),
             class: "figure",
             onmounted: move |_| watched.watch_reader(),
-            div { class: if started { "figure-view" } else { "figure-view waiting" },
+            div {
+                class: if started { "figure-view" } else { "figure-view waiting" },
+                style: "--room:{room.0}px;--room-narrow:{room.1}px",
                 if started {
                     {children}
                 } else if building {

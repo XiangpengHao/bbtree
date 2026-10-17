@@ -1,0 +1,9 @@
+run,map,keys,workload,threads,operations,elapsed_ns,mops
+single-thread,bbtree,str-json,get-half,1,6552320,1004256292,6.525
+single-thread,std-btree,str-json,get-half,1,1568768,1004293435,1.562
+single-thread,bbtree,u64,get-half,1,9939712,1000552148,9.934
+single-thread,std-btree,u64,get-half,1,3877888,1000596948,3.876
+single-thread,bbtree,uuid,get-half,1,9118720,998450886,9.133
+single-thread,std-btree,uuid,get-half,1,3049728,999734712,3.051
+single-thread,bbtree,wiki-titles,get-half,1,2935552,1004387859,2.923
+single-thread,std-btree,wiki-titles,get-half,1,1559808,1003879414,1.554

@@ -92,6 +92,10 @@ Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
 differ (no length tags fit). Leaves of fixed-size keys and values match.
 
+The post's charts compile in the measurements under `data/<machine>/`:
+`bench/tools/blog-runs.sh` measures them on a machine, and
+`bench/tools/blog-collect.sh` writes them there (doc 14).
+
 ## Code
 
 By feature, in `src/`:
@@ -101,6 +105,9 @@ By feature, in `src/`:
 - `explorer.rs`: the explorer, its panels and controls;
 - `post.rs`, `figure.rs`: the post, and a figure: its frame, the panels'
   state it owns, and the trees the figures share;
+- `performance_cards.rs`, `one_thread_chart.rs`, `scaling_chart.rs`,
+  `integration_chart.rs`, `chart_scale.rs`, `measurements.rs`: the post's
+  cards and charts, their scales, and the measurements they draw;
 - `element_ids.rs`: element ids unique to the component that draws them,
   for a panel drawn more than once on a page;
 - `workload.rs`: what to build, its toolbar button, and building it in

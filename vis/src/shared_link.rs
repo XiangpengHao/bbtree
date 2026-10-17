@@ -64,6 +64,16 @@ impl ExplorerLink {
         }
     }
 
+    /// The link to a batch lookup of `keys` in the tree of `workload`.
+    pub(crate) fn batch(workload: Workload, keys: [&str; BatchKeys::LANES]) -> Self {
+        Self {
+            workload,
+            lookup: None,
+            batch: Some(BatchKeys::new(keys.map(String::from).to_vec())),
+            tab: InspectorTab::Page,
+        }
+    }
+
     pub(crate) fn workload(&self) -> Workload {
         self.workload
     }

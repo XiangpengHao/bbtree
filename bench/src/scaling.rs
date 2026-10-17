@@ -13,14 +13,25 @@
 //! - `get-miss`: lookups of keys it doesn't, for `--seconds`;
 //! - `get-batch`, `get-miss-batch`: the same, [`LOOKUP_BATCH`] keys a call,
 //!   through the batch API of the maps that have one (`BCTreeMap`,
-//!   `BBTreeMap`), separate lookups on the others;
+//!   `BBTreeMap`), separate lookups on the others, under one epoch pin for
+//!   the batch where a map takes a guard (artmap, scc);
+//! - `get-half`, `get-half-batch`: lookups of which half hit and half miss,
+//!   drawn at random from as many keys the map holds as it doesn't, one at
+//!   a time or [`LOOKUP_BATCH`] a call;
+//! - `update`: adds one to the value of a key the map holds, in place, for
+//!   `--seconds`;
 //! - `mixed`: 90% lookups, 10% updates of their values, for `--seconds`;
 //! - `scan`: scans of [`SCAN_LENGTH`] entries from keys the map holds, for
 //!   `--seconds`, on the maps that keep order;
+//! - `scan-mixed`: 90% scans, 10% updates of the values of keys the map
+//!   holds, for `--seconds`, on the maps that keep order;
 //! - `churn`: a key the map holds removed and inserted again, two
 //!   operations, for `--seconds`;
 //! - `insert`: the whole map inserted into an empty one, the keys split
-//!   between the workers, timed to the last one.
+//!   between the workers, timed to the last one;
+//! - `insert-batch`: the same, [`INSERT_BATCH`] entries a call, through the
+//!   batch API of the maps that have one (`BBTreeMap`'s `insert_many`),
+//!   separate inserts on the others.
 //!
 //! What it measures of them, by `--measure`:
 //!
@@ -37,7 +48,7 @@
 //! worker gets its own list of keys to look up, in random order, which it
 //! reads front to back: making or finding a key costs no map anything.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -54,7 +65,7 @@ use dashmap::DashMap;
 use scc::TreeIndex;
 
 use crate::command_line::Named;
-use crate::concurrent_maps::{ArenaArtOf, ArtMapOf, MapHandle, Owned, ScalingKey, SharedMap};
+use crate::concurrent_maps::{ArtMapOf, MapHandle, Owned, ScalingKey, SharedMap};
 use crate::datasets::{DataDirectory, DataFile, KeyList};
 use crate::keys::KeyMaker;
 use crate::latency::{LatencyHistogram, TickClock};
@@ -69,6 +80,9 @@ const SCAN_LENGTH: usize = 100;
 /// tracks with one bit each.
 const LOOKUP_BATCH: usize = 64;
 
+/// How many entries a batched insert takes: what `insert_many` is tuned for.
+const INSERT_BATCH: usize = 16;
+
 /// How many keys each worker's lookup list holds, a power of two.
 const QUERIES_PER_WORKER: usize = 1 << 18;
 
@@ -82,22 +96,32 @@ enum Workload {
     GetMiss,
     GetBatch,
     GetMissBatch,
+    GetHalf,
+    GetHalfBatch,
+    Update,
     Mixed,
     Scan,
+    ScanMixed,
     Churn,
     Insert,
+    InsertBatch,
 }
 
 impl Workload {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 13] = [
         Self::Get,
         Self::GetMiss,
         Self::GetBatch,
         Self::GetMissBatch,
+        Self::GetHalf,
+        Self::GetHalfBatch,
+        Self::Update,
         Self::Mixed,
         Self::Scan,
+        Self::ScanMixed,
         Self::Churn,
         Self::Insert,
+        Self::InsertBatch,
     ];
 
     fn named(name: &str) -> Result<Self, String> {
@@ -115,10 +139,15 @@ impl Workload {
             Self::GetMiss => "get-miss",
             Self::GetBatch => "get-batch",
             Self::GetMissBatch => "get-miss-batch",
+            Self::GetHalf => "get-half",
+            Self::GetHalfBatch => "get-half-batch",
+            Self::Update => "update",
             Self::Mixed => "mixed",
             Self::Scan => "scan",
+            Self::ScanMixed => "scan-mixed",
             Self::Churn => "churn",
             Self::Insert => "insert",
+            Self::InsertBatch => "insert-batch",
         }
     }
 }
@@ -138,6 +167,32 @@ impl<K> KeySet<K> {
             present: keys,
             absent,
         }
+    }
+}
+
+impl<K: ScalingKey> KeySet<K> {
+    /// Writes the keys to `path`, for a harness that can't make them (the
+    /// WebAssembly one, `bench/wasm`): a line `<present> <absent>`, then a
+    /// key a line, present then absent, in their order.
+    fn dump(&self, path: &std::path::Path) -> Result<(), String> {
+        let mut dump = format!("{} {}\n", self.present.len(), self.absent.len());
+        for key in self.present.iter().chain(&self.absent) {
+            key.dump_line(&mut dump);
+        }
+        std::fs::write(path, dump).map_err(|error| format!("{}: {error}", path.display()))
+    }
+}
+
+impl<K: Clone> KeySet<K> {
+    /// As many keys the map holds as it doesn't, for lookups half of which
+    /// hit: every absent key and the first as many present ones, a random
+    /// sample, as the present keys come in random order.
+    fn half_and_half(&self) -> Vec<K> {
+        let count = self.absent.len().min(self.present.len());
+        (self.present[..count].iter())
+            .chain(&self.absent[..count])
+            .cloned()
+            .collect()
     }
 }
 
@@ -219,9 +274,9 @@ impl KeyKind {
     /// (4) and the variant, distinct for distinct indexes, as either half
     /// alone is.
     fn uuid(index: u64) -> [u8; 16] {
-        let mut bytes =
-            (u128::from(SeededRng::mix(index)) << 64 | u128::from(SeededRng::mix(!index)))
-                .to_be_bytes();
+        let mut bytes = (u128::from(SeededRng::mix(index)) << 64
+            | u128::from(SeededRng::mix(!index)))
+        .to_be_bytes();
         bytes[6] = (bytes[6] & 0x0f) | 0x40;
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         bytes
@@ -413,11 +468,13 @@ impl<K: Clone> WorkerQueries<K> {
 }
 
 /// What a worker's operations left to check: their values added up, which
-/// the compiler must not drop, and how many scans ended early.
+/// the compiler must not drop, how many scans ended early, and how many
+/// lookups of keys that may be missing hit.
 #[derive(Default)]
 struct WorkerTally {
     checksum: u64,
     short_scans: u64,
+    hits: u64,
 }
 
 impl WorkerTally {
@@ -459,6 +516,20 @@ impl WorkerTally {
                     "an absent key found"
                 );
             }
+            Workload::GetHalf => {
+                if let Some(value) = handle.get(queries.next_key()) {
+                    self.checksum = self.checksum.wrapping_add(value);
+                    self.hits += 1;
+                }
+            }
+            Workload::GetHalfBatch => {
+                let keys = queries.next_keys::<LOOKUP_BATCH>();
+                for value in handle.get_batch(keys).into_iter().flatten() {
+                    self.checksum = self.checksum.wrapping_add(value);
+                    self.hits += 1;
+                }
+            }
+            Workload::Update => handle.bump(queries.next_key()),
             Workload::Mixed if queries.updates() => handle.bump(queries.next_key()),
             Workload::Mixed => {
                 let value = handle.get(queries.next_key());
@@ -466,7 +537,8 @@ impl WorkerTally {
                     .checksum
                     .wrapping_add(value.expect("every key is there"));
             }
-            Workload::Scan => {
+            Workload::ScanMixed if queries.updates() => handle.bump(queries.next_key()),
+            Workload::Scan | Workload::ScanMixed => {
                 let (visited, sum) = handle.scan(queries.next_key(), SCAN_LENGTH);
                 self.checksum = self.checksum.wrapping_add(sum);
                 self.short_scans += u64::from(visited < SCAN_LENGTH);
@@ -477,7 +549,9 @@ impl WorkerTally {
                 handle.remove(key);
                 handle.insert(copy, 0);
             }
-            Workload::Insert => unreachable!("inserts fill an empty map"),
+            Workload::Insert | Workload::InsertBatch => {
+                unreachable!("inserts fill an empty map")
+            }
         }
     }
 }
@@ -488,7 +562,7 @@ impl Workload {
     fn operations_per_iteration(self) -> u64 {
         match self {
             Self::Churn => 2,
-            Self::GetBatch | Self::GetMissBatch => LOOKUP_BATCH as u64,
+            Self::GetBatch | Self::GetMissBatch | Self::GetHalfBatch => LOOKUP_BATCH as u64,
             _ => 1,
         }
     }
@@ -525,6 +599,9 @@ struct MemoryPoint {
     entries: usize,
     /// Live bytes that dropping the map freed, its keys' included.
     heap_bytes: usize,
+    /// The most live bytes the build added at any moment: the map's
+    /// garbage and spare room while it grew, as well as what it kept.
+    peak_heap_bytes: usize,
     /// The growth of the process's resident set while it was built.
     resident_growth: u64,
     /// The growth of the process's peak resident set while it was built.
@@ -544,6 +621,8 @@ struct ScalingRun {
     cpus: CpuOrder,
     thread_counts: Vec<usize>,
     out: PathBuf,
+    /// Where to write the run's keys instead of measuring (`--dump-keys`).
+    dump_keys: Option<PathBuf>,
     points: Vec<Point>,
     latencies: Vec<LatencyPoint>,
     memory: Vec<MemoryPoint>,
@@ -554,13 +633,13 @@ impl ScalingRun {
     const MAPS: [&'static str; 11] = [
         <Owned<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <Owned<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
+        <Owned<HashMap<u64, u64>> as SharedMap<u64>>::NAME,
         <BCTreeMap<u64, u64> as SharedMap<u64>>::NAME,
         <RwLock<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <RwLock<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <SkipMap<u64, AtomicU64> as SharedMap<u64>>::NAME,
         <TreeIndex<u64, AtomicU64> as SharedMap<u64>>::NAME,
         <ArtMapOf<u64> as SharedMap<u64>>::NAME,
-        <ArenaArtOf<u64> as SharedMap<u64>>::NAME,
         <ConcurrentMap<u64, u64> as SharedMap<u64>>::NAME,
         <DashMap<u64, u64> as SharedMap<u64>>::NAME,
     ];
@@ -583,6 +662,7 @@ impl ScalingRun {
             thread_counts: cpus.thread_counts(),
             cpus,
             out: PathBuf::from("results"),
+            dump_keys: None,
             points: Vec::new(),
             latencies: Vec::new(),
             memory: Vec::new(),
@@ -602,6 +682,7 @@ impl ScalingRun {
                         .collect::<Result<_, _>>()?
                 }
                 "--out" => run.out = PathBuf::from(value()?),
+                "--dump-keys" => run.dump_keys = Some(PathBuf::from(value()?)),
                 "--keys" => run.keys = KeyKind::named(value()?)?,
                 "--workloads" => {
                     run.workloads = (value()?.split(','))
@@ -644,8 +725,8 @@ impl ScalingRun {
                     return Err(format!(
                         "unknown option {flag}; options: --entries N, --seconds S, \
                          --threads 1,2,4, --maps A,B, --keys u64|u128|uuid|str-json|str-path|wiki-titles, \
-                         --workloads get,get-miss,mixed,scan,churn,insert, \
-                         --measure throughput|latency|memory, --out DIR"
+                         --workloads get,get-miss,mixed,scan,churn,insert,insert-batch, \
+                         --measure throughput|latency|memory, --out DIR, --dump-keys FILE"
                     ));
                 }
             }
@@ -723,11 +804,21 @@ impl ScalingRun {
     /// Every map the command line picked, in the order of [`Self::MAPS`],
     /// with `keys`.
     fn measure_picked_maps<K: ScalingKey>(&mut self, keys: &KeySet<K>) {
+        if let Some(path) = &self.dump_keys {
+            match keys.dump(path) {
+                Ok(()) => println!("wrote {}", path.display()),
+                Err(message) => eprintln!("error: {message}"),
+            }
+            return;
+        }
         if self.picks(<Owned<BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, Owned<BBTreeMap<K, u64>>>(keys);
         }
         if self.picks(<Owned<BTreeMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, Owned<BTreeMap<K, u64>>>(keys);
+        }
+        if self.picks(<Owned<HashMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, Owned<HashMap<K, u64>>>(keys);
         }
         if self.picks(<BCTreeMap<K, u64> as SharedMap<K>>::NAME) {
             self.measure::<K, BCTreeMap<K, u64>>(keys);
@@ -746,9 +837,6 @@ impl ScalingRun {
         }
         if self.picks(<ArtMapOf<K> as SharedMap<K>>::NAME) {
             self.measure::<K, ArtMapOf<K>>(keys);
-        }
-        if self.picks(<ArenaArtOf<K> as SharedMap<K>>::NAME) {
-            self.measure::<K, ArenaArtOf<K>>(keys);
         }
         if self.picks(<ConcurrentMap<K, u64> as SharedMap<K>>::NAME) {
             self.measure::<K, ConcurrentMap<K, u64>>(keys);
@@ -774,7 +862,10 @@ impl ScalingRun {
     /// What the run measures, of `M`, with `keys`.
     fn measure<K: ScalingKey, M: SharedMap<K>>(&mut self, keys: &KeySet<K>) {
         if self.thread_counts_of::<K, M>().is_empty() {
-            println!("{:<18} runs at one thread only, which --threads leaves out", M::NAME);
+            println!(
+                "{:<18} runs at one thread only, which --threads leaves out",
+                M::NAME
+            );
             return;
         }
         match self.measure {
@@ -943,22 +1034,28 @@ impl ScalingRun {
     /// count.
     fn throughput<K: ScalingKey, M: SharedMap<K>>(&mut self, keys: &KeySet<K>) {
         let map: M = self.built(&keys.present);
+        let half = keys.half_and_half();
         for workload in [
             Workload::Get,
             Workload::GetMiss,
             Workload::GetBatch,
             Workload::GetMissBatch,
+            Workload::GetHalf,
+            Workload::GetHalfBatch,
+            Workload::Update,
             Workload::Mixed,
             Workload::Scan,
+            Workload::ScanMixed,
             Workload::Churn,
         ] {
-            if !self.workloads.contains(&workload) || (workload == Workload::Scan && !M::ORDERED) {
+            let scans = matches!(workload, Workload::Scan | Workload::ScanMixed);
+            if !self.workloads.contains(&workload) || (scans && !M::ORDERED) {
                 continue;
             }
-            let queried = if matches!(workload, Workload::GetMiss | Workload::GetMissBatch) {
-                &keys.absent
-            } else {
-                &keys.present
+            let queried = match workload {
+                Workload::GetMiss | Workload::GetMissBatch => &keys.absent,
+                Workload::GetHalf | Workload::GetHalfBatch => &half,
+                _ => &keys.present,
             };
             for threads in self.thread_counts_of::<K, M>() {
                 let (done, elapsed) = self.for_duration(
@@ -968,17 +1065,21 @@ impl ScalingRun {
                     WorkerTally::default,
                     |handle, queries, tally| tally.operate(workload, handle, queries),
                 );
-                let mut operations = 0;
-                let mut short_scans = 0;
+                let (mut operations, mut short_scans, mut hits) = (0, 0, 0);
                 for (iterations, tally) in done {
                     operations += iterations * workload.operations_per_iteration();
                     short_scans += tally.short_scans;
+                    hits += tally.hits;
                     black_box(tally.checksum);
                 }
                 if short_scans * 100 > operations {
                     println!(
                         "  {short_scans} of {operations} scans ended before {SCAN_LENGTH} entries"
                     );
+                }
+                let halves = matches!(workload, Workload::GetHalf | Workload::GetHalfBatch);
+                if halves && !(0.45..=0.55).contains(&(hits as f64 / operations as f64)) {
+                    println!("  {hits} of {operations} lookups hit, not about half");
                 }
                 self.record(M::NAME, workload, threads, operations, elapsed);
             }
@@ -999,6 +1100,30 @@ impl ScalingRun {
             });
             let operations = keys.present.len() as u64;
             self.record(M::NAME, Workload::Insert, threads, operations, elapsed);
+        }
+        let batch_threads = if self.workloads.contains(&Workload::InsertBatch) {
+            self.thread_counts_of::<K, M>()
+        } else {
+            Vec::new()
+        };
+        for threads in batch_threads {
+            let map = M::new();
+            let shares = Self::insert_shares(&map, &keys.present, threads);
+            let (_, elapsed) = self.on_workers(shares, |worker, (handle, share)| {
+                let batches = share.len() / INSERT_BATCH;
+                let mut entries = (share.into_iter().enumerate())
+                    .map(|(index, key)| (key, (worker + index) as u64));
+                for _ in 0..batches {
+                    handle.insert_batch(std::array::from_fn::<_, INSERT_BATCH, _>(|_| {
+                        entries.next().expect("a whole batch is left")
+                    }));
+                }
+                for (key, value) in entries {
+                    handle.insert(key, value);
+                }
+            });
+            let operations = keys.present.len() as u64;
+            self.record(M::NAME, Workload::InsertBatch, threads, operations, elapsed);
         }
     }
 
@@ -1098,9 +1223,15 @@ impl ScalingRun {
                 handle.insert(copy, 0);
                 histogram.record(clock.stop() - start);
             }
-            Workload::GetBatch | Workload::GetMissBatch | Workload::Scan | Workload::Insert => {
-                unreachable!("not timed one at a time")
-            }
+            Workload::GetBatch
+            | Workload::GetMissBatch
+            | Workload::GetHalf
+            | Workload::GetHalfBatch
+            | Workload::Update
+            | Workload::Scan
+            | Workload::ScanMixed
+            | Workload::Insert
+            | Workload::InsertBatch => unreachable!("not timed one at a time"),
         }
     }
 
@@ -1114,18 +1245,22 @@ impl ScalingRun {
     ) {
         let keys = &keys.present;
         let resident = ResidentSet::read().current_bytes();
+        let live_before = allocator.live_bytes();
+        allocator.reset_peak();
         let map: M = self.built(keys);
+        let peak_heap_bytes = allocator.peak_bytes() - live_before;
         let after = ResidentSet::read();
         let resident_growth = after.current_bytes().saturating_sub(resident);
         let peak_growth = after.peak_bytes().saturating_sub(resident);
         let heap_bytes = allocator.bytes_freed_by_dropping(map);
         let per_entry = |bytes: u64| bytes as f64 / keys.len() as f64;
         println!(
-            "{:<18} {:>12} heap bytes, {:>6.1} per entry; resident set grew {:>6.1} bytes \
-             per entry, {:>6.1} at its peak",
+            "{:<18} {:>12} heap bytes, {:>6.1} per entry, {:>6.1} at the peak of the build; \
+             resident set grew {:>6.1} bytes per entry, {:>6.1} at its peak",
             M::NAME,
             heap_bytes,
             per_entry(heap_bytes as u64),
+            per_entry(peak_heap_bytes as u64),
             per_entry(resident_growth),
             per_entry(peak_growth)
         );
@@ -1133,6 +1268,7 @@ impl ScalingRun {
             map: M::NAME,
             entries: keys.len(),
             heap_bytes,
+            peak_heap_bytes,
             resident_growth,
             peak_growth,
         });
@@ -1177,18 +1313,19 @@ impl ScalingRun {
             Measure::Memory(_) => {
                 csv.push_str(
                     "map,keys,entries,heap_bytes,heap_bytes_per_entry,resident_growth_bytes,\
-                     peak_growth_bytes\n",
+                     peak_growth_bytes,peak_heap_bytes\n",
                 );
                 for point in &self.memory {
                     let _ = writeln!(
                         csv,
-                        "{},{keys},{},{},{:.1},{},{}",
+                        "{},{keys},{},{},{:.1},{},{},{}",
                         point.map,
                         point.entries,
                         point.heap_bytes,
                         point.heap_bytes as f64 / point.entries as f64,
                         point.resident_growth,
-                        point.peak_growth
+                        point.peak_growth,
+                        point.peak_heap_bytes
                     );
                 }
             }
@@ -1223,7 +1360,12 @@ pub fn run(counting_allocator: Option<&'static CountingAllocator>) -> ExitCode {
             run.entries, run.duration, run.cpus.cpus, run.thread_counts
         );
         run.measure_with_keys();
-        run.write()
+        // A dump is the run's whole output.
+        if run.dump_keys.is_some() {
+            Ok(())
+        } else {
+            run.write()
+        }
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

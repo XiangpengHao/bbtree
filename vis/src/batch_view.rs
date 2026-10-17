@@ -366,6 +366,17 @@ impl Playback {
             // Just before a poll ends: run, its fetch gone out.
             const RAN = 0.999;
             let t = -1, playing = true, last = null, hold = 0, told = null;
+            // The time last drawn, and whether a frame is asked for: the
+            // loop runs only while playing, and draws only what changed.
+            let drawn = null, asked = false;
+            // Off screen it holds where it is, and plays on once back.
+            let visible = true;
+            const wake = () => {
+                if (!asked) {
+                    asked = true;
+                    requestAnimationFrame(frame);
+                }
+            };
             const pollAt = (time) => {
                 let low = 0, high = starts.length;
                 while (low < high) {
@@ -393,9 +404,15 @@ impl Playback {
                     t = after(pollAt(command));
                 }
                 last = null;
+                wake();
             });
             const frame = (time) => {
+                asked = false;
                 if (!board.isConnected) return;
+                if (!visible) {
+                    last = null;
+                    return;
+                }
                 if (playing && last !== null) {
                     if (reduced) {
                         if (time >= hold) {
@@ -408,16 +425,23 @@ impl Playback {
                 }
                 if (t >= total || (reduced && pollAt(t) === starts.length - 1)) playing = false;
                 last = time;
-                board.style.setProperty('--t', t.toFixed(3));
+                if (t !== drawn) {
+                    drawn = t;
+                    board.style.setProperty('--t', t.toFixed(3));
+                }
                 const index = pollAt(t);
                 const state = index + ':' + playing;
                 if (state !== told) {
                     told = state;
                     dioxus.send([index, playing]);
                 }
-                requestAnimationFrame(frame);
+                if (playing) wake();
             };
-            requestAnimationFrame(frame);
+            new IntersectionObserver((entries) => {
+                visible = entries.some((entry) => entry.isIntersecting);
+                if (visible && playing) wake();
+            }).observe(board);
+            wake();
             "#,
         );
         let _ = heard.send((

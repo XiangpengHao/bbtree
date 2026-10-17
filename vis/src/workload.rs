@@ -204,8 +204,11 @@ impl Workload {
     /// The entry counts on offer.
     pub(crate) const COUNTS: [usize; 4] = [10_000, 100_000, 1_000_000, 10_000_000];
 
-    /// Inserts between two yields to the browser.
-    const CHUNK: usize = 50_000;
+    /// How long a build inserts before it yields to the browser, in
+    /// milliseconds: short enough that a slow phone's page stays
+    /// responsive (no task past 50 ms), long enough that the yields cost
+    /// little.
+    const SLICE_MS: f64 = 12.0;
 
     pub(crate) fn new(kind: KeyKind, count: usize, order: InsertOrder) -> Self {
         Self {
@@ -272,9 +275,13 @@ impl Workload {
         let mut done = 0;
         loop {
             let before = done;
-            for index in indices.by_ref().take(Self::CHUNK) {
+            let started = js_sys::Date::now();
+            for index in indices.by_ref() {
                 map.insert(key_at(index), index);
                 done += 1;
+                if done % 1024 == 0 && js_sys::Date::now() - started >= Self::SLICE_MS {
+                    break;
+                }
             }
             if done == before {
                 return map;

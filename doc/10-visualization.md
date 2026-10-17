@@ -90,7 +90,7 @@ From the original note:
   they run, four keys, on one thread, and nothing about the executor,
   polls or timing.
 - **A post beside the explorer, from the same panels (2026-10-16).** The
-  blog post on bbtree and BCTree and the visualizer share one build and
+  blog post on bbtree and bctree and the visualizer share one build and
   one look. The explorer stays as it is, at `/`, for readers who want to
   look around; the post is a page of its own, at `/post/`, with tabs
   between them. The post is prose with figures, each figure one idea drawn
@@ -431,9 +431,19 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   scoped to it, so the post scrolls.
 - **Trees are shared and built as the reader nears** (`TreeStore`).
   Figures of one workload share one tree, built when the reader comes
-  within a screen of the first of them. A figure starts its lookup once a
-  third of it is in view, so the way down plays where it is read; until
-  then its frame keeps the panels' room.
+  within a screen of the first of them, in slices of about 12 ms between
+  yields to the browser (`Workload::SLICE_MS`), so that a slow phone
+  isn't blocked in 50-80 ms runs. A figure starts its lookup when it
+  comes into view, so the way down plays where it is read. Until then its
+  frame keeps room as tall as its panels draw, on a desk and on a phone
+  (`FigureFrame`'s `room`), and the panels replace it while only the
+  figure's top edge shows, pushing down what is still below the screen:
+  the page doesn't move under the reader.
+- **The batch's playback runs only while it plays and shows.** Its frame
+  loop (`batch_view.rs`) asks for frames only while playing, writes the
+  time (`--t`) only when it changes, and holds while the board is off
+  screen. Every frame it plays restyles the board, whose tokens, fills
+  and highlights all derive from `--t`: about 2.6 ms a frame at full speed.
 - **Styled from the first paint.** On a slow network the wasm takes
   seconds, and stylesheets the app linked itself came only after it: a
   blank page, then the page unstyled. The stylesheets are in the static
@@ -443,10 +453,18 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   white for the post) until the app draws, so nothing moves when it does.
 - **Shortcuts and the address are the explorer's.** On the post, Space and
   the arrows scroll; the figures' buttons play and step them.
-- **So far:** one figure, the way down of one `u64` lookup (the key and the
-  path's cards); the prose is a placeholder. The post's text, its order and
-  how it is written (Markdown with figure markers, or prose in `rsx!`) are
-  still to decide.
+- **Charts beside the figures** (`performance_cards.rs`): five cards the
+  reader picks, nothing turning by itself: single thread, concurrent, end
+  to end, memory and architectures, each a chart of its own
+  (`*_chart.rs`, the grouped bars of the last three in
+  `baseline_bars.rs`). The wide charts are drawn at their card's width, a
+  unit a pixel (`FrameWidth`), and lay themselves out for it. bbtree's
+  maps wear the site's highlighter, every other map a dark slate. Bars
+  grow at one speed and lines draw left to right, once the cards are in
+  view. Their data is compiled in from `vis/data/<machine>/`
+  (`measurements.rs`); doc 14 says what each shows and how it is made.
+- **So far:** three figures (the way down, the leaf in the inspector, a
+  batch); the prose is a draft of doc 14's plan.
 
 ## Not done
 

@@ -1,0 +1,20 @@
+[package]
+name = "bbtree-wasm-gets"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The architectures card's gets in WebAssembly: bbtree against std's BTreeMap."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bbtree = { path = "../.." }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+
+# A workspace of its own, apart from the native bench's.
+[workspace]

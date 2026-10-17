@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 
 use crate::icons::{Icon, IconGlyph};
 
-const REPOSITORY: &str = "https://github.com/XiangpengHao/bbtree";
+pub(crate) const REPOSITORY: &str = "https://github.com/XiangpengHao/bbtree";
 const AUTHOR_PAGE: &str = "https://xiangpeng.systems";
 
 /// One of the site's pages.

@@ -49,6 +49,18 @@
   /* An inline key's bytes in the fence strip. */
   --compare-soft: #fde3d6;
 
+  /* The post's charts: bbtree's maps in the site's highlighter, its marks
+   * rimmed and its lines drawn in the highlighter's dark gold, 3.8:1 on
+   * panel; every other map a dark, desaturated slate, apart by lightness;
+   * their names ride the marks, so color is never the only way to tell
+   * them apart. */
+  --ours: var(--marker);
+  --ours-line: var(--marker-strong);
+  --theirs-1: #353b47;
+  --theirs-2: #59616e;
+  --theirs-3: #6e7682;
+  --theirs-4: #878e99;
+
   --font-display: "Martian Mono", ui-monospace, monospace;
   --font-ui: "IBM Plex Sans", system-ui, sans-serif;
   --font-data: "IBM Plex Mono", ui-monospace, monospace;
@@ -426,6 +438,7 @@
   }
   .segmented {
     display: inline-flex;
+    flex-wrap: wrap;
     margin: 0;
     padding: 2px;
     border: 1px solid var(--rule-strong);
@@ -707,7 +720,7 @@
   }
   /* Skipped: every key of the node shares it. */
   .key-skipped {
-    color: var(--muted);
+    color: var(--graphite);
   }
   /* The zeros a window reads past the key's end, once one does. */
   .key-padding {
@@ -1525,6 +1538,7 @@
     font-size: 12.5px;
     line-height: 1.5;
     overflow-wrap: anywhere;
+    white-space: pre-line;
   }
   .hint-source {
     margin-top: 6px !important;
@@ -1762,6 +1776,15 @@
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+@keyframes bar-grow-x {
+  from { transform: scaleX(0); }
+}
+@keyframes bar-grow-y {
+  from { transform: scaleY(0); }
+}
+@keyframes line-draw {
+  from { stroke-dashoffset: 1; }
 }
 @keyframes shimmer {
   from { background-position: 100% 0; }
@@ -2317,6 +2340,13 @@
       border-left: 1px solid var(--rule);
       overflow-y: auto;
     }
+    /* A batch in the post's figure: the explorer's grid, the tree given
+     * room of its own, since the figure's height follows its content. */
+    .figure .batch-board {
+      grid-template-columns: minmax(0, 1fr) minmax(460px, 40%);
+      grid-template-rows: auto auto minmax(420px, 1fr);
+      grid-template-areas: "head code" "keys code" "tree code";
+    }
   }
   @media (max-width: 640px) {
     .batch-headline,
@@ -2358,7 +2388,7 @@
     align-content: start;
     grid-template-columns:
       [wide-start] minmax(16px, 1fr)
-      [text-start] minmax(0, 680px)
+      [text-start] minmax(0, 620px)
       [text-end] minmax(16px, 1fr)
       [wide-end];
     padding: 56px 0 72px;
@@ -2380,10 +2410,6 @@
   }
   .post-head {
     margin-bottom: 28px;
-  }
-  .post-kicker {
-    margin: 0 0 12px;
-    color: var(--marker-ink);
   }
   .post-title {
     margin: 0;
@@ -2414,11 +2440,17 @@
     border-radius: 12px;
     overflow: hidden;
   }
-  /* Room for the panels until the lookup starts, so the page holds still. */
+  /* Room for the panels until the lookup starts, as tall as they draw
+   * (`--room`, the figure's own), so the page holds still. */
   .figure-view.waiting {
-    min-height: 360px;
+    min-height: var(--room, 360px);
     display: grid;
     place-items: center;
+  }
+  @media (max-width: 640px) {
+    .figure-view.waiting {
+      min-height: var(--room-narrow, 360px);
+    }
   }
   .figure-wait {
     margin: 0;
@@ -2443,6 +2475,7 @@
   }
   .figure-text {
     flex: 1 1 320px;
+    max-width: 72ch;
   }
   .figure-explore {
     flex: none;
@@ -2457,11 +2490,481 @@
     text-decoration: underline;
     text-underline-offset: 3px;
   }
+
+  .post-section {
+    margin: 48px 0 12px;
+    font-family: var(--font-display);
+    font-stretch: 112.5%;
+    font-weight: 600;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+  }
+  .post-subsection {
+    margin: 32px 0 8px;
+    font-size: 19px;
+    font-weight: 600;
+  }
+  .post-quote {
+    margin: 4px 0 24px;
+    padding: 4px 0 4px 20px;
+    border-left: 3px solid var(--marker);
+    color: var(--graphite);
+    font-style: italic;
+  }
+  .post-quote p {
+    margin: 0;
+  }
+
+  /* The performance cards: tabs over a card, wider than the text. */
+  .post > .performance-cards {
+    grid-column: wide;
+    justify-self: center;
+    width: min(1100px, calc(100% - 32px));
+    margin: 12px 0 28px;
+  }
+  .performance-cards {
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .card-tabs {
+    display: flex;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper);
+  }
+  .card-tab {
+    position: relative;
+    flex: 1 0 auto;
+    padding: 14px 18px 13px;
+    border: 0;
+    background: none;
+    font: 600 14px var(--font-ui);
+    color: var(--graphite);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .card-tab:hover {
+    color: var(--ink);
+  }
+  /* Inset: the strip scrolls and the cards clip, so an outer ring would
+   * show only in part. */
+  .card-tab:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: -2px;
+  }
+  .card-tab[aria-selected="true"] {
+    color: var(--ink);
+    background: var(--panel);
+    box-shadow: inset 0 -2px 0 var(--ink);
+  }
+  .card-body {
+    padding: 18px 20px 16px;
+  }
+
+  /* Charts: recessive chrome, thin marks, ink for text. */
+  .chart-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin-bottom: 14px;
+  }
+  .segment-button {
+    min-height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    font: 500 13px var(--font-ui);
+    color: var(--graphite);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .segment-button:hover {
+    color: var(--ink);
+  }
+  .segment-button[aria-pressed="true"] {
+    background: var(--panel);
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(21, 23, 28, 0.12), 0 0 0 1px var(--rule-strong);
+  }
+  .panel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+    gap: 14px 28px;
+  }
+  .chart-panel {
+    margin: 0;
+    min-width: 0;
+  }
+  .panel-title {
+    margin-bottom: 4px;
+    font-size: 13.5px;
+  }
+  .panel-detail {
+    color: var(--muted);
+  }
+  .chart-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    font-family: var(--font-ui);
+  }
+  .chart-grid {
+    stroke: var(--rule);
+    stroke-width: 1;
+  }
+  .chart-axis {
+    stroke: var(--rule-strong);
+    stroke-width: 1;
+  }
+  .chart-crosshair {
+    stroke: var(--graphite);
+    stroke-width: 1;
+    stroke-opacity: 0.35;
+  }
+  .chart-tick {
+    font-size: 11px;
+    fill: var(--muted);
+  }
+  .chart-row-label {
+    font-size: 12.5px;
+    fill: var(--graphite);
+  }
+  .chart-row.ours .chart-row-label,
+  .chart-row.ours .chart-value {
+    fill: var(--ink);
+    font-weight: 600;
+  }
+  .chart-value {
+    font-size: 11.5px;
+    fill: var(--graphite);
+    font-variant-numeric: tabular-nums;
+  }
+  .chart-hit {
+    fill: transparent;
+  }
+  .chart-row:hover .chart-hit {
+    fill: var(--well);
+  }
+  .chart-tick-mark {
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+  .chart-tick-mark.thin {
+    stroke-width: 1.5;
+    opacity: 0.7;
+  }
+  .chart-dot {
+    stroke: var(--panel);
+    stroke-width: 2;
+  }
+  /* bbtree's marks: the highlighter, rimmed in its gold. */
+  .ours .chart-dot,
+  .ours .chart-point,
+  .ours .chart-bar,
+  .chart-bar.ours {
+    stroke: var(--ours-line);
+    stroke-width: 1.5;
+  }
+  .chart-bar {
+    stroke-width: 0;
+  }
+  /* bbtree's batched time: a hollow bar under its own; the legend says
+   * so. */
+  .chart-bar.hollow {
+    fill: var(--panel);
+    stroke-width: 1.5;
+  }
+  /* std's hash map: a different kind of map, set apart by a dashed rule,
+   * a dashed, pale bar and a note under its name. */
+  .chart-bar.unordered {
+    fill-opacity: 0.18;
+    stroke-width: 1.5;
+    stroke-dasharray: 3 2;
+  }
+  .unordered-rule {
+    stroke: var(--rule-strong);
+    stroke-width: 1;
+    stroke-dasharray: 3 4;
+  }
+  .chart-row.unordered .chart-row-label {
+    font-style: italic;
+  }
+  .chart-row-note {
+    font-size: 10.5px;
+    fill: var(--muted);
+  }
+  /* The cards' motion: bars grow from their baseline at one speed, each
+   * taking the time its length takes (`--grow`, from the chart's scale),
+   * so that the faster map's bar lands first; a value arrives as its bar
+   * lands; lines draw left to right, as threads are added. Held until the
+   * cards are first in view. */
+  .grow-x,
+  .grow-y {
+    transform-box: fill-box;
+    animation: bar-grow-x var(--grow, 800ms) var(--ease-out) both;
+  }
+  .grow-x {
+    transform-origin: left center;
+  }
+  .grow-y {
+    transform-origin: center bottom;
+    animation-name: bar-grow-y;
+  }
+  .lands {
+    animation: fade-in 200ms ease-out both;
+    animation-delay: var(--grow, 800ms);
+  }
+  .draws {
+    stroke-dasharray: 1;
+    animation: line-draw 800ms var(--ease-out) both;
+  }
+  .performance-cards:not(.seen) :is(.grow-x, .grow-y, .lands, .draws) {
+    animation-play-state: paused;
+  }
+  /* The memory card: a bar on to the peak, lighter than what stays. */
+  .peak-bar {
+    fill-opacity: 0.3;
+  }
+  .memory-built {
+    fill: var(--ink);
+  }
+  .memory-peak {
+    fill: var(--muted);
+  }
+  .chart-series {
+    pointer-events: none;
+  }
+  .chart-line {
+    fill: none;
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .chart-series.ours .chart-line {
+    stroke-width: 2.5;
+  }
+  /* bbtree's lines: gold, over a stroke of the highlighter. */
+  .chart-highlight {
+    fill: none;
+    stroke: var(--ours);
+    stroke-width: 7;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+  .chart-point {
+    stroke: var(--panel);
+    stroke-width: 1.5;
+  }
+  .chart-tick.strong {
+    fill: var(--ink);
+    font-weight: 600;
+  }
+
+  /* A wide chart is drawn at its frame's width, a unit a pixel, and lays
+   * itself out for it; the end-to-end chart's rows of groups stack. */
+  .chart-panel.wide > .chart-svg + .chart-svg {
+    margin-top: 6px;
+  }
+  /* The line chart's key, under the plot where its lines can't be named
+   * at their ends. */
+  .line-keys {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 4px 14px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 13px;
+    color: var(--graphite);
+  }
+  .line-key {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .line-key strong {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .line-key.ours {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .line-key-swatch {
+    flex: none;
+    width: 16px;
+    height: 3px;
+    border-radius: 2px;
+  }
+  .line-key.ours .line-key-swatch {
+    box-shadow: 0 0 0 2px var(--ours);
+  }
+  /* A chart's title and what it measures, above its plot. */
+  .chart-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
+    margin-bottom: 6px;
+    font-size: 15px;
+  }
+  .chart-subtitle {
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  /* A line's name and last value at its end, in ink: the line beside it
+   * carries the color. */
+  .end-value {
+    font-size: 12.5px;
+    font-weight: 600;
+    fill: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .end-name {
+    font-size: 12.5px;
+    fill: var(--graphite);
+  }
+  .end-label.ours .end-name {
+    fill: var(--ink);
+    font-weight: 600;
+  }
+  .end-leader {
+    fill: none;
+    stroke: var(--rule-strong);
+    stroke-width: 1;
+  }
+
+  /* The end-to-end chart's clusters and system groups. */
+  .chart-cluster:hover .chart-hit {
+    fill: var(--well);
+  }
+  .cluster-speedup {
+    font-size: 13px;
+    font-weight: 600;
+    fill: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  /* A bar's time, over it, in ink: bbtree's bold. */
+  .cluster-value {
+    font-size: 12px;
+    fill: var(--graphite);
+    font-variant-numeric: tabular-nums;
+  }
+  .cluster-value.ours {
+    fill: var(--ink);
+    font-weight: 600;
+  }
+  .cluster-speedup.inside {
+    fill: var(--panel);
+  }
+  .cluster-speedup.slower {
+    fill: var(--graphite);
+  }
+  .cluster-label {
+    font-size: 12px;
+    fill: var(--graphite);
+  }
+  .group-rule {
+    stroke: var(--rule-strong);
+    stroke-width: 1;
+  }
+  .group-caption {
+    font-size: 11.5px;
+    fill: var(--muted);
+  }
+  .group-label {
+    font-size: 14px;
+    font-weight: 600;
+    fill: var(--ink);
+  }
+  .chart-keys {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: var(--graphite);
+  }
+  .chart-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .chart-key strong {
+    color: var(--ink);
+  }
+  .chart-key-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+  }
+  .chart-key-swatch.hollow {
+    background: var(--panel);
+    box-shadow: inset 0 0 0 1.5px var(--ours-line);
+  }
+  .chart-key-swatch.ours {
+    background: var(--ours);
+    box-shadow: inset 0 0 0 1.5px var(--ours-line);
+  }
+  .chart-controls .chart-keys {
+    align-self: center;
+    margin: 0;
+  }
+  .chart-note a {
+    color: var(--link);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
+    text-underline-offset: 2px;
+  }
+  .chart-note a:hover {
+    text-decoration-color: var(--link);
+  }
+  .chart-note {
+    max-width: 75ch;
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+  /* The one-thread panels scale with their box: on a phone, their text
+   * is larger in its own units, so that it reads at 11 px or more. The
+   * wide charts are drawn a unit a pixel and need none of this. */
+  @media (max-width: 640px) {
+    .chart-panel:not(.wide) .chart-svg .chart-row-label {
+      font-size: 15px;
+    }
+    .chart-panel:not(.wide) .chart-svg .chart-value {
+      font-size: 14px;
+    }
+    .chart-panel:not(.wide) .chart-svg .chart-tick {
+      font-size: 15px;
+    }
+    .chart-panel:not(.wide) .chart-svg .chart-row-note {
+      font-size: 15px;
+    }
+    .card-body {
+      padding: 14px 12px 12px;
+    }
+  }
 }
 
 /* Less motion: nothing travels or grows; reads and marks still arrive in
  * their order, as fades. */
 @media (prefers-reduced-motion: reduce) {
+  /* The cards' bars and lines appear whole; their values still fade in. */
+  .grow-x,
+  .grow-y,
+  .draws {
+    animation: none;
+  }
+  .lands {
+    animation-delay: 0ms;
+  }
   .path-card,
   .level-label,
   .gauge,

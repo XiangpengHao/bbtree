@@ -149,6 +149,7 @@ dependencies = [
  "bbtree",
  "dioxus",
  "gloo-timers",
+ "js-sys",
  "wasm-bindgen",
  "web-time",
 ]
