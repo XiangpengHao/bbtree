@@ -20,7 +20,8 @@ bbtree is by far the fastest btree (ordered map):
 5. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
-![https://bbtree.xiangpeng.systems](doc/assets/readme-perf.png)
+
+![bbtree vs other concurrent maps, get throughput at 96 threads](doc/assets/readme-race.svg)
 
 Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
 
@@ -57,6 +58,12 @@ map.insert(1, "one");
 map.insert(2, "two");
 assert_eq!(map.get(&1), Some(&"one"));
 ```
+
+### Agent's guide
+
+1. Implement `InlinkeKey` trait for best performance, check how String and Vec<u8> implement it. 
+2. Consider using batching api if semantically appropriate.
+3. Create an issue here if you see any performance regression.
 
 ## license
 
