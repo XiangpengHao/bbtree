@@ -10,6 +10,7 @@ use core::mem::offset_of;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
+use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::latch::NodeLatch;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
@@ -455,6 +456,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_header(self) -> (usize, usize) {
         debug_assert!(Self::is_latched());
+        Interleaving::switch_point();
         // SAFETY: both fields are aligned `u16`s of the allocated,
         // initialized header (caller), read through the raw pointer.
         unsafe {
@@ -478,6 +480,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_has_head(self) -> bool {
         debug_assert!(Self::is_latched());
+        Interleaving::switch_point();
         // SAFETY: the field is a `bool` of the allocated, initialized header
         // (caller), which writers only ever set to a `bool`, read through
         // the raw pointer.

@@ -38,7 +38,7 @@ use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::{Latched, Version};
 use super::super::node::leaf::{CandidateLine, Leaf};
 use super::LatchedTree;
-use super::descent::{HeldLeaf, RootRead, Shared};
+use super::descent::{HeldLeaf, RootRead};
 use super::insert::Replace;
 use super::lookup::{RacingRead, Unsettled};
 use crate::allocator::Allocator;
@@ -557,7 +557,8 @@ where
                         let visit = &self.batch.visit;
                         LatchedTree::settle_copy(leaf, version, read, &self.key, true, visit)
                     } else {
-                        LatchedTree::read_head(leaf, &self.key, &self.batch.visit).map(Some)
+                        let visit = &self.batch.visit;
+                        LatchedTree::read_head(leaf, version, &self.key, visit).map(Some)
                     }
                 } else {
                     let (candidate, prefix_len) = leaf.candidate_line_racing(&self.key);
@@ -702,12 +703,16 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(line)
     }
 
-    /// What `visit` makes of `leaf`'s head, latched shared, if its key is
-    /// `key`, which matched the separator left of the leaf; that separator
-    /// may have been removed since, its successor the head now. Synchronous,
-    /// as [`Self::read_in_leaf`].
+    /// What `visit` makes of `leaf`'s head, latched shared, if the leaf is
+    /// still at `version`, the version it was read at under its parent, and
+    /// its head's key is `key`, which matched the separator left of the
+    /// leaf; that separator may have been removed since, its successor the
+    /// head now. A leaf that changed since may have merged into its sibling
+    /// and been freed, its bytes a stale copy of entries that live on there.
+    /// Synchronous, as [`Self::read_in_leaf`].
     fn read_head<Q, B: EntryVisit<K, V, S>>(
         leaf: Leaf<K, V, Latched<S>>,
+        version: Version,
         key: &SearchKey<'_, K, Latched<S>, Q>,
         visit: &RefCell<B>,
     ) -> Result<B::Output, Restart>
@@ -715,7 +720,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let held = HeldLeaf::<K, V, S, Shared>::lock(leaf);
+        let held = Self::latch_unchanged(leaf, version).ok_or(Restart)?;
         if !Self::is_head(leaf, key) {
             return Err(Restart);
         }

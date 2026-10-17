@@ -274,17 +274,19 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 Err(Unsettled) => LeafFind::Changed,
             };
         }
+        // A leaf that changed since the descent may have merged into its
+        // sibling and been freed, its bytes a stale copy of entries that
+        // live on there.
+        let Some(held) = Self::latch_unchanged(leaf, at.version()) else {
+            return LeafFind::Changed;
+        };
         if at_separator {
-            let held = HeldLeaf::<K, V, S, Shared>::lock(leaf);
             return if Self::is_head(leaf, key) {
                 LeafFind::Held(held, EntryPlace::Head)
             } else {
                 LeafFind::Changed
             };
         }
-        let Some(held) = Self::latch_unchanged(leaf, at.version()) else {
-            return LeafFind::Changed;
-        };
         match Self::find_latched(leaf, key, candidate, ()) {
             Some(index) => LeafFind::Held(held, EntryPlace::Key(index)),
             None => LeafFind::Absent,

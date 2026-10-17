@@ -18,6 +18,7 @@ use core::ops::Range;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 
+use super::super::interleaving::Interleaving;
 use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
@@ -182,6 +183,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// The page is a latched tree's root page, allocated.
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
+        Interleaving::switch_point();
         // SAFETY: the root area was written with the page, which is
         // allocated (caller); its length is a byte, read as an atomic, and a
         // racing write makes the copy one that the version check throws

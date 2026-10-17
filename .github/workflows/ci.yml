@@ -257,9 +257,9 @@ jobs:
 
   # This workflow's one required check (.github/rulesets/main.json), so the
   # jobs above can change without touching the ruleset. It always runs: a
-  # required check that is skipped counts as passed. Miri and the sanitizer
-  # are required checks of their own (miri.yml, sanitizer.yml), as Verus will
-  # be.
+  # required check that is skipped counts as passed. Miri, the sanitizer and
+  # Shuttle are required checks of their own (miri.yml, sanitizer.yml,
+  # shuttle.yml), as Verus will be.
   merge-gate:
     name: merge gate
     if: always()

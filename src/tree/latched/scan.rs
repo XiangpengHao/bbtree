@@ -667,7 +667,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 }
                 Node::Internal(internal) => internal,
             };
-            let version = root.latch().read_version();
+            // A lowering to a leaf that finished since the root pointer was
+            // read leaves a version that checks out on the leaf's bytes.
+            let Some(version) = self.root_version(root) else {
+                continue;
+            };
             if let Some(held) = Self::walk_down::<O>(root, version, None, path) {
                 return held;
             }

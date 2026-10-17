@@ -6,6 +6,8 @@
 mod batch;
 mod owner;
 mod range;
+#[cfg(all(test, shuttle))]
+mod shuttle_tests;
 #[cfg(test)]
 mod tests;
 
@@ -357,6 +359,21 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// How many leading bytes every key shares (D50).
     pub(crate) fn shared_prefix_len(&mut self) -> usize {
         self.tree.shared_prefix_len()
+    }
+
+    /// How many keys each node holds, level by level from the root.
+    #[cfg(shuttle)]
+    pub(crate) fn node_lengths(&mut self) -> std::vec::Vec<std::vec::Vec<usize>> {
+        self.tree.node_lengths()
+    }
+
+    /// The keys of each leaf, in key order.
+    #[cfg(shuttle)]
+    pub(crate) fn leaf_keys(&mut self) -> std::vec::Vec<std::vec::Vec<K>>
+    where
+        K: Clone,
+    {
+        self.tree.leaf_keys()
     }
 }
 
