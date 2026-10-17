@@ -2756,6 +2756,9 @@
   .chart-series.unordered .chart-point {
     fill-opacity: 0.45;
   }
+  .end-label.unordered .chart-dot {
+    fill-opacity: 0.45;
+  }
   .end-label.unordered .end-name {
     font-style: italic;
   }

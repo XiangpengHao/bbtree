@@ -58,7 +58,7 @@ impl PerformanceCard {
 
 #[component]
 pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotlight) -> Element {
-    let mut shown = use_signal(|| PerformanceCard::Concurrent); // SCREENSHOT-TEMP
+    let mut shown = use_signal(|| PerformanceCard::SingleThread);
     // The cards have been in view: their charts' motion may play.
     let mut seen = use_signal(|| false);
     let ids = ElementIds::of_current();

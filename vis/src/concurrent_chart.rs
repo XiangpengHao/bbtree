@@ -95,7 +95,7 @@ impl ConcurrentLine {
 #[component]
 pub(crate) fn ConcurrentChart(spotlight: Spotlight) -> Element {
     let measurements = use_hook(|| Rc::new(Measurements::of_epyc_9r45()));
-    let mut keys = use_signal(|| MeasuredKeys::WikiTitles); // SCREENSHOT-TEMP
+    let mut keys = use_signal(|| MeasuredKeys::U64);
     let mut operation = use_signal(|| MeasuredOperation::Get);
     let frame = FrameWidth::use_new();
     let machine = measurements.machine();

@@ -70,8 +70,8 @@ author's.
   (`get_copied`), and uses its batch APIs (`get_many_copied`, 64 keys a
   call; `insert_many`, 16). artmap (ART) was measured, in both its forms,
   and left out of the post as not a fair comparison; its numbers are in
-  the session's notes, not in `vis/data/`. DashMap was measured and is not
-  shown.
+  the session's notes, not in `vis/data/`. DashMap, a hash map, is shown
+  only on the concurrent card, for reference.
 - **Charts.** The cards are "Single thread", "Concurrent", "End to End",
   "Memory" and "Architectures", in that order (the author's names); they
   don't turn by themselves. Above them,
@@ -101,8 +101,14 @@ author's.
     lines' ends, a crosshair; Get, Insert,
     Update, 90/10 get/update, 90/10 scan/update. bbtree's batched lookups
     are a solid line of their own, "bbtree (batched)"; other maps'
-    batches aren't shown. No hash map: DashMap was measured and left
-    out. It is the one card not run on the 9900X, whose 12 cores made a
+    batches aren't shown. DashMap, a hash map threads share, is drawn for
+    reference (the author's call, 2026-10-17): a faint, dotted line that
+    fades in, "DashMap (unordered, hashtable)" in italics, a dotted swatch
+    in the phone's key; no scans, so no line under 90/10 scan/update. Its
+    cells come from `blog-runs.sh tab2-extra` (DashMap and bbtree's
+    batched inserts, the latter not shown) on the same machine type the
+    same day, copied into the card's results before `blog-collect.sh`,
+    which keeps DashMap's rows. It is the one card not run on the 9900X, whose 12 cores made a
     cramped chart and whose second hardware threads bent its lines: it
     runs on AWS's c8a.metal-24xl (AMD EPYC 9R45, Zen 5, 96 cores, one
     socket, 12 × 32 MiB L3; AWS's AMD instances run a thread a core), at
