@@ -146,6 +146,11 @@ pub(crate) trait SharedMap<K>: Sized {
     /// only, and that thread builds it.
     const SHARED: bool = true;
 
+    /// Whether its writers take turns, as behind one lock: more threads
+    /// build it no faster, only slower as they fight for the lock, so one
+    /// thread builds it.
+    const WRITERS_TAKE_TURNS: bool = false;
+
     /// What one worker reads and writes the map through.
     type Handle<'m>: MapHandle<K> + Send
     where
@@ -218,11 +223,20 @@ impl<K, T: MapHandle<K>> MapHandle<K> for &T {
 }
 
 /// Implements [`SharedMap`] for a map that threads share by reference,
-/// named `$name`, for every [`ScalingKey`].
+/// named `$name`, for every [`ScalingKey`]; `behind one lock` for a map
+/// whose writers take turns.
 macro_rules! shared_by_reference {
     ($map:ty, $name:literal, $new:expr) => {
+        shared_by_reference!($map, $name, $new, false);
+    };
+    (behind one lock $map:ty, $name:literal, $new:expr) => {
+        shared_by_reference!($map, $name, $new, true);
+    };
+    ($map:ty, $name:literal, $new:expr, $writers_take_turns:literal) => {
         impl<K: ScalingKey> SharedMap<K> for $map {
             const NAME: &'static str = $name;
+
+            const WRITERS_TAKE_TURNS: bool = $writers_take_turns;
 
             type Handle<'m> = &'m Self;
 
@@ -288,7 +302,7 @@ impl<K: ScalingKey> MapHandle<K> for BBTreeMap<K, u64> {
 }
 
 shared_by_reference!(
-    RwLock<unsync::BBTreeMap<K, u64>>,
+    behind one lock RwLock<unsync::BBTreeMap<K, u64>>,
     "bbtree-unsync-rwlock",
     RwLock::new(unsync::BBTreeMap::new())
 );
@@ -560,7 +574,7 @@ impl<K: ScalingKey> MapHandle<K> for DashMap<K, u64> {
 // std's B-tree behind a reader-writer lock, as `unsync::BBTreeMap` above:
 // the way to share a map that has no concurrent version.
 shared_by_reference!(
-    RwLock<BTreeMap<K, u64>>,
+    behind one lock RwLock<BTreeMap<K, u64>>,
     "std-btree-rwlock",
     RwLock::new(BTreeMap::new())
 );

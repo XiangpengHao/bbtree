@@ -1,46 +1,49 @@
 # bbtree
 
-[![test](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
-[![miri](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
-[![sanitizer](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
-[![shuttle](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
-[![fuzzing](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
+[![crates.io](https://img.shields.io/crates/v/bbtree.svg)](https://crates.io/crates/bbtree)
+[![docs.rs](https://img.shields.io/docsrs/bbtree)](https://docs.rs/bbtree)\
+[![test](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/ci.yml?branch=main&label=test)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
+[![miri](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/miri.yml?branch=main&label=miri)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
+[![sanitizer](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/sanitizer.yml?branch=main&label=sanitizer)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
+[![shuttle](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=shuttle)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
+[![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
 
-Blessed B-tree:
-1. An ordered map that threads share, `BBTreeMap`, and one for a single
-   thread, `unsync::BBTreeMap`, a drop-in replacement for std's
-   `BTreeMap`/`BTreeSet`, on the same nodes.
-2. Zero dependencies, `no_std` compatible.
-3. x% lower memory usage, y% faster search, z% lower tail latency.
-4. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
-5. Brought to you by decades of database research and careful curation from [Xiangpeng Hao](https://xiangpeng.systems).
+bbtree is world's fastest ordered map:
+1. 5x faster than std's `BTreeMap` at single thread, 7x faster than `crossbeam-skiplist` at 12 threads.
+2. 30% lower memory usage, 5x lower p99 latency.
+3. Zero dependencies, `no_std` compatible.
+4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.
+5. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
+6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
-See it find a key at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems).
+![https://bbtree.xiangpeng.systems/post/](doc/assets/readme-perf.png)
 
-## usage
+Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post/bbtree-internals/).
+
+## Usage
 
 ```bash
 cargo add bbtree
 ```
 
-Threads share a `BBTreeMap` through `&self`. A lookup copies a value out,
-or runs a closure on the entry; nothing it hands out outlives the call:
+### Concurrent bbtree
 
 ```rust
 use bbtree::BBTreeMap;
 
 let map = BBTreeMap::new();
+
 std::thread::scope(|scope| {
     scope.spawn(|| map.insert(1_u64, 10_u64));
     scope.spawn(|| map.insert(2, 20));
 });
+
 assert_eq!(map.get_copied(&1), Some(10));
 assert_eq!(map.read(&2, |_, value| value + 1), Some(21));
 assert_eq!(map.get_many_copied([&1, &2, &3]), [Some(10), Some(20), None]);
 ```
 
-One thread at a time, `unsync::BBTreeMap` and `unsync::BBTreeSet` have
-std's API:
+### Single thread
 
 ```rust
 use bbtree::unsync::BBTreeMap;

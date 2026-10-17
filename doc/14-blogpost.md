@@ -117,10 +117,10 @@ Added by the session that built the post; the plan above is the author's.
     and AWS's C8i (Xeon 6) and C9g (Graviton5); the note names the AWS
     instances. Cells come from `blog-runs.sh arch` (UUIDs unless
     other keys are named; Linux or macOS), merged by `blog-collect.sh`;
-    on AWS, `bench/tools/aws-arch.sh <type> <name>` runs them on a
+    on AWS, `bench/tools/aws-blog-runs.sh <type> <name>` runs them on a
     throwaway spot instance (c8i.large and c9g.large, 2 vCPUs, about a
     cent a run in us-west-2) and terminates it, the instance also
-    shutting itself down an hour after boot. A machine joins the card in
+    shutting itself down three hours after boot. A machine joins the card in
     `ArchitectureMachine::ALL`. WebAssembly and the ESP32-P4 are left out:
     WebAssembly until Rust builds wasm32 with SIMD (`simd128`) by default
     (its harness stays in `bench/wasm`, on keys from `bbtree-scaling

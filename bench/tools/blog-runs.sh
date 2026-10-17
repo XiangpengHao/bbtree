@@ -93,8 +93,9 @@ tab1() {
 
 # Tab 2: the maps threads share, as threads are added: lookups half of
 # which miss, updates, a 90/10 lookup/update mix and a 90/10 scan/update
-# mix in one invocation; bbtree's batched lookups in another; inserts in a
-# third.
+# mix in one invocation; bbtree's batched lookups in another; inserts in
+# one a map, as each count of threads inserts every entry anew, and the
+# lock's map takes as long at every count.
 tab2() {
     local key=$1
     local maps=bbtree,std-btree-rwlock,scc-treeindex,concurrent-map,crossbeam-skipmap
@@ -104,8 +105,11 @@ tab2() {
     $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps bbtree \
         --workloads get-half-batch --measure throughput --seconds 0.5 \
         --out "$out/tab2-batch-$key"
-    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps "$maps" \
-        --workloads insert --measure throughput --out "$out/tab2-inserts-$key"
+    local map
+    for map in ${maps//,/ }; do
+        $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps "$map" \
+            --workloads insert --measure throughput --out "$out/tab2-inserts-$key-$map"
+    done
 }
 
 # Architectures: the single-thread gets of bbtree against std's B-tree

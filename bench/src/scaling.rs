@@ -906,10 +906,15 @@ impl ScalingRun {
     }
 
     /// A map of every key, inserted by all the CPUs, each every so many, or
-    /// by one if one thread owns it: in random key order, as the keys are.
+    /// by one if one thread owns it or its writers take turns: in random
+    /// key order, as the keys are.
     fn built<K: ScalingKey, M: SharedMap<K>>(&self, keys: &[K]) -> M {
         let map = M::new();
-        let workers = if M::SHARED { self.cpus.cpus.len() } else { 1 };
+        let workers = if M::SHARED && !M::WRITERS_TAKE_TURNS {
+            self.cpus.cpus.len()
+        } else {
+            1
+        };
         let handles = (0..workers).map(|_| map.handle()).collect();
         self.on_workers(handles, |worker, handle| {
             for (index, key) in keys.iter().enumerate().skip(worker).step_by(workers) {
