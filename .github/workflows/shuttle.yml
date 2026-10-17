@@ -1,0 +1,50 @@
+# Named for its README badge.
+name: shuttle
+
+# The latched tree's thread interleavings, explored by Shuttle
+# (src/bctree_map/shuttle_tests.rs, doc/09-concurrency.md): builds with
+# `--cfg shuttle` mark where threads may switch (src/tree/interleaving.rs),
+# and each test runs its threads under thousands of schedules. Release
+# builds, as Shuttle reruns a test once a schedule. Each test explores for at
+# most 50 seconds a scheduler, two schedulers, so it ends within two minutes;
+# the tests run as many at once as the runner has cores, so all end within
+# fifteen.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel a pull request's superseded runs. Every commit on main finishes its
+# run, so the README badge reports it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  shuttle:
+    name: shuttle
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTFLAGS: --cfg shuttle
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Shuttle
+        run: cargo test --release --lib shuttle_tests

@@ -193,7 +193,7 @@ where
                     }
                 };
                 let found = if at_separator {
-                    LatchedTree::read_head(leaf, &self.key, &self.batch.f).map(Some)
+                    LatchedTree::read_head(leaf, version, &self.key, &self.batch.f).map(Some)
                 } else {
                     let (candidate, prefix_len) = leaf.candidate_line_racing(&self.key);
                     let index = match candidate {
@@ -299,12 +299,16 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(line)
     }
 
-    /// What `f` returns on `leaf`'s head, latched shared, if its key is
-    /// `key`, which matched the separator left of the leaf; that separator
-    /// may have been removed since, its successor the head now. Synchronous,
-    /// as [`Self::read_in_leaf`].
+    /// What `f` returns on `leaf`'s head, latched shared, if the leaf is
+    /// still at `version`, the version it was read at under its parent, and
+    /// its head's key is `key`, which matched the separator left of the
+    /// leaf; that separator may have been removed since, its successor the
+    /// head now. A leaf that changed since may have merged into its sibling
+    /// and been freed, its bytes a stale copy of entries that live on there.
+    /// Synchronous, as [`Self::read_in_leaf`].
     fn read_head<Q, R>(
         leaf: Leaf<K, V, Latched<S>>,
+        version: Version,
         key: &SearchKey<'_, K, Latched<S>, Q>,
         f: &RefCell<impl FnMut(&K, &V) -> R>,
     ) -> Result<R, Restart>
@@ -313,7 +317,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Q: Ord + ?Sized,
     {
         let held = HeldLeaf::<K, V, S, Shared>::lock(leaf);
-        if !Self::is_head(leaf, key) {
+        if !leaf.latch().is_unchanged(version) || !Self::is_head(leaf, key) {
             return Err(Restart);
         }
         let result = (f.borrow_mut())(leaf.head_key(), leaf.head_value());

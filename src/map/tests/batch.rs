@@ -29,8 +29,8 @@ fn empty_single_and_repeated_keys() {
         set.contains_many([&1, &4, &1, &2]),
         [true, false, true, true]
     );
-    assert_eq!(set.insert_many([]), []);
-    assert_eq!(set.contains_many::<i32, 0>([]), []);
+    assert_eq!(set.insert_many([]), [false; 0]);
+    assert_eq!(set.contains_many::<i32, 0>([]), [false; 0]);
 }
 
 #[test]
