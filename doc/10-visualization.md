@@ -93,12 +93,17 @@ From the original note:
   blog post on bbtree and the visualizer share one build and
   one look. The explorer stays as it is, at `/`, for readers who want to
   look around; the post is a page of its own, at `/post/`, with tabs
-  between them. The post is prose with figures, each figure one idea drawn
-  by the explorer's own panels, not a second set of drawings. Rejected:
-  the explorer pinned beside scrolling prose (at half width it loses its
-  inspector, scroll fights its playback, and phones need figures anyway),
-  and the explorer with a story panel (the fourth pass's guide, removed in
-  the fifth).
+  between them. The post is prose with figures, each one idea and nothing
+  else (2026-10-17): a mechanism (prefix keys, the count, version checks)
+  drawn plain, from fixed example keys and numbers, which claim no tree's
+  state; what a lookup did (the leaf's lines it read, a batch's searches
+  and prefetches) drawn from a real tree's views, as the explorer reads
+  them. Rejected: the explorer's own panels as figures (the first post's:
+  each panel showed far more than its paragraph needed), the explorer
+  pinned beside scrolling prose (at half width it loses its inspector,
+  scroll fights its playback, and phones need figures anyway), and the
+  explorer with a story panel (the fourth pass's guide, removed in the
+  fifth).
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws

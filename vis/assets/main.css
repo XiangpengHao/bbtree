@@ -25,6 +25,8 @@
   --link: #2266c8;
   --error: #b42318;
   --error-soft: #fdf0ee;
+  /* A check that passed, as text: 5.5:1 on panel. */
+  --ok: #11795a;
 
   --marker: #ffe24a;
   --marker-strong: #a67c00;
@@ -2448,11 +2450,12 @@
     border-top: 1px solid var(--rule);
   }
 
+  /* A figure shows one idea, a little wider than the text. */
   .post > .figure {
     grid-column: wide;
     justify-self: center;
-    width: min(1100px, calc(100% - 32px));
-    margin: 12px 0 36px;
+    width: min(760px, calc(100% - 32px));
+    margin: 12px 0 28px;
   }
   .figure {
     display: flex;
@@ -2511,6 +2514,254 @@
   .figure-explore:hover {
     text-decoration: underline;
     text-underline-offset: 3px;
+  }
+
+  /* The post's code: a command, a call, the citation. */
+  .post > pre {
+    margin: 0 0 20px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    font: 14px/1.6 var(--font-data);
+  }
+  .note-ref {
+    font-size: 0.72em;
+    line-height: 0;
+  }
+  .note-ref a {
+    margin-left: 1px;
+    color: var(--link);
+    text-decoration: none;
+  }
+  .post-notes {
+    margin: 40px 0 0;
+    padding: 16px 0 0 1.5em;
+    border-top: 1px solid var(--rule);
+    list-style: decimal;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--graphite);
+  }
+  .post-notes li + li {
+    margin-top: 6px;
+  }
+  .post-notes a {
+    color: var(--link);
+    text-underline-offset: 3px;
+  }
+  .post-notes li:target {
+    background: var(--marker-wash);
+  }
+
+  /* The figures of how it works: each one idea, in the explorer's hues;
+   * what a lookup reads in the highlighter. */
+  .diagram {
+    padding: 20px 20px 18px;
+    background: var(--panel);
+    font-size: 13px;
+  }
+  .prefix-keys {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px 14px;
+  }
+  .prefix-keys-head,
+  .prefix-keys-foot {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .prefix-keys-key {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .prefix-keys-shared {
+    color: var(--muted);
+  }
+  .prefix-keys-window {
+    background: var(--compare-soft);
+    border-radius: 3px;
+  }
+  .byte-chip {
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: pre;
+    letter-spacing: 0.04em;
+  }
+  .byte-chip.tied {
+    background: var(--well);
+    color: var(--graphite);
+  }
+  .byte-chip.apart {
+    background: var(--compare-soft);
+    box-shadow: inset 0 0 0 1px var(--compare);
+  }
+  @media (max-width: 560px) {
+    .prefix-keys {
+      grid-template-columns: auto auto;
+      justify-content: start;
+    }
+    .prefix-keys-key {
+      display: none;
+    }
+  }
+  .key-count {
+    display: grid;
+    grid-template-columns: auto repeat(8, minmax(0, 44px));
+    justify-content: start;
+    align-items: center;
+    gap: 6px;
+    text-align: center;
+  }
+  .key-count-label {
+    padding-right: 6px;
+    text-align: left;
+    font: 12px var(--font-ui);
+    color: var(--muted);
+  }
+  .key-count-cell {
+    padding: 5px 0;
+    border-radius: 4px;
+    background: var(--compare-soft);
+  }
+  .key-count-cell.empty {
+    background: var(--panel);
+    box-shadow: inset 0 0 0 1px var(--rule-strong);
+    color: var(--muted);
+  }
+  .key-count-cell.target {
+    background: var(--well);
+  }
+  .key-count-cell.smaller {
+    background: var(--slot-smaller);
+    color: var(--panel);
+  }
+  .key-count-cell.larger {
+    background: var(--slot-larger);
+  }
+  .key-count-result {
+    grid-column: 2 / -1;
+    padding-top: 4px;
+    text-align: left;
+    font: 600 13px var(--font-ui);
+  }
+  .cache-lines-name {
+    margin: 0 0 6px;
+    color: var(--graphite);
+  }
+  .cache-lines-name strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .cache-lines-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--lines), minmax(0, 36px));
+    column-gap: 3px;
+    row-gap: 4px;
+  }
+  .cache-line {
+    grid-row: 1;
+    height: 26px;
+    border-radius: 3px;
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--rule);
+  }
+  .cache-line.read {
+    background: var(--marker);
+    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
+  }
+  .cache-lines-span {
+    grid-row: 2;
+    min-width: 0;
+    padding-top: 3px;
+    border-top: 1.5px solid var(--rule-strong);
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cache-lines-span:empty {
+    border-top-color: transparent;
+  }
+  .batch-lanes {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px 14px;
+  }
+  .batch-lanes-row {
+    width: 100%;
+    height: 16px;
+  }
+  .batch-lanes-search {
+    fill: var(--ink);
+  }
+  .batch-lanes-way {
+    fill: var(--marker);
+  }
+  .batch-lanes-legend {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    margin: 6px 0 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .batch-lanes-legend .legend-mark + * {
+    margin-right: 8px;
+  }
+  .versions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: 30px;
+    gap: 4px 8px;
+    max-width: 560px;
+    margin: 0 auto;
+  }
+  .versions-head {
+    grid-row: 1;
+    align-self: end;
+    text-align: center;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .act {
+    display: grid;
+    place-items: center;
+    padding: 0 4px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 4px;
+    background: var(--panel);
+    font: 12px var(--font-data);
+    text-align: center;
+    line-height: 1.15;
+  }
+  .act.version {
+    border-color: transparent;
+    background: var(--well);
+  }
+  .act.version.new {
+    background: var(--marker-soft);
+  }
+  .act.write {
+    border-color: var(--marker-strong);
+    background: var(--marker-soft);
+  }
+  .act.kept {
+    color: var(--ok);
+    font-weight: 600;
+  }
+  .act.retried {
+    border-color: var(--error);
+    background: var(--error-soft);
+    color: var(--error);
+    font-weight: 600;
   }
 
   .post-section {

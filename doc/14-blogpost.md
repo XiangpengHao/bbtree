@@ -2,8 +2,10 @@ The blog post is along with the visualization.
 
 ## Blog content
 
-The post's text as the site shows it (`vis/src/post.rs`). Bracketed lines
-mark where a figure or the charts sit.
+The post's text as the site shows it (`vis/src/post.rs`,
+`vis/src/how_it_works.rs`). Bracketed lines mark where a figure or the
+charts sit; each figure of "How it works" shows one idea and nothing else,
+given here as what it draws, a sketch, and its caption.
 
 Title: bbtree: fastest ordered map in the world
 
@@ -19,25 +21,232 @@ Title: bbtree: fastest ordered map in the world
 
 [Charts: Single thread, Concurrent, End to End, Memory, Architectures]
 
-### How it works 
+### How it works
 
-#### Prefix key to improve comparisons 
+A lookup walks from the root to a leaf: 5 nodes at 10M entries.
+At each node, it does two things:
 
-[Figure: one lookup's way down]
+1. **Search**: pick the child to go to.
+2. **Fetch**: bring that child into cache, usually a miss to DRAM.
 
-[Figure: the leaf]
+Every B-tree pays both, at every level.
+bbtree makes the search cheaper (prefix keys, SIMD), makes the fetch smaller (layout), and overlaps the fetches of different lookups (batching).
 
-#### AVX512/NEON SIMD to improve search speed
+#### Prefix keys to improve comparisons
 
-#### Batching to improve throughput
+Comparing two `String`s means following two pointers into the heap.
+A binary search over a node of `String`s is a chain of heap misses: each probe waits for the one before.
 
-[Figure: four lookups on one thread]
+The fix is old database wisdom[^graefe], and the same trick as German strings[^umbra]: keep a short, fixed-size prefix of each key in the node, and compare that instead.
+bbtree keeps up to 8 bytes per key, in a dense array next to the keys.
+Two keys whose prefixes differ are ordered by their prefixes alone; only a tie reads the heap.
+
+But real keys share prefixes.
+In 10M Wikipedia titles, 65% of neighbors share their first 8 bytes, and then the prefix decides nothing.
+
+So bbtree skips what a node's keys share.
+Every key in a node lies between the node's two fences (the separators beside it in its parents), so every key starts with whatever the fences share.
+The node stores only that length, a `u16`, and keeps the 8 bytes *after* it.
+No fence key is stored.
+
+[Figure 1: four Wikipedia titles as the benchmarks store them, each with
+the bytes they share dimmed; their first 8 bytes; and the 8 bytes past
+what they share (`prefix_keys_figure.rs`).]
+
+```text
+key                              first 8 bytes   8 bytes past the shared 20
+
+List_of_bridges_in_Afghanistan   List_of_        fghanist
+List_of_bridges_in_Alabama       List_of_        labama··
+List_of_bridges_in_Alaska        List_of_        laska···
+List_of_bridges_in_Albania       List_of_        lbania··
+
+                                 all tie:        all differ:
+                                 compare in full decided in a register
+```
+
+> Four Wikipedia titles. Their first 8 bytes are the same, so a plain prefix decides nothing. They share their first 20 bytes, `List_of_bridges_in_A`: a node whose keys all share them skips them, and keeps the next 8 bytes, which tell the keys apart.
+
+When we added prefix keys, Wikipedia lookups went from 1,073 to 704 ns and loaded half as many cache lines from DRAM.
+Skipping shared prefixes made lookups of Linux paths another 1.5× faster (693 → 457 ns at 1M).
+
+#### AVX-512/NEON SIMD to improve search speed
+
+With prefix keys, a node search is a search over a small array of integers: 2 bytes a key for integers and UUIDs, 4 to 8 for strings, which is enough once the shared prefix is gone.
+
+Binary search is the textbook answer, and the wrong one here.
+Each step waits for the one before, and its branch is a coin flip for the CPU.
+
+bbtree doesn't search; it counts.
+The child to follow is the number of keys smaller than the target.
+One AVX-512 instruction compares the target with 32 two-byte keys at once, and a popcount of the result is the answer.
+A whole internal node is two 64-byte vectors: no loop, no branch, every load issued at once.
+Empty slots hold the largest value, so they never count.
+
+[Figure 2: one count. Eight slots, the last empty, the target under each,
+the mask, the count (`key_count_figure.rs`).]
+
+```text
+prefix keys      3  11  27  40  58  71  90  max
+target          45  45  45  45  45  45  45   45
+key < target     1   1   1   1   0   0   0    0
+
+                4 ones: go to child 4
+```
+
+> One compare checks every slot against the target; counting the ones gives the child to follow. Binary search would take 3 steps here, each waiting for the last, and 6 in a full node of 49 children.
+
+On ARM, the same count runs in NEON.
+On an M1 Pro, it took a 10M `u64` lookup from 390 to 174 ns, and from 1,678 instructions to 407.
+
+AVX-512 needs `-C target-cpu=native` (Rust 1.89 or later); without it, bbtree counts with SSE2.
 
 #### Careful layouts to improve cache locality
 
+At 10M entries, the tree is many times larger than the cache, so most fetches go to DRAM.
+What a fetch costs is the number of 64-byte cache lines it touches.
+bbtree lays out each node so that a lookup touches as few as possible:
+
+1. **1 KiB nodes.** Disk B-trees use big pages because a disk read is expensive. In memory, the unit is a cache line, and every insert shifts half a node. In our sweep, 1 KiB beat everything from 512 B to 8 KiB on random gets and inserts; 4 KiB nodes made random gets 1.4× slower.
+2. **Internal nodes keep no keys**, only prefix keys and child pointers. A search reads the prefix keys, then one pointer; full keys in between took cache lines for nothing. 49 children fit in 512 bytes. On a tie, the search reads the full key from the leaf, where it lives anyway.
+3. **Leaves keep each key next to its value**, aligned so that a pair never straddles two lines: the line that confirms the key brings the value with it.
+
+[Figure 3: the leaf of one `u64` lookup in the site's 1M-key tree, a cell
+a 64-byte line, the lines it read lit, from bbtree's page map and trace
+(`cache_lines_figure.rs`). Only the leaf: the site runs bbtree built for
+wasm32, whose 4-byte pointers give internal nodes another layout than a
+64-bit machine's; a leaf of `u64` keys and values is the same on both.]
+
+```text
+leaf, 1 KiB: 3 of 16 lines read
+██ ██ ░░ ░░ ░░ ░░ ██ ░░ ░░ ░░ ░░ ░░ ░░ ░░ ░░ ░░
+└───┘ └───────────────────────────────────────┘
+prefix          keys and values
+keys
+```
+
+> The leaf of one `u64` lookup, a cell a 64-byte line. The lookup reads the lines lit: the prefix keys, then the one line that holds the key and its value. An internal node reads the same way: its prefix keys, then one child pointer.
+
+And no software prefetch.
+Prefetch hides a bad layout instead of fixing it: when we tried it, misses got 12–33% slower, and DRAM traffic went up 4–6×.
+
+#### Batching to improve throughput
+
+A single lookup can't beat its chain of misses: the CPU can't fetch a child before the parent's search picks it.
+
+But a caller often has many keys at hand: a join probing an index, a bulk load.
+Their lookups are independent, so their misses can overlap.
+
+`get_many_copied` looks up an array of keys at once:
+
+```rust
+let values = map.get_many_copied([&a, &b, &c, &d]);
+```
+
+Each key walks the tree in its own *lane*: it searches a node, prefetches the child it picked, and steps aside.
+While it waits for memory, the other lanes search.
+
+[Figure 4: four `u64` keys looked up together in the site's 1M-key tree,
+a row each: each search a block and, from each prefetch to that key's
+next search, the line on its way; time counted in searches, from
+bbtree's trace of the batch (`batch_lanes_figure.rs`).]
+
+```text
+131072   ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■
+500000    ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
+851191     ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
+999000      ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
+
+■ search   ━ line on its way, from the key's prefetch to its next search
+```
+
+> Four `u64` keys looked up together on one thread, a row each, time counted in searches. After each search, a key prefetches the next node it reads; while that line is on its way, the other keys search. Up to 3 lines are on their way at once; one key alone has one.
+
+On one thread, batching takes a `u64` get from 109 to 74 ns, and a JSON-key get from 162 to 102 ns.
+At 96 threads, UUID gets go from 591 to 795 M/s with 64 keys a call.
+
+Each lane is an `async` block that reads like the plain lookup, and a tiny executor polls the lanes in turn: no allocation, no runtime.
+It is also the only place bbtree prefetches: the one line each lane reads next.
+
 #### Optimistic latch coupling to improve concurrency
 
-#### Formal verification to ensure correctness
+The usual way to share a B-tree is a reader-writer latch on every node.
+But taking a read latch writes to the latch, and every lookup takes the root's.
+At 96 cores, the root's cache line bounces between cores on every lookup: readers never block each other, yet they still queue for one line.
+
+bbtree's readers write nothing.
+Each node carries a version number:
+
+1. A reader reads the version, reads the node, and checks the version again. Unchanged: what it read is consistent. Changed: start over.
+2. A writer latches the node with a compare-and-swap, changes it, and bumps the version as it lets go.
+
+Lookups read their leaf the same way: `get_copied` copies the value out and checks the version after, like a seqlock.
+A lookup, hit or miss, writes nothing to shared memory.
+
+[Figure 5: one node's version, a writer, and two readers, a column each,
+time running down (`versions_figure.rs`).]
+
+```text
+version     writer      reader 1      reader 2
+   7                    read v7
+   7                    read node     read v7
+   7                    check v7 ✓    read node
+   7        latch                     read node
+   7        change                    read node
+   7        release                   read node
+   8                                  check v8 ✗
+```
+
+> Time runs down. Readers only read. Reader 1 finished before the writer changed anything, so its read stands. Reader 2 overlapped the change, finds version 8, and starts over.
+
+A reader may still be reading a node that a writer just freed.
+So a freed node never goes back to the allocator while the map lives: it waits on a free list for the next node of its kind.
+A late reader reads a stale node, fails its version check, and retries.
+No epochs, no guards to hold.
+
+At 96 threads, bbtree's lookups run at 86–94% of 96 times its one-thread speed.
+On UUID gets, `RwLock<BTreeMap>` does 19 M/s; bbtree 591 M/s, 795 batched.
+Bf-tree[^bftree] latches its inner nodes the same way[^olc].
+
+#### Model checking and fuzzing to ensure correctness
+
+A faster B-tree is worthless if it loses your data.
+bbtree is checked four ways:
+
+1. **Differential fuzzing against std.** Random operations run on bbtree and std's `BTreeMap` side by side; every answer must match, and the tree's invariants are checked after every operation, under AddressSanitizer. Seven targets, every week and before every release.
+2. **Model checking with Shuttle.** Shuttle runs the threads one at a time and switches between them at every atomic they share: latch words, the root pointer, free lists. It reaches interleavings that stress tests rarely hit, and found two bugs that our threaded tests and a 12-thread stress run had missed. One: after a merge, a lookup of a separator key could run its closure on a stale copy of an entry, which another thread could then remove and free.
+3. **Miri**, with tree borrows and strict provenance, on a selected set of tests.
+4. **Hostile user code.** An `Ord`, `Clone` or `Drop` that panics or lies can give wrong answers, but never undefined behavior. A fuzz target checks exactly that.
+
+### Try it
+
+```bash
+cargo add bbtree
+```
+
+1. Replacing std's `BTreeMap`? Use `bbtree::unsync::BBTreeMap`; change one `use` line.
+2. Sharing it across threads? Use `bbtree::BBTreeMap`.
+3. Many keys at once? Use `get_many_copied` and `insert_many`.
+4. On x86, build with `-C target-cpu=native` for AVX-512.
+
+If you like bbtree, don't forget to cite it in your paper:
+
+```bibtex
+@misc{hao2026bbtree,
+  author       = {Xiangpeng Hao},
+  title        = {{bbtree}: fastest ordered map in the world},
+  year         = {2026},
+  howpublished = {\url{https://github.com/XiangpengHao/bbtree}},
+}
+```
+
+[^graefe]: Goetz Graefe, [More Modern B-Tree Techniques](https://doi.org/10.1561/1900000070) (2024): keep full keys out of the comparison stream with dense, fixed-width codes, and skip the prefix a page shares.
+
+[^umbra]: [Umbra: A Disk-Based System with In-Memory Performance](https://db.in.tum.de/~freitag/papers/p29-neumann-cidr20.pdf) (CIDR 2020); see also my post on [the nature of strings](https://blog.xiangpeng.systems/posts/nature-of-string/).
+
+[^bftree]: [Bf-Tree: A Modern Read-Write-Optimized Concurrent Larger-Than-Memory Range Index](https://github.com/microsoft/bf-tree) (VLDB 2024).
+
+[^olc]: Viktor Leis et al., [The ART of Practical Synchronization](https://db.in.tum.de/~leis/papers/artsync.pdf) (DaMoN 2016).
 
 
 ## Status and decisions (2026-10-17, from the runs)

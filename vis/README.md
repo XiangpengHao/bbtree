@@ -11,7 +11,7 @@ read from bbtree's own read-only views (`unsync::BBTreeMap::inspect`,
 `TreeView::trace`, the `inspect` feature), never recomputed. Design and decisions are in `doc/10-visualization.md`.
 
 One build, two pages, with tabs between them: the explorer at `/`, and the
-post at `/post/`, whose figures are the explorer's own panels.
+post at `/post/`, whose figures each show one idea.
 
 ```bash
 nix develop            # the repository's dev shell, or direnv
@@ -79,15 +79,15 @@ the left, the inspected node on the right.
 
 ## The post
 
-A column of prose with figures wider than it. A figure is an explorer link
-drawn in place: it names a tree and a lookup (`ExplorerLink`), draws the
-explorer's panels of its choosing, and links to the explorer, which opens
-on the same lookup. Figures of one workload share one tree, built as the
-reader nears the first of them; a figure starts its lookup once a third of
-it is in view, so the way down plays where it is read. Each figure owns its
-tracer, batcher and spotlight, so clicking in one changes it alone. The
-explorer's keyboard shortcuts and its address are the explorer's only:
-on the post, Space scrolls.
+A column of prose with figures a little wider than it, each one idea and
+nothing else (`how_it_works.rs`). A figure of a mechanism (prefix keys, the
+count, version checks) is drawn plain. A figure of what a lookup did reads
+a real tree: it names the tree and the lookup (`ExplorerLink`), draws what
+it needs of bbtree's views (the leaf's lines the lookup read, the batch's
+searches and prefetches), and links to the explorer, which opens on the
+same lookup. Figures of one workload share one tree, built as the reader
+nears the first of them. The explorer's keyboard shortcuts and its address
+are the explorer's only: on the post, Space scrolls.
 
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
