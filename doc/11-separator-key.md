@@ -261,8 +261,8 @@ small, the change is a simplification, judged by the code it removes.
 ### Census, 2026-10-13
 
 (1) and (2) at 10M entries, 1M hits and 1M misses, from
-`bbtree-separator-census` (bench crate, `inspect` feature): the bench's
-keys and insertion order, today's tree, its lookups traced through
+`bbtree-separator-census` (bbtree-eval's harness, `inspect` feature): the
+harness's keys and insertion order, today's tree, its lookups traced through
 `TreeView::trace`. Not yet with choosing where to split; (3) not yet run.
 
 | keys | width | exact in the leaves' parents | exact above | ties per hit | of which inexact |

@@ -81,8 +81,9 @@ impl Invocation {
     pub(crate) fn usage() -> String {
         format!(
             "\
-bbtree's benchmark suite. Every cell (map × key × value × size × operation)
-runs in a fresh process, once per repetition.
+bbtree's CI benchmarks. Every cell (map × key × value × size × operation)
+runs in a fresh process, once per repetition. The evaluation lives in
+bbtree-eval: https://github.com/XiangpengHao/bbtree-eval.
 
 usage: bbtree-bench <suite>... [filters] [options]
        bbtree-bench-memory <suite>... [filters] [options]

@@ -3,36 +3,20 @@ name = "bbtree-bench"
 version = "0.0.0"
 publish = false
 edition = "2024"
-description = "bbtree's benchmark suite: BBTreeMap against std's maps and hashbrown."
+description = "bbtree's CI benchmarks: BBTreeMap against std's maps and hashbrown."
 default-run = "bbtree-bench"
 
 [dependencies]
-artmap = "0.8.0"
 bbtree = { path = ".." }
-bytes = "1"
-concurrent-map = "5.0.37"
-crossbeam-skiplist = "0.1.3"
-dashmap = "6.2.1"
 hashbrown = "0.17"
-# Pins `bbtree-scaling`'s workers to CPUs (`sched_setaffinity`).
-libc = "0.2"
 mimalloc = "0.1"
 # Runs a cell's untimed setup on all cores; timed regions stay on one thread.
 rayon = "1"
-scc = "3.8.8"
 # Checks the datasets against the manifest (`verify-data`).
 sha2 = "0.10"
 # Holds out a dataset's keys by a hash of their bytes that, unlike std's
 # `DefaultHasher`, is pinned across Rust releases.
 siphasher = "1"
-tikv-jemallocator = { version = "0.7", optional = true }
-
-[features]
-# Time with jemalloc instead of mimalloc, the default.
-jemalloc = ["dep:tikv-jemallocator"]
-# The separator census (`bbtree-separator-census`), which reads the map's
-# nodes through bbtree's `inspect` views; the timing binaries never enable it.
-inspect = ["bbtree/inspect"]
 
 # Times with plain mimalloc.
 [[bin]]
@@ -45,24 +29,6 @@ path = "src/bin/bbtree-bench.rs"
 [[bin]]
 name = "bbtree-bench-memory"
 path = "src/bin/bbtree-bench-memory.rs"
-
-# Throughput and latency as threads are added, on maps threads share
-# (`scaling.rs`).
-[[bin]]
-name = "bbtree-scaling"
-path = "src/bin/bbtree-scaling.rs"
-
-# The same maps' memory, with a counting allocator, as for the memory binary.
-[[bin]]
-name = "bbtree-scaling-memory"
-path = "src/bin/bbtree-scaling-memory.rs"
-
-# Counts separators and the ties lookups meet in internal nodes, untimed
-# (`doc/11-separator-key.md`).
-[[bin]]
-name = "bbtree-separator-census"
-path = "src/bin/bbtree-separator-census.rs"
-required-features = ["inspect"]
 
 [profile.release]
 # One codegen unit and full LTO, so that inlining doesn't depend on how the

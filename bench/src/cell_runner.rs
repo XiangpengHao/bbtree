@@ -8,16 +8,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use bbtree::unsync;
+
 use crate::command_line::{CellRequest, Named};
 use crate::datasets::{DataDirectory, DataFile, JsonObjectCorpus, KeyList};
 use crate::keys::{BenchKey, KeyKind, KeyMaker};
-use crate::map_adapters::{MapKind, MapUnderTest};
+use crate::map_adapters::{CountedBBTree, MapKind, MapUnderTest};
 use crate::memory::{ResidentSet, RunMode};
 use crate::operations::{
-    BatchCell, ManyMapsCell, ManyMapsKeys, PreparedCell, SingleMapCell, SingleMapKeys, Stopwatch,
+    ManyMapsCell, ManyMapsKeys, PreparedCell, SingleMapCell, SingleMapKeys, Stopwatch,
 };
 use crate::perf_counters::PerfControl;
-use crate::values::{BenchValue, InlineRecord, ValueKind, ValueMaker};
+use crate::values::{BenchValue, ValueKind, ValueMaker};
 use crate::workload::{MapShape, MapSize};
 
 /// What a child measured.
@@ -135,24 +137,9 @@ impl CellRun {
     fn with_key_type(&self) -> Result<CellMeasurement, String> {
         match self.request.cell().workload().key() {
             KeyKind::U64Random => self.with_value_type(self.generated_keys(KeyMaker::random_u64())),
-            KeyKind::U64Sequential => {
-                self.with_value_type(self.generated_keys(KeyMaker::sequential_u64()))
-            }
-            KeyKind::U32 => self.with_value_type(self.generated_keys(KeyMaker::random_u32())),
             KeyKind::JsonString => self.with_value_type(self.generated_keys(KeyMaker::json_keys())),
             KeyKind::CrateString => {
                 self.with_value_type(self.generated_keys(KeyMaker::crate_versions()))
-            }
-            KeyKind::PathString => {
-                let paths = KeyMaker::registry_paths(self.fixed_shape().distinct_keys());
-                self.with_value_type(self.generated_keys(paths))
-            }
-            KeyKind::Hash32 => self.with_value_type(self.generated_keys(KeyMaker::random_hashes())),
-            KeyKind::Memtable16 => {
-                self.with_value_type(self.generated_keys(KeyMaker::memtable(16)))
-            }
-            KeyKind::Memtable24 => {
-                self.with_value_type(self.generated_keys(KeyMaker::memtable(24)))
             }
             KeyKind::CrateNames => self.with_value_type(self.key_list_keys(DataFile::CrateNames)?),
             KeyKind::KernelPaths => {
@@ -205,18 +192,8 @@ impl CellRun {
 
     fn with_value_type<K: BenchKey>(&self, keys: CellKeys<K>) -> Result<CellMeasurement, String> {
         match self.request.cell().workload().value() {
-            ValueKind::Unit => self.with_prepared_cell(keys, ValueMaker::unit()),
             ValueKind::U64 => self.with_prepared_cell(keys, ValueMaker::counters()),
             ValueKind::Struct32 => self.with_prepared_cell(keys, ValueMaker::structs()),
-            ValueKind::String => self.with_prepared_cell(keys, ValueMaker::short_strings()),
-            ValueKind::Bytes100 => self.with_prepared_cell(keys, ValueMaker::byte_records(100)),
-            ValueKind::Bytes1k => self.with_prepared_cell(keys, ValueMaker::byte_records(1024)),
-            ValueKind::Inline100 => {
-                self.with_prepared_cell(keys, ValueMaker::<InlineRecord<100>>::inline_records())
-            }
-            ValueKind::Inline1k => {
-                self.with_prepared_cell(keys, ValueMaker::<InlineRecord<1000>>::inline_records())
-            }
         }
     }
 
@@ -229,12 +206,7 @@ impl CellRun {
         match keys {
             CellKeys::SingleMap(keys) => {
                 let budget = self.request.scale().operation_budget();
-                let prepared = SingleMapCell::new(keys, values, budget);
-                if self.request.cell().workload().operation().is_batch() {
-                    self.with_map_type(BatchCell::from(prepared))
-                } else {
-                    self.with_map_type(prepared)
-                }
+                self.with_map_type(SingleMapCell::new(keys, values, budget))
             }
             CellKeys::ManyMaps(keys) => self.with_map_type(ManyMapsCell::new(keys, values)),
         }
@@ -245,8 +217,8 @@ impl CellRun {
         prepared: impl PreparedCell<K, V>,
     ) -> Result<CellMeasurement, String> {
         match self.request.cell().map() {
-            MapKind::BBTree => K::measure_on_bbtree(self, prepared),
-            MapKind::Unsync => K::measure_on_unsync(self, prepared),
+            MapKind::BBTree => self.measure::<CountedBBTree<K, V>, K, V>(prepared),
+            MapKind::Unsync => self.measure::<unsync::BBTreeMap<K, V>, K, V>(prepared),
             MapKind::UnsyncInline => K::measure_with_inline_keys(self, prepared),
             MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
             MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
@@ -264,15 +236,6 @@ impl CellRun {
         V: BenchValue,
     {
         let operation = self.request.cell().workload().operation();
-        // `MapKind` reads its maps' lists at `u64 → u64`; a key type can pick
-        // another adapter, as memtable keys do on both bbtree maps.
-        if M::UNSUPPORTED.contains(&operation) {
-            return Err(format!(
-                "{} lacks {} on these keys",
-                self.request.cell().map().name(),
-                operation.name()
-            ));
-        }
         match self.mode {
             RunMode::Timing => {
                 let perf_control = (self.request.perf_control())

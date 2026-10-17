@@ -133,7 +133,7 @@ pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotli
                         SingleThreadChart { measurements: measurements.clone(), spotlight }
                     },
                     PerformanceCard::Concurrent => rsx! {
-                        ConcurrentChart { measurements: measurements.clone(), spotlight }
+                        ConcurrentChart { spotlight }
                     },
                     PerformanceCard::EndToEnd => rsx! {
                         EndToEndChart { measurements: measurements.clone(), spotlight }

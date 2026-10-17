@@ -157,9 +157,9 @@ the evidence.
 Each entry: the idea, what was measured, the verdict. Unless noted,
 numbers are 10M entries, native CPU, mimalloc, one run, ns per operation.
 "Portable" means baseline x86-64 (SSE2, no POPCNT); those runs mostly
-used the 2M-entry System-allocator diagnostic in
-`bench/diagnostics/portable`, whose numbers can't be compared with the
-main suite.
+used the 2M-entry System-allocator diagnostic in bbtree-eval's
+`diagnostics/portable`, whose numbers can't be compared with the main
+suite.
 
 | Experiment | Verdict | Decision |
 |---|---|---|
@@ -250,7 +250,7 @@ nodes with inline keys keep no keys (D49).
 **Children before keys for `u128`.** Native random operations improve
 2–7%, but portable random hit and insert lose 1–2% and native dense misses
 lose 28% (23.3 → 29.8, cause unknown). Deferred. Diagnostic in
-`bench/diagnostics/integer-edge`.
+bbtree-eval's `diagnostics/integer-edge`.
 
 **64-byte node alignment.** With glibc's malloc, a 1 KiB-aligned 1 KiB
 block can't sit next to another, so every other slot is skipped:

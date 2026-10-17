@@ -2401,7 +2401,29 @@
   .post > p {
     margin: 0 0 20px;
   }
+  .post > ol {
+    margin: 0 0 24px;
+    padding-left: 1.5em;
+    list-style: decimal;
+  }
+  .post > ol > li + li {
+    margin-top: 4px;
+  }
+  .post > p a,
+  .post > ol a,
+  .post-quote a {
+    color: var(--link);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
+    text-underline-offset: 3px;
+  }
+  .post > p a:hover,
+  .post > ol a:hover,
+  .post-quote a:hover {
+    text-decoration-color: var(--link);
+  }
   .post > p code,
+  .post > ol code,
   .figure-text code {
     font: 0.9em var(--font-data);
     background: var(--well);
@@ -2513,6 +2535,11 @@
   }
   .post-quote p {
     margin: 0;
+  }
+  .post-quote footer {
+    margin-top: 6px;
+    font-style: normal;
+    font-size: 15px;
   }
 
   /* The performance cards: tabs over a card, wider than the text. */
@@ -2747,6 +2774,21 @@
   .chart-series.ours .chart-line {
     stroke-width: 2.5;
   }
+  /* A hash map, for reference: a different kind of map, so a faint,
+   * dotted line and marks, its name in italics. */
+  .chart-series.unordered .chart-line {
+    stroke-dasharray: 0 5;
+    stroke-opacity: 0.5;
+  }
+  .chart-series.unordered .chart-point {
+    fill-opacity: 0.45;
+  }
+  .end-label.unordered .chart-dot {
+    fill-opacity: 0.45;
+  }
+  .end-label.unordered .end-name {
+    font-style: italic;
+  }
   /* bbtree's lines: gold, over a stroke of the highlighter. */
   .chart-highlight {
     fill: none;
@@ -2799,6 +2841,17 @@
     width: 16px;
     height: 3px;
     border-radius: 2px;
+    background: var(--swatch);
+  }
+  .line-key.unordered .line-key-swatch {
+    height: 0;
+    border-top: 3px dotted var(--swatch);
+    border-radius: 0;
+    background: none;
+    opacity: 0.6;
+  }
+  .line-key.unordered {
+    font-style: italic;
   }
   .line-key.ours .line-key-swatch {
     box-shadow: 0 0 0 2px var(--ours);

@@ -37,7 +37,7 @@ impl SeededRng {
         }
     }
 
-    pub(crate) fn next_u64(&mut self) -> u64 {
+    fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(Self::GOLDEN_GAMMA);
         Self::mix(self.state)
     }

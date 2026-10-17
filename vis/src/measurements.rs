@@ -1,6 +1,6 @@
-//! The post's measurements, as `bench/tools/blog-runs.sh` took them on a
-//! machine and `bench/tools/blog-collect.sh` merged them: compiled in from
-//! the CSVs, so a new run is a rebuild. Each map keeps one name and one
+//! The post's measurements, as bbtree-eval's `blog/runs.sh` took them on a
+//! machine and its `blog/collect.sh` merged them: compiled in from the
+//! CSVs, so a new run is a rebuild. Each map keeps one name and one
 //! color across every chart.
 
 /// A map the bench measured.
@@ -18,6 +18,9 @@ pub(crate) enum MeasuredMap {
     /// std's hash map, which keeps no order: the speed of a lookup that
     /// needn't be ordered.
     StdHashMap,
+    /// DashMap, a hash map threads share, which keeps no order: the speed
+    /// of a lookup that needn't be ordered, as threads are added.
+    DashMap,
 }
 
 impl MeasuredMap {
@@ -33,13 +36,15 @@ impl MeasuredMap {
         Self::StdHashMap,
     ];
 
-    /// The maps threads share, in the order the charts draw them.
-    pub(crate) const CONCURRENT: [Self; 5] = [
+    /// The maps threads share, in the order the charts draw them: the
+    /// ordered ones, then DashMap apart.
+    pub(crate) const CONCURRENT: [Self; 6] = [
         Self::BBTree,
         Self::StdBTreeRwLock,
         Self::SccTreeIndex,
         Self::ConcurrentMap,
         Self::SkipMap,
+        Self::DashMap,
     ];
 
     /// The maps whose memory the post shows: a `RwLock` adds nothing to
@@ -62,6 +67,7 @@ impl MeasuredMap {
             "scc-treeindex" => Self::SccTreeIndex,
             "concurrent-map" => Self::ConcurrentMap,
             "std-hash" => Self::StdHashMap,
+            "dashmap" => Self::DashMap,
             _ => return None,
         })
     }
@@ -75,6 +81,7 @@ impl MeasuredMap {
             Self::SccTreeIndex => "scc TreeIndex",
             Self::ConcurrentMap => "concurrent-map",
             Self::StdHashMap => "std HashMap",
+            Self::DashMap => "DashMap",
         }
     }
 
@@ -95,7 +102,9 @@ impl MeasuredMap {
     pub(crate) fn line_color(self) -> &'static str {
         match self {
             Self::BBTree => "var(--ours-line)",
-            Self::StdBTree | Self::StdBTreeRwLock | Self::StdHashMap => "var(--theirs-1)",
+            Self::StdBTree | Self::StdBTreeRwLock | Self::StdHashMap | Self::DashMap => {
+                "var(--theirs-1)"
+            }
             Self::SccTreeIndex => "var(--theirs-2)",
             Self::ConcurrentMap => "var(--theirs-3)",
             Self::SkipMap => "var(--theirs-4)",
@@ -109,6 +118,7 @@ impl MeasuredMap {
             Self::SkipMap => "https://github.com/crossbeam-rs/crossbeam",
             Self::SccTreeIndex => "https://codeberg.org/wvwwvwwv/scalable-concurrent-containers",
             Self::ConcurrentMap => "https://github.com/komora-io/concurrent-map",
+            Self::DashMap => "https://github.com/xacrimon/dashmap",
             Self::StdBTree | Self::StdBTreeRwLock | Self::StdHashMap => return None,
         };
         Some((self.label().to_string(), url))
@@ -120,9 +130,9 @@ impl MeasuredMap {
     }
 
     /// Whether it keeps its keys in order, to scan ranges of them: all but
-    /// the hash map.
+    /// the hash maps.
     pub(crate) fn is_ordered(self) -> bool {
-        self != Self::StdHashMap
+        !matches!(self, Self::StdHashMap | Self::DashMap)
     }
 }
 
@@ -258,7 +268,7 @@ struct MemoryRow {
 
 /// One workload of a real system, before and after one of its maps became
 /// bbtree's: the system's own benchmark on one thread, run by an
-/// integration in `~/coding/bbtree-integrations` (outside the repository).
+/// integration in bbtree-eval (`integrations/<system>`).
 /// The CSV keeps the thread count it ran at; the post shows one thread.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct IntegrationRow {
@@ -276,11 +286,6 @@ pub(crate) struct IntegrationRow {
 }
 
 impl IntegrationRow {
-    /// How many times faster the system ran with bbtree's map.
-    pub(crate) fn speedup(&self) -> f64 {
-        self.before_nanos / self.after_nanos
-    }
-
     /// Where the system's code lives.
     pub(crate) fn repository(&self) -> Option<&'static str> {
         match self.system.as_str() {
@@ -291,36 +296,6 @@ impl IntegrationRow {
             "Lance" => Some("https://github.com/lance-format/lance"),
             _ => None,
         }
-    }
-}
-
-/// The least and the most of some speedups, shown as "1.9–4.7×".
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct SpeedupRange {
-    least: f64,
-    most: f64,
-}
-
-impl SpeedupRange {
-    fn of(speedups: impl Iterator<Item = f64>) -> Option<Self> {
-        speedups.fold(None, |range: Option<Self>, speedup| {
-            Some(match range {
-                Some(range) => Self {
-                    least: range.least.min(speedup),
-                    most: range.most.max(speedup),
-                },
-                None => Self {
-                    least: speedup,
-                    most: speedup,
-                },
-            })
-        })
-    }
-}
-
-impl std::fmt::Display for SpeedupRange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.1}–{:.1}×", self.least, self.most)
     }
 }
 
@@ -354,9 +329,23 @@ impl Measurements {
         )
     }
 
-    /// A machine's single-thread runs alone (`blog-runs.sh arch`), for
-    /// the architectures card.
-    pub(crate) fn of_single_thread(machine: Machine, throughput: &str) -> Self {
+    /// The concurrent card's runs (`blog/runs.sh tab2`), on AWS's
+    /// c8a.metal-24xl: 96 cores and a thread a core, so that each thread
+    /// added is a core added.
+    pub(crate) fn of_epyc_9r45() -> Self {
+        Self::of_throughput(
+            Machine {
+                name: "AWS c8a.metal-24xl",
+                detail: "AMD EPYC 9R45, Zen 5, 96 cores, 12 × 32 MiB L3, DDR5, mimalloc",
+            },
+            include_str!("../data/aws-c8a-20261017/throughput.csv"),
+        )
+    }
+
+    /// A machine's throughput runs alone, without memory or integrations:
+    /// the architectures card's single-thread runs (`blog/runs.sh arch`),
+    /// or the concurrent card's.
+    pub(crate) fn of_throughput(machine: Machine, throughput: &str) -> Self {
         Self::parse(machine, throughput, "", "")
     }
 
@@ -460,28 +449,6 @@ impl Measurements {
         (self.memory.iter())
             .find(|row| row.map == map && row.keys == keys)
             .map(|row| row.memory)
-    }
-
-    /// How many times faster `faster` ran than `slower` on one thread,
-    /// each a map and the operation it ran, the least and the most across
-    /// the kinds of keys.
-    pub(crate) fn single_thread_speedups(
-        &self,
-        faster: (MeasuredMap, MeasuredOperation),
-        slower: (MeasuredMap, MeasuredOperation),
-    ) -> Option<SpeedupRange> {
-        SpeedupRange::of(MeasuredKeys::ALL.into_iter().filter_map(|keys| {
-            Some(
-                self.single_thread_nanos(slower.0, keys, slower.1)?
-                    / self.single_thread_nanos(faster.0, keys, faster.1)?,
-            )
-        }))
-    }
-
-    /// How many times faster the systems ran with bbtree, the least and
-    /// the most across their workloads.
-    pub(crate) fn integration_speedups(&self) -> Option<SpeedupRange> {
-        SpeedupRange::of(self.integrations.iter().map(IntegrationRow::speedup))
     }
 
     /// The systems measured before and after, in the order of their rows.

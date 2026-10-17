@@ -17,9 +17,9 @@ struct ArchitectureMachine {
     name: &'static str,
     /// Its instruction set, and its core where it has one to name.
     caption: &'static str,
-    /// Its `throughput.csv`, the single-thread cells of
-    /// `bench/tools/blog-runs.sh arch` merged by `blog-collect.sh`, once it
-    /// has run: add it here with `include_str!`.
+    /// Its `throughput.csv`, the single-thread cells of bbtree-eval's
+    /// `blog/runs.sh arch` merged by its `blog/collect.sh`, once it has run:
+    /// add it here with `include_str!`.
     throughput: &'static str,
 }
 
@@ -58,7 +58,7 @@ impl ArchitectureMachine {
             name: self.name,
             detail: self.caption,
         };
-        let measurements = Measurements::of_single_thread(machine, self.throughput);
+        let measurements = Measurements::of_throughput(machine, self.throughput);
         let keys = MeasuredKeys::Uuid;
         let get = |map| measurements.single_thread_nanos(map, keys, MeasuredOperation::Get);
         Some(BaselineGroup {
@@ -100,7 +100,7 @@ pub(crate) fn ArchitecturesChart(spotlight: Spotlight) -> Element {
             spotlight,
         }
         p { class: "chart-note",
-            "Mean time per get on one thread (lower is better): 10M random version-4 UUIDs, half of the lookups miss, the same cells on every machine (bench/tools/blog-runs.sh arch), each machine's bench built for its CPU. AWS: c8i.large and c9g.large, spot, in us-west-2."
+            "Mean time per get on one thread (lower is better): 10M random version-4 UUIDs, half of the lookups miss, the same cells on every machine (blog/runs.sh arch in bbtree-eval), each machine's bench built for its CPU. AWS: c8i.large and c9g.large, spot, in us-west-2."
         }
     }
 }

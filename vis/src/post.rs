@@ -1,8 +1,8 @@
-//! The post (doc/14-blogpost.md): what bbtree is, how fast, on one
-//! thread, on many, and in real systems (`performance_cards.rs`), and how
-//! it is made, in figures drawn by the explorer's own panels
-//! (`figure.rs`). The figures build their trees as the reader comes to
-//! them, sharing the trees of one workload.
+//! The post (doc/14-blogpost.md, whose text it shows): what bbtree is, how
+//! fast, on one thread, on many, and in real systems
+//! (`performance_cards.rs`), and how it works, in figures drawn by the
+//! explorer's own panels (`figure.rs`). The figures build their trees as
+//! the reader comes to them, sharing the trees of one workload.
 
 use std::rc::Rc;
 
@@ -10,13 +10,13 @@ use dioxus::prelude::*;
 
 use crate::batch_view::BatchView;
 use crate::figure::{Figure, FigureFrame, TreeStore};
-use crate::measurements::{MeasuredMap, MeasuredOperation, Measurements};
+use crate::measurements::Measurements;
 use crate::node_inspector::NodeInspector;
 use crate::path_summary::PathSummary;
 use crate::path_tree::PathTree;
 use crate::performance_cards::PerformanceCards;
 use crate::shared_link::ExplorerLink;
-use crate::site::{Credit, SiteHeader, SitePage};
+use crate::site::{AUTHOR_PAGE, Credit, SiteHeader, SitePage};
 use crate::spotlight::{HintLayer, PointerHint, Spotlight};
 use crate::workload::{InsertOrder, KeyKind, Workload};
 
@@ -28,59 +28,75 @@ pub(crate) fn Post() -> Element {
     let charts = Spotlight::use_new(hint);
     let measurements = use_hook(|| Rc::new(Measurements::of_ryzen_9900x()));
     rsx! {
-        document::Title { "The fastest ordered map" }
+        document::Title { "bbtree: fastest ordered map in the world" }
         div { class: "post-page",
             SiteHeader { current: SitePage::Post }
             article { class: "post",
                 header { class: "post-head",
-                    h1 { class: "post-title", "The fastest ordered map" }
+                    h1 { class: "post-title", "bbtree: fastest ordered map in the world" }
+                }
+                blockquote { class: "post-quote",
+                    p {
+                        "B-trees are by far the most important access path structure in database and file systems."
+                    }
+                    footer {
+                        "— "
+                        a {
+                            href: "https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist)",
+                            target: "_blank",
+                            rel: "noopener",
+                            "Jim Gray"
+                        }
+                    }
                 }
                 p {
                     strong { "bbtree" }
-                    " is an ordered map for Rust that many threads share. For one thread, "
-                    code { "bbtree::unsync::BBTreeMap" }
-                    " is the same tree, which takes "
-                    code { "std::collections::BTreeMap" }
-                    "'s place without a change to the code around it: the same API, the same behavior. Both have no dependencies, and need no "
-                    code { "std" }
-                    ", only an allocator."
+                    " is by far the fastest btree (ordered map):"
                 }
-                blockquote { class: "post-quote",
-                    p { "[Jim Gray on B-trees: the quote and its source to confirm.]" }
+                ol {
+                    li {
+                        "5x faster than std's "
+                        code { "BTreeMap" }
+                        " at single thread, 7x faster than "
+                        code { "crossbeam-skiplist" }
+                        " at 12 threads."
+                    }
+                    li { "30% lower memory usage, 5x lower p99 latency." }
+                    li {
+                        "Zero dependencies, "
+                        code { "no_std" }
+                        " compatible."
+                    }
+                    li {
+                        code { "unsync::BBTreeMap" }
+                        " is a "
+                        strong { "drop-in replacement" }
+                        " for std's "
+                        code { "BTreeMap" }
+                        "/"
+                        code { "BTreeSet" }
+                        "."
+                    }
+                    li {
+                        "Production-ready by formal verification, model checking, fuzzing, and lots of testing."
+                    }
+                    li {
+                        "Brought to you by decades of database research and careful curation by "
+                        a { href: AUTHOR_PAGE, target: "_blank", rel: "noopener", "Xiangpeng Hao" }
+                        "."
+                    }
                 }
-                p {
-                    "B-trees hold the indexes of nearly every database. bbtree builds its tree the way those databases do, for memory instead of disk: nodes are pages, a lookup reads a few cache lines of each, and many lookups can share one thread's wait for memory."
-                }
-                h2 { class: "post-section", "How fast" }
-                p {
-                    "Against std's B-tree, the skip list concurrent Rust code reaches for, and the other concurrent ordered maps on crates.io, with 10M keys of four kinds: integers, UUIDs, Wikipedia's titles and JSON objects' keys; then in real systems, end to end."
-                }
-                HeadlineResult { measurements: measurements.clone() }
-                PerformanceCards { measurements: measurements.clone(), spotlight: charts }
-                h2 { class: "post-section", "How it is made" }
-                h3 { class: "post-subsection", "Compare a few bytes, read a few lines" }
-                p {
-                    "A lookup in a B-tree is a chain of cache misses, one node after another, and each node's search reads more of it. bbtree keeps, beside each node's keys, a few bytes of each, its "
-                    em { "inline key" }
-                    ": the bytes after those that all of the node's keys share. The search compares the looked-up key's inline key with all of them at once, in a few vector instructions and no branches, and counts the smaller ones; that count is where the key goes. Only keys whose inline keys tie are compared in full."
-                }
-                p {
-                    "What the node's keys share comes from where the node sits: the separators either side of it in its parent, its "
-                    em { "fences" }
-                    ", bound every key below. The deeper the node, the closer its fences, the more bytes they share, and the further into the key its inline keys reach."
-                }
+                PerformanceCards { measurements, spotlight: charts }
+                h2 { class: "post-section", "How it works" }
+                h3 { class: "post-subsection", "Prefix key to improve comparisons" }
                 WayDownFigure { trees, hint }
-                p {
-                    "In the leaf, all of that is a few lines of its page: the header, the inline keys, compared all at once, and the one key they tie with, compared in full. The rest of the page stays where it is."
-                }
                 LeafFigure { trees, hint }
-                h3 { class: "post-subsection", "Many lookups, one thread" }
-                p {
-                    "Each node a lookup reads is a cache miss the processor waits for. Lookups of other keys don't depend on it, and could run while it waits. "
-                    code { "get_many" }
-                    " runs them that way: each key is a small state machine that searches the node it holds, asks for the line it reads next, and steps aside; the others search while that line comes. All on one thread, with no locks or atomics."
-                }
+                h3 { class: "post-subsection", "AVX512/NEON SIMD to improve search speed" }
+                h3 { class: "post-subsection", "Batching to improve throughput" }
                 BatchFigure { trees, hint }
+                h3 { class: "post-subsection", "Careful layouts to improve cache locality" }
+                h3 { class: "post-subsection", "Optimistic latch coupling to improve concurrency" }
+                h3 { class: "post-subsection", "Formal verification to ensure correctness" }
             }
             Credit {}
             HintLayer { hint }
@@ -186,40 +202,6 @@ fn BatchFigure(trees: TreeStore, hint: PointerHint) -> Element {
                     spotlight: figure.spotlight(),
                 }
             }
-        }
-    }
-}
-
-/// The post's result in one sentence, from the measurements: bbtree's gets
-/// against std's on one thread, one key a call and batched, and the
-/// systems end to end with bbtree.
-#[component]
-fn HeadlineResult(measurements: Rc<Measurements>) -> Element {
-    let single = measurements.single_thread_speedups(
-        (MeasuredMap::BBTree, MeasuredOperation::Get),
-        (MeasuredMap::StdBTree, MeasuredOperation::Get),
-    );
-    let batched = measurements.single_thread_speedups(
-        (MeasuredMap::BBTree, MeasuredOperation::GetBatch),
-        (MeasuredMap::StdBTree, MeasuredOperation::Get),
-    );
-    let systems = measurements.integrated_systems();
-    let end_to_end = measurements.integration_speedups();
-    let (Some(single), Some(batched), Some(end_to_end)) = (single, batched, end_to_end) else {
-        return rsx! {};
-    };
-    let named = match systems.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => return rsx! {},
-    };
-    rsx! {
-        p {
-            "On one thread, bbtree's gets are "
-            strong { "{single} faster" }
-            " than std's BTreeMap's across the four kinds of keys, {batched} batched. With bbtree in place of their skip list, {named} run their own benchmarks "
-            strong { "{end_to_end} faster" }
-            "."
         }
     }
 }
