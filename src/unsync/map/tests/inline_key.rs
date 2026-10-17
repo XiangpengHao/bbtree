@@ -181,7 +181,9 @@ impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
 fn keys_sharing_long_prefixes_match_std() {
     let rng = TestRng::new(66);
     let mut maps = MirroredMaps::<Box<str>, u64>::new();
-    maps.run_random_operations(&rng, 4000, 1 << 12);
+    // Enough keys to put the leaves 2 below the root on 32-bit targets too,
+    // whose internal nodes hold more edges.
+    maps.run_random_operations(&rng, 8000, 1 << 13);
     maps.insert(Box::from("z"), 0);
     let keys: Vec<Box<str>> = maps.keys().cloned().collect();
     assert!(maps.ours().leaf_depth() >= 2);
