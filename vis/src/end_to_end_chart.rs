@@ -1,8 +1,8 @@
 //! The post's end-to-end card: real systems, before and after one of their
-//! maps became bctree, on their own benchmarks, on one thread: with more,
+//! maps became bbtree, on their own benchmarks, on one thread: with more,
 //! these systems are bound by their own locks and counters. A group a
-//! system, a cluster a workload: bctree's
-//! time as a share of the time as shipped.
+//! system, a cluster a workload: bbtree's time as a share of the time as
+//! shipped.
 
 use std::rc::Rc;
 
@@ -36,7 +36,7 @@ pub(crate) fn EndToEndChart(measurements: Rc<Measurements>, spotlight: Spotlight
                         detail: row.detail,
                         baseline: row.before,
                         baseline_nanos: row.before_nanos,
-                        ours: "bctree".to_string(),
+                        ours: "bbtree".to_string(),
                         ours_nanos: row.after_nanos,
                     })
                     .collect(),
@@ -53,13 +53,13 @@ pub(crate) fn EndToEndChart(measurements: Rc<Measurements>, spotlight: Spotlight
             }
             span { class: "chart-key",
                 span { class: "chart-key-swatch ours" }
-                strong { "with bctree" }
+                strong { "with bbtree" }
             }
         }
         BaselineBars {
             groups,
             scale: BarScale::Relative,
-            label: "Time per operation with bctree, relative to as shipped",
+            label: "Time per operation with bbtree, relative to as shipped",
             heading: (
                 "Time per operation, relative to as shipped".to_string(),
                 "one thread; lower is better; the speedup over each bright bar".to_string(),
@@ -67,7 +67,7 @@ pub(crate) fn EndToEndChart(measurements: Rc<Measurements>, spotlight: Spotlight
             spotlight,
         }
         p { class: "chart-note",
-            "Each system's own benchmark, one thread, wall time per operation: the dark bar as shipped (100%), the bright one inside it with bctree. Only the map changed: crossbeam's SkipMap, or Lance's own arena skip list. More threads hit the systems' own locks first. Not shown, slower or unchanged: SlateDB's memtable_seek, 0.80× (a fixed cost per bctree scan call); Tonbo's Transaction::get, 0.88× (it copies every row per call); Lance's lookups of absent keys, 0.98× (they plan a DataFusion query). {machine.name}."
+            "Each system's own benchmark, one thread, wall time per operation: the dark bar as shipped (100%), the bright one inside it with bbtree. Only the map changed, and where a system writes a batch, the call that hands it to the map whole (insert_many): crossbeam's SkipMap, or Lance's own arena skip list. More threads hit the systems' own locks first. Not shown, slower or unchanged: SlateDB's memtable_seek, 0.91–0.99× (its iterators read three rows ahead of a seek, which the adapter clones out); Tonbo's Transaction::get, 0.86× (it copies every row per call); Lance's lookups of absent keys, 1.00–1.02× (they plan a DataFusion query). {machine.name}."
             RepositoryLinks { links }
         }
     }

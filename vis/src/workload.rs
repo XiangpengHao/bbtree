@@ -1,7 +1,7 @@
 //! What the visualizer builds: a key type, how many entries, in what order,
 //! and the build itself, in chunks between which the page stays responsive.
 
-use bbtree::BBTreeMap;
+use bbtree::unsync::BBTreeMap;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 

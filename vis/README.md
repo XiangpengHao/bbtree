@@ -4,10 +4,11 @@ Look keys up in a bbtree and see how it finds them: the path from the root,
 each node's page cache line by cache line, and what the search compared at
 every node. Or look a batch of keys up at once and watch `get_many`
 search them together on one thread: each key prefetches the line it reads
-next, and the others search while it comes. Everything is read from
-bbtree's own read-only views
-(`BBTreeMap::inspect`, `TreeView::trace`, the `inspect` feature), never
-recomputed. Design and decisions are in `doc/10-visualization.md`.
+next, and the others search while it comes. The trees are
+`bbtree::unsync::BBTreeMap`s, which keep the same nodes as the
+`bbtree::BBTreeMap` that threads share, without its latches. Everything is
+read from bbtree's own read-only views (`unsync::BBTreeMap::inspect`,
+`TreeView::trace`, the `inspect` feature), never recomputed. Design and decisions are in `doc/10-visualization.md`.
 
 One build, two pages, with tabs between them: the explorer at `/`, and the
 post at `/post/`, whose figures are the explorer's own panels.
@@ -105,9 +106,11 @@ By feature, in `src/`:
 - `explorer.rs`: the explorer, its panels and controls;
 - `post.rs`, `figure.rs`: the post, and a figure: its frame, the panels'
   state it owns, and the trees the figures share;
-- `performance_cards.rs`, `one_thread_chart.rs`, `scaling_chart.rs`,
-  `integration_chart.rs`, `chart_scale.rs`, `measurements.rs`: the post's
-  cards and charts, their scales, and the measurements they draw;
+- `performance_cards.rs`, `single_thread_chart.rs`, `concurrent_chart.rs`,
+  `end_to_end_chart.rs`, `memory_chart.rs`, `architectures_chart.rs`,
+  `baseline_bars.rs`, `chart_scale.rs`, `measurements.rs`: the post's cards
+  and charts, their scales, and the measurements they draw, of bbtree, the
+  map threads share, against other maps;
 - `element_ids.rs`: element ids unique to the component that draws them,
   for a panel drawn more than once on a page;
 - `workload.rs`: what to build, its toolbar button, and building it in

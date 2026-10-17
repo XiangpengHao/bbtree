@@ -1,28 +1,32 @@
-# 09 — Concurrency: BCTree, closures instead of handles
+# 09 — Concurrency: the shared `BBTreeMap`, closures instead of handles
 
-Status: built (2026-10-15, 2026-10-16): `BCTreeMap` with `read`,
-`update`, `get_cloned`, `contains_key`, `insert`, `get_or_insert`,
-`remove`, `remove_entry`, `remove_if`, `scan`, `scan_rev`,
-`range_cloned`, and batched lookups, `read_many` and `get_many_cloned`:
-bbtree's tree, shared through optimistic lock coupling, its tree
-operations bbtree's own. No `entry` yet. `BBTreeMap` stays
-single-threaded (D4).
+Status: built (2026-10-15, 2026-10-16, 2026-10-17): `bbtree::BBTreeMap`,
+the map threads share, with `read`, `update`, `get_copied`, `get_cloned`,
+`contains_key`, `insert`, `get_or_insert`, `remove`, `remove_entry`,
+`remove_if`, `scan`, `scan_rev`, `range_cloned`, `is_empty`; batched
+`read_many`, `get_many_copied`, `get_many_cloned` and `insert_many`; and,
+for its owner, `get_mut`, `iter_mut`, `into_iter`, `clear`, `extend` and
+`collect`: the unsync tree, shared through optimistic lock coupling, its
+tree operations the unsync tree's own. No `entry` yet.
+`unsync::BBTreeMap` stays single-threaded (D4). Until 2026-10-17 the shared
+map was `BCTreeMap` and the unsync one `bbtree::BBTreeMap`.
 
 ## Scope
 
-A concurrent B-tree differs enough in design and cost that `BBTreeMap`
-stays single-threaded, and the concurrent tree is a separate type, BCTree
-(working name, `bctree_map/`). The two share the node code.
+A concurrent B-tree differs enough in design and cost that the std
+replacement, `unsync::BBTreeMap`, stays single-threaded, and the map
+threads share is a type of its own, `BBTreeMap` (`src/map/`), the crate's
+headline (D4). The two share the node code and the tree's operations.
 
-BCTree is about single-entry concurrency: latches that keep the tree
-consistent while threads read and write it, one entry per operation. No
-transactions, no atomicity across entries.
+The shared map is about single-entry concurrency: latches that keep the
+tree consistent while threads read and write it, one entry per operation.
+No transactions, no atomicity across entries.
 
 ## Requirements
 
 1. Users never take a latch by hand.
-2. Users never hold an epoch, guard or handle. BCTree's API stays close to
-   `BBTreeMap`'s.
+2. Users never hold an epoch, guard or handle. The API stays close to the
+   unsync map's.
 3. A single thread never deadlocks with itself. Two threads may deadlock
    only where the semantics ask for it.
 
@@ -30,13 +34,21 @@ transactions, no atomicity across entries.
 
 An operation that exposes a key or value runs the caller's closure while
 the entry's leaf is latched, unlatches, and returns what the closure
-returned. No reference, guard or handle outlives the call, so no latch
-does either.
+returned; or hands out a copy. No reference, guard or handle outlives the
+call, so no latch does either. The names follow std's where they mean the
+same: `get_*` returns a value, `read*` runs a closure on the entry in
+place, as scc's maps do.
 
 ```rust
-impl<K: Ord, V> BCTreeMap<K, V> {
+impl<K: Ord, V> BBTreeMap<K, V> {
     /// Runs `f` on the entry while its leaf is latched shared.
     fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>;
+    /// A copy of the value, read without a latch where the leaf settles the
+    /// key (Lookups, below).
+    fn get_copied<Q>(&self, key: &Q) -> Option<V> where V: Copy;
+    fn get_cloned<Q>(&self, key: &Q) -> Option<V> where V: Clone {
+        self.read(key, |_, v| v.clone())
+    }
     /// Runs `f` on the entry while its leaf is latched exclusive.
     fn update<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &mut V) -> R) -> Option<R>;
     /// Runs `f` on the entry, inserting `key` and `value` first if there
@@ -54,17 +66,22 @@ impl<K: Ord, V> BCTreeMap<K, V> {
     fn range_cloned<Q, R>(&self, range: R) -> RangeCloned<'_, K, V, ..>
     where K: Clone, V: Clone;
 
-    fn get_cloned<Q>(&self, key: &Q) -> Option<V> where V: Clone {
-        self.read(key, |_, v| v.clone())
-    }
-
-    /// Runs `f` on each key's entry, as `read`s would, the lookups'
-    /// waits for memory overlapped (Batches, below).
+    /// Batches: each key in a lane, the lookups' and inserts' waits for
+    /// memory overlapped (Batches, below).
     fn read_many<Q, R, const N: usize>(&self, keys: [&Q; N],
                                        f: impl FnMut(&K, &V) -> R) -> [Option<R>; N];
+    fn get_many_copied<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]
+    where V: Copy;
     fn get_many_cloned<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]
     where V: Clone;
+    fn insert_many<const N: usize>(&self, entries: [(K, V); N]) -> [Option<V>; N];
+
+    /// The owner's, through `&mut` or by value: no latch (Owners, below).
+    fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>;
+    fn iter_mut(&mut self) -> IterMut<'_, K, V, ..>;
+    fn clear(&mut self);
 }
+// and IntoIterator by value and for `&mut`, Extend, FromIterator, From<[(K, V); N]>
 ```
 
 The types keep references from escaping: `impl FnOnce(&K, &V) -> R` is
@@ -75,13 +92,15 @@ The types keep references from escaping: `impl FnOnce(&K, &V) -> R` is
 shape.
 
 One entry at a time: an entry can't be held across calls, there is no
-`get_mut` handle, and an operation on two entries isn't atomic. `entry`,
+`get_mut` handle through `&self`, and an operation on two entries isn't
+atomic. `entry`,
 std's API within one exclusive latch, is not built: `get_or_insert`
 (insert unless present, then read) and `remove_if` (remove only the entry
 the caller saw) cover what the integrations surveyed need of it.
 
 There is no `len`: a shared counter would cost every insert an atomic on
-one line all threads write.
+one line all threads write. The systems integrated (14-blogpost.md) count
+entries themselves, from what `insert` returns.
 
 Rejected:
 
@@ -97,7 +116,7 @@ Rejected:
 
 ## One tree, shared
 
-BCTree is bbtree's tree: the same nodes, `Leaf`, `Internal` and `RootPage`,
+The shared map's tree is the unsync map's: the same nodes, `Leaf`, `Internal` and `RootPage`,
 the same shared prefix (D50) and prefixes fit to their fences, the same
 4-byte windows of heap strings in internal nodes (D43), the same root that
 grows and shrinks in its page, and an append to the last leaf (D45). Its
@@ -108,11 +127,11 @@ instead of 8 (`LatchedNodeHeader`); u64→u64 nodes keep 55 entries per leaf
 and go from 49 to 48 children per internal node. The keys need inline keys:
 an internal node read optimistically must keep no keys (D49).
 
-Its tree operations are bbtree's own too. A split, a removal that
+Its tree operations are the unsync tree's own too. A split, a removal that
 rebalances, and a shrinking of the shared prefix first take every node
-bbtree's operation will change or read a separator of, without waiting,
+the unsync tree's operation will change or read a separator of, without waiting,
 then run it along a node stack from the topmost node they hold
-(`NodeStackMut::along`, "Changes to more than a leaf" below). BCTree's own
+(`NodeStackMut::along`, "Changes to more than a leaf" below). The shared map's own
 code is what sharing needs and nothing else (`tree/latched/`):
 
 - the optimistic descent (`descent.rs`);
@@ -124,12 +143,12 @@ code is what sharing needs and nothing else (`tree/latched/`):
 A first version rewrote the tree layer, and left out the shared prefix,
 fitting prefixes after removals, lowering the tree to a leaf, 4-byte
 windows and appends. Each cut put a special case into shared code, a flag
-in the node plan and in the invariant check, a root shape bbtree never
+in the node plan and in the invariant check, a root shape the unsync tree never
 has, or made another path hot: with an empty shared prefix, dense integers
 tied at the root and along the borders, and once removal latched ties,
 `u64-seq` hits took 205 ns.
 
-bbtree changed in three places for it, none on its lookup paths: the
+The unsync tree changed in three places for it, none on its lookup paths: the
 inline-key searches read their slots through a raw `Slots` view, so that a
 racing reader forms no reference into a node a writer is changing; a node
 stack can start along a path a descent kept; and a removal's fixing decides
@@ -150,17 +169,22 @@ an internal node and back.
   failure restarts the operation. Letting go bumps the version. bf-tree
   does the same (`src/utils/inner_lock.rs`: `try_read`, `check_version`,
   `upgrade`).
-- **Leaves: pessimistic.** Shared for `read`, exclusive for `update` and
-  `insert`, spinning with exponential backoff. No scheduler hint: the crate
-  is `no_std` (D3). Releasing exclusively bumps the version too. Writers
-  can starve under a steady stream of readers.
+- **Leaves: latched to change them, and to run a closure.** Shared for
+  `read`'s closure and scans, exclusive for `update` and `insert`,
+  spinning with exponential backoff. No scheduler hint: the crate is
+  `no_std` (D3). Releasing exclusively bumps the version too. Writers can
+  starve under a steady stream of readers. A lookup reads its leaf
+  optimistically first, as it reads internal nodes, and latches it only
+  where that doesn't settle it (Lookups, below).
 - **Descent** (`descent.rs`): a key that lacks what every key shares is in
   no node, which the descent says once the root's version vouches for the
   shared prefix it read, or with the root leaf latched. Optimistic through
-  the inner nodes: at each, route the key, load the child pointer, check
-  the node's version, read the child's version, then check the node's
-  again; at the leaf, latch it, then check its parent's version, so the
-  leaf still covers the key. A root leaf checks the tree's root pointer
+  the inner nodes: at each, route the key, load the child pointer, read the
+  child's version, then check the node's version, so that the child was
+  the node's child when its version was read (the root's version is also
+  checked before the edge is followed: Edges, below); at the leaf, latch
+  it, or for a lookup read its version (`Optimistic`), then check its
+  parent's version, so the leaf still covers the key. A root leaf checks the tree's root pointer
   instead, once latched, and an internal root checks it once its version
   is read: a lowering to a leaf that finished between the pointer's read
   and the version's leaves a version that checks out on a leaf, but
@@ -186,11 +210,14 @@ not crash it or run user code on garbage:
   runs the shared inline-key search on the page's slots: any inline keys
   give an answer in bounds (D14). The shared prefix is copied out of the
   root page, as raw bytes.
-- **Edges** are followed only once the node's version vouches for them. A
-  pointer read from a node is then to a node page of the kind its tag says,
-  live or free (type-stable nodes, below). The check before following is
-  for the root page, the one page that changes kind: an edge read from it
-  may be a leaf's bytes.
+- **Edges** of the root page are followed only once the root's version
+  vouches for them: it is the one page that changes kind, so an edge read
+  from it may be a leaf's bytes. An edge read from any other node, even a
+  stale one or one past the length, is null or a pointer to a node page of
+  the kind its tag says, live or free: internal pages come zeroed and keep
+  their kind while threads share the tree (type-stable nodes, below). So
+  the descent reads the child's version before checking the parent's,
+  once, which then vouches for both.
 - **Ties** compare the separator's key, the head of the leftmost leaf right
   of it (D49), with that leaf latched shared: the walk reads the node's
   edge, checks the node's version, walks down first edges, which only a
@@ -201,16 +228,57 @@ not crash it or run user code on garbage:
   std integers and byte arrays `Auto` recognizes, skip the latch: the walk
   copies the head's key, compares the copy, and checks the node's version
   after, as the head changes only while the node is held. `u64` keeps
-  2-byte windows in internal nodes, so about one descent in nine ties
-  somewhere; with the latch, each tie wrote two atomics to a leaf every
-  other thread's ties write too. A walk that meets a null edge, a leaf
+  2-byte windows in internal nodes, so lookups tie: 0.16 walks a lookup at
+  10M random keys; with the latch, each tie wrote two atomics to a leaf
+  every other thread's ties write too. A walk that meets a null edge, a leaf
   without a head, or a changed version restarts.
 - **A separator match** is checked at the leaf: the descent checks only
   the leaf's parent, and a separator matched higher up may have been
   removed since, its successor the leaf's head now. The latched leaf's head
   must be the key, or the descent starts over.
 
-## Changes to more than a leaf
+## Lookups
+
+A lookup reads its leaf as it reads internal nodes, without the latch
+(`tree/latched/lookup.rs`, D57): the descent ends at the leaf with its
+version read, the parent checked after. Then, in place:
+
+- **The inline keys rule the key out:** absent, once the leaf's version,
+  unchanged, confirms the read. A miss writes nothing.
+- **A copy** (`get_copied`, `get_many_copied`, `contains_key`): where the
+  leaf settles its one candidate without following a pointer, the lookup
+  copies the candidate's value out and checks the version after, as a
+  sequence lock reads (`RacingRead`). A key ordered by its own bytes, a
+  std integer or byte array, is copied with the value and compared once
+  the version holds; a byte string that ends within the leaf's 8-byte
+  inline key is the candidate if their lengths are equal (D36), as the
+  leaf's length tags tell, so no heap byte is read. Every slot read is a
+  `MaybeUninit` until the version holds. A head the descent matched is
+  copied and compared the same way.
+- **Otherwise** the lookup latches the leaf shared, checks that it is still
+  at the version read, so that it still covers the key and its candidate
+  is still where it was, and searches it, or compares the candidate, and
+  runs the closure.
+
+A leaf that changed meanwhile sends the lookup the latched way
+(`read_latched`), which waits for a writer rather than race it again, so
+readers don't starve behind a hot leaf.
+
+Only a `Copy` value is read this way: a closure, or a clone of a value that
+owns memory, can't run on what an unlatched read saw, since a writer may
+free that memory before the check fails. A `Copy` value has no `Drop` and
+no interior mutability, so a torn copy is thrown away unused. Racing plain
+reads are formally a data race, as the internal nodes' are, and crossbeam's
+`AtomicCell` sequence lock's; the threads tests stay out of Miri for that
+(`.config/nextest.toml`).
+
+Measured (2026-10-17, 9900X, 10M `u64`, `bbtree-scaling`, against the
+latched lookups of 2026-10-16, millions a second): lookups half of which
+miss, 9.16 → 8.84 on one thread, 83.4 → 86.9 at 12, 98.0 → 113.6 at 24;
+batched, 13.5 → 13.8, 115.5 → 130.6, 121.5 → 145.9. A hit no longer
+writes its leaf's latch word, a line each reader of the leaf took in turn.
+
+## Changes to more than a leaf## Changes to more than a leaf
 
 A change that a leaf can't take alone descends again, keeping each internal
 node it passes with the version it read, the edge it took and the length
@@ -219,14 +287,14 @@ without waiting (`held.rs`), internal nodes on the path by compare-and-swap
 at the versions it read, so that each is still the parent of the next, and
 nodes beside the path at the versions they are at, reached through nodes
 it holds. Any node held by another thread, or changed, lets go of all and
-starts over. Then it runs bbtree's operation along a node stack from the
+starts over. Then it runs the unsync tree's operation along a node stack from the
 topmost node it holds, as if that were the root, on the tree as it is
 (`LatchedTree::change_held`), and lets go once all is done: a reader that
 read a node meanwhile fails its check. Pages it allocates come latched and
 stay so until then (`pages.rs`), and a change of the root's kind retags the
 tree's root pointer before the root is let go.
 
-What each takes, so that bbtree's operation changes nothing and reads no
+What each takes, so that the unsync tree's operation changes nothing and reads no
 separator it doesn't hold:
 
 - **A split**: the nodes from the leaf's parent up to the lowest with room,
@@ -247,7 +315,7 @@ separator it doesn't hold:
   a node stays on whatever others change, and whose fence is what every
   key shares. Fence values move but never change under a split, merge or
   move between siblings elsewhere: separators go up and come down whole.
-  So prefixes stay exact, as bbtree's.
+  So prefixes stay exact, as in the unsync map.
 - **Shrinking the shared prefix**, for a key that lacks it: the root and
   every node along both borders (`shared_prefix.rs`). An operation holding
   a border node holds the shared prefix still.
@@ -255,7 +323,7 @@ separator it doesn't hold:
 Holding a node holds its separators' keys, though they are heads of leaves
 below (D49): a head changes only when its separator is removed, replaced
 by its successor, or rotated through the node by a merge or a move between
-siblings, each holding the node. So bbtree's operations read every key
+siblings, each holding the node. So the unsync tree's operations read every key
 they need where it is: a separator's, a fence's, or a window's other bytes
 when a node hands out a 4-byte window of a heap string (D43).
 
@@ -268,113 +336,77 @@ separator; a merge that frees it, or a lowering that moves it into the
 root page, at the leaf that took its entries. An insert latches the leaf
 the pointer names, and if the pointer still names it, the leaf is last and
 stays so while held: a key greater than its last key, that shares what
-every key shares, goes in if the leaf has room, as bbtree's append (D45).
+every key shares, goes in if the leaf has room, as the unsync map's append (D45).
 A new tree's root leaf is latched until the pointer names it.
 
 ## Performance
 
-Ryzen 9 9900X, first die only (`taskset -c 0-5,12-17`), mimalloc, 10M
-entries, one run each, on a quiet machine (2026-10-15).
+Ryzen 9 9900X, mimalloc, 10M entries, one run each (2026-10-17).
 
-One thread, ns per operation (`bbtree-bench --map bbtree,bctree`):
+One thread, ns per operation, against the unsync map, from this round's
+probe (one `#[inline(never)]` cell per map, key and operation):
 
-| cell | bbtree | bctree |
+| cell | unsync | shared |
 |---|--:|--:|
-| `u64` get hit / miss | 129 / 94.6 | 132 / 103 |
-| `u64` random / sequential insert | 146 / 5.33 | 153 / 10.6 |
-| `u64` random remove | 250 | 172 |
-| `u64-seq` get hit / miss | 132 / 94.0 | 138 / 102 |
-| `hash32` get hit / miss | 158 / 108 | 159 / 120 |
-| `str-json` get hit / miss | 217 / 153 | 248 / 191 |
+| `u64` get hit / miss / half | 135 / 93.2 / 122 | 138 / 96.3 / 126 |
+| `u64` random / sequential insert | 137–146 / 5.0 | 150 / 11.1 |
+| `u64` random remove | 306 | 199 |
+| UUID get hit / miss / half | 137 / 96.2 / 127 | 144 / 99.2 / 132 |
+| UUID random insert | 261 | 167 |
+| JSON get hit / miss / half | 172 / 108 / 152 | 189 / 110 / 161 |
+| JSON random insert | 317 | 318 |
 
-The version with a tree layer of its own ran `u64-seq` hits at 205 ns,
-tying at the root for want of a shared prefix, `str-json` hits at 293 with
-8-byte internal windows, and sequential inserts at 38.5 without appends.
-A random insert pays about 1.5 ns for the append's look at the last leaf
-and 1–2 ns for the split path's setup; the rest of the gap is latching:
-the leaf's compare-and-swap, and the versions read and checked on the way
-down. Removal runs bbtree's own code, yet is faster than bbtree's: most
-likely because bbtree keeps a node stack for every removal, where BCTree
-removes an entry whose leaf keeps its minimum with the leaf alone. Not
-measured yet; if so, bbtree could do the same.
+A lookup pays for the versions read and checked on the way down, and
+where its leaf can't settle a hit unlatched (JSON keys past the inline
+key), the leaf's latch. A random insert pays the leaf's compare-and-swap;
+an append, that on every key, so sequential inserts take twice as long.
+Removal runs the unsync tree's own code, yet is faster than the unsync
+map's: most likely because the unsync map keeps a node stack for every
+removal, where the shared one removes an entry whose leaf keeps its
+minimum with the leaf alone. Not measured yet; if so, the unsync map could
+do the same. UUID inserts of the unsync map are slower than the shared
+one's on the same tree code: open (14-blogpost.md).
 
-Threads (`bbtree-scaling`, `u64 → u64`), on the whole machine: workers
-pinned one per core, 1–6 on the first die and 7–12 on the second, then the
-SMT siblings; millions of operations per second, `RwLock<BBTreeMap>` for
-contrast:
+Threads (`bbtree-scaling`, the blog's runs, `u64 → u64`), on the whole
+machine: workers pinned one per core, 1–6 on the first die and 7–12 on the
+second, then the SMT siblings; millions of operations a second at 1 / 12 /
+24 threads, each map as its crate ships it: scc's `TreeIndex` and
+crossbeam's `SkipMap` hand out values shared only, so theirs are atomics an
+update adds to; concurrent-map gives each worker a clone and returns values
+by copy; std's `BTreeMap` sits behind a `RwLock`. A scan visits 100 entries
+from a key the map holds.
 
-| threads | get | 90/10 get/update | insert | `RwLock` get | `RwLock` insert |
-|--:|--:|--:|--:|--:|--:|
-| 1 | 6.81 | 7.39 | 6.85 | 7.52 | 7.14 |
-| 6 | 41.2 (6.0×) | 40.3 (5.4×) | 30.1 (4.4×) | 18.8 | 3.89 |
-| 12 | 75.7 (11.1×) | 73.7 (10.0×) | 43.8 (6.4×) | 21.7 | 2.36 |
-| 24 | 85.8 (12.6×) | 84.4 (11.4×) | 48.2 (7.0×) | 27.4 | 1.98 |
+| map | lookups, half missing | batched | update | 90/10 get/update | 90/10 scan/update | insert |
+|---|--:|--:|--:|--:|--:|--:|
+| bbtree | 9.5 / 94.3 / 111.7 | 13.6 / 129.5 / 146.5 | 8.6 / 71.2 / 80.9 | 8.4 / 79.4 / 92.5 | 1.8 / 12.2 / 13.6 | 6.8 / 46.2 / 48.4 |
+| scc `TreeIndex` | 2.4 / 27.3 / 47.3 | | 2.3 / 26.1 / 43.3 | 2.4 / 26.8 / 46.5 | 0.6 / 6.3 / 9.2 | 2.5 / 25.7 / 35.1 |
+| concurrent-map | 2.4 / 25.7 / 46.2 | | 1.5 / 10.7 / 13.5 | 2.1 / 22.2 / 37.4 | 1.3 / 10.9 / 12.3 | 2.4 / 11.9 / 12.5 |
+| crossbeam `SkipMap` | 1.0 / 12.4 / 21.8 | | 1.1 / 12.2 / 20.7 | 1.0 / 12.0 / 21.7 | 0.1 / 1.1 / 1.9 | 1.3 / 10.2 / 14.6 |
+| `RwLock<BTreeMap>` | 4.0 / 22.8 / 33.3 | | 3.6 / 2.1 / 2.1 | 3.8 / 4.8 / 5.8 | 0.7 / 2.1 / 2.3 | 4.3 / 2.1 / 1.9 |
 
 Lookups scale near linearly across both dies' cores; the SMT siblings add
-about an eighth more. Inserts scale less: each dirties several leaf lines,
-and a profile at 6 threads showed no time spinning on latches and under 1%
-in splits.
+about a fifth more. Inserts scale less: each dirties several leaf lines.
+On string keys the same holds but for one cell: the 90/10 scan/update mix
+on Wikipedia titles at 24 threads, where scc passes bbtree, 6.5 against
+6.0 M/s, both near memory's bandwidth, while each of bbtree's scans
+writes two atomics to every leaf it visits (Scans, below). In the
+2026-10-16 round, against the latched lookups of then, Congee (an ART,
+8-byte keys) read 87.9 M/s at 24 threads (85.5 then, 111.7 now) and
+inserted 55.3 (49.2 then, 48.4 now), and DashMap, a hash map, read 209;
+Congee copies a range out instead of scanning in place, DashMap keeps no
+order, and both are out of the blog's comparison.
 
-Against other crates' concurrent maps (`bbtree-scaling --maps`), each as
-its crate ships it: Congee pins an epoch on every call; `SkipMap` and
-`TreeIndex` hand out values shared only, so theirs are atomics an update
-adds to; concurrent-map gives each worker a clone and returns values by
-copy; DashMap, a hash map in locked shards, keeps no order and scans
-nothing. Millions of operations a second at 1 / 12 / 24 threads; a scan
-visits 100 entries from a key the map holds:
+Memory, 10M entries, each map built in a process of its own
+(`bbtree-scaling-memory`): heap bytes per entry, keys' own allocations
+included:
 
-| map | get | 90/10 get/update | insert | scan |
+| map | `u64` | UUID | JSON | Wikipedia titles |
 |---|--:|--:|--:|--:|
-| BCTree | 6.85 / 72.0 / 85.5 | 7.37 / 73.8 / 84.8 | 6.89 / 45.6 / 49.2 | 1.68 / 11.4 / 12.0 |
-| Congee 0.4.1 (ART, 8-byte keys) | 6.78 / 70.3 / 87.9 | 6.55 / 68.2 / 87.4 | 8.71 / 69.3 / 55.3 | 0.08 / 0.94 / 1.54 |
-| scc 3.8.8 `TreeIndex` | 2.48 / 28.9 / 50.8 | 2.45 / 27.9 / 48.4 | 2.54 / 25.5 / 41.4 | 0.55 / 5.96 / 8.73 |
-| concurrent-map 5.0.37 | 2.43 / 26.7 / 46.0 | 2.25 / 23.1 / 37.8 | 2.43 / 12.7 / 13.7 | 1.37 / 11.4 / 12.7 |
-| crossbeam-skiplist 0.1.3 | 1.07 / 12.4 / 22.2 | 1.05 / 12.3 / 22.1 | 1.29 / 10.2 / 15.7 | 0.10 / 1.01 / 1.68 |
-| DashMap 6.2.1 (hash) | 13.4 / 101 / 150 | 14.6 / 106 / 140 | 14.4 / 53.8 / 65.6 | — |
-| bbtree in a `RwLock` | 7.58 / 21.6 / 25.9 | 7.45 / 4.90 / 5.19 | 7.15 / 2.48 / 2.11 | 1.43 / 11.3 / 12.9 |
-
-Congee scans by copying a range between two keys out: given an end key
-where 150 entries are expected, it took 5.4 µs a scan of 100 out of 200,000
-entries in a probe of its own. DashMap reaches one bucket where a tree
-descends.
-
-Latency, each operation timed alone with the time-stamp counter (10 ns
-resolution here), ns, p50 / p99 / p99.9 at 1 and 24 threads (`--measure
-latency`). These were read with a bare `rdtsc` on each side, which an
-out-of-order core reads before a lookup's cache misses return: they
-understate. Since 2026-10-16 the reads are fenced (`lfence; rdtsc;
-lfence` before, `rdtscp; lfence` after; `latency.rs`), which adds 20–25 ns
-to every operation and keeps consecutive ones from overlapping; the blog
-post's runs (`bench/tools/blog-runs.sh`) use it. At 10M `u64`, one thread,
-fenced: bbtree's get 240 / 541 / 711, std's 281 / 581 / 681, artmap's
-arena 210 / 561 / 601; back to back the same gets average 109, 277 and
-84 ns, since bbtree's branchless search lets independent lookups overlap.
-
-| map | get, 1 thread | get, 24 | insert, 1 thread | insert, 24 |
-|---|--:|--:|--:|--:|
-| BCTree | 150 / 461 / 591 | 190 / 601 / 842 | 180 / 591 / 882 | 341 / 1823 / 3556 |
-| Congee | 190 / 601 / 681 | 230 / 591 / 852 | 90 / 511 / 812 | 210 / 1302 / 5035 |
-| scc `TreeIndex` | 391 / 751 / 922 | 441 / 842 / 1102 | 351 / 1031 / 1603 | 471 / 2004 / 3414 |
-| concurrent-map | 411 / 852 / 1262 | 441 / 1022 / 1663 | 361 / 1071 / 3884 | 1323 / 4627 / 25299 |
-| crossbeam-skiplist | 932 / 2124 / 2783 | 1011 / 2343 / 3144 | 731 / 1924 / 2543 | 1372 / 2933 / 4875 |
-| DashMap | 70 / 351 / 451 | 120 / 511 / 681 | 40 / 341 / 431 | 190 / 792 / 4518 |
-| bbtree in a `RwLock` | 130 / 481 / 651 | 1312 / 3184 / 4314 | 140 / 531 / 761 | 8919 / 59050 / 96299 |
-
-The slowest operation at 24 threads took 0.9–2.4 ms for every map alike:
-the workers fill every CPU, and the operating system preempts them.
-
-Memory, 10M `u64 → u64` entries, each map built in a process of its own
-(`bbtree-scaling-memory`): heap bytes per entry the map frees when dropped,
-and the resident set's growth per entry while it was built:
-
-| map | heap | resident |
-|---|--:|--:|
-| BCTree | 26.9 | 27.1 |
-| concurrent-map | 25.9 | 33.7 |
-| DashMap | 28.5 | 52.1 |
-| scc `TreeIndex` | 39.5 | 45.6 |
-| crossbeam-skiplist | 40.0 | 43.7 |
-| Congee | 90.9 | 94.9 |
+| bbtree | 26.9 | 39.7 | 68.5 | 80.9 |
+| std `BTreeMap` | 27.1 | 38.9 | 59.1 | 71.6 |
+| concurrent-map | 25.9 | 38.0 | 59.4 | 72.8 |
+| crossbeam `SkipMap` | 40.0 | 48.0 | 64.5 | 77.0 |
+| scc `TreeIndex` | 39.5 | 55.0 | 80.1 | 94.1 |
 
 ## Type-stable nodes
 
@@ -405,10 +437,24 @@ Fresh internal and root pages come zeroed, so that every edge a reader may
 read before its check is initialized; a fresh leaf gets its latch word
 alone, as a leaf is read past what its node writes only under its latch.
 
+## Owners
+
+A thread that holds the map by `&mut` or by value has it alone, so the
+unsync tree's own lookups and walks run on it as on an unsync map's tree,
+without a latch, and hand out references for as long as the owner lends
+the map (`tree/latched/owner.rs`, `map/owner.rs`): `get_mut`, `iter_mut`
+(a range walk over the whole tree, from both ends), `into_iter` (the walk
+that takes the tree apart, front only: the tree keeps no count of its
+entries, which a double-ended walk needs), `clear`. `Extend`,
+`FromIterator` and `From<[(K, V); N]>` insert one entry at a time.
+
 ## What is left out
 
 - **No `entry`.**
 - **No `len`** (above).
+- **No iteration by reference through `&self`:** a reference would
+  outlive the latch. `scan` runs a closure; `range_cloned` clones; owners
+  iterate with `iter_mut` and `into_iter`.
 
 ## Scans
 
@@ -437,7 +483,30 @@ A scan is not a snapshot: an entry inserted or removed while it runs may or
 may not be visited. An entry present for the whole scan is visited exactly
 once.
 
-`range_cloned` (`bctree_map/range.rs`) is the iterator over a range that
+A scan's fixed cost is its descent: the path it keeps (`TreePath`) holds
+its levels uninitialized past its depth, so making one writes nothing, and
+a hop to the next leaf copies only the levels it walked down, in place.
+Each used to write and copy the whole 23-level array, 920 bytes, two
+copies a hop; a path returned by value still cost a whole copy where the
+compiler kept the move (SlateDB's key type, 2026-10-17).
+
+Every leaf after the first is visited whole (`ScanOrder::whole_entries`):
+its keys start at index 0, so no entry's address waits on the header's
+head flag. A first index computed from that flag, branch-free, made every
+entry load of the leaf wait for the header's line from memory, and the
+hardware prefetcher with it: Tonbo's memtable walk, 17 entries a leaf,
+took 59 cycles an entry against 47 (its integration's diagnosis,
+2026-10-17). A probe of that shape, 1M `u64` keys with 64-byte values,
+now walks at 8.8 ns an entry, against 10.0–10.6 before the lookups'
+round.
+Measured (2026-10-17, 9900X, one thread): a scan of 2 entries from a key,
+at 100k `u64` entries, in cache, 43 ns against 31 for a lookup; 100-entry
+scans at 10M, 625 ns `u64` and 972 JSON, against 662 and 1,146 for the
+unsync map's `range`. The 90/10 scan/update mix at 24 threads, millions a
+second: `u64` 13.8 (scc's `TreeIndex` 9.7), JSON 7.8 (6.7), Wikipedia titles
+6.3 (6.5); the scans read near memory's bandwidth there.
+
+`range_cloned` (`map/range.rs`) is the iterator over a range that
 the integrations surveyed need: a cursor held across calls, by a query
 plan or an `async` task. It holds no latch between calls. Each end copies a
 few entries during a scan, each with its leaf's stamp: the leaf's latch
@@ -473,13 +542,14 @@ scan's throughput.
 
 ## Batches
 
-`read_many` looks up a fixed array of keys at once, as
-`BBTreeMap::get_many` does (doc 12), and `get_many_cloned` is `read_many`
-with a clone (`tree/latched/batch.rs`, `bctree_map/batch.rs`). Each key
-descends in its own lane, an async block that prefetches the line it
-reads next and yields, on bbtree's executor and its `Prefetcher`, the one
-place that prefetches (D46). Results come in input order; the closure runs
-once per entry found, in the order the lanes reach them.
+`read_many`, `get_many_copied` and `get_many_cloned` look up a fixed array
+of keys at once, and `insert_many` inserts one, as the unsync map's
+`get_many` and `insert_many` do (doc 12; `tree/latched/batch.rs`,
+`map/batch.rs`). Each key descends in its own lane, an async block that
+prefetches the line it reads next and yields, on the unsync tree's executor
+and its `Prefetcher`, the one place that prefetches (D46). Results come in
+input order; a closure runs once per entry found, in the order the lanes
+reach them.
 
 A suspended lane holds no latch. So the lanes of a batch never wait for
 one another, and no yield falls between latching and letting go: a lane
@@ -487,61 +557,64 @@ latches its leaf, searches it, runs the closure and lets go within one
 poll. On the way down it reads the internal nodes as the descent does,
 optimistically, each stage after fetching the line it needs: the chosen
 edge, then the child's header, whose version it reads before checking the
-parent's again. At the leaf it reads the inline keys, unlatched, at the
-version it read:
+parent's. At the leaf it reads the inline keys, unlatched, at the version
+it read:
 
 - **No inline key equals the key's:** absent, if the leaf's version is
   still the same. A miss writes nothing.
-- **One candidate:** the lane fetches its entry. For a heap key it then
-  latches the leaf a moment to read where the key's bytes are, lets go,
-  and fetches them: a pointer into a key is read only under the latch,
-  and a prefetch of a stale one is harmless. Then, latched shared, the
-  leaf still at the version read, it compares the candidate and runs the
-  closure.
+- **One candidate:** the lane fetches its entry. A lane that copies
+  (`get_many_copied`) then settles it as a single lookup does (Lookups,
+  above), unlatched. Otherwise, for a heap key, it latches the leaf a
+  moment to read where the key's bytes are, lets go, and fetches them: a
+  pointer into a key is read only under the latch, and a prefetch of a
+  stale one is harmless. Then, latched shared, the leaf still at the
+  version read, it compares the candidate and runs the closure.
 - **Ties**, and keys equal to a separator, go to the leaf's own search, or
-  to its head, latched, as `read`.
+  to its head, latched, as `read`, or copied where the key orders by its
+  own bytes. A tie inside an internal node walks to its head
+  synchronously: a lane that prefetched and yielded along that walk ran
+  `u64` batches slower, 75–80 ns a lookup against 71 (D55).
 
 A failed check starts the lane over from the root, alone.
 
+**Inserts.** An insert's lane descends as a lookup's, and stops at its
+leaf with the version it read, and whether its key matched a separator;
+it also fetches the entry where the insertion will shift entries, as the
+inline keys place it. Then the entries go in, in input order, each into
+its lane's leaf, taken by a compare-and-swap at the version the lane read:
+unchanged since, the leaf still covers the key, and its search under the
+latch finds the key or its place. An insert into a leaf moves the version
+the later keys of the batch expect of it on, but only for lanes that read
+it at the version the insert took it at: a lane that read it before
+another thread changed it doesn't trust it. A leaf another thread holds or
+changed, or one that lost the head a key matched, sends that key through a
+single insert; a full one, through the insert that splits; either way the
+later keys' lanes that named that leaf are forgotten.
+
 Below about an L2 of leaf pages, the lanes find their lines in cache and
 cost more than they save: at 10k `u64` keys, 28.3 ns a batched hit against
-17.7 alone. There batches go one key at a time, as bbtree's do. BCTree has
-no length to estimate that from, so its height tells: three internal
-levels or more, which a tree grown by splits reaches only past 2·m²
-leaves, m half an internal node's capacity, about 1,150 pages for `u64`
-keys.
+17.7 alone. There batches go one key at a time, as the unsync map's do. The
+shared map has no length to estimate that from, so its height tells: three
+internal levels or more, which a tree grown by splits reaches only past
+2·m² leaves, m half an internal node's capacity, about 1,150 pages for
+`u64` keys.
 
-Measured (2026-10-16): 10M entries, `u64` values, 64 keys a batch, one
-run each. One thread pinned to a core, ns per key (`bbtree-bench batch`):
+Measured (2026-10-17, 9900X, 10M entries, `u64` values, 64 keys a lookup
+batch, 16 an insert batch, one run each), one thread pinned to a core, ns
+a key (the probe of this round, as `bbtree-bench`'s cells), against the
+unsync map's batches:
 
-| keys | | one key a call | batch | speedup | bbtree's batch |
-|---|---|--:|--:|--:|--:|
-| `u64` | hit | 137 | 98.8 | 1.39× | 74.9 |
-| `u64` | miss | 101 | 77.8 | 1.30× | 63.5 |
-| JSON | hit | 249 | 111 | 2.24× | 90.0 |
-| JSON | miss | 184 | 81.9 | 2.25× | 71.7 |
+| keys | lookups half missing, alone | batched | unsync batched | inserts, alone | batched | unsync batched |
+|---|--:|--:|--:|--:|--:|--:|
+| `u64` | 128 | 72 | 61 | 150 | 111 | 96 |
+| UUID | 134 | 82 | 68 | 167 | 131 | 110 |
+| JSON | 161 | 91 | 77 | 318 | 178 | 168 |
 
-Threads (`bbtree-scaling`, whole machine), millions of lookups a second at
-1 / 12 / 24 threads; bbtree's batch runs under a `RwLock`'s read lock,
-taken once a batch:
-
-| keys | | one key a call | batch | bbtree's batch |
-|---|---|--:|--:|--:|
-| `u64` | hit | 8.03 / 75.4 / 84.1 | 13.4 / 102.9 / 107.9 | 17.3 / 138.7 / 148.3 |
-| `u64` | miss | 11.1 / 101.5 / 111.4 | 17.0 / 147.6 / 153.9 | 20.2 / 164.4 / 173.2 |
-| JSON | hit | 5.03 / 49.2 / 63.4 | 10.2 / 75.3 / 76.9 | 12.8 / 99.4 / 106.3 |
-| JSON | miss | 8.31 / 75.5 / 86.4 | 14.8 / 113.3 / 118.8 | 16.2 / 114.3 / 118.1 |
-
-At 12 and 24 threads, JSON misses batch as well as bbtree's and `u64`
-misses within 11%; hits trail by 24–28%. A hit latches its leaf: two locked atomics, each a full barrier
-that the lanes' later loads wait for, and a dirtied leaf header line,
-which goes back to memory when evicted. At 24 threads, batched `u64` hits
-read 22.7 GB/s from memory (3.29 lines a lookup), bbtree's 30.9 GB/s
-(3.26), near the 32 GB/s that scans reach; a dirtied line a hit would add
-about 7 GB/s of writes, which no counter of one process sees here. At one
-thread the lane runs about 230 instructions a key more than bbtree's: the
-versions read and checked at each level, and the state kept across
-yields.
+The lookup lanes run about 155 instructions a key more than the unsync
+map's (560 against 403 a `u64` miss): the versions read and checked at
+each level, the lengths read racily and clamped, and the state kept across
+yields. At 24 threads the batches pay off more: `u64` lookups half
+missing, 113.6 M/s one key a call, 145.9 batched.
 
 Batches don't fetch fewer lines (3.8 a 10M `u64` hit on one thread,
 batched or not): they keep more in flight, until the reads near what
@@ -565,7 +638,10 @@ stays as it is.
 ## Testing
 
 Differential tests against std one thread at a time, inserts and
-removals, with bbtree's invariant check, exact prefixes included, and a
+removals, copies (`get_copied`, `get_many_copied`, `contains_key`),
+batched inserts (repeated keys, splits, ascending runs, keys that shrink
+the shared prefix), and the owner's API (`get_mut`, `iter_mut` from both
+ends, `into_iter`, `clear`, `extend`, `collect`, `Debug`), with the unsync tree's invariant check, exact prefixes included, and a
 check that appends go to the last leaf; a test of the shared prefix
 growing, shrinking for keys that lack it, and starting anew in an emptied
 tree; a test that removed nodes' pages serve later splits; and threaded
@@ -576,7 +652,7 @@ keys against models of their own, with many keys and with about a leaf of
 them, threads appending while another shrinks the shared prefix, and
 scans of the steady keys while other threads insert and remove others,
 which visit each once, in order, in both directions, and the same for
-`range_cloned` iterators (`bctree_map/tests.rs`). Scans of random ranges,
+`range_cloned` iterators (`map/tests.rs`). Scans of random ranges,
 in both directions, and `range_cloned` from both ends in random
 interleavings, match std's `range`; a `range_cloned` iterator hands out a
 key inserted ahead of it in a leaf it copied, and not one removed;
@@ -588,7 +664,10 @@ look up, keys outside the shared prefix included, match separate `read`s
 and run the closure once per entry found; and batches of steady and
 changing keys, while threads insert and remove, find every steady key,
 also while the root grows from a leaf and lowers back (tests run lanes on
-every tree with an internal root).
+every tree with an internal root). Copies, single and batched, while
+threads insert, remove and update in place, are always of their own key's
+value, for integer keys and for short and long strings; threads that
+batch their inserts while others look up find each key from its batch on.
 
 Races that need a narrow schedule escape them, and a 12-thread release
 stress run outside the crate found two: a removal that left the path below

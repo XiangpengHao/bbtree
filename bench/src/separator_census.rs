@@ -13,7 +13,8 @@ use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use bbtree::inspect::{NodeId, NodeView, TraceOutcome, TreeView};
-use bbtree::{Auto, BBTreeMap, InlineKey};
+use bbtree::unsync::BBTreeMap;
+use bbtree::{Auto, InlineKey};
 
 use crate::keys::{BenchKey, KeyMaker};
 use crate::random::{RandomStream, SeededRng};

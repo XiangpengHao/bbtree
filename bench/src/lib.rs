@@ -1,7 +1,8 @@
-//! bbtree's benchmark suite: `bbtree::BBTreeMap` against std's `BTreeMap`,
-//! hashbrown's `HashMap` and std's `HashMap`, on the key types, value types,
-//! sizes and operations that `doc/02-field_study.md` §6 derives from how Rust
-//! code uses maps.
+//! bbtree's benchmark suite: `bbtree::unsync::BBTreeMap` (`bbtree-unsync`),
+//! and `bbtree::BBTreeMap` (`bbtree`, the map threads share, where `--map`
+//! names it), against std's `BTreeMap`, hashbrown's `HashMap` and std's
+//! `HashMap`, on the key types, value types, sizes and operations that
+//! `doc/02-field_study.md` §6 derives from how Rust code uses maps.
 //!
 //! - A *workload* is a key kind, a value kind, a size and an operation; a
 //!   *cell* is a workload on one map. Suites are lists of workloads

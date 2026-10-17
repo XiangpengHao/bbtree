@@ -1,13 +1,13 @@
 //! The maps that `bbtree-scaling` measures (`scaling.rs`), each as its crate
-//! ships it. Maps threads share: `BCTreeMap`; `BBTreeMap` and std's
-//! `BTreeMap` behind a `RwLock`, the way to share them without one; other
-//! crates' concurrent ordered maps: crossbeam's `SkipMap`, scc's
-//! `TreeIndex`, surrealdb's artmap and
+//! ships it. Maps threads share: bbtree's `BBTreeMap`; bbtree's
+//! `unsync::BBTreeMap` and std's `BTreeMap` behind a `RwLock`, the way to
+//! share them without one; other crates' concurrent ordered maps:
+//! crossbeam's `SkipMap`, scc's `TreeIndex`, surrealdb's artmap and
 //! concurrent-map; and DashMap, a hash map, which keeps no order and so
-//! scans nothing. Maps one thread owns, measured at one thread: `BBTreeMap`
-//! and std's `BTreeMap` as they are used without threads (`Owned`), and
-//! std's `HashMap` beside them, which keeps no order. Values are `u64`; keys
-//! any [`ScalingKey`].
+//! scans nothing. Maps one thread owns, measured at one thread:
+//! `unsync::BBTreeMap` and std's `BTreeMap` as they are used without threads
+//! (`Owned`), and std's `HashMap` beside them, which keeps no order. Values
+//! are `u64`; keys any [`ScalingKey`].
 
 use std::cell::{Cell, UnsafeCell};
 use std::collections::{BTreeMap, HashMap};
@@ -19,7 +19,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use artmap::{ArtMap, AsBytes};
-use bbtree::{BBTreeMap, BCTreeMap};
+use bbtree::{BBTreeMap, unsync};
 use concurrent_map::{ConcurrentMap, Minimum};
 use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
@@ -245,19 +245,23 @@ fn sum_of_first(entries: impl Iterator<Item = u64>, count: usize) -> (usize, u64
     })
 }
 
-shared_by_reference!(BCTreeMap<K, u64>, "bctree", BCTreeMap::new());
+shared_by_reference!(BBTreeMap<K, u64>, "bbtree", BBTreeMap::new());
 
-impl<K: ScalingKey> MapHandle<K> for BCTreeMap<K, u64> {
+impl<K: ScalingKey> MapHandle<K> for BBTreeMap<K, u64> {
     fn insert(&self, key: K, value: u64) {
-        BCTreeMap::insert(self, key, value);
+        BBTreeMap::insert(self, key, value);
+    }
+
+    fn insert_batch<const N: usize>(&self, entries: [(K, u64); N]) {
+        self.insert_many(entries);
     }
 
     fn get(&self, key: &K) -> Option<u64> {
-        self.read(key, |_, &value| value)
+        self.get_copied(key)
     }
 
     fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
-        self.read_many(keys, |_, &value| value)
+        self.get_many_copied(keys)
     }
 
     fn bump(&self, key: &K) {
@@ -265,12 +269,12 @@ impl<K: ScalingKey> MapHandle<K> for BCTreeMap<K, u64> {
     }
 
     fn remove(&self, key: &K) -> bool {
-        BCTreeMap::remove(self, key).is_some()
+        BBTreeMap::remove(self, key).is_some()
     }
 
     fn scan(&self, start: &K, count: usize) -> (usize, u64) {
         let (mut visited, mut sum) = (0, 0_u64);
-        BCTreeMap::scan(self, start.., |_, &value| {
+        BBTreeMap::scan(self, start.., |_, &value| {
             sum = sum.wrapping_add(value);
             visited += 1;
             if visited == count {
@@ -284,12 +288,12 @@ impl<K: ScalingKey> MapHandle<K> for BCTreeMap<K, u64> {
 }
 
 shared_by_reference!(
-    RwLock<BBTreeMap<K, u64>>,
-    "bbtree-rwlock",
-    RwLock::new(BBTreeMap::new())
+    RwLock<unsync::BBTreeMap<K, u64>>,
+    "bbtree-unsync-rwlock",
+    RwLock::new(unsync::BBTreeMap::new())
 );
 
-impl<K: ScalingKey> MapHandle<K> for RwLock<BBTreeMap<K, u64>> {
+impl<K: ScalingKey> MapHandle<K> for RwLock<unsync::BBTreeMap<K, u64>> {
     fn insert(&self, key: K, value: u64) {
         self.write().expect("no thread panics").insert(key, value);
     }
@@ -553,8 +557,8 @@ impl<K: ScalingKey> MapHandle<K> for DashMap<K, u64> {
     }
 }
 
-// std's B-tree behind a reader-writer lock, as `BBTreeMap` above: the way to
-// share a map that has no concurrent version.
+// std's B-tree behind a reader-writer lock, as `unsync::BBTreeMap` above:
+// the way to share a map that has no concurrent version.
 shared_by_reference!(
     RwLock<BTreeMap<K, u64>>,
     "std-btree-rwlock",
@@ -650,14 +654,14 @@ impl<M> Drop for OwnedHandle<'_, M> {
     }
 }
 
-impl<K: ScalingKey> SharedMap<K> for Owned<BBTreeMap<K, u64>> {
-    const NAME: &'static str = "bbtree";
+impl<K: ScalingKey> SharedMap<K> for Owned<unsync::BBTreeMap<K, u64>> {
+    const NAME: &'static str = "bbtree-unsync";
     const SHARED: bool = false;
 
-    type Handle<'m> = OwnedHandle<'m, BBTreeMap<K, u64>>;
+    type Handle<'m> = OwnedHandle<'m, unsync::BBTreeMap<K, u64>>;
 
     fn new() -> Self {
-        Owned::new(BBTreeMap::new())
+        Owned::new(unsync::BBTreeMap::new())
     }
 
     fn handle(&self) -> Self::Handle<'_> {
@@ -665,7 +669,7 @@ impl<K: ScalingKey> SharedMap<K> for Owned<BBTreeMap<K, u64>> {
     }
 }
 
-impl<K: ScalingKey> MapHandle<K> for OwnedHandle<'_, BBTreeMap<K, u64>> {
+impl<K: ScalingKey> MapHandle<K> for OwnedHandle<'_, unsync::BBTreeMap<K, u64>> {
     fn insert(&self, key: K, value: u64) {
         self.with(|map| map.insert(key, value));
     }

@@ -132,7 +132,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// does, if it holds `key` or has room; or gives all back, with the edge
     /// where `key` goes in the full leaf.
     #[inline(always)]
-    fn insert_into<P: InsertPolicy<K, V>>(
+    pub(super) fn insert_into<P: InsertPolicy<K, V>>(
         &self,
         held: &HeldLeaf<K, V, S, Exclusive>,
         at_separator: bool,
@@ -185,7 +185,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// [`Self::insert`] where the leaf was full: searches again, keeping
     /// the internal nodes it goes through, and splits, until it inserts.
     #[inline(never)]
-    fn insert_splitting<P: InsertPolicy<K, V>>(
+    pub(super) fn insert_splitting<P: InsertPolicy<K, V>>(
         &self,
         mut key: K,
         mut value: V,

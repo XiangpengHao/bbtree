@@ -4,7 +4,9 @@
 # throughput as threads are added; each map's memory, at the end of its
 # build and at the build's peak; and arch, the architectures card's cells
 # alone, for every other machine (Linux or macOS). Every invocation stays
-# under five minutes, and each cell runs once.
+# under five minutes, and each cell runs once. The post shows one bbtree
+# map, `bbtree::BBTreeMap`, which threads share, as "bbtree" in every tab;
+# bbtree's unsync map runs in none.
 #
 #   bench/tools/blog-runs.sh [tab1|tab2|memory|arch|all] [keys...]
 #
@@ -70,14 +72,14 @@ esac
     fi
 } > "$out/machine.txt"
 
-# Tab 1: one thread, pinned. The maps a program without threads would pick,
-# and the ordered maps it might pick instead, each as its crate ships it:
-# bbtree, std's B-tree, crossbeam's skiplist, scc's TreeIndex and
-# concurrent-map (concurrent maps, used from one thread); and std's hash map
-# beside them, which keeps no order and can't scan. The mean time of each
-# operation, back to back: lookups half of which miss, inserts, updates and
-# 100-entry scans; bbtree's lookups and inserts also through its batch API,
-# in an invocation of its own.
+# Tab 1: one thread, pinned. bbtree, used from one thread, against the maps
+# a program without threads would pick, and the ordered maps it might pick
+# instead, each as its crate ships it: std's B-tree, crossbeam's skiplist,
+# scc's TreeIndex and concurrent-map (concurrent maps, used from one
+# thread); and std's hash map beside them, which keeps no order and can't
+# scan. The mean time of each operation, back to back: lookups half of
+# which miss, inserts, updates and 100-entry scans; bbtree's lookups and
+# inserts also through its batch API, in an invocation of its own.
 tab1() {
     local key=$1
     $timed ${pin[@]+"${pin[@]}"} "$scaling" --entries "$entries" --threads 1 --keys "$key" \
@@ -91,15 +93,15 @@ tab1() {
 
 # Tab 2: the maps threads share, as threads are added: lookups half of
 # which miss, updates, a 90/10 lookup/update mix and a 90/10 scan/update
-# mix in one invocation; BCTree's batched lookups in another; inserts in a
+# mix in one invocation; bbtree's batched lookups in another; inserts in a
 # third.
 tab2() {
     local key=$1
-    local maps=bctree,std-btree-rwlock,scc-treeindex,concurrent-map,crossbeam-skipmap
+    local maps=bbtree,std-btree-rwlock,scc-treeindex,concurrent-map,crossbeam-skipmap
     $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps "$maps" \
         --workloads get-half,update,mixed,scan-mixed --measure throughput --seconds 0.5 \
         --out "$out/tab2-reads-$key"
-    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps bctree \
+    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps bbtree \
         --workloads get-half-batch --measure throughput --seconds 0.5 \
         --out "$out/tab2-batch-$key"
     $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps "$maps" \
@@ -121,7 +123,7 @@ arch() {
 memory_of() {
     local key=$1
     $timed "$memory" --entries "$entries" --keys "$key" \
-        --maps bbtree,bctree,std-btree,crossbeam-skipmap,scc-treeindex,concurrent-map \
+        --maps bbtree,std-btree,crossbeam-skipmap,scc-treeindex,concurrent-map \
         --measure memory --out "$out/memory-$key"
 }
 

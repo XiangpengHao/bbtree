@@ -376,7 +376,7 @@ impl Prefetcher {
 
     /// Prefetches `line` without yielding.
     #[inline(always)]
-    fn hint(line: *const u8) {
+    pub(in crate::tree) fn hint(line: *const u8) {
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         // SAFETY: x86-64 has SSE, and the intrinsic doesn't dereference
         // its address.

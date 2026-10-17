@@ -1,7 +1,7 @@
 # 10 — Visualization: browsing the real tree in a browser
 
 Status (2026-10-16): the `inspect` feature with lookup and batch traces
-(`tree/inspect.rs`, `tree/batch.rs`, `map/mod.rs`), and the visualizer in
+(`tree/inspect.rs`, `tree/batch.rs`, `unsync/map/mod.rs`), and the visualizer in
 `vis/`, one key or a batch at a time; beside it, the post's page, with
 one figure so far. Inserts and removals are still to come.
 
@@ -90,7 +90,7 @@ From the original note:
   they run, four keys, on one thread, and nothing about the executor,
   polls or timing.
 - **A post beside the explorer, from the same panels (2026-10-16).** The
-  blog post on bbtree and bctree and the visualizer share one build and
+  blog post on bbtree and the visualizer share one build and
   one look. The explorer stays as it is, at `/`, for readers who want to
   look around; the post is a page of its own, at `/post/`, with tabs
   between them. The post is prose with figures, each figure one idea drawn
@@ -124,7 +124,7 @@ because a dependent crate opts into a feature and needs no `RUSTFLAGS`. It
 adds API only, no dependencies (D2), and promises no stability. Its module
 also compiles in tests, so `cargo test` runs its checks without the feature.
 
-- **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
+- **`unsync::BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
   and whose `shared_prefix()` is the bytes every key shares (D50).
 - **`NodeView`** wraps a `Node`, a leaf or an internal node as the tag of
   the edge to it says, or for the root its header (D52), and answers
@@ -481,5 +481,5 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 - CI for `vis/`: it is a workspace of its own, which bbtree's CI doesn't
   build.
 - `cargo clippy --target wasm32-unknown-unknown` on bbtree fails one lint
-  expectation: `#[expect(clippy::large_enum_variant)]` in `map/entry.rs`
+  expectation: `#[expect(clippy::large_enum_variant)]` in `unsync/map/entry.rs`
   holds only where pointers take 8 bytes. Plain builds are unaffected.

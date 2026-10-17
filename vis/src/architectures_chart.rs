@@ -28,27 +28,27 @@ impl ArchitectureMachine {
         Self {
             name: "Ryzen 9 9900X",
             caption: "x86-64 · Zen 5",
-            throughput: include_str!("../data/9900x-20261016/throughput.csv"),
+            throughput: include_str!("../data/9900x-20261017/throughput.csv"),
         },
         Self {
             name: "Core i5-11400",
             caption: "x86-64 · Rocket Lake",
-            throughput: include_str!("../data/pittsburgh-20261016/throughput.csv"),
+            throughput: include_str!("../data/pittsburgh-20261017/throughput.csv"),
         },
         Self {
             name: "Apple M1 Pro",
             caption: "AArch64 · Firestorm",
-            throughput: include_str!("../data/m1-20261016/throughput.csv"),
+            throughput: include_str!("../data/m1-20261017/throughput.csv"),
         },
         Self {
             name: "AWS C8i",
             caption: "x86-64 · Xeon 6975P-C",
-            throughput: include_str!("../data/aws-c8i-20261016/throughput.csv"),
+            throughput: include_str!("../data/aws-c8i-20261017/throughput.csv"),
         },
         Self {
             name: "AWS Graviton5",
             caption: "AArch64 · Neoverse V3",
-            throughput: include_str!("../data/aws-c9g-20261016/throughput.csv"),
+            throughput: include_str!("../data/aws-c9g-20261017/throughput.csv"),
         },
     ];
 

@@ -5,7 +5,8 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use bbtree::inspect::{NodeId, NodeView, PageMap, TreeView};
-use bbtree::{Auto, BBTreeMap, InlineKey};
+use bbtree::unsync::BBTreeMap;
+use bbtree::{Auto, InlineKey};
 
 use crate::batch_run::{BatchKeys, BatchRun, Fetched, LanePoll};
 use crate::fences::{Fence, KeyBytes, NodeFences};

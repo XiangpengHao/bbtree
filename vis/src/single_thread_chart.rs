@@ -20,8 +20,8 @@ struct PanelRow {
     map: MeasuredMap,
     /// None for the hash map where the work scans: it can't.
     nanos: Option<f64>,
-    /// The same work through bbtree's batch API (`get_many`, 64 keys a
-    /// call; `insert_many`, 16), where it has one.
+    /// The same work through bbtree's batch API (`get_many_copied`, 64
+    /// keys a call; `insert_many`, 16), where it has one.
     batched_nanos: Option<f64>,
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn SingleThreadChart(measurements: Rc<Measurements>, spotlight: Spotl
             }
         }
         p { class: "chart-note",
-            "Mean time per operation, one thread, 10M entries; lower is better. Get: half hits, half misses. Scan: 100 entries in order. Batched: get_many, 64 keys a call; insert_many, 16. scc TreeIndex and concurrent-map are concurrent maps, used from one thread. std's HashMap keeps no order, so it can't scan. {machine.name} ({machine.detail})."
+            "Mean time per operation, one thread, 10M entries; lower is better. Get: half hits, half misses. Scan: 100 entries in order. Batched: get_many_copied, 64 keys a call; insert_many, 16. scc TreeIndex and concurrent-map are concurrent maps, used from one thread. std's HashMap keeps no order, so it can't scan. {machine.name} ({machine.detail})."
             RepositoryLinks { links }
         }
     }

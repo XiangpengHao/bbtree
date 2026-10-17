@@ -20,7 +20,7 @@
 //!   parent, its fences, as the bytes every key shares (D50, D52,
 //!   `node/root_page.rs`, `shared_prefix.rs`), and the last leaf an append
 //!   went to (D45). Every operation on a whole tree starts there.
-//! - [`latched`] is a tree that threads share (`BCTreeMap`): the same
+//! - [`latched`] is a tree that threads share (`BBTreeMap`): the same
 //!   nodes with a latch word each (`node/latch.rs`), read optimistically
 //!   above the leaves (`node/optimistic.rs`) (D54).
 //! - The rest of this module is the tree's operations, each in its own

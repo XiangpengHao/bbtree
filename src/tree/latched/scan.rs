@@ -32,7 +32,7 @@
 //!
 //! With each entry the closure gets its leaf's [`LeafStamp`]: whether a
 //! thread has changed the leaf since tells a caller that copied entries
-//! whether its copies are still the leaf's (`bctree_map/range.rs`). A scan
+//! whether its copies are still the leaf's (`map/range.rs`). A scan
 //! that the closure stops can keep where it stopped ([`ScanResume`]): the
 //! leaf, its stamp and the place in it. The next scan latches that leaf
 //! again and, if its stamp is current, goes on from there without a
@@ -128,6 +128,16 @@ trait ScanOrder {
         cursor: LeafCursor,
     ) -> impl Iterator<Item = (&'a K, &'a V)>;
 
+    /// Every entry of `leaf`, which the caller holds, in the scan's order:
+    /// [`Self::entries`] from [`Self::whole_leaf`], but where no key's place
+    /// waits on the header's head flag. A computed first index would make
+    /// every entry load in the leaf wait for the header's line, and the
+    /// hardware prefetcher with them: one memory latency a leaf, a quarter
+    /// of a walk of 17-entry leaves (Tonbo's memtable, 2026-10-17).
+    fn whole_entries<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>>(
+        leaf: Leaf<K, V, Latched<S>>,
+    ) -> impl Iterator<Item = (&'a K, &'a V)>;
+
     /// The key of `leaf`, which the caller holds, that the scan visits
     /// last: `None` for a leaf without one, as only an empty tree's root
     /// is.
@@ -180,6 +190,18 @@ impl ScanOrder for Ascending {
         head.into_iter().chain(keys)
     }
 
+    fn whole_entries<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>>(
+        leaf: Leaf<K, V, Latched<S>>,
+    ) -> impl Iterator<Item = (&'a K, &'a V)> {
+        let head = leaf
+            .has_head()
+            .then(|| (leaf.head_key(), leaf.head_value()));
+        // SAFETY: each index is below the length of the leaf, which the
+        // caller holds, so that it doesn't change.
+        let keys = (0..leaf.len()).map(move |index| unsafe { leaf.key_value_unchecked(index) });
+        head.into_iter().chain(keys)
+    }
+
     fn last_visited<'a, K, V, S: InlineKeyStrategy<K>>(
         leaf: Leaf<K, V, Latched<S>>,
     ) -> Option<&'a K> {
@@ -225,6 +247,20 @@ impl ScanOrder for Descending {
         let head = (has_head && cursor.0 > 0).then(|| (leaf.head_key(), leaf.head_value()));
         let key_end = cursor.0 - usize::from(has_head && cursor.0 > 0);
         let keys = (0..key_end).rev().map(move |index| leaf.key_value(index));
+        keys.chain(head)
+    }
+
+    fn whole_entries<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>>(
+        leaf: Leaf<K, V, Latched<S>>,
+    ) -> impl Iterator<Item = (&'a K, &'a V)> {
+        let head = leaf
+            .has_head()
+            .then(|| (leaf.head_key(), leaf.head_value()));
+        // SAFETY: each index is below the length of the leaf, which the
+        // caller holds, so that it doesn't change.
+        let keys = (0..leaf.len())
+            .rev()
+            .map(move |index| unsafe { leaf.key_value_unchecked(index) });
         keys.chain(head)
     }
 
@@ -521,10 +557,17 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // The leaves after the first are visited whole.
+        let mut whole = false;
         loop {
             let leaf = held.leaf();
             let stamp = LeafStamp::of(leaf);
-            match Self::visit::<O, Q, R>(leaf, cursor, stamp, to, &mut f) {
+            let visit = if whole {
+                Self::visit::<O, Q, R>(O::whole_entries(leaf), cursor, stamp, to, &mut f)
+            } else {
+                Self::visit::<O, Q, R>(O::entries(leaf, cursor), cursor, stamp, to, &mut f)
+            };
+            match visit {
                 Visit::Broke(result, past) => {
                     if let Some(stopped) = stopped {
                         *stopped = Some((leaf, stamp, past));
@@ -540,11 +583,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 path_kept = true;
                 NextLeaf::StartOver
             };
-            (held, cursor) = match next {
+            (held, cursor, whole) = match next {
                 NextLeaf::None => return (None, path_kept),
                 NextLeaf::Latched(next) => {
                     let cursor = O::whole_leaf(Self::entry_count(next.leaf()));
-                    (next, cursor)
+                    (next, cursor, true)
                 }
                 NextLeaf::StartOver => {
                     let Some(last) = O::last_visited(held.leaf()) else {
@@ -556,7 +599,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                         .unwrap_or_else(|_| unreachable!("a key in the tree shares its prefix"));
                     let cursor =
                         LeafCursor::at::<O, _, _, _, _>(next.leaf(), &last, at_head, false);
-                    (next, cursor)
+                    (next, cursor, false)
                 }
             };
         }
@@ -568,17 +611,18 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         usize::from(leaf.has_head()) + leaf.len()
     }
 
-    /// Runs `f` on the entries of `leaf`, which the caller holds, from
-    /// `cursor` on, in order `O`, up to `to`, with the leaf's stamp.
-    fn visit<'t, O: ScanOrder, Q, R>(
-        leaf: Leaf<K, V, Latched<S>>,
+    /// Runs `f` on `entries`, those of a leaf the caller holds from `cursor`
+    /// on, in order `O`, up to `to`, with the leaf's stamp.
+    fn visit<'a, 't, O: ScanOrder, Q, R>(
+        entries: impl Iterator<Item = (&'a K, &'a V)>,
         cursor: LeafCursor,
         stamp: LeafStamp<'t>,
         to: Bound<&Q>,
         f: &mut impl FnMut(&K, &V, LeafStamp<'t>) -> ControlFlow<R>,
     ) -> Visit<R>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + 'a,
+        V: 'a,
         Q: Ord + ?Sized,
     {
         let past_end = |key: &K| match to {
@@ -587,7 +631,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             Bound::Unbounded => false,
         };
         let mut visited = 0;
-        for (key, value) in O::entries(leaf, cursor) {
+        for (key, value) in entries {
             if past_end(key) {
                 return Visit::PastEnd;
             }
@@ -648,7 +692,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             return NextLeaf::None;
         };
         let PathLevel { node, version, .. } = path.level(level);
-        let mut next_path = path.prefix(level);
+        let mut next_path = TreePath::new();
+        next_path.copy_levels_from(path, level);
         let Some(next) = Self::walk_down::<O>(node, version, Some(edge), &mut next_path) else {
             return NextLeaf::StartOver;
         };
@@ -661,7 +706,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         if !unchanged {
             return NextLeaf::StartOver;
         }
-        *path = next_path;
+        path.copy_from(&next_path);
         NextLeaf::Latched(next)
     }
 

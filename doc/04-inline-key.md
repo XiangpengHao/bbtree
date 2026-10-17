@@ -93,26 +93,26 @@ impl InlineKey for String {
 pub struct Auto;
 pub struct WithInlineKey;
 
-pub struct BBTreeMap<K, V, A = Global, S = Auto> { /* … */ }
+pub struct BBTreeMap<K, V, S = Auto, A = Global> { /* … */ }  // unsync::BBTreeMap
 ```
 
 User code:
 
 ```rust
-let names: BBTreeMap<String, u64> = BBTreeMap::new();      // inline keys
+let names: unsync::BBTreeMap<String, u64> = unsync::BBTreeMap::new();      // inline keys
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct UserName(String);
 impl InlineKey for UserName {
     fn inline_key_at(&self, offset: usize) -> InlineWord { self.0.inline_key_at(offset) }
 }
-let plain: BBTreeMap<UserName, u64> = BBTreeMap::new();                     // no inline keys
-let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
-    BBTreeMap::with_strategy(WithInlineKey);                                 // inline keys
+let plain: unsync::BBTreeMap<UserName, u64> = unsync::BBTreeMap::new();     // no inline keys
+let opted_in: unsync::BBTreeMap<UserName, u64, WithInlineKey> =
+    unsync::BBTreeMap::with_strategy(WithInlineKey);                         // inline keys
 ```
 
 Opting in goes through `with_strategy`, not an annotated `new()`: a `new()`
-generic over `S` breaks plain `BBTreeMap::new()` with "type annotations
+generic over `S` breaks plain `unsync::BBTreeMap::new()` with "type annotations
 needed", because default type parameters don't drive inference. `new()` stays
 `Auto`-only, as std's is `Global`-only. The strategy is the third parameter,
 before the allocator (D8), so opting in names only the strategy.
@@ -134,7 +134,7 @@ if is_byte_string::<K>() && is_byte_string::<Q>() {
 }
 ```
 
-- **Drop-in compatibility.** `BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
+- **Drop-in compatibility.** `unsync::BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
   means; `S` and the allocator `A` after it are defaulted. Every method is
   identical for every `S`.
 - **Both sides must be recognized.** `Auto` uses inline keys only when **both** `K`

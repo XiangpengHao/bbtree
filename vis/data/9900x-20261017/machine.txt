@@ -1,0 +1,17 @@
+host: xiangpeng-madison
+date: 2026-10-17T01:38:40-07:00
+bbtree: c4b5c7e80f8521e9a7cb4c0c241b6d8e5ceff92f 106 files changed
+rustc: rustc 1.101.0-nightly (8d1a76430 2026-10-06)
+Linux xiangpeng-madison 7.2.8-cachyos #1-NixOS SMP PREEMPT_DYNAMIC Sat Sep 26 14:39:58 UTC 2026 x86_64 GNU/Linux
+CPU(s):                                  24
+Model name:                              AMD Ryzen 9 9900X 12-Core Processor
+Thread(s) per core:                      2
+Core(s) per socket:                      12
+Socket(s):                               1
+CPU(s) scaling MHz:                      73%
+CPU max MHz:                             5662.0161
+CPU min MHz:                             613.9540
+L1d cache:                               576 KiB (12 instances)
+L2 cache:                                12 MiB (12 instances)
+L3 cache:                                64 MiB (2 instances)
+MemTotal:       63365436 kB

@@ -6,8 +6,9 @@
 /// A map the bench measured.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MeasuredMap {
+    /// bbtree's `BBTreeMap`, which threads share: the map the post is about,
+    /// on one thread and as threads are added.
     BBTree,
-    BCTree,
     StdBTree,
     /// std's `BTreeMap` behind a `RwLock`.
     StdBTreeRwLock,
@@ -34,7 +35,7 @@ impl MeasuredMap {
 
     /// The maps threads share, in the order the charts draw them.
     pub(crate) const CONCURRENT: [Self; 5] = [
-        Self::BCTree,
+        Self::BBTree,
         Self::StdBTreeRwLock,
         Self::SccTreeIndex,
         Self::ConcurrentMap,
@@ -43,9 +44,8 @@ impl MeasuredMap {
 
     /// The maps whose memory the post shows: a `RwLock` adds nothing to
     /// std's.
-    pub(crate) const MEMORY: [Self; 6] = [
+    pub(crate) const MEMORY: [Self; 5] = [
         Self::BBTree,
-        Self::BCTree,
         Self::StdBTree,
         Self::SkipMap,
         Self::SccTreeIndex,
@@ -56,7 +56,6 @@ impl MeasuredMap {
     fn from_bench_name(name: &str) -> Option<Self> {
         Some(match name {
             "bbtree" => Self::BBTree,
-            "bctree" => Self::BCTree,
             "std-btree" => Self::StdBTree,
             "std-btree-rwlock" => Self::StdBTreeRwLock,
             "crossbeam-skipmap" => Self::SkipMap,
@@ -70,7 +69,6 @@ impl MeasuredMap {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::BBTree => "bbtree",
-            Self::BCTree => "bctree",
             Self::StdBTree => "std BTreeMap",
             Self::StdBTreeRwLock => "RwLock<BTreeMap>",
             Self::SkipMap => "crossbeam SkipMap",
@@ -81,12 +79,12 @@ impl MeasuredMap {
     }
 
     /// The fill of the map's dots and bars, a CSS variable, one a map
-    /// whatever the chart shows: bbtree's maps in the site's highlighter,
+    /// whatever the chart shows: bbtree in the site's highlighter,
     /// every other a dark, desaturated slate, apart by lightness, so that
     /// the story's series stands out.
     pub(crate) fn fill_color(self) -> &'static str {
         match self {
-            Self::BBTree | Self::BCTree => "var(--ours)",
+            Self::BBTree => "var(--ours)",
             _ => self.line_color(),
         }
     }
@@ -96,7 +94,7 @@ impl MeasuredMap {
     /// gold.
     pub(crate) fn line_color(self) -> &'static str {
         match self {
-            Self::BBTree | Self::BCTree => "var(--ours-line)",
+            Self::BBTree => "var(--ours-line)",
             Self::StdBTree | Self::StdBTreeRwLock | Self::StdHashMap => "var(--theirs-1)",
             Self::SccTreeIndex => "var(--theirs-2)",
             Self::ConcurrentMap => "var(--theirs-3)",
@@ -107,7 +105,7 @@ impl MeasuredMap {
     /// Its name and where its code lives, for the maps outside std.
     pub(crate) fn repository_link(self) -> Option<(String, &'static str)> {
         let url = match self {
-            Self::BBTree | Self::BCTree => crate::site::REPOSITORY,
+            Self::BBTree => crate::site::REPOSITORY,
             Self::SkipMap => "https://github.com/crossbeam-rs/crossbeam",
             Self::SccTreeIndex => "https://codeberg.org/wvwwvwwv/scalable-concurrent-containers",
             Self::ConcurrentMap => "https://github.com/komora-io/concurrent-map",
@@ -116,9 +114,9 @@ impl MeasuredMap {
         Some((self.label().to_string(), url))
     }
 
-    /// Whether it is one of bbtree's: the series the story is about.
+    /// Whether it is bbtree: the series the story is about.
     pub(crate) fn is_ours(self) -> bool {
-        matches!(self, Self::BBTree | Self::BCTree)
+        self == Self::BBTree
     }
 
     /// Whether it keeps its keys in order, to scan ranges of them: all but
@@ -192,8 +190,8 @@ pub(crate) enum MeasuredOperation {
 }
 
 impl MeasuredOperation {
-    /// The same operation through bbtree's batch API (`get_many`,
-    /// `insert_many`), if it has one.
+    /// The same operation through bbtree's batch API
+    /// (`get_many_copied`, `insert_many`), if it has one.
     pub(crate) fn batched(self) -> Option<Self> {
         match self {
             Self::Get => Some(Self::GetBatch),
@@ -350,9 +348,9 @@ impl Measurements {
                 name: "Ryzen 9 9900X",
                 detail: "Zen 5, 12 cores, 24 threads, 2 × 32 MiB L3, DDR5, mimalloc",
             },
-            include_str!("../data/9900x-20261016/throughput.csv"),
-            include_str!("../data/9900x-20261016/memory.csv"),
-            include_str!("../data/9900x-20261016/integrations.csv"),
+            include_str!("../data/9900x-20261017/throughput.csv"),
+            include_str!("../data/9900x-20261017/memory.csv"),
+            include_str!("../data/9900x-20261017/integrations.csv"),
         )
     }
 
@@ -480,7 +478,7 @@ impl Measurements {
         }))
     }
 
-    /// How many times faster the systems ran with bctree, the least and
+    /// How many times faster the systems ran with bbtree, the least and
     /// the most across their workloads.
     pub(crate) fn integration_speedups(&self) -> Option<SpeedupRange> {
         SpeedupRange::of(self.integrations.iter().map(IntegrationRow::speedup))

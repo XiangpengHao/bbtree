@@ -754,7 +754,7 @@ fn OutcomeText(outcome: TraceOutcome, detail: NodeDetail, spotlight: Spotlight) 
 
 #[cfg(test)]
 mod tests {
-    use bbtree::BBTreeMap;
+    use bbtree::unsync::BBTreeMap;
 
     use super::*;
     use crate::inspected_tree::{InspectedMap, InspectedTree};

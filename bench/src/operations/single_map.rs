@@ -196,7 +196,7 @@ impl<K: BenchKey, V: BenchValue> SingleMapCell<K, V> {
     ) -> (usize, usize) {
         let map: M = self.built_map();
         let probes = self.probes(pool);
-        // Maps that lend no references (`BCTreeMap`) read through a closure;
+        // Maps that lend no references (`bbtree::BBTreeMap`) read through a closure;
         // the others keep their loop as it was.
         let (hits, _checksum) = if M::LENDS_REFERENCES {
             stopwatch.time(|| {

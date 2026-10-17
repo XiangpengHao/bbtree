@@ -2,8 +2,10 @@
 //! its map's API lacks, whose cells are reported as `n/a`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::ControlFlow;
 
-use bbtree::{BBTreeMap, BCTreeMap, InlineKey, InlineKeyStrategy, WithInlineKey};
+use bbtree::unsync;
+use bbtree::{BBTreeMap, InlineKey, InlineKeyStrategy, WithInlineKey};
 
 use crate::command_line::Named;
 use crate::keys::{BenchKey, KeyKind};
@@ -12,18 +14,19 @@ use crate::values::BenchValue;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MapKind {
-    /// `BBTreeMap` with the strategy its users would pick for the key type
-    /// (`BenchKey::measure_on_bbtree`): `WithInlineKey` for memtable keys,
-    /// `Auto` for the others.
+    /// `BBTreeMap`, the map threads share, with the strategy its users would
+    /// pick for the key type (`BenchKey::measure_on_bbtree`), on one thread.
+    /// Runs only when `--map` names it, on keys with inline keys.
     BBTree,
-    /// `BBTreeMap` with the `WithInlineKey` strategy: keys with inline keys
-    /// through their own `InlineKey` impl. Runs only when `--map` names it,
-    /// and only on the keys that `bbtree` gives none, the integers.
-    BBTreeInline,
-    /// `BCTreeMap`, the map threads share, with the strategy `bbtree` uses,
-    /// on one thread. Runs only when `--map` names it, on keys with inline
-    /// keys.
-    BCTree,
+    /// `unsync::BBTreeMap`, the map for one thread, with the strategy its
+    /// users would pick for the key type (`BenchKey::measure_on_unsync`):
+    /// `WithInlineKey` for memtable keys, `Auto` for the others.
+    Unsync,
+    /// `unsync::BBTreeMap` with the `WithInlineKey` strategy: keys with
+    /// inline keys through their own `InlineKey` impl. Runs only when
+    /// `--map` names it, and only on the keys that `bbtree-unsync` gives
+    /// none, the integers.
+    UnsyncInline,
     StdBTree,
     /// hashbrown's `HashMap` with its default hasher (foldhash).
     Hashbrown,
@@ -34,8 +37,8 @@ pub(crate) enum MapKind {
 impl Named for MapKind {
     const ALL: &'static [Self] = &[
         Self::BBTree,
-        Self::BBTreeInline,
-        Self::BCTree,
+        Self::Unsync,
+        Self::UnsyncInline,
         Self::StdBTree,
         Self::Hashbrown,
         Self::StdHash,
@@ -44,8 +47,8 @@ impl Named for MapKind {
     fn name(self) -> &'static str {
         match self {
             Self::BBTree => "bbtree",
-            Self::BBTreeInline => "bbtree-inline",
-            Self::BCTree => "bctree",
+            Self::Unsync => "bbtree-unsync",
+            Self::UnsyncInline => "bbtree-unsync-inline",
             Self::StdBTree => "std-btree",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std-hash",
@@ -58,8 +61,8 @@ impl MapKind {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::BBTree => "bbtree",
-            Self::BBTreeInline => "bbtree, inline keys",
-            Self::BCTree => "bctree",
+            Self::Unsync => "bbtree unsync",
+            Self::UnsyncInline => "bbtree unsync, inline keys",
             Self::StdBTree => "std BTreeMap",
             Self::Hashbrown => "hashbrown",
             Self::StdHash => "std HashMap",
@@ -70,20 +73,20 @@ impl MapKind {
         !self.unsupported_operations().contains(&operation)
     }
 
-    /// Whether the map runs on keys of `key`: `bbtree-inline` only on those
-    /// whose type has an `InlineKey` impl that `bbtree` doesn't use, and
-    /// `bctree` on those with inline keys.
+    /// Whether the map runs on keys of `key`: `bbtree-unsync-inline` only on
+    /// those whose type has an `InlineKey` impl that `bbtree-unsync` doesn't
+    /// use, and `bbtree` on those with inline keys.
     pub(crate) fn supports_key(self, key: KeyKind) -> bool {
         match self {
-            Self::BBTreeInline => key.is_inline_keyed_integer(),
-            Self::BCTree => key != KeyKind::U32,
-            Self::BBTree | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
+            Self::UnsyncInline => key.is_inline_keyed_integer(),
+            Self::BBTree => key != KeyKind::U32,
+            Self::Unsync | Self::StdBTree | Self::Hashbrown | Self::StdHash => true,
         }
     }
 
     /// Whether the map runs only when `--map` names it.
     pub(crate) fn is_opt_in(self) -> bool {
-        matches!(self, Self::BBTreeInline | Self::BCTree)
+        matches!(self, Self::UnsyncInline | Self::BBTree)
     }
 
     /// The adapter's list, read at `u64 → u64`: the lists don't depend on
@@ -91,11 +94,11 @@ impl MapKind {
     /// which `CellRun::measure` checks.
     fn unsupported_operations(self) -> &'static [Operation] {
         match self {
-            Self::BBTree => <BBTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
-            Self::BBTreeInline => {
-                <BBTreeMap<u64, u64, WithInlineKey> as MapUnderTest<u64, u64>>::UNSUPPORTED
+            Self::BBTree => <CountedBBTree<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
+            Self::Unsync => <unsync::BBTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
+            Self::UnsyncInline => {
+                <unsync::BBTreeMap<u64, u64, WithInlineKey> as MapUnderTest<u64, u64>>::UNSUPPORTED
             }
-            Self::BCTree => <CountedBCTree<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
             Self::StdBTree => <BTreeMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED,
             Self::Hashbrown => {
                 <hashbrown::HashMap<u64, u64> as MapUnderTest<u64, u64>>::UNSUPPORTED
@@ -205,12 +208,12 @@ pub(crate) trait MapUnderTest<K: BenchKey, V: BenchValue>: Sized {
     }
 }
 
-impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
+impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for unsync::BBTreeMap<K, V> {
     /// Not written yet.
     const UNSUPPORTED: &'static [Operation] = &[];
 
     fn new() -> Self {
-        BBTreeMap::new()
+        unsync::BBTreeMap::new()
     }
 
     fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
@@ -218,11 +221,11 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
     }
 
     fn entry_count(&self) -> usize {
-        BBTreeMap::len(self)
+        unsync::BBTreeMap::len(self)
     }
 
     fn insert(&mut self, key: K, value: V) {
-        BBTreeMap::insert(self, key, value);
+        unsync::BBTreeMap::insert(self, key, value);
     }
 
     fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
@@ -230,7 +233,7 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
     }
 
     fn get(&self, key: &K) -> Option<&V> {
-        BBTreeMap::get(self, key)
+        unsync::BBTreeMap::get(self, key)
     }
 
     fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
@@ -246,11 +249,11 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
-        BBTreeMap::remove(self, key)
+        unsync::BBTreeMap::remove(self, key)
     }
 
     fn pop_first(&mut self) -> Option<(K, V)> {
-        BBTreeMap::pop_first(self)
+        unsync::BBTreeMap::pop_first(self)
     }
 
     fn from_sorted_entries(entries: Vec<(K, V)>) -> Self {
@@ -263,11 +266,13 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V> {
 }
 
 /// `collect` makes maps of the default strategy only.
-impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K, V, WithInlineKey> {
+impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V>
+    for unsync::BBTreeMap<K, V, WithInlineKey>
+{
     const UNSUPPORTED: &'static [Operation] = &[Operation::BulkBuild];
 
     fn new() -> Self {
-        BBTreeMap::with_strategy(WithInlineKey)
+        unsync::BBTreeMap::with_strategy(WithInlineKey)
     }
 
     fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
@@ -275,11 +280,11 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K,
     }
 
     fn entry_count(&self) -> usize {
-        BBTreeMap::len(self)
+        unsync::BBTreeMap::len(self)
     }
 
     fn insert(&mut self, key: K, value: V) {
-        BBTreeMap::insert(self, key, value);
+        unsync::BBTreeMap::insert(self, key, value);
     }
 
     fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
@@ -287,7 +292,7 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K,
     }
 
     fn get(&self, key: &K) -> Option<&V> {
-        BBTreeMap::get(self, key)
+        unsync::BBTreeMap::get(self, key)
     }
 
     fn get_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<&V>; N] {
@@ -303,11 +308,11 @@ impl<K: BenchKey + InlineKey, V: BenchValue> MapUnderTest<K, V> for BBTreeMap<K,
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {
-        BBTreeMap::remove(self, key)
+        unsync::BBTreeMap::remove(self, key)
     }
 
     fn pop_first(&mut self) -> Option<(K, V)> {
-        BBTreeMap::pop_first(self)
+        unsync::BBTreeMap::pop_first(self)
     }
 
     fn bump_count(&mut self, key: K) {
@@ -445,27 +450,24 @@ impl<K: BenchKey, V: BenchValue> MapUnderTest<K, V> for HashMap<K, V> {
     }
 }
 
-/// `BCTreeMap` with strategy `S`, and the count of entries it has taken,
+/// `BBTreeMap` with strategy `S`, and the count of entries it has taken,
 /// which the map itself doesn't keep: a shared counter would cost every
 /// insert an atomic. Lookups read through a closure, as the map hands out no
-/// references.
-pub(crate) struct CountedBCTree<K, V, S: InlineKeyStrategy<K> = bbtree::Auto> {
-    map: BCTreeMap<K, V, S>,
+/// references to threads that share it; iterating, through a scan.
+pub(crate) struct CountedBBTree<K, V, S: InlineKeyStrategy<K> = bbtree::Auto> {
+    map: BBTreeMap<K, V, S>,
     entries: usize,
 }
 
 impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest<K, V>
-    for CountedBCTree<K, V, S>
+    for CountedBBTree<K, V, S>
 {
-    /// `BCTreeMap` has no iteration yet, and batches only lookups.
+    /// `BBTreeMap` has no entry API, no `pop_first`, and builds only by
+    /// inserts.
     const UNSUPPORTED: &'static [Operation] = &[
         Operation::BulkBuild,
-        Operation::Iterate,
-        Operation::Range64,
         Operation::EntryUpsert,
         Operation::PopFirst,
-        Operation::BatchRandomInsert,
-        Operation::BatchSequentialInsert,
         Operation::ExtendRandom,
         Operation::ExtendSequential,
     ];
@@ -474,7 +476,7 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
 
     fn new() -> Self {
         Self {
-            map: BCTreeMap::with_strategy(S::default()),
+            map: BBTreeMap::with_strategy(S::default()),
             entries: 0,
         }
     }
@@ -489,6 +491,11 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
         }
     }
 
+    fn insert_batch<const N: usize>(&mut self, entries: [(K, V); N]) {
+        let replaced = self.map.insert_many(entries);
+        self.entries += replaced.iter().filter(|value| value.is_none()).count();
+    }
+
     fn extend_entries(&mut self, entries: impl Iterator<Item = (K, V)>) {
         for (key, value) in entries {
             self.insert(key, value);
@@ -501,6 +508,31 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
 
     fn lookup_fingerprint_batch<const N: usize>(&self, keys: [&K; N]) -> [Option<u64>; N] {
         self.map.read_many(keys, |_, value| value.fingerprint())
+    }
+
+    fn checksum_all(&self) -> u64 {
+        let mut sum = 0_u64;
+        self.map.scan::<K, ()>(.., |key, value| {
+            sum = sum.wrapping_add(key.fingerprint() ^ value.fingerprint());
+            ControlFlow::Continue(())
+        });
+        sum
+    }
+
+    fn checksum_range(&self, start: &K, count: usize) -> u64 {
+        let (mut sum, mut visited) = (0_u64, 0);
+        if count > 0 {
+            self.map.scan::<K, ()>(start.., |key, value| {
+                sum = sum.wrapping_add(key.fingerprint() ^ value.fingerprint());
+                visited += 1;
+                if visited == count {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+        }
+        sum
     }
 
     fn remove(&mut self, key: &K) -> Option<V> {

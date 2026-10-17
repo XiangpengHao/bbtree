@@ -741,6 +741,22 @@ where
         bytes.get(offset).map(core::ptr::from_ref)
     }
 
+    /// Whether the key, a recognized byte string, ends within the inline key
+    /// a node of kind `Kind`, a node of std byte strings, keeps at
+    /// `prefix_len`: a stored key that shares those first `prefix_len` bytes
+    /// and has an equal inline key is this key if their lengths are equal.
+    /// `false` for any other key.
+    #[inline(always)]
+    pub(super) fn ends_within_window<Kind: NodeKind>(&self, prefix_len: usize) -> bool {
+        let plan = NodePlan::<K>::of::<S, Kind>();
+        let (Some(KeyInliner::ByteString(_)), Some(width), Some(query)) =
+            (plan.inliner(), plan.inline_width(), self.recognized_bytes())
+        else {
+            return false;
+        };
+        query.bytes.len() <= prefix_len + width.byte_len()
+    }
+
     /// The query's length tag, if it is a recognized byte string (D36).
     #[inline]
     pub(super) fn length_tag(&self) -> Option<u16> {

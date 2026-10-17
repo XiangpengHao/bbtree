@@ -33,8 +33,9 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::panic::{self, AssertUnwindSafe};
 
-use bbtree::bbtree_map::Entry;
-use bbtree::{Auto, BBTreeMap, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
+use bbtree::unsync::BBTreeMap;
+use bbtree::unsync::bbtree_map::Entry;
+use bbtree::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 
 use crate::operation_list::Operations;

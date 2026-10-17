@@ -1,0 +1,17 @@
+host: xiangpeng-pittsburgh
+date: 2026-10-17T00:58:21-07:00
+bbtree: working tree of 2026-10-17, copied without .git
+rustc: rustc 1.101.0-nightly (8d1a76430 2026-10-06), built on the Ryzen 9 9900X with target-cpu=rocketlake
+Linux xiangpeng-pittsburgh 7.1.4-cachyos #1-NixOS SMP PREEMPT_DYNAMIC Mon Jul 20 14:00:01 UTC 2026 x86_64 GNU/Linux
+CPU(s):                                  12
+Model name:                              11th Gen Intel(R) Core(TM) i5-11400 @ 2.60GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      6
+Socket(s):                               1
+CPU(s) scaling MHz:                      63%
+CPU max MHz:                             4400.0000
+CPU min MHz:                             800.0000
+L1d cache:                               288 KiB (6 instances)
+L2 cache:                                3 MiB (6 instances)
+L3 cache:                                12 MiB (1 instance)
+MemTotal:       32752940 kB

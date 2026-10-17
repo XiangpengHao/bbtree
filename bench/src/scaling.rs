@@ -1,8 +1,9 @@
 //! `bbtree-scaling`: maps that threads share (`concurrent_maps.rs`) as
-//! threads are added: `BCTreeMap`, `BBTreeMap` and std's `BTreeMap` behind a
-//! `RwLock`, and other crates' concurrent maps (`--maps` picks some); and,
-//! at one thread, `BBTreeMap` and `BTreeMap` without threads; with `u64`,
-//! `u128`, UUID, string or Wikipedia-title keys (`--keys`).
+//! threads are added: bbtree's `BBTreeMap`, `unsync::BBTreeMap` and std's
+//! `BTreeMap` behind a `RwLock`, and other crates' concurrent maps (`--maps`
+//! picks some); and, at one thread, `unsync::BBTreeMap` and `BTreeMap`
+//! without threads; with `u64`, `u128`, UUID, string or Wikipedia-title keys
+//! (`--keys`).
 //!
 //! Each worker is pinned to a CPU of its own, one per physical core first,
 //! then their SMT siblings, in the order the process's affinity mask allows
@@ -12,9 +13,9 @@
 //! - `get`: lookups of keys the map holds, for `--seconds`;
 //! - `get-miss`: lookups of keys it doesn't, for `--seconds`;
 //! - `get-batch`, `get-miss-batch`: the same, [`LOOKUP_BATCH`] keys a call,
-//!   through the batch API of the maps that have one (`BCTreeMap`,
-//!   `BBTreeMap`), separate lookups on the others, under one epoch pin for
-//!   the batch where a map takes a guard (artmap, scc);
+//!   through the batch API of the maps that have one (both bbtree maps),
+//!   separate lookups on the others, under one epoch pin for the batch
+//!   where a map takes a guard (artmap, scc);
 //! - `get-half`, `get-half-batch`: lookups of which half hit and half miss,
 //!   drawn at random from as many keys the map holds as it doesn't, one at
 //!   a time or [`LOOKUP_BATCH`] a call;
@@ -30,7 +31,7 @@
 //! - `insert`: the whole map inserted into an empty one, the keys split
 //!   between the workers, timed to the last one;
 //! - `insert-batch`: the same, [`INSERT_BATCH`] entries a call, through the
-//!   batch API of the maps that have one (`BBTreeMap`'s `insert_many`),
+//!   batch API of the maps that have one (both bbtree maps' `insert_many`),
 //!   separate inserts on the others.
 //!
 //! What it measures of them, by `--measure`:
@@ -58,7 +59,7 @@ use std::sync::{Barrier, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bbtree::{BBTreeMap, BCTreeMap};
+use bbtree::{BBTreeMap, unsync};
 use concurrent_map::ConcurrentMap;
 use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
@@ -631,11 +632,11 @@ struct ScalingRun {
 impl ScalingRun {
     /// Every map it measures, by name, in the order it measures them.
     const MAPS: [&'static str; 11] = [
-        <Owned<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
+        <Owned<unsync::BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <Owned<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <Owned<HashMap<u64, u64>> as SharedMap<u64>>::NAME,
-        <BCTreeMap<u64, u64> as SharedMap<u64>>::NAME,
-        <RwLock<BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
+        <BBTreeMap<u64, u64> as SharedMap<u64>>::NAME,
+        <RwLock<unsync::BBTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <RwLock<BTreeMap<u64, u64>> as SharedMap<u64>>::NAME,
         <SkipMap<u64, AtomicU64> as SharedMap<u64>>::NAME,
         <TreeIndex<u64, AtomicU64> as SharedMap<u64>>::NAME,
@@ -811,8 +812,8 @@ impl ScalingRun {
             }
             return;
         }
-        if self.picks(<Owned<BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
-            self.measure::<K, Owned<BBTreeMap<K, u64>>>(keys);
+        if self.picks(<Owned<unsync::BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, Owned<unsync::BBTreeMap<K, u64>>>(keys);
         }
         if self.picks(<Owned<BTreeMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, Owned<BTreeMap<K, u64>>>(keys);
@@ -820,11 +821,11 @@ impl ScalingRun {
         if self.picks(<Owned<HashMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, Owned<HashMap<K, u64>>>(keys);
         }
-        if self.picks(<BCTreeMap<K, u64> as SharedMap<K>>::NAME) {
-            self.measure::<K, BCTreeMap<K, u64>>(keys);
+        if self.picks(<BBTreeMap<K, u64> as SharedMap<K>>::NAME) {
+            self.measure::<K, BBTreeMap<K, u64>>(keys);
         }
-        if self.picks(<RwLock<BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
-            self.measure::<K, RwLock<BBTreeMap<K, u64>>>(keys);
+        if self.picks(<RwLock<unsync::BBTreeMap<K, u64>> as SharedMap<K>>::NAME) {
+            self.measure::<K, RwLock<unsync::BBTreeMap<K, u64>>>(keys);
         }
         if self.picks(<RwLock<BTreeMap<K, u64>> as SharedMap<K>>::NAME) {
             self.measure::<K, RwLock<BTreeMap<K, u64>>>(keys);

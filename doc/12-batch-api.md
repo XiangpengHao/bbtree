@@ -1,12 +1,13 @@
 # 12 — Batch API
 
 Status: built (2026-10-15). Lanes, their executor and the only software
-prefetch are in `src/tree/batch.rs`; the API in `src/map/batch.rs` and
-`src/set/mod.rs`; batched `extend` in `src/map/from_entries.rs`; the set
-operations' batched lookups in `src/set/lookups.rs`. D53. Prefetch is
-allowed here and nowhere else: D46's exception. `BCTreeMap::read_many`
-(2026-10-16) runs lanes of its own on this executor and `Prefetcher`
-(`src/tree/latched/batch.rs`, doc 09, D55).
+prefetch are in `src/tree/batch.rs`; the API in `src/unsync/map/batch.rs`
+and `src/unsync/set/mod.rs`; batched `extend` in
+`src/unsync/map/from_entries.rs`; the set operations' batched lookups in
+`src/unsync/set/lookups.rs`. D53. Prefetch is allowed here and nowhere else:
+D46's exception. The shared `BBTreeMap`'s batches, `read_many`,
+`get_many_copied` and `insert_many`, run lanes of their own on this
+executor and `Prefetcher` (`src/tree/latched/batch.rs`, doc 09, D55).
 
 ## Problem
 
@@ -22,13 +23,13 @@ independent keys: a join probing an index, a bulk load in random order,
 ## API and contract
 
 ```rust
-// BBTreeMap<K, V, S, A>
+// unsync::BBTreeMap<K, V, S, A>
 pub fn get_many<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<&V>; N]
 where K: Borrow<Q> + Ord, Q: Ord + ?Sized;
 pub fn insert_many<const N: usize>(&mut self, entries: [(K, V); N]) -> [Option<V>; N]
 where K: Ord;
 
-// BBTreeSet<T, S, A>
+// unsync::BBTreeSet<T, S, A>
 pub fn contains_many<Q, const N: usize>(&self, values: [&Q; N]) -> [bool; N]
 where T: Borrow<Q> + Ord, Q: Ord + ?Sized;
 pub fn insert_many<const N: usize>(&mut self, values: [T; N]) -> [bool; N]
@@ -340,7 +341,7 @@ misprediction there flushes the younger lanes' loads.
 ## Verification
 
 Tests compare batches with individual calls, and inserted trees node by
-node (`tree/batch.rs`, `map/tests/batch.rs`, `set/tests.rs`), including
+node (`tree/batch.rs`, `unsync/map/tests/batch.rs`, `unsync/set/tests.rs`), including
 more than 64 lanes, panicking lanes in the executor, and set operations on
 a set past the cutoff. The differential fuzz targets
 (`fuzz/src/map_differential.rs`, `fuzz/src/set_algebra.rs`) cover

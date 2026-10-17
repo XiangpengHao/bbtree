@@ -5,13 +5,13 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use bbtree::{BBTreeMap, InlineKey, InlineWord, WithInlineKey};
+use bbtree::{InlineKey, InlineWord, WithInlineKey, unsync};
 use bytes::Bytes;
 
 use crate::cell_runner::{CellMeasurement, CellRun};
 use crate::command_line::Named;
 use crate::datasets::DataFile;
-use crate::map_adapters::CountedBCTree;
+use crate::map_adapters::CountedBBTree;
 use crate::operations::PreparedCell;
 use crate::random::{RandomStream, SeededRng};
 use crate::values::BenchValue;
@@ -140,7 +140,7 @@ impl KeyKind {
     }
 
     /// Whether the keys are integers with an `InlineKey` impl, which only
-    /// `bbtree-inline` uses.
+    /// `bbtree-unsync-inline` uses.
     pub(crate) fn is_inline_keyed_integer(self) -> bool {
         matches!(self, Self::U64Random | Self::U64Sequential)
     }
@@ -177,34 +177,35 @@ pub(crate) trait BenchKey: Ord + Hash + Clone + Send + Sync + 'static {
     /// can't skip visiting it.
     fn fingerprint(&self) -> u64;
 
-    /// Measures `prepared` on `bbtree`, a `BBTreeMap` set up as users of the
-    /// key type would set it up: with the default strategy, `Auto`, unless
-    /// the impl says otherwise.
+    /// Measures `prepared` on `bbtree`, a `BBTreeMap`, which threads share,
+    /// set up as users of the key type would set it up: with the default
+    /// strategy, `Auto`, unless the impl says otherwise; on one thread.
     fn measure_on_bbtree<V: BenchValue>(
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
-        run.measure::<BBTreeMap<Self, V>, Self, V>(prepared)
+        run.measure::<CountedBBTree<Self, V>, Self, V>(prepared)
     }
 
-    /// Measures `prepared` on `bctree`, a `BCTreeMap` with the strategy
-    /// `bbtree` uses for the key type, on one thread.
-    fn measure_on_bctree<V: BenchValue>(
+    /// Measures `prepared` on `bbtree-unsync`, an `unsync::BBTreeMap` with
+    /// the strategy `bbtree` uses for the key type.
+    fn measure_on_unsync<V: BenchValue>(
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
-        run.measure::<CountedBCTree<Self, V>, Self, V>(prepared)
+        run.measure::<unsync::BBTreeMap<Self, V>, Self, V>(prepared)
     }
 
-    /// Measures `prepared` on `bbtree-inline`, a `BBTreeMap` whose keys have
-    /// inline keys through their `InlineKey` impl: for the key types of
+    /// Measures `prepared` on `bbtree-unsync-inline`, an
+    /// `unsync::BBTreeMap` whose keys have inline keys through their
+    /// `InlineKey` impl: for the key types of
     /// [`KeyKind::is_inline_keyed_integer`] only.
     fn measure_with_inline_keys<V: BenchValue>(
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
         let _ = (run, prepared);
-        Err("bbtree-inline runs on integer keys only".to_owned())
+        Err("bbtree-unsync-inline runs on integer keys only".to_owned())
     }
 }
 
@@ -217,7 +218,7 @@ impl BenchKey for u64 {
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
-        run.measure::<BBTreeMap<u64, V, WithInlineKey>, u64, V>(prepared)
+        run.measure::<unsync::BBTreeMap<u64, V, WithInlineKey>, u64, V>(prepared)
     }
 }
 
@@ -250,14 +251,14 @@ impl BenchKey for SequencedKey {
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
-        run.measure::<BBTreeMap<Self, V, WithInlineKey>, Self, V>(prepared)
+        run.measure::<CountedBBTree<Self, V, WithInlineKey>, Self, V>(prepared)
     }
 
-    fn measure_on_bctree<V: BenchValue>(
+    fn measure_on_unsync<V: BenchValue>(
         run: &CellRun,
         prepared: impl PreparedCell<Self, V>,
     ) -> Result<CellMeasurement, String> {
-        run.measure::<CountedBCTree<Self, V, WithInlineKey>, Self, V>(prepared)
+        run.measure::<unsync::BBTreeMap<Self, V, WithInlineKey>, Self, V>(prepared)
     }
 }
 

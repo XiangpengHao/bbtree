@@ -430,7 +430,7 @@ impl Statistic {
 }
 
 /// The markdown summary: one row per workload, one column per map, and
-/// bbtree against std's `BTreeMap`.
+/// bbtree's unsync map against std's `BTreeMap`.
 pub(crate) struct Summary<'run> {
     header: &'run RunHeader,
     rows: &'run [SuiteRow],
@@ -561,25 +561,25 @@ impl<'run> Summary<'run> {
     /// The comparison column's title, when both maps it compares are in the
     /// table.
     fn comparison_title(&self) -> Option<&'static str> {
-        let compared = [MapKind::BBTree, MapKind::StdBTree];
+        let compared = [MapKind::Unsync, MapKind::StdBTree];
         if !compared.iter().all(|map| self.maps.contains(map)) {
             return None;
         }
         Some(match self.mode {
-            RunMode::Timing => "bbtree speedup vs std BTreeMap",
-            RunMode::Memory(_) => "bbtree ÷ std BTreeMap",
+            RunMode::Timing => "bbtree-unsync speedup vs std BTreeMap",
+            RunMode::Memory(_) => "bbtree-unsync ÷ std BTreeMap",
         })
     }
 
     fn comparison_text(&self, row: SuiteRow, statistic: Statistic) -> String {
-        let bbtree = self.value(row, MapKind::BBTree, statistic);
+        let unsync = self.value(row, MapKind::Unsync, statistic);
         let std_btree = self.value(row, MapKind::StdBTree, statistic);
-        let (Some(bbtree), Some(std_btree)) = (bbtree, std_btree) else {
+        let (Some(unsync), Some(std_btree)) = (unsync, std_btree) else {
             return "n/a".to_owned();
         };
         let ratio = match self.mode {
-            RunMode::Timing => std_btree / bbtree,
-            RunMode::Memory(_) => bbtree / std_btree,
+            RunMode::Timing => std_btree / unsync,
+            RunMode::Memory(_) => unsync / std_btree,
         };
         format!("{ratio:.2}×")
     }

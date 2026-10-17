@@ -1,9 +1,9 @@
 //! The explorer: look keys up in a bbtree of the reader's choosing and
 //! watch how it finds them: the path from the root, and each node's page,
 //! cache line by cache line, drawn from bbtree's own read-only views of its
-//! nodes (`BBTreeMap::inspect`), as bbtree stores them; or many keys at
-//! once, as `get_many` interleaves their lookups. One screen, its state in
-//! its address (`doc/10-visualization.md`).
+//! nodes (`unsync::BBTreeMap::inspect`), as bbtree stores them; or many
+//! keys at once, as `get_many` interleaves their lookups. One screen, its
+//! state in its address (`doc/10-visualization.md`).
 
 use dioxus::prelude::*;
 use web_time::{SystemTime, UNIX_EPOCH};

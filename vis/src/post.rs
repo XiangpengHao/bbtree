@@ -1,6 +1,6 @@
-//! The post (doc/14-blogpost.md): what bbtree and bctree are, how fast,
-//! on one thread, on many, and in real systems (`performance_cards.rs`),
-//! and how they are made, in figures drawn by the explorer's own panels
+//! The post (doc/14-blogpost.md): what bbtree is, how fast, on one
+//! thread, on many, and in real systems (`performance_cards.rs`), and how
+//! it is made, in figures drawn by the explorer's own panels
 //! (`figure.rs`). The figures build their trees as the reader comes to
 //! them, sharing the trees of one workload.
 
@@ -37,9 +37,9 @@ pub(crate) fn Post() -> Element {
                 }
                 p {
                     strong { "bbtree" }
-                    " is an ordered map for Rust, and "
-                    strong { "bctree" }
-                    " is the same tree for many threads. bbtree takes "
+                    " is an ordered map for Rust that many threads share. For one thread, "
+                    code { "bbtree::unsync::BBTreeMap" }
+                    " is the same tree, which takes "
                     code { "std::collections::BTreeMap" }
                     "'s place without a change to the code around it: the same API, the same behavior. Both have no dependencies, and need no "
                     code { "std" }
@@ -192,7 +192,7 @@ fn BatchFigure(trees: TreeStore, hint: PointerHint) -> Element {
 
 /// The post's result in one sentence, from the measurements: bbtree's gets
 /// against std's on one thread, one key a call and batched, and the
-/// systems end to end with bctree.
+/// systems end to end with bbtree.
 #[component]
 fn HeadlineResult(measurements: Rc<Measurements>) -> Element {
     let single = measurements.single_thread_speedups(
@@ -217,7 +217,7 @@ fn HeadlineResult(measurements: Rc<Measurements>) -> Element {
         p {
             "On one thread, bbtree's gets are "
             strong { "{single} faster" }
-            " than std's BTreeMap's across the four kinds of keys, {batched} batched. With bctree in place of their skip list, {named} run their own benchmarks "
+            " than std's BTreeMap's across the four kinds of keys, {batched} batched. With bbtree in place of their skip list, {named} run their own benchmarks "
             strong { "{end_to_end} faster" }
             "."
         }

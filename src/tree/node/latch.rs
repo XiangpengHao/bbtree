@@ -36,7 +36,7 @@ use crate::inline_key::sealed::{InlineKeySource, Sealed};
 
 /// The strategy of a latched tree's nodes: `S`'s inline keys, and a latch
 /// word in every node's header (`page.rs`, `LatchedNodeHeader`). Nothing
-/// public names it: a `BCTreeMap` with strategy `S` keeps its tree with
+/// public names it: a `BBTreeMap` with strategy `S` keeps its tree with
 /// this one.
 pub(crate) struct Latched<S>(PhantomData<fn() -> S>);
 
@@ -77,6 +77,15 @@ pub(in crate::tree) struct NodeLatch(AtomicU64);
 /// that nothing changed it in between.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::tree) struct Version(u64);
+
+impl Version {
+    /// The version a node held exclusively since this one is at once let go
+    /// ([`NodeLatch::unlock_exclusive`]).
+    #[inline(always)]
+    pub(in crate::tree) fn next(self) -> Self {
+        Self(self.0 + NodeLatch::VERSION_UNIT)
+    }
+}
 
 impl NodeLatch {
     const EXCLUSIVE: u64 = 1;
@@ -145,8 +154,7 @@ impl NodeLatch {
     /// to the next version, which tells optimistic readers it changed.
     #[inline]
     pub(in crate::tree) fn unlock_exclusive(&self, version: Version) {
-        self.0
-            .store(version.0 + Self::VERSION_UNIT, Ordering::Release);
+        self.0.store(version.next().0, Ordering::Release);
     }
 
     /// The node's version, if no thread holds it exclusively now; `None`

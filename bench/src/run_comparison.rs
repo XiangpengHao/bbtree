@@ -1,6 +1,6 @@
-//! `compare`: a markdown report of how bbtree changed between two suite runs,
-//! such as a pull request's base and head, and how it stands against std's
-//! `BTreeMap`, from the runs' CSVs. Each run may come from its own build of
+//! `compare`: a markdown report of how bbtree's unsync map changed between
+//! two suite runs, such as a pull request's base and head, and how it stands
+//! against std's `BTreeMap`, from the runs' CSVs. Each run may come from its own build of
 //! the suite: a column that one run lacks shows as missing.
 
 use std::fmt::Write as _;
@@ -166,9 +166,9 @@ impl RecordedRun {
     }
 }
 
-/// The report: bbtree's change from the base run to the head run, bbtree
-/// against std's `BTreeMap` in the head run, and every number. Without a
-/// base run, the latter two.
+/// The report: bbtree's unsync map's change from the base run to the head
+/// run, the map against std's `BTreeMap` in the head run, and every number.
+/// Without a base run, the latter two.
 pub(crate) struct RunComparison {
     head: RecordedRun,
     base: Option<RecordedRun>,
@@ -185,16 +185,16 @@ impl RunComparison {
     pub(crate) fn markdown(&self) -> String {
         let mut text = String::new();
         if let Some(base) = &self.base {
-            text.push_str("#### bbtree, change from base to head\n\n");
+            text.push_str("#### bbtree-unsync, change from base to head\n\n");
             text.push_str(&self.metric_table(|benchmark, metric| {
-                let value = |run: &RecordedRun| run.value(benchmark, MapKind::BBTree, metric);
+                let value = |run: &RecordedRun| run.value(benchmark, MapKind::Unsync, metric);
                 value(&self.head).change_from(value(base))
             }));
         }
-        text.push_str("#### bbtree ÷ std BTreeMap, at head (lower is better)\n\n");
+        text.push_str("#### bbtree-unsync ÷ std BTreeMap, at head (lower is better)\n\n");
         text.push_str(&self.metric_table(|benchmark, metric| {
             let value = |map| self.head.value(benchmark, map, metric);
-            value(MapKind::BBTree).ratio_to(value(MapKind::StdBTree))
+            value(MapKind::Unsync).ratio_to(value(MapKind::StdBTree))
         }));
         text.push_str("<details><summary>Every number</summary>\n\n");
         for metric in Metric::all() {
@@ -239,7 +239,7 @@ impl RunComparison {
             .map(|base| ("base", base))
             .chain([("head", &self.head)])
             .collect();
-        let maps = [MapKind::BBTree, MapKind::StdBTree];
+        let maps = [MapKind::Unsync, MapKind::StdBTree];
         let titles: Vec<String> = (maps.iter())
             .flat_map(|map| runs.iter().map(|(run, _)| format!("{} {run}", map.name())))
             .collect();
@@ -292,13 +292,13 @@ mod tests {
     #[test]
     fn a_value_is_the_median_of_the_measured_repetitions() {
         let rows = [
-            row("bbtree", 0, "ok", "12.0", "100"),
-            row("bbtree", 1, "ok", "10.0", "100"),
-            row("bbtree", 2, "ok", "11.0", "100"),
+            row("bbtree-unsync", 0, "ok", "12.0", "100"),
+            row("bbtree-unsync", 1, "ok", "10.0", "100"),
+            row("bbtree-unsync", 2, "ok", "11.0", "100"),
         ];
         let run = run(&rows.each_ref().map(String::as_str));
         assert_eq!(
-            run.value("u64_u64_get_hit_1k", MapKind::BBTree, Metric::Time),
+            run.value("u64_u64_get_hit_1k", MapKind::Unsync, Metric::Time),
             RecordedValue::Measured(11.0)
         );
         assert_eq!(
@@ -310,32 +310,33 @@ mod tests {
     #[test]
     fn a_failed_repetition_fails_the_cell() {
         let rows = [
-            row("bbtree", 0, "ok", "12.0", "100"),
+            row("bbtree-unsync", 0, "ok", "12.0", "100"),
             format!(
-                "u64_u64_get_hit_1k,bbtree,u64,u64,1k,get_hit,1,failed{}",
+                "u64_u64_get_hit_1k,bbtree-unsync,u64,u64,1k,get_hit,1,failed{}",
                 ",".repeat(14)
             ),
         ];
         let run = run(&rows.each_ref().map(String::as_str));
         assert_eq!(
-            run.value("u64_u64_get_hit_1k", MapKind::BBTree, Metric::Time),
+            run.value("u64_u64_get_hit_1k", MapKind::Unsync, Metric::Time),
             RecordedValue::Failed
         );
     }
 
     #[test]
     fn a_column_the_run_lacks_is_absent() {
-        let run =
-            RecordedRun::parse("benchmark,map,status,ns_per_op\nu64_u64_get_hit_1k,bbtree,ok,12.5")
-                .expect("a valid run");
+        let run = RecordedRun::parse(
+            "benchmark,map,status,ns_per_op\nu64_u64_get_hit_1k,bbtree-unsync,ok,12.5",
+        )
+        .expect("a valid run");
         assert_eq!(
-            run.value("u64_u64_get_hit_1k", MapKind::BBTree, Metric::Time),
+            run.value("u64_u64_get_hit_1k", MapKind::Unsync, Metric::Time),
             RecordedValue::Measured(12.5)
         );
         assert_eq!(
             run.value(
                 "u64_u64_get_hit_1k",
-                MapKind::BBTree,
+                MapKind::Unsync,
                 Metric::Count(PerfEvent::Branches)
             ),
             RecordedValue::Absent
@@ -346,11 +347,11 @@ mod tests {
     fn benchmarks_at_10m_come_first_and_the_rest_keep_the_run_order() {
         let run = RecordedRun::parse(
             "benchmark,map,size,status\n\
-             u64_u64_get_hit_1k,bbtree,1k,ok\n\
-             u64_u64_get_hit_10M,bbtree,10M,ok\n\
-             u64_u64_get_hit_1M,bbtree,1M,ok\n\
+             u64_u64_get_hit_1k,bbtree-unsync,1k,ok\n\
+             u64_u64_get_hit_10M,bbtree-unsync,10M,ok\n\
+             u64_u64_get_hit_1M,bbtree-unsync,1M,ok\n\
              u64_u64_get_hit_10M,std-btree,10M,ok\n\
-             u64_u64_get_miss_10M,bbtree,10M,ok",
+             u64_u64_get_miss_10M,bbtree-unsync,10M,ok",
         )
         .expect("a valid run");
         assert_eq!(
@@ -378,13 +379,13 @@ mod tests {
     }
 
     #[test]
-    fn the_report_compares_bbtree_with_its_base_and_with_std() {
+    fn the_report_compares_the_unsync_map_with_its_base_and_with_std() {
         let base = [
-            row("bbtree", 0, "ok", "10.0", "200"),
+            row("bbtree-unsync", 0, "ok", "10.0", "200"),
             row("std-btree", 0, "ok", "20.0", "400"),
         ];
         let head = [
-            row("bbtree", 0, "ok", "9.0", "200"),
+            row("bbtree-unsync", 0, "ok", "9.0", "200"),
             row("std-btree", 0, "ok", "20.0", "400"),
         ];
         let comparison = RunComparison {
@@ -398,11 +399,11 @@ mod tests {
             lines[at + 4]
         };
         assert_eq!(
-            row_after("#### bbtree, change from base to head"),
+            row_after("#### bbtree-unsync, change from base to head"),
             "| u64_u64_get_hit_1k | -10.0% | +0.0% | +0.0% | +0.0% | +0.0% | +0.0% | 0 |"
         );
         assert_eq!(
-            row_after("#### bbtree ÷ std BTreeMap, at head (lower is better)"),
+            row_after("#### bbtree-unsync ÷ std BTreeMap, at head (lower is better)"),
             "| u64_u64_get_hit_1k | 0.45× | 1.00× | 0.50× | 1.00× | 1.00× | 1.00× | – |"
         );
         assert_eq!(

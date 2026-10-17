@@ -1,6 +1,7 @@
-//! Differential fuzzing of maps (D5): operations from the input run on a
-//! `BBTreeMap` and on std's `BTreeMap`, which must answer every one alike,
-//! and our tree must stay well formed after each (`check_invariants`).
+//! Differential fuzzing of maps (D5): operations from the input run on an
+//! `unsync::BBTreeMap` and on std's `BTreeMap`, which must answer every one
+//! alike, and our tree must stay well formed after each
+//! (`check_invariants`).
 //!
 //! Every map operation reaches the same node code: slots, splits, merges,
 //! moves between siblings, cuts, joins, bulk builds and walks. What sets key
@@ -15,8 +16,9 @@ use std::collections::{BTreeMap, btree_map};
 use std::fmt::Debug;
 use std::ops::Bound;
 
-use bbtree::bbtree_map::Entry;
-use bbtree::{Auto, BBTreeMap, InlineKey, InlineKeyStrategy, WithInlineKey};
+use bbtree::unsync::BBTreeMap;
+use bbtree::unsync::bbtree_map::Entry;
+use bbtree::{Auto, InlineKey, InlineKeyStrategy, WithInlineKey};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 
 use crate::key_recipe::{BorrowedLookup, FuzzKey, KeyRecipe, Stems, UserKey, WideKey};

@@ -93,8 +93,8 @@ usage: bbtree-bench <suite>... [filters] [options]
 The memory binary reports the memory held by the maps that build operations
 make, instead of time.
 
-compare prints a markdown report of a timing run's CSV: bbtree against std's
-BTreeMap, time and perf counts per operation, and with --base, bbtree's change
+compare prints a markdown report of a timing run's CSV: bbtree-unsync against
+std's BTreeMap, time and perf counts per operation, and with --base, its change
 from that run. CI posts it on pull requests (.github/workflows/perf.yml).
 
 suites: {suites}, or all

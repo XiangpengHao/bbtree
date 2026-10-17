@@ -143,7 +143,7 @@ impl<K: Ord + Clone> KeyDump<K> {
         match map {
             MeasuredMap::BBTree => {
                 let map: BBTreeMap<K, u64> = self.present.into_iter().zip(values).collect();
-                Self::time_gets(&queries, seconds, |key| map.get(key).copied())
+                Self::time_gets(&queries, seconds, |key| map.get_copied(key))
             }
             MeasuredMap::StdBTree => {
                 let map: BTreeMap<K, u64> = self.present.into_iter().zip(values).collect();

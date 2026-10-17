@@ -11,7 +11,7 @@
 //! - **Descent** (`descent.rs`): optimistic through the internal nodes, each
 //!   read in place while writers may change it and checked by its version
 //!   (optimistic lock coupling, `node/optimistic.rs`); the leaf latched,
-//!   shared or exclusive.
+//!   shared or exclusive, or for a lookup read in place too (`lookup.rs`).
 //! - **Operations** run the caller's closure on an entry while its leaf is
 //!   latched, and let go before returning: no reference or latch outlives
 //!   the call.
@@ -46,6 +46,8 @@ mod batch;
 mod descent;
 mod held;
 mod insert;
+mod lookup;
+mod owner;
 mod pages;
 mod remove;
 mod scan;
@@ -60,7 +62,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use self::descent::{Exclusive, Shared};
+use self::descent::Exclusive;
 use self::pages::{FreeLists, NodePages};
 use super::node::Node;
 use super::node::inline_keys::SearchKey;
@@ -135,7 +137,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     pub(crate) fn new() -> Self {
         assert!(
             NodePtr::<K, V, Latched<S>>::has_inline_keys(),
-            "a BCTreeMap's keys need inline keys"
+            "a BBTreeMap's keys need inline keys"
         );
         Self {
             root: AtomicPtr::new(ptr::null_mut()),
@@ -226,30 +228,6 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             self.root.store(tagged.as_ptr(), Ordering::Release);
         }
         result
-    }
-
-    /// Runs `f` on the entry whose key equals `key`, while its leaf is
-    /// latched shared, and returns what `f` returned; `None` without one.
-    #[inline]
-    pub(crate) fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.root_page()?;
-        let key = SearchKey::new(key);
-        let (held, at_separator) = self.descend::<Q, Shared, ()>(&key, &mut ()).ok()?;
-        let leaf = held.leaf();
-        let (key, value) = if at_separator {
-            (leaf.head_key(), leaf.head_value())
-        } else {
-            let index = leaf.find(&key, ())?;
-            // SAFETY: a search returns the index of a key of the leaf.
-            unsafe { leaf.key_value_unchecked(index) }
-        };
-        let result = f(key, value);
-        drop(held);
-        Some(result)
     }
 
     /// Runs `f` on the entry whose key equals `key`, its value exclusive,

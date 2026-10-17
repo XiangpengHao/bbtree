@@ -1,12 +1,12 @@
 //! The post's second card: the maps threads share, as threads are added,
 //! at 10M entries: throughput, all threads together, a line a map. Gets
-//! (half of them misses; bctree's batched ones a line of their own),
+//! (half of them misses; bbtree's batched ones a line of their own),
 //! inserts, updates, and mixes of 10% updates with 90% lookups or 90%
 //! scans; a kind of key at a time.
 //!
 //! The lines are drawn for reading, not decoration: thread counts to
 //! scale from zero, so that a map whose throughput grows with its threads
-//! draws a straight line from the corner; bctree's lines highlighted, the
+//! draws a straight line from the corner; bbtree's lines highlighted, the
 //! others dark; each line named at its end, so there is no legend to
 //! match colors against; and a crosshair that reads every line at the
 //! thread count under the pointer.
@@ -47,7 +47,7 @@ impl ConcurrentLine {
         }
     }
 
-    /// The lines of `operation` with `keys`: a map each, and bctree's
+    /// The lines of `operation` with `keys`: a map each, and bbtree's
     /// batched one where it has a batch API for it.
     fn of(
         measurements: &Measurements,
@@ -65,9 +65,9 @@ impl ConcurrentLine {
             lines.insert(
                 1,
                 Self {
-                    map: MeasuredMap::BCTree,
+                    map: MeasuredMap::BBTree,
                     batched: true,
-                    points: measurements.concurrent_mops(MeasuredMap::BCTree, keys, batch),
+                    points: measurements.concurrent_mops(MeasuredMap::BBTree, keys, batch),
                 },
             );
         }
@@ -126,7 +126,7 @@ pub(crate) fn ConcurrentChart(measurements: Rc<Measurements>, spotlight: Spotlig
         p { class: "chart-note",
             "All threads together, 10M entries; higher is better. Up to 12 threads, one a core; past 12, the cores' second hardware threads. "
             match operation() {
-                MeasuredOperation::Get => "Get: half hits, half misses; batched: read_many, 64 keys a call. ",
+                MeasuredOperation::Get => "Get: half hits, half misses; batched: get_many_copied, 64 keys a call. ",
                 MeasuredOperation::Mixed => "90% lookups, 10% updates. ",
                 MeasuredOperation::ScanMixed => "90% scans of 100 entries, 10% updates. ",
                 _ => "",
@@ -301,7 +301,7 @@ fn ThroughputLines(
                         y2: height - BOTTOM,
                     }
                 }
-                // The others first, so bctree's lines lie on top.
+                // The others first, so bbtree's lines lie on top.
                 for line in lines.iter().filter(|line| !line.map.is_ours()).chain(lines.iter().filter(|line| line.map.is_ours())) {
                     {
                         let smooth = SmoothLine::through(

@@ -112,7 +112,7 @@ jobs:
       - name: Quick run without datasets
         env:
           BBTREE_BENCH_DATA: ${{ runner.temp }}/no-bench-data
-        run: cargo run --release --bin bbtree-bench -- realkeys tiny --quick --map bbtree
+        run: cargo run --release --bin bbtree-bench -- realkeys tiny --quick --map bbtree-unsync
 
   fuzz:
     name: fuzz harness (fmt + clippy + test)
