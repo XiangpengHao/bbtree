@@ -627,7 +627,7 @@ impl<B: CopyableBorrow, K, V, S> NodeStack<B, K, V, S> {
 /// An exclusive node stack, from the root down: what an entry keeps, and what
 /// inserts and removals go back up. It changes the nodes below the root
 /// through the bottom node, and the root only through
-/// [`Self::ascend_raising`] and [`Self::detach_lowering_an_empty_root`].
+/// [`Self::ascend_raising`] and [`Self::detach_lowering_an_emptied_root`].
 ///
 /// It is made detached, and starts where it is: every way of starting it
 /// first attaches it to the root.
@@ -647,6 +647,27 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
             tree,
             stack: NodeStack::detached(),
         }
+    }
+
+    /// A node stack down `tree` along `levels`, from the root down: each
+    /// node with the index taken at it, the edge to the next node above the
+    /// bottom, and the position in the bottom node. For a latched tree's
+    /// operation (`tree/latched`), which descends on its own, and then runs
+    /// the tree's operations from here.
+    ///
+    /// The caller holds every node the operation changes, and every node it
+    /// reads a separator of, from some depth down; the levels above may
+    /// have changed since, and the operation goes up to none of them.
+    pub(in crate::tree) fn along(
+        tree: &'a mut Tree<K, V, S>,
+        levels: impl IntoIterator<Item = (Node<K, V, S>, usize)>,
+    ) -> Self {
+        let mut stack = Self::new(tree);
+        for (depth, (node, index)) in levels.into_iter().enumerate() {
+            stack.stack.write_level(depth, node.node_ptr(), index);
+            stack.stack.levels = depth as u8 + 1;
+        }
+        stack
     }
 
     /// The tree the node stack goes down, shared.
@@ -860,12 +881,17 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     }
 
     /// Detaches the node stack, which a removal is done with, and lowers the
-    /// tree, if merges left the root internal and without keys, moving the
-    /// root's only child up into the root ([`Tree::lower`]), and giving the
-    /// child's page back to `alloc`.
-    pub(in crate::tree) fn detach_lowering_an_empty_root(&mut self, alloc: &impl Allocator) {
+    /// tree if `fixed_root`, the removal's fixing changed the root, and
+    /// merges left it internal and without keys: moves the root's only child
+    /// up into the root ([`Tree::lower`]), and gives the child's page back to
+    /// `alloc`. Reads the root only if `fixed_root`.
+    pub(in crate::tree) fn detach_lowering_an_emptied_root(
+        &mut self,
+        fixed_root: bool,
+        alloc: &impl Allocator,
+    ) {
         self.stack = NodeStack::detached();
-        if matches!(self.tree.root(), Node::Internal(root) if root.len() == 0) {
+        if fixed_root && matches!(self.tree.root(), Node::Internal(root) if root.len() == 0) {
             self.tree.lower().deallocate(alloc);
         }
     }

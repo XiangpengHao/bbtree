@@ -24,7 +24,7 @@ that misbehaves. Seven targets, in `fuzz/fuzz_targets/`, over the harnesses in
 | `map_integers` | `u64`: 2-byte windows past shared bytes (D31); the most common keys with inline keys | 12 |
 | `map_user_inline_keys` | a user's `InlineKey` under `WithInlineKey`, at the default width: prefixes kept without calling it while keys move, borrowed lookups by `Ord` alone (D19) | 12 |
 | `map_plain_keys` | no inline keys: `u32`, branchless (D19); 64-byte keys whose trees reach three levels from a few hundred entries | 10 |
-| `set_algebra` | the operations on two sets: strategy choice, the merge of two walks (`set/merge.rs`), std's prints | 10 |
+| `set_algebra` | the operations on two sets: strategy choice, the merge of two walks (`unsync/set/merge.rs`), std's prints | 10 |
 | `map_byte_arrays` | `[u8; 16]`: separator keys in heads (D49), whole-key equality (D38) | 6 |
 
 The four map targets with inline keys each run a wide map (`u64` values) and

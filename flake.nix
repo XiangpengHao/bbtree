@@ -55,7 +55,7 @@
             # AVX-512, which valgrind can't run.
             pkgs.valgrind
             # Backtraces of every thread of a hung concurrent test
-            # (`BCTreeMap`): `gdb -p <pid> -batch -ex "thread apply all bt"`.
+            # (`BBTreeMap`): `gdb -p <pid> -batch -ex "thread apply all bt"`.
             pkgs.gdb
             # The bench's `fetch` downloads its datasets with these, and
             # derives those it may not redistribute with

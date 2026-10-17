@@ -1,7 +1,7 @@
 //! Differential fuzzing of the operations on two sets (D5): union,
 //! intersection, difference and symmetric difference, as iterators and as
 //! operators, and the subset and disjointness tests, on a pair of
-//! `BBTreeSet`s and a pair of std's `BTreeSet`s, fed the same changes.
+//! `unsync::BBTreeSet`s and a pair of std's `BTreeSet`s, fed the same changes.
 //!
 //! A set is a map of zero-sized values, whose own methods hand their work
 //! to the map's, which the map targets fuzz. What is the set's own is the
@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 
-use bbtree::BBTreeSet;
+use bbtree::unsync::BBTreeSet;
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 
 use crate::key_recipe::{FuzzKey, KeyRecipe, Stems};

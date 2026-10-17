@@ -2,7 +2,7 @@
 //! is, its parent and children, and its key count and prefix, so the panels
 //! can name nodes, walk to neighbors and draw gauges without a page read.
 //! It caches what bbtree's node views say about each node
-//! (`BBTreeMap::inspect`), and computes nothing that bbtree computes.
+//! (`unsync::BBTreeMap::inspect`), and computes nothing that bbtree computes.
 
 use std::ops::Range;
 
@@ -260,7 +260,7 @@ impl Level {
 
 #[cfg(test)]
 mod tests {
-    use bbtree::BBTreeMap;
+    use bbtree::unsync::BBTreeMap;
 
     use super::*;
 

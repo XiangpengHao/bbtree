@@ -72,9 +72,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         rightmost_leaf: None,
     };
 
-    /// The tree on `root_page`, which it owns from now on, with every node
-    /// under it: a latched tree's, once no other thread reaches it, to take
-    /// apart (`tree/latched`).
+    /// The tree on `root_page`, with every node under it: a latched tree's
+    /// (`tree/latched`), to take apart once no other thread reaches it, or
+    /// for one of the tree's operations on the nodes a latched operation
+    /// holds, as if it owned them.
     pub(in crate::tree) fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
         Self {
             root_page: Some(root_page),

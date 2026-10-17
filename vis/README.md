@@ -4,23 +4,35 @@ Look keys up in a bbtree and see how it finds them: the path from the root,
 each node's page cache line by cache line, and what the search compared at
 every node. Or look a batch of keys up at once and watch `get_many`
 search them together on one thread: each key prefetches the line it reads
-next, and the others search while it comes. Everything is read from
-bbtree's own read-only views
-(`BBTreeMap::inspect`, `TreeView::trace`, the `inspect` feature), never
-recomputed. Design and decisions are in `doc/10-visualization.md`.
+next, and the others search while it comes. The trees are
+`bbtree::unsync::BBTreeMap`s, which keep the same nodes as the
+`bbtree::BBTreeMap` that threads share, without its latches. Everything is
+read from bbtree's own read-only views (`unsync::BBTreeMap::inspect`,
+`TreeView::trace`, the `inspect` feature), never recomputed. Design and decisions are in `doc/10-visualization.md`.
+
+One build, two pages, with tabs between them: the explorer at `/`, and the
+post at `/post/`, whose figures are the explorer's own panels.
 
 ```bash
 nix develop            # the repository's dev shell, or direnv
 cd vis
-dx serve               # http://127.0.0.1:8080
+dx serve               # http://127.0.0.1:8080, and the post at /post/
 dx build --release --debug-symbols false   # into target/dx/bbtree-vis/release/web/public
+# A static host serves the post from its own copy of the page:
+cd target/dx/bbtree-vis/release/web/public && mkdir -p post && cp index.html post/
 ```
 
 The release build needs `--debug-symbols false`: the nixpkgs `wasm-opt` crashes
 on the debug info `dx` keeps by default. Fonts come from Google Fonts; offline,
 the page falls back to system fonts.
 
-## Using it
+The page is styled from its first paint, before the wasm loads: `dx` puts
+the stylesheets in `index.html`'s head (`with_static_head`), the fonts are
+linked there, and its body holds a loading screen in the app's own classes,
+which `main.css` hides once the app draws. Keep that screen's bar in step
+with the header (`site.rs`).
+
+## The explorer
 
 One screen, no scrolling on a laptop: a slim toolbar, the lookup's path on
 the left, the inspected node on the right.
@@ -65,20 +77,48 @@ the left, the inspected node on the right.
   pauses, `,` and `.` step a search; click a key's number to look it up
   alone.
 
+## The post
+
+A column of prose with figures wider than it. A figure is an explorer link
+drawn in place: it names a tree and a lookup (`ExplorerLink`), draws the
+explorer's panels of its choosing, and links to the explorer, which opens
+on the same lookup. Figures of one workload share one tree, built as the
+reader nears the first of them; a figure starts its lookup once a third of
+it is in view, so the way down plays where it is read. Each figure owns its
+tracer, batcher and spotlight, so clicking in one changes it alone. The
+explorer's keyboard shortcuts and its address are the explorer's only:
+on the post, Space scrolls.
+
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
 differ (no length tags fit). Leaves of fixed-size keys and values match.
+
+The post's charts compile in the measurements under `data/<machine>/`:
+`bench/tools/blog-runs.sh` measures them on a machine, and
+`bench/tools/blog-collect.sh` writes them there (doc 14).
 
 ## Code
 
 By feature, in `src/`:
 
+- `site.rs`: the two pages, which one the address names, the header with
+  the tabs between them, and the credit;
+- `explorer.rs`: the explorer, its panels and controls;
+- `post.rs`, `figure.rs`: the post, and a figure: its frame, the panels'
+  state it owns, and the trees the figures share;
+- `performance_cards.rs`, `single_thread_chart.rs`, `concurrent_chart.rs`,
+  `end_to_end_chart.rs`, `memory_chart.rs`, `architectures_chart.rs`,
+  `baseline_bars.rs`, `chart_scale.rs`, `measurements.rs`: the post's cards
+  and charts, their scales, and the measurements they draw, of bbtree, the
+  map threads share, against other maps;
+- `element_ids.rs`: element ids unique to the component that draws them,
+  for a panel drawn more than once on a page;
 - `workload.rs`: what to build, its toolbar button, and building it in
   chunks;
 - `inspected_tree.rs`: a built map behind one face for every key type;
 - `trace.rs`: a lookup as plain data, and the search that starts one;
-- `shared_link.rs`: the page's state in its address and the browser's
-  history, read at start and kept in step;
+- `shared_link.rs`: the explorer's state in its address and the browser's
+  history, read at start and kept in step; the link a figure starts from;
 - `popover.rs`: the panels the toolbar's buttons open;
 - `scenarios.rs`: lookups worth seeing, on the tree that is built;
 - `path_summary.rs`: the controls and the key above the path, its legend;
@@ -88,8 +128,8 @@ By feature, in `src/`:
 - `fences.rs`: a node's fences and keys as bytes, and its prefix;
 - `memory_map.rs`: a page drawn as cache lines, with what a lookup read;
 - `slot_table.rs`: a node's slots, one row each;
-- `spotlight.rs`: what the reader points at, shared by the panels, and the
-  hint;
+- `spotlight.rs`: what the reader points at, shared by one view's panels,
+  and the page's hint;
 - `concepts.rs`: bbtree's ideas in plain words, and the terms that name
   them;
 - `shortcuts.rs`, `icons.rs`: keys for the common moves, and the icons;

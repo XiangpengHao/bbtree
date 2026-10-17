@@ -1,6 +1,6 @@
 mod string_keys;
 
-use bbtree::BBTreeMap;
+use bbtree::unsync::BBTreeMap;
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 use string_keys::StringKeys;
 
@@ -102,7 +102,7 @@ impl<K: Copy + Ord> Workload<K> {
 
     fn run(&self, key_kind: &str, backend: &str) {
         match backend {
-            "bbtree" => self.measure::<BBTreeMap<K, u64>>(key_kind, backend),
+            "bbtree-unsync" => self.measure::<BBTreeMap<K, u64>>(key_kind, backend),
             "std-btree" => self.measure::<BTreeMap<K, u64>>(key_kind, backend),
             _ => panic!("unknown backend: {backend}"),
         }
@@ -196,7 +196,7 @@ fn main() {
     let key_kind = args
         .next()
         .expect("key: hash32, u64, u128, u128-dense, borrowed-json or borrowed-path");
-    let backend = args.next().expect("backend: bbtree or std-btree");
+    let backend = args.next().expect("backend: bbtree-unsync or std-btree");
     let operation = args
         .next()
         .expect("operation: get_hit, get_miss, random_insert, iterate_next");

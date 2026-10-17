@@ -13,7 +13,7 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 
 use crate::batch_run::{BatchKeys, BatchRun};
-use crate::batch_view::{Batcher, Playback};
+use crate::batch_view::Batcher;
 use crate::concepts::{Concept, Term};
 use crate::icons::{Icon, IconGlyph};
 use crate::inspected_tree::LoadedTree;
@@ -131,7 +131,7 @@ pub(crate) fn KeyRows(
                         "aria-hidden": "true",
                         onclick: move |evt| {
                             let x = evt.client_coordinates().x - page_left;
-                            Playback::seek((x - layout.left) / layout.scale);
+                            batcher.seek((x - layout.left) / layout.scale);
                         },
                         for lane in 0..run.lanes().len() {
                             line {

@@ -269,8 +269,22 @@ impl<K> PrefixedKey<K> {
         }
     }
 
+    /// `key`, which a latched tree's descent found shares what every key of
+    /// the tree shares, at a version of the root it checked, into the leaf
+    /// it holds, where the key belongs (`tree/latched`): the leaf's prefix,
+    /// which only a thread holding it changes, is what its fences share, or
+    /// the shared prefix on a border, and `key` lies between them.
+    pub(in crate::tree) fn checked_by_descent(key: K) -> Self {
+        Self(key)
+    }
+
     pub(in crate::tree) fn key(&self) -> &K {
         &self.0
+    }
+
+    /// The key itself.
+    pub(in crate::tree) fn into_key(self) -> K {
+        self.0
     }
 
     /// The key with its window at `prefix_len`, the prefix length of the

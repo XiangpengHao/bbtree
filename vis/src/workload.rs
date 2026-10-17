@@ -1,7 +1,7 @@
 //! What the visualizer builds: a key type, how many entries, in what order,
 //! and the build itself, in chunks between which the page stays responsive.
 
-use bbtree::BBTreeMap;
+use bbtree::unsync::BBTreeMap;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 
@@ -204,8 +204,11 @@ impl Workload {
     /// The entry counts on offer.
     pub(crate) const COUNTS: [usize; 4] = [10_000, 100_000, 1_000_000, 10_000_000];
 
-    /// Inserts between two yields to the browser.
-    const CHUNK: usize = 50_000;
+    /// How long a build inserts before it yields to the browser, in
+    /// milliseconds: short enough that a slow phone's page stays
+    /// responsive (no task past 50 ms), long enough that the yields cost
+    /// little.
+    const SLICE_MS: f64 = 12.0;
 
     pub(crate) fn new(kind: KeyKind, count: usize, order: InsertOrder) -> Self {
         Self {
@@ -272,9 +275,13 @@ impl Workload {
         let mut done = 0;
         loop {
             let before = done;
-            for index in indices.by_ref().take(Self::CHUNK) {
+            let started = js_sys::Date::now();
+            for index in indices.by_ref() {
                 map.insert(key_at(index), index);
                 done += 1;
+                if done % 1024 == 0 && js_sys::Date::now() - started >= Self::SLICE_MS {
+                    break;
+                }
             }
             if done == before {
                 return map;
@@ -375,8 +382,9 @@ mod tests {
     }
 }
 
-/// What builds the tree: the workload shown, the build under way, and the
-/// tree it built. Owned by the app, handed to what starts builds.
+/// What builds the explorer's tree: the workload shown, the build under
+/// way, and the tree it built. Owned by the explorer, handed to what starts
+/// builds.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Builder {
     tree: Signal<Option<LoadedTree>>,
@@ -386,17 +394,13 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
-    pub(crate) fn new(
-        tree: Signal<Option<LoadedTree>>,
-        workload: Signal<Workload>,
-        progress: Signal<Option<f64>>,
-        took: Signal<Option<f64>>,
-    ) -> Self {
+    /// A builder that has built nothing yet: a hook, for the explorer.
+    pub(crate) fn use_new() -> Self {
         Self {
-            tree,
-            workload,
-            progress,
-            took,
+            tree: use_signal(|| None),
+            workload: use_signal(Workload::first),
+            progress: use_signal(|| None),
+            took: use_signal(|| None),
         }
     }
 
@@ -411,6 +415,12 @@ impl Builder {
 
     /// The built tree, if one is shown.
     pub(crate) fn tree(&self) -> Option<LoadedTree> {
+        self.tree.read().clone()
+    }
+
+    /// The built tree, if one is shown, read without following it: for
+    /// event handlers.
+    pub(crate) fn peek_tree(&self) -> Option<LoadedTree> {
         self.tree.peek().clone()
     }
 

@@ -246,8 +246,8 @@ impl CellRun {
     ) -> Result<CellMeasurement, String> {
         match self.request.cell().map() {
             MapKind::BBTree => K::measure_on_bbtree(self, prepared),
-            MapKind::BBTreeInline => K::measure_with_inline_keys(self, prepared),
-            MapKind::BCTree => K::measure_on_bctree(self, prepared),
+            MapKind::Unsync => K::measure_on_unsync(self, prepared),
+            MapKind::UnsyncInline => K::measure_with_inline_keys(self, prepared),
             MapKind::StdBTree => self.measure::<BTreeMap<K, V>, K, V>(prepared),
             MapKind::Hashbrown => self.measure::<hashbrown::HashMap<K, V>, K, V>(prepared),
             MapKind::StdHash => self.measure::<HashMap<K, V>, K, V>(prepared),
@@ -265,7 +265,7 @@ impl CellRun {
     {
         let operation = self.request.cell().workload().operation();
         // `MapKind` reads its maps' lists at `u64 → u64`; a key type can pick
-        // another adapter, as memtable keys do on `bbtree`.
+        // another adapter, as memtable keys do on both bbtree maps.
         if M::UNSUPPORTED.contains(&operation) {
             return Err(format!(
                 "{} lacks {} on these keys",

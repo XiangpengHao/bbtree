@@ -11,12 +11,11 @@
 //!   agrees with a model: unchanged when `Ord` panicked, as the map calls it
 //!   only while it searches, never while keys move (D26); taken as it is
 //!   after a panic in a bulk change or a drop, which may leave it with fewer
-//!   entries, but well formed. An `InlineKey` that panics may stop an
-//!   operation once its change is done, before the nodes it changed are fit
-//!   to their fences (`node/prefix.rs`): the entry is then in or out, and
-//!   those nodes keep prefixes shorter than their fences share, which
-//!   searches allow but `check_invariants` doesn't, so from then on the run
-//!   checks prefix lengths (`check_prefix_lens`) and answers only;
+//!   entries, but well formed. An `InlineKey` that panics need not leave a
+//!   valid map (D48): it may stop a change before the nodes it changed are
+//!   fit to their fences (`node/prefix.rs`) or their inline keys written,
+//!   which searches count over the whole node, so from then on the run
+//!   checks only what it checks with any keys;
 //! - with any keys, no node's prefix is shorter than its parent's (D44),
 //!   the nodes along the tree's borders keep the tree's shared prefix
 //!   (D50), which searches past the first or last key read, and the map's
@@ -33,8 +32,9 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::panic::{self, AssertUnwindSafe};
 
-use bbtree::bbtree_map::Entry;
-use bbtree::{Auto, BBTreeMap, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
+use bbtree::unsync::BBTreeMap;
+use bbtree::unsync::bbtree_map::Entry;
+use bbtree::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 
 use crate::operation_list::Operations;
@@ -257,6 +257,8 @@ struct Host {
     drop_panic_armed: Cell<bool>,
     /// What made the current operation panic, if anything did.
     fired: Cell<Option<Hostility>>,
+    /// Whether an `InlineKey` panicked in this run.
+    encoding_panicked: Cell<bool>,
     /// The state of the xorshift generator that the lies come from.
     lies: Cell<u64>,
     /// Per id, whether its key or value is alive.
@@ -272,6 +274,7 @@ impl Host {
             trap: Cell::new(None),
             drop_panic_armed: Cell::new(false),
             fired: Cell::new(None),
+            encoding_panicked: Cell::new(false),
             lies: Cell::new(0x9E37_79B9_7F4A_7C15),
             alive: RefCell::new(Vec::new()),
             live_keys: Cell::new(0),
@@ -279,14 +282,17 @@ impl Host {
         }
     }
 
-    fn is_honest(&self) -> bool {
-        self.conduct == Conduct::Honest
+    /// Whether the map must answer as the model does: the keys keep their
+    /// contracts, and no `InlineKey` has panicked, which need not leave a
+    /// valid map (D48).
+    fn expects_right_answers(&self) -> bool {
+        self.conduct == Conduct::Honest && !self.encoding_panicked.get()
     }
 
     /// Asserts that the map answered `ours` where the model answers
-    /// `model`, if the keys are honest: lying keys give wrong answers.
+    /// `model`, if it must answer right: lying keys give wrong answers.
     fn expect<T: PartialEq + std::fmt::Debug>(&self, ours: T, model: T) {
-        if self.is_honest() {
+        if self.expects_right_answers() {
             assert_eq!(ours, model);
         }
     }
@@ -318,6 +324,9 @@ impl Host {
     fn raise(&self, hostility: Hostility) -> ! {
         self.disarm();
         self.fired.set(Some(hostility));
+        if hostility == Hostility::Trap(Callback::Encoding) {
+            self.encoding_panicked.set(true);
+        }
         panic::panic_any(HostilePanic)
     }
 
@@ -472,9 +481,6 @@ struct HostileMap<'h, S: InlineKeyStrategy<HostileKey<'h>>> {
     host: &'h Host,
     map: BBTreeMap<HostileKey<'h>, HostileValue<'h>, S>,
     model: BTreeMap<u16, u32>,
-    /// Whether every node's prefix is what its fences share: until an
-    /// `InlineKey` panics.
-    exact_prefixes: bool,
 }
 
 impl<'h, S: InlineKeyStrategy<HostileKey<'h>> + Default> HostileMap<'h, S> {
@@ -483,7 +489,6 @@ impl<'h, S: InlineKeyStrategy<HostileKey<'h>> + Default> HostileMap<'h, S> {
             host,
             map: BBTreeMap::with_strategy(S::default()),
             model: BTreeMap::new(),
-            exact_prefixes: true,
         };
         for step in steps {
             map.step(step);
@@ -523,15 +528,11 @@ impl<'h, S: InlineKeyStrategy<HostileKey<'h>> + Default> HostileMap<'h, S> {
             "values lost or kept alive"
         );
         self.map.check_prefix_lens();
-        if !self.host.is_honest() {
+        if !self.host.expects_right_answers() {
             return;
         }
-        let fired = self.host.fired.get();
-        self.exact_prefixes &= fired != Some(Hostility::Trap(Callback::Encoding));
-        if self.exact_prefixes {
-            self.map.check_invariants();
-        }
-        let unchanged = match fired {
+        self.map.check_invariants();
+        let unchanged = match self.host.fired.get() {
             None => true,
             Some(Hostility::Trap(callback)) => operation.trap_leaves_map_unchanged(callback),
             Some(Hostility::Predicate | Hostility::Drop) => false,

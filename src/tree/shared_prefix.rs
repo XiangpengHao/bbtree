@@ -9,6 +9,7 @@
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::mem::offset_of;
 
 use super::node::inline_keys::{KeyInliner, SearchKey, Window};
 use crate::inline_key::{InlineKey, InlineKeyStrategy};
@@ -22,14 +23,20 @@ use crate::inline_key::{InlineKey, InlineKeyStrategy};
 /// borders has this prefix length. `len <= MAX_LEN`.
 ///
 /// A plain value, which the root's page holds in place: a lookup in a tree
-/// whose keys share nothing reads its length alone.
+/// whose keys share nothing reads its length alone, which a latched tree's
+/// descent reads at [`Self::LEN_OFFSET`] while another thread may write it
+/// (`node/root_page.rs`).
 #[derive(Clone)]
+#[repr(C)]
 pub(in crate::tree) struct SharedPrefix {
     len: u8,
     bytes: [u8; Self::MAX_LEN],
 }
 
 impl SharedPrefix {
+    /// Where the length is in the value.
+    pub(in crate::tree) const LEN_OFFSET: usize = offset_of!(Self, len);
+
     /// The most bytes a tree keeps. A search compares a query with all of
     /// them; keys that share more share at least these, which suffice.
     const MAX_LEN: usize = 64;

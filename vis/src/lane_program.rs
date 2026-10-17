@@ -501,7 +501,7 @@ pub(crate) fn PollCaption(
 
 #[cfg(test)]
 mod tests {
-    use bbtree::BBTreeMap;
+    use bbtree::unsync::BBTreeMap;
 
     use super::*;
     use crate::batch_run::BatchKeys;

@@ -84,7 +84,11 @@ impl InlineWidth {
 ///
 /// Implementing it is not enough for a map to use it: the map also needs the
 /// [`WithInlineKey`] strategy. Std byte strings and the 64- and 128-bit
-/// integers get inline keys by default ([`Auto`]).
+/// integers get inline keys by default ([`Auto`]). A [`BBTreeMap`], which
+/// threads share, needs inline keys; the [`unsync`](crate::unsync) map and
+/// set work without, comparing full keys.
+///
+/// [`BBTreeMap`]: crate::BBTreeMap
 ///
 /// A wrong implementation, like a wrong `Ord`, gives wrong answers but never
 /// undefined behavior: whatever it returns, the map reads only its own
@@ -104,9 +108,9 @@ impl InlineWidth {
 ///     }
 /// }
 ///
-/// let mut names = BBTreeMap::with_strategy(WithInlineKey);
+/// let names = BBTreeMap::with_strategy(WithInlineKey);
 /// names.insert(UserName("ferris".to_string()), 7);
-/// assert_eq!(names.get(&UserName("ferris".to_string())), Some(&7));
+/// assert_eq!(names.get_copied(&UserName("ferris".to_string())), Some(7));
 /// ```
 pub trait InlineKey: Ord {
     /// How many bytes of each inline key the nodes keep, where the map uses
@@ -284,11 +288,11 @@ pub struct Auto;
 ///
 /// A lookup uses the inline keys when it looks up with the key type itself.
 /// A lookup through another borrowed form of the key (a `Q` other than `K`
-/// in [`BBTreeMap::get`]) has no inline key to compare, and compares full
+/// in [`BBTreeMap::read`]) has no inline key to compare, and compares full
 /// keys instead: inline keys only speed up the search, so the answer is the
 /// same.
 ///
-/// [`BBTreeMap::get`]: crate::BBTreeMap::get
+/// [`BBTreeMap::read`]: crate::BBTreeMap::read
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WithInlineKey;
 
@@ -325,7 +329,7 @@ pub(crate) mod sealed {
 
         /// Whether the nodes keep a latch word in their header, for a tree
         /// that threads share (`tree/node/latch.rs`): only the strategy a
-        /// `BCTreeMap` wraps its own in, never a public one.
+        /// shared `BBTreeMap` wraps its own in, never a public one.
         const LATCHED: bool = false;
     }
 

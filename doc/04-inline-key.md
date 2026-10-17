@@ -43,9 +43,8 @@ touching the heap**.
   (D43, D32; Q7). A tie falls back to the full comparison.
 - **Search runs over the inline keys,** which compare in a register, so the
   search strategy follows the inline key, not `K`. On a tie, the remaining range
-  of equal inline keys is searched on full keys. The run is found by a linear
-  count over every slot with AVX-512, a branchless binary search otherwise
-  (Q6).
+  of equal inline keys is searched on full keys. The run is found by a count
+  over every slot, never a binary search (Q6).
 - **No node prefetch** (D46). Every hit on a key longer than its inline key,
   and every tie, reads a key line, which sits on the critical path; the
   layouts put it where the search already reads (D29, D32), and internal
@@ -94,26 +93,26 @@ impl InlineKey for String {
 pub struct Auto;
 pub struct WithInlineKey;
 
-pub struct BBTreeMap<K, V, A = Global, S = Auto> { /* … */ }
+pub struct BBTreeMap<K, V, S = Auto, A = Global> { /* … */ }  // unsync::BBTreeMap
 ```
 
 User code:
 
 ```rust
-let names: BBTreeMap<String, u64> = BBTreeMap::new();      // inline keys
+let names: unsync::BBTreeMap<String, u64> = unsync::BBTreeMap::new();      // inline keys
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct UserName(String);
 impl InlineKey for UserName {
     fn inline_key_at(&self, offset: usize) -> InlineWord { self.0.inline_key_at(offset) }
 }
-let plain: BBTreeMap<UserName, u64> = BBTreeMap::new();                     // no inline keys
-let opted_in: BBTreeMap<UserName, u64, WithInlineKey> =
-    BBTreeMap::with_strategy(WithInlineKey);                                 // inline keys
+let plain: unsync::BBTreeMap<UserName, u64> = unsync::BBTreeMap::new();     // no inline keys
+let opted_in: unsync::BBTreeMap<UserName, u64, WithInlineKey> =
+    unsync::BBTreeMap::with_strategy(WithInlineKey);                         // inline keys
 ```
 
 Opting in goes through `with_strategy`, not an annotated `new()`: a `new()`
-generic over `S` breaks plain `BBTreeMap::new()` with "type annotations
+generic over `S` breaks plain `unsync::BBTreeMap::new()` with "type annotations
 needed", because default type parameters don't drive inference. `new()` stays
 `Auto`-only, as std's is `Global`-only. The strategy is the third parameter,
 before the allocator (D8), so opting in names only the strategy.
@@ -135,7 +134,7 @@ if is_byte_string::<K>() && is_byte_string::<Q>() {
 }
 ```
 
-- **Drop-in compatibility.** `BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
+- **Drop-in compatibility.** `unsync::BBTreeMap<K, V>` means what std's `BTreeMap<K, V>`
   means; `S` and the allocator `A` after it are defaulted. Every method is
   identical for every `S`.
 - **Both sides must be recognized.** `Auto` uses inline keys only when **both** `K`
@@ -237,53 +236,29 @@ tie. Fraction of sorted neighbours sharing the first 8 / 16 bytes
   44% at 1M and 65% at 10M.
 - **Paths:** see 05-fence-key.md.
 
-**Q6. (resolved) Search over the inline-key array: a linear count with
-AVX-512, a branchless binary search otherwise.**
+**Q6. (resolved) Search over the inline-key array: a count over every
+slot, on every target; never a binary search.**
 - **The count:** one pass over every slot up to the capacity counts the
-  inline keys below the target and those equal to it, masked by `len`, so
+  inline keys below the target and those equal to it, clipped to `len`, so
   the run is `below..below + equal`. Its trip count is a constant per node
   kind, so for 21 slots each count compiles to three AVX-512 compares and
   no loop, branch or dependent load. It reads slots past `len`, so those
-  hold the greatest inline key.
-- **The search:** a branchless binary search for the run's start, then a
-  scan for its end. The scan replaced a second binary search, whose exit
-  depended on where the first one ended: on hits it mispredicted about 0.5
-  times per lookup, late, as the leaf arrived from DRAM, which flushed the
-  next lookup's overlapped work (LBR and cycle profiles, hash32 at 1M).
-- **Measured** (2026-10-08, 1M entries, bbtree, one run each), `get_hit`
-  ns before → after:
-
-  | build | hash32 | str-json | str-16 | wiki titles |
-  |---|---|---|---|---|
-  | AVX-512 (count) | 227 → 157 | 302 → 233 | 339 → 243 | 365 → 303 |
-  | baseline x86-64 (search) | 231 → 167 | 302 → 254 | 325 → 270 | 370 → 330 |
-
-  Misses and inserts stayed within noise (±5%) on baseline, and stayed
-  within noise or gained up to 10% with AVX-512.
-- **Why the split:** each way trades extra work against mispredicts, and
-  which wins depends on what the CPU can compare in vectors. Hash32
-  `get_hit` at 1M, instructions / mispredicts / ns per lookup:
-
-  | way | AVX-512 | baseline x86-64 |
-  |---|---|---|
-  | count | 441 / 0.07 / 157 | 1477 / 0.07 / 246 |
-  | early-exit scan | 565 / 6.3 / 179 | 565 / 6.3 / 178 |
-  | binary search, then scan | not measured | 476 / 1.9 / 167 |
-
-  - **The early-exit scan** (stop at the first inline key not below the
-    target) is scalar, so it costs the same in both builds: it mispredicts
-    about once per node, where it stops. With AVX-512 it is 6–18% slower
-    than the count on every get.
-  - **The count** never mispredicts, and with AVX-512 its work is three
-    compares. Baseline x86-64 has no 64-bit vector compare, so there it is
-    an emulated sequence, about 200 more instructions per node: gets 7–54%
-    slower than before it.
-  - **The search** probes about 5 of 21 slots, without the emulation, and
-    mispredicts less than the scan: the fastest of the three without
-    AVX-512.
-- **Open: AVX2.** It has only a signed 64-bit vector compare, so the count
-  needs a fix-up per compare; one run of count against search was mixed,
-  which is not enough to settle it. It takes the search for now.
+  hold the greatest inline key (invariant 4).
+- **In explicit vectors** where the compiler's own count is poor: AVX-512
+  masks, SSE2 masks on baseline x86-64 (D40, D43), and NEON on AArch64
+  (D56).
+- **No binary search.** Its probes are dependent loads, so the lines of a
+  node that comes from DRAM arrive one after another, where a count's
+  loads issue together. A branchless search won at 1M on baseline x86-64
+  (`hash32` hit 167 against 246 ns for the emulated 64-bit count, 476
+  against 1,477 instructions), where the map sits in L3 and compare work
+  decides. At 10M, which is what bbtree is for, the count is within ±3% of
+  the search on baseline x86-64 and AVX2 (probe, pittsburgh, 2026-10-16,
+  `u64`, `hash32` and borrowed-JSON hits and misses), and strings gain
+  3–7% on an M1 Pro.
+- **No early-exit scan** (stop at the first inline key not below the
+  target): it mispredicts about once per node, where it stops; with
+  AVX-512 it was 6–18% slower than the count on every get.
 
 ## 5. How we'll know it worked
 
@@ -322,5 +297,3 @@ AVX-512, a branchless binary search otherwise.**
       ([rust-lang/rust#31844](https://github.com/rust-lang/rust/issues/31844));
     - the next-generation trait solver it depends on.
   - **Last checked:** 2026-10-07. Design work only; stabilization in later years.
-- [ ] **AVX2: count or search?** It takes the search; one run was mixed
-  (Q6). Settle it if AVX2 builds matter.

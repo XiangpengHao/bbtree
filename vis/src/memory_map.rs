@@ -590,7 +590,7 @@ pub(crate) fn MemoryMap(
 
 #[cfg(test)]
 mod tests {
-    use bbtree::BBTreeMap;
+    use bbtree::unsync::BBTreeMap;
 
     use super::*;
 

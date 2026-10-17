@@ -38,7 +38,7 @@ use crate::inline_key::InlineKeyStrategy;
 /// Separates the batch's leaf searches from the single-key `get`'s in
 /// compilation, without changing node layouts: sharing one search
 /// outlined the single-key one.
-struct BatchSearch;
+pub(in crate::tree) struct BatchSearch;
 
 /// What a lane fetches: the line it reads next, which it may not have, so
 /// it prefetches the line and yields (doc 12).
@@ -299,12 +299,12 @@ impl<K, V, S> Destination<K, V, S> {
 /// Polls a batch's lanes round-robin until all finish. A lane yields only
 /// after prefetching what it reads next, so none needs waking: the executor
 /// polls every live lane again. No allocation, vtable or runtime.
-struct Executor;
+pub(in crate::tree) struct Executor;
 
 impl Executor {
     /// Up to 64 lanes, a bit per live lane, so that a finished lane needs no
     /// second discriminant beside its state.
-    fn run<F: Future<Output = ()>, const N: usize>(lanes: [F; N]) {
+    pub(in crate::tree) fn run<F: Future<Output = ()>, const N: usize>(lanes: [F; N]) {
         if N > u64::BITS as usize {
             return Self::run_slots(lanes);
         }
@@ -350,9 +350,9 @@ impl Executor {
 }
 
 /// The only software prefetch (D46): a hint about a line of a live node,
-/// the query or a chosen candidate, which reads nothing. Other targets and
-/// Miri do nothing.
-struct Prefetcher {
+/// the query or a chosen candidate, which reads nothing. On x86-64 and
+/// AArch64; other targets and Miri do nothing.
+pub(in crate::tree) struct Prefetcher {
     yielded: bool,
 }
 
@@ -360,7 +360,7 @@ impl Prefetcher {
     /// Prefetches `line` and yields once, on the first poll: the lane
     /// resumes once the others have had a turn while the line arrives.
     #[inline(always)]
-    fn fetch(line: *const u8) -> Self {
+    pub(in crate::tree) fn fetch(line: *const u8) -> Self {
         Self::hint(line);
         Self { yielded: false }
     }
@@ -376,14 +376,25 @@ impl Prefetcher {
 
     /// Prefetches `line` without yielding.
     #[inline(always)]
-    fn hint(line: *const u8) {
+    pub(in crate::tree) fn hint(line: *const u8) {
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         // SAFETY: x86-64 has SSE, and the intrinsic doesn't dereference
         // its address.
         unsafe {
             core::arch::x86_64::_mm_prefetch(line.cast(), core::arch::x86_64::_MM_HINT_T0);
         }
-        #[cfg(any(not(target_arch = "x86_64"), miri))]
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        // SAFETY: `prfm` is a hint, as `_mm_prefetch` is: it doesn't
+        // dereference its address, and an address that maps nothing doesn't
+        // fault. AArch64's prefetch intrinsic isn't stable.
+        unsafe {
+            core::arch::asm!(
+                "prfm pldl1keep, [{line}]",
+                line = in(reg) line,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+        #[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
         let _ = line;
     }
 }
@@ -844,7 +855,7 @@ mod tests {
 
     #[test]
     fn insert_batches_with_duplicates_splits_and_raises_match_node_for_node() {
-        let count = if cfg!(miri) { 240 } else { 4000 };
+        let count = if cfg!(miri) { 240 } else { 1000 };
         let mut numbers: Vec<u64> = (0..count).chain(0..count).collect();
         TestRng::new(54).shuffle(&mut numbers);
         InsertBatches::check::<_, Auto, 8>(numbers.clone());

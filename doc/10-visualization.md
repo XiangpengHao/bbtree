@@ -1,9 +1,9 @@
 # 10 — Visualization: browsing the real tree in a browser
 
-Status (2026-10-15): the `inspect` feature with lookup and batch traces
-(`tree/inspect.rs`, `tree/batch.rs`, `map/mod.rs`), and the visualizer in
-`vis/`, one key or a batch at a time. Inserts and removals are still to
-come.
+Status (2026-10-16): the `inspect` feature with lookup and batch traces
+(`tree/inspect.rs`, `tree/batch.rs`, `unsync/map/mod.rs`), and the visualizer in
+`vis/`, one key or a batch at a time; beside it, the post's page, with
+one figure so far. Inserts and removals are still to come.
 
 ## Goals
 
@@ -89,6 +89,16 @@ From the original note:
   keys there are. The view now shows searches and prefetches in the order
   they run, four keys, on one thread, and nothing about the executor,
   polls or timing.
+- **A post beside the explorer, from the same panels (2026-10-16).** The
+  blog post on bbtree and the visualizer share one build and
+  one look. The explorer stays as it is, at `/`, for readers who want to
+  look around; the post is a page of its own, at `/post/`, with tabs
+  between them. The post is prose with figures, each figure one idea drawn
+  by the explorer's own panels, not a second set of drawings. Rejected:
+  the explorer pinned beside scrolling prose (at half width it loses its
+  inspector, scroll fights its playback, and phones need figures anyway),
+  and the explorer with a story panel (the fourth pass's guide, removed in
+  the fifth).
 - **Light theme only.**
 
 ## The rule: bbtree describes itself, the viewer reads and draws
@@ -114,7 +124,7 @@ because a dependent crate opts into a feature and needs no `RUSTFLAGS`. It
 adds API only, no dependencies (D2), and promises no stability. Its module
 also compiles in tests, so `cargo test` runs its checks without the feature.
 
-- **`BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
+- **`unsync::BBTreeMap::inspect() -> TreeView`**, whose `root()` is a `NodeView`,
   and whose `shared_prefix()` is the bytes every key shares (D50).
 - **`NodeView`** wraps a `Node`, a leaf or an internal node as the tag of
   the edge to it says, or for the root its header (D52), and answers
@@ -210,9 +220,10 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   random, `[` `]` the leaves beside, `↑` `↓` along the path, `←` `→`
   back and forward through the lookups, Space to play or pause the way
   down, `,` `.` to step it (`shortcuts.rs`).
-- **The toolbar**: the search, as the current key and its outcome
-  (`trace.rs`); the tree's build controls (`workload.rs`); both open
-  panels (`popover.rs`); and the repository's GitHub mark. A credit line
+- **The toolbar**: the tabs to the post (`site.rs`); the search, as the
+  current key and its outcome (`trace.rs`); the tree's build controls
+  (`workload.rs`); both open panels (`popover.rs`); and the repository's
+  GitHub mark. A credit line
   sits under the path.
 - **The headline** (`path_summary.rs`): where the lookup ended, how many
   nodes and cache lines it read, and a replay; the path's legend sits in
@@ -392,6 +403,69 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   keeps a 13-byte shared prefix: `bbtree`, two zero bytes and the index's 5
   high zero bytes.
 
+## The post (`vis/`, `/post/`)
+
+- **Two pages, one build, no router** (`site.rs`). The app reads the path
+  once at start: `/post/` mounts the post, anything else the explorer, so
+  every link made before the post still opens it. The tabs are plain
+  links, and moving between the pages loads the other afresh. The
+  explorer alone writes the address and the history (`shared_link.rs`); a
+  router beside it would fight it for both. A static host serves the post
+  from a copy of `index.html` at `post/`; `dx serve` serves it as is.
+- **A figure is an explorer link drawn in place** (`figure.rs`). The link
+  the explorer keeps in its address (`ExplorerLink`: the workload, the key
+  and the level to inspect, or a batch's keys, and the tab) is what a
+  figure starts from, and the figure links to the explorer with it, which
+  opens on the same tree and lookup. A figure owns what its panels share in
+  the explorer: the tracer, the batcher, the spotlight and the
+  inspector's tab, so clicking in one figure changes it alone. Each figure
+  is a component of its own that picks its panels; there is no generic
+  list of panels to configure until a pattern repeats.
+- **The panels are unchanged.** They took their state as explicit props
+  and handles already; what was page-wide was the DOM and the CSS. Ids the
+  browser looks elements up by (the batch's board, the inspector's tabs,
+  the slot table's box) are unique to the component that draws them
+  (`element_ids.rs`). The page's one hint is split from each view's
+  spotlight (`PointerHint`), since `NodeAt` names no tree and two figures
+  would light each other's nodes. The explorer's one-screen layout is
+  scoped to it, so the post scrolls.
+- **Trees are shared and built as the reader nears** (`TreeStore`).
+  Figures of one workload share one tree, built when the reader comes
+  within a screen of the first of them, in slices of about 12 ms between
+  yields to the browser (`Workload::SLICE_MS`), so that a slow phone
+  isn't blocked in 50-80 ms runs. A figure starts its lookup when it
+  comes into view, so the way down plays where it is read. Until then its
+  frame keeps room as tall as its panels draw, on a desk and on a phone
+  (`FigureFrame`'s `room`), and the panels replace it while only the
+  figure's top edge shows, pushing down what is still below the screen:
+  the page doesn't move under the reader.
+- **The batch's playback runs only while it plays and shows.** Its frame
+  loop (`batch_view.rs`) asks for frames only while playing, writes the
+  time (`--t`) only when it changes, and holds while the board is off
+  screen. Every frame it plays restyles the board, whose tokens, fills
+  and highlights all derive from `--t`: about 2.6 ms a frame at full speed.
+- **Styled from the first paint.** On a slow network the wasm takes
+  seconds, and stylesheets the app linked itself came only after it: a
+  blank page, then the page unstyled. The stylesheets are in the static
+  page's head instead (`with_static_head`), the fonts load beside the
+  wasm without holding up the paint, and `index.html` shows a loading
+  screen in the app's own classes (its bar, the explorer's waiting state;
+  white for the post) until the app draws, so nothing moves when it does.
+- **Shortcuts and the address are the explorer's.** On the post, Space and
+  the arrows scroll; the figures' buttons play and step them.
+- **Charts beside the figures** (`performance_cards.rs`): five cards the
+  reader picks, nothing turning by itself: single thread, concurrent, end
+  to end, memory and architectures, each a chart of its own
+  (`*_chart.rs`, the grouped bars of the last three in
+  `baseline_bars.rs`). The wide charts are drawn at their card's width, a
+  unit a pixel (`FrameWidth`), and lay themselves out for it. bbtree's
+  maps wear the site's highlighter, every other map a dark slate. Bars
+  grow at one speed and lines draw left to right, once the cards are in
+  view. Their data is compiled in from `vis/data/<machine>/`
+  (`measurements.rs`); doc 14 says what each shows and how it is made.
+- **So far:** three figures (the way down, the leaf in the inspector, a
+  batch); the prose is a draft of doc 14's plan.
+
 ## Not done
 
 - Batched inserts (`insert_many`, `extend`): their lanes descend as
@@ -407,5 +481,5 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 - CI for `vis/`: it is a workspace of its own, which bbtree's CI doesn't
   build.
 - `cargo clippy --target wasm32-unknown-unknown` on bbtree fails one lint
-  expectation: `#[expect(clippy::large_enum_variant)]` in `map/entry.rs`
+  expectation: `#[expect(clippy::large_enum_variant)]` in `unsync/map/entry.rs`
   holds only where pointers take 8 bytes. Plain builds are unaffected.

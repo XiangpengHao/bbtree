@@ -14,10 +14,10 @@ nix-shell --expr '(builtins.getFlake ("git+file://" + toString ./.)).devShells.x
 Run a selected operation pinned to CPU 6, with other builds and benchmarks idle:
 
 ```sh
-nix-shell --expr '(builtins.getFlake ("git+file://" + toString ./.)).devShells.x86_64-linux.default' --run 'taskset -c 6 bench/diagnostics/portable/target/release/bbtree-portable-diagnostic hash32 bbtree get_hit 2000000'
+nix-shell --expr '(builtins.getFlake ("git+file://" + toString ./.)).devShells.x86_64-linux.default' --run 'taskset -c 6 bench/diagnostics/portable/target/release/bbtree-portable-diagnostic hash32 bbtree-unsync get_hit 2000000'
 ```
 
-Arguments are `hash32|u64|u128|u128-dense|borrowed-json|borrowed-path`, `bbtree|std-btree`,
+Arguments are `hash32|u64|u128|u128-dense|borrowed-json|borrowed-path`, `bbtree-unsync|std-btree` (`bbtree::unsync::BBTreeMap` or std's `BTreeMap`),
 `get_hit|get_miss|random_insert|iterate_next`, and the initial entry count (default
 2,000,000; must exceed 1,000,000). Output columns are key kind, backend,
 operation, initial entries, operation count, nanoseconds per operation,

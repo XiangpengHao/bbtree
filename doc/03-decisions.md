@@ -7,17 +7,35 @@ the file is not a history of decisions.
 ## Scope (from 00-init)
 
 **D1. Drop-in replacement for std's `BTreeMap`/`BTreeSet`.**
-`BBTreeMap` and `BBTreeSet` keep std's API and behavior. Any deviation needs a
-strong reason and is documented in README.md. Design as if it could be merged
-into std someday; flag anything that would prevent that.
+`unsync::BBTreeMap` and `unsync::BBTreeSet` keep std's API and behavior. Any
+deviation needs a strong reason and is documented in README.md. Design as if
+it could be merged into std someday; flag anything that would prevent that.
 
 **D2. Zero dependencies.** `serde` and `rand` support, when added, are
 optional features.
 
 **D3. `no_std`.**
 
-**D4. Single-threaded**, like std. The map threads share is a separate
-type, `BCTreeMap` (D54).
+**D4. Two maps on one tree: `BBTreeMap`, which threads share, and
+`unsync`'s, single-threaded like std's.** (2026-10-17)
+`bbtree::BBTreeMap` is the map threads share (D54); `bbtree::unsync::BBTreeMap`
+and `unsync::BBTreeSet` are std's drop-in replacements (D1). Both keep the
+same nodes, and the concurrent one runs the unsync tree's operations.
+
+- **Why the shared map leads:** the ordered maps that matter for speed are
+  shared: the systems surveyed (13-gtm.md) keep theirs behind locks or in
+  concurrent skiplists, while most single-threaded `BTreeMap`s are small
+  (configuration, sorted output) and nobody times them. One name, bbtree,
+  for the map they'd pick.
+- **Why keep `unsync`:** it is the only one std's users can switch to by
+  changing an import. The shared map can't lend `&V`, iterate by reference
+  through `&self`, or take keys without inline keys, and its single-thread
+  lookups and batches cost a little more (09-concurrency.md). Its code is
+  mostly the map and set APIs over the tree both maps use.
+- **Names:** `unsync` after once_cell's `sync`/`unsync`. The shared map's
+  methods follow std's words where they mean the same: `get_*` returns a
+  value (`get_copied`, `get_cloned`, `get_mut`), `read*` runs a closure on
+  the entry in place, as scc's maps do.
 
 **D5. Differential fuzzing against std's btree.** Formal verification with
 Verus is optional but welcome.
@@ -36,8 +54,9 @@ node or the root page, with that kind's layout (D21).
   `unsafe trait`; a clone is the same allocator), so it works on stable.
   `Global`, the global allocator, is the default; `&A` is an allocator too,
   to share one between maps.
-- **In types:** `BBTreeMap<K, V, S = Auto, A: Allocator + Clone = Global>`,
-  and the same for the set: the strategy before the allocator, so opting
+- **In types:** `unsync::BBTreeMap<K, V, S = Auto, A: Allocator + Clone =
+  Global>`, and the same for the set (the shared `BBTreeMap` takes any
+  `A: Allocator`): the strategy before the allocator, so opting
   into inline keys stays `BBTreeMap<K, V, WithInlineKey>` (D18).
   `new_in(alloc)` and `with_strategy_in(strategy, alloc)` take one; `new`,
   `with_strategy`, `Default`, `FromIterator` and `From` stay `Global`-only,
@@ -805,8 +824,8 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   In leaves, 4 bytes would more than double JSON's heap comparisons, so
   leaves stay at 8.
 - **Search on baseline x86-64:** 17–32 four-byte summaries use one SSE2
-  packing step and trailing-one counts; above 32, a branchless binary
-  search. A second packing step for 33–64 cut instructions but was slower
+  packing step and trailing-one counts; above 32, the compiler's count
+  (04 Q6). A second packing step for 33–64 cut instructions but was slower
   on borrowed JSON, so it was dropped.
 - **Measured,** 10M native: JSON inserts 314.1 → 282.5 ns, hits
   343.8 → 320.4, misses 282.3 → 235.4; paths about 1.3% faster. Baseline
@@ -914,8 +933,8 @@ Design and measurements in 07-node-plan.md.
   abort-on-unwind guard.
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
-  (`map/tests/drops.rs`, `map/tests/inline_key.rs`) go when a change
-  breaks them.
+  (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
+  `fuzz/src/user_code_panics.rs`) go when a change breaks them.
 
 **D49. With inline keys, separator keys are leaf heads, and internal nodes keep no keys.** (2026-10-13)
 Design, census and measurements in 11-separator-key.md.
@@ -1124,15 +1143,33 @@ Design in 05-fence-key.md, "The shared prefix".
   a call-site marker and `inline(always)` on four insert helpers; doc 12
   lists what each saved.
 
-**D54. BCTree: the shared tree is bbtree's nodes with a latch word, under a crate-private strategy, synchronized by optimistic lock coupling.** (2026-10-15)
+**D54. The shared `BBTreeMap`: the unsync tree, shared through optimistic lock coupling; its tree operations are the unsync tree's own, run on the nodes it holds.** (2026-10-15)
 Design, protocols and measurements in 09-concurrency.md.
 
-- **What:** `BCTreeMap` keeps its tree with strategy `Latched<S>`, which
+- **What:** `BBTreeMap` keeps its tree with strategy `Latched<S>`, which
   gives `S`'s inline keys and a 16-byte header with a latch word
-  (`node/latch.rs`): leaves, internal nodes, searches, splits and prefix
-  fits are bbtree's. Internal nodes are read optimistically, in place,
+  (`node/latch.rs`). Internal nodes are read optimistically, in place,
   through raw pointers, and changed in place by writers holding them (OLC,
-  `node/optimistic.rs`); leaves are latched. Keys need inline keys (D49).
+  `node/optimistic.rs`); leaves are latched to change, and to run a
+  closure on an entry; lookups read them optimistically first (D57). Keys
+  need inline keys (D49).
+- **Same tree, same operations:** the shared prefix (D50), prefixes fit to
+  their fences, 4-byte windows of heap strings (D43), appends to the last
+  leaf (D45), a root that grows and shrinks in its page. A split, a
+  rebalancing removal or a shrinking of the shared prefix takes, without
+  waiting, every node bbtree's operation will change or read a separator
+  of, then runs that operation along a node stack from the topmost one
+  (`tree/latched`). The shared map's own code is only what sharing needs:
+  the descent, which nodes to take, type-stable pages, the append pointer.
+- **Why not a tree layer of its own:** the first version had one, and left
+  out the shared prefix, prefix fits after removals, lowering to a leaf,
+  4-byte windows and appends. Each cut needed a special case elsewhere, in
+  the node plan, the invariant check or the root, or made another path
+  hot: dense integers tied at the root, 205 ns a `u64-seq` hit.
+- **Holding a node holds its separators' keys:** a head key changes only
+  while the node holding its separator is held, so bbtree's operations
+  read keys where they are. A reader that holds nothing latches the head's
+  leaf shared: a removed key's memory may be freed at once.
 - **Why the strategy:** every node type already carries it, so no type
   gains a parameter, and the layouts pick their constants from it as they do
   from the plan.
@@ -1140,13 +1177,89 @@ Design, protocols and measurements in 09-concurrency.md.
   reference, so only the version check decides what a read was worth. A
   first version read through atomic copies and wrote through private copies
   of each node: about 30 instructions more per internal level for lookups.
-- **Zero cost to bbtree:** what only BCTree needs lives in BCTree's own
-  functions and its allocator wrapper. Atomic header accessors and a
-  zeroing branch in `FreshPage::allocate`, tried first, changed bbtree's
-  insert paths (an `inline(always)` on `len` moved a `u32` split by 195
-  instructions).
-- **Phase 1** only grows: no removal, so no node is freed and head keys,
-  which ties read without a latch, never change.
+- **Type-stable nodes, not epochs:** a freed node's page goes on the
+  tree's free list for its kind, keeps its latch word, whose version only
+  grows, and goes back to the allocator when the map drops. A racing
+  reader always reads a node of the kind its pointer says, and its check
+  fails; nothing per operation, no guards. The root page alone changes
+  kind, and a reader checks a node's version before following an edge.
+- **Cost to bbtree:** the inline-key searches read through a raw `Slots`
+  view; a node stack can start along a kept path; a removal's fixing reads
+  no node above the last it changes. Atomic header accessors and a zeroing
+  branch in `FreshPage::allocate`, tried first, changed bbtree's insert
+  paths (an `inline(always)` on `len` moved a `u32` split by 195
+  instructions); racing reads have functions of their own instead.
+
+**D55. The shared map's batches hold no latch across a yield.** (2026-10-16)
+Design and measurements in 09-concurrency.md, "Batches".
+
+- **What:** `read_many`, `get_many_copied`, `get_many_cloned` and
+  `insert_many` run one lane a key on the unsync tree's executor and
+  `Prefetcher` (D53). A lane reads internal nodes and its leaf's inline
+  keys optimistically, prefetching each line first. A lookup's lane copies
+  its entry unlatched where the leaf settles the key (D57); otherwise it
+  latches the leaf, searches it, runs the closure and lets go within one
+  poll. An insert's lane only finds its leaf and the version it read; the
+  inserts then go in input order, each taking its leaf by a
+  compare-and-swap at that version, moved on by the batch's own inserts
+  there, and otherwise inserting as a single insert does. Batches go one
+  key at a time on trees with fewer than three internal levels, about an
+  L2 of leaves.
+- **Why:** a latch held across a yield would make lanes wait for one
+  another, and a writer for a whole batch. Prefetching before latching
+  keeps the latch to the poll that needs it.
+- **Ties walk synchronously:** a lane that prefetched and yielded along a
+  tie's walk to its head, as a nested future or written flat in the lane,
+  ran 10M `u64` batched lookups at 75–80 ns against 71: the suspension
+  points cost more than the overlapped walks saved (2026-10-17).
+
+**D56. AArch64 counts inline keys in NEON, relying on invariant 4.** (2026-10-16)
+
+- **What:** on AArch64, every width of inline key counts in explicit NEON
+  vectors (`NeonCount` in `vector_count.rs`): per 16 bytes of slots, one
+  `cmhi` and one `cmeq` against the broadcast target, their all-ones lanes
+  subtracted into counters of the slots' width, one `addv` each at the end;
+  a capacity that isn't a multiple of the vector ends with an overlapping
+  load, its counted lanes masked out. The exact-key equality mask (D41) and
+  the length-tag filter (D36) stay x86-only: the count already tells none
+  from one from many, and length tags only filter ties.
+- **Why:** the compiler's own count there widened each compared lane to 64
+  bits, one at a time, to add it to a `usize`. A 10M `u64` hit on an M1 Pro
+  ran 1,678 instructions, against 228 on Rocket Lake with AVX-512, and
+  bbtree was 1.06× std's speed.
+- **Slots past `len` count:** the counts are exact where those hold the
+  greatest inline key (invariant 4), as the compiler's count already
+  required, and clipped to `0..len` for any contents. x86's masks ignore
+  them; masking them per vector on NEON cost 8–18% of a lookup.
+- **Measured** (M1 Pro, 10M entries, probe `bench/diagnostics/portable`,
+  one run each), ns before → after: `u64` hit 389.5 → 173.5, miss 308.1 →
+  137.3; `hash32` hit 398.7 → 185.2, miss 270.7 → 119.9; borrowed JSON hit
+  428.7 → 267.3, miss 306.8 → 198.2. Instructions per `u64` hit 1,678 →
+  407.
+
+**D57. Lookups read the leaf optimistically; a `Copy` value is copied out unlatched.** (2026-10-17)
+Design and measurements in 09-concurrency.md, "Lookups".
+
+- **What:** a lookup's descent reads its leaf at a version too, without
+  the latch, and searches its inline keys in place. A key they rule out is
+  absent once the version, unchanged, confirms the read: a miss writes
+  nothing. `get_copied` and `get_many_copied`, for `V: Copy`, copy the
+  candidate's value out and check the version after, as a sequence lock
+  reads, where the leaf settles the key without following a pointer: a key
+  ordered by its own bytes (std integers, byte arrays) is copied and
+  compared, and a byte string that ends within its 8-byte inline key is
+  the candidate of the same length (D36). Otherwise the lookup latches the
+  same leaf at the same version and searches it; a leaf that changed sends
+  it the latched way, which waits rather than race again.
+- **Why `Copy`:** a closure, or a clone of a value that owns memory, can't
+  run on what an unlatched read saw: a writer may free that memory before
+  the check. A `Copy` value has no `Drop` and no interior mutability, so a
+  torn copy is thrown away unused. Closures (`read`, `update`, scans) keep
+  the latch.
+- **Measured** (9900X, 10M `u64`, `bbtree-scaling`, against the latched
+  lookups of 2026-10-16): get-half at 24 threads 98.0 → 113.6 M/s, batched
+  121.5 → 145.9; one thread within 4%. A hit no longer writes its leaf's
+  latch word, a line every reader of the leaf took in turn.
 
 ## Navigation
 

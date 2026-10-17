@@ -1,0 +1,3 @@
+run,map,keys,workload,threads,operations,elapsed_ns,mops
+single-thread,std-btree,uuid,get-half,1,1822976,998597737,1.826
+single-thread,bbtree,uuid,get-half,1,4725760,1001182506,4.720

@@ -1,62 +1,120 @@
-//! A tree that threads share (`doc/09-concurrency.md`): the node code of
-//! every tree, with a latch word in each node (`node/latch.rs`), behind an
-//! atomic pointer to the root page.
+//! A tree that threads share (`doc/09-concurrency.md`): bbtree's tree, with
+//! a latch word in each node (`node/latch.rs`), behind an atomic pointer to
+//! the root page.
 //!
-//! - **Descent** ([`LatchedTree::descend`]): optimistic through the
-//!   internal nodes, each read racing with its writers and checked by its
-//!   version after its child's is read (`node/optimistic.rs`); the leaf is
-//!   latched, shared or exclusive, and then its parent's version checked
-//!   again, so the leaf is still where the key belongs. A failed check
-//!   starts over from the root.
+//! It is bbtree's tree in every way but how threads share it: the same
+//! nodes, the same shared prefix (D50) and prefixes fit to their fences,
+//! the same splits, merges and moves between siblings, the same root that
+//! grows and shrinks in its page, and an append to the last leaf (D45). Its
+//! own are the ways threads share it:
+//!
+//! - **Descent** (`descent.rs`): optimistic through the internal nodes, each
+//!   read in place while writers may change it and checked by its version
+//!   (optimistic lock coupling, `node/optimistic.rs`); the leaf latched,
+//!   shared or exclusive, or for a lookup read in place too (`lookup.rs`).
 //! - **Operations** run the caller's closure on an entry while its leaf is
 //!   latched, and let go before returning: no reference or latch outlives
 //!   the call.
-//! - **Splits** ([`LatchedTree::split_leaf`]): an insert into a full leaf,
-//!   held exclusively, takes the internal nodes the split changes, from its
-//!   parent up to the first with room, at the versions its descent read,
-//!   and starts over if any changed. It changes them in place, as bbtree
-//!   does, and lets go of them only once all are done: a reader that read
-//!   one meanwhile fails its version check.
+//! - **Changes to more than a leaf**, a split (`insert.rs`), a removal that
+//!   rebalances (`remove.rs`) or a shrinking of the shared prefix
+//!   (`shared_prefix.rs`), take every node bbtree's operation will change or
+//!   read a separator of, without waiting (`held.rs`), and start over if
+//!   another thread holds one or changed it since the descent. Then they
+//!   run bbtree's operation itself, on the tree as it is, along a node
+//!   stack from the topmost node they hold ([`LatchedTree::change_held`]):
+//!   bbtree's operations go no higher than the nodes they change and the
+//!   nearest separators above them, their fences. A reader that read a
+//!   node meanwhile fails its version check.
+//! - **Pages are type-stable** (`pages.rs`): a node a merge empties goes on
+//!   the tree's free list for its kind, and comes back only as a node of
+//!   that kind, with the same latch word, whose version only grows. So a
+//!   pointer a racing reader loads is always to a node of the kind it says,
+//!   and its version check fails if the node was freed since. The root page
+//!   alone changes kind, and a reader checks a node's version before it
+//!   follows an edge it read there. Pages go back to the allocator when the
+//!   map is dropped.
+//! - **The last leaf** is where an append goes (`append.rs`), by a pointer
+//!   that only a thread holding that leaf changes.
 //!
-//! The tree only grows: nothing removes an entry, merges nodes or frees a
-//! page while threads share it. So a pointer a racing reader loads is to a
-//! live page, and a leaf's head key, which internal nodes route by (D49),
-//! never changes while threads read it. The keys all share nothing, as far
-//! as the tree knows: its shared prefix (D50) stays empty, so no insert
-//! changes the nodes along its borders.
+//! A leaf's head key, which internal nodes route by (D49), changes only
+//! while the node holding its separator is held, so a thread holding that
+//! node reads it where it is (`held.rs`). A reader that holds nothing reads
+//! it with its leaf latched shared (`node/optimistic.rs`).
 
-use core::alloc::Layout;
+mod append;
+mod batch;
+mod descent;
+mod held;
+mod insert;
+mod lookup;
+mod owner;
+mod pages;
+mod remove;
+mod scan;
+mod shared_prefix;
+
+pub(crate) use self::insert::{ReadOrInsert, Replace};
+pub(crate) use self::scan::{LeafStamp, ScanResume};
+
 use core::borrow::Borrow;
 use core::marker::PhantomData;
-use core::mem;
+use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use super::node::inline_keys::{KeyInliner, SearchKey, Separator, WindowedKey};
+use self::descent::Exclusive;
+use self::pages::{FreeLists, NodePages};
+use super::interleaving::Interleaving;
+use super::node::Node;
+use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
-use super::node::latch::{Latched, NodeLatch, Version};
+use super::node::latch::Latched;
 use super::node::leaf::Leaf;
-use super::node::optimistic::Routed;
-use super::node::page::{FreshPage, NodePtr};
+use super::node::page::{FreshPage, NodePtr, PageType};
 use super::node::root_page::RootPage;
-use super::node::{Child, Insertion, Node};
-use super::node_stack::{FirstEdge, MAX_DEPTH};
 use super::root::Tree;
-use crate::allocator::{AllocError, Allocator};
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree that threads share, by an atomic pointer to its root page, tagged
 /// with the root's kind; null until the first insert makes one. Its nodes'
 /// strategy is `Latched<S>`.
 ///
-/// It owns its nodes, keys and values, as a [`Tree`] does, and has no
-/// `Drop`: [`Self::destroy`] takes it apart.
+/// It owns its nodes, keys and values, as a [`Tree`] does, and the pages on
+/// its free lists, and has no `Drop`: [`Self::destroy`] takes it apart.
 pub(crate) struct LatchedTree<K, V, S> {
+    /// Read by every operation, written when the root changes kind.
     root: AtomicPtr<u8>,
+    /// The tree's last leaf, tagged, where an append goes (`append.rs`):
+    /// null until the first insert makes the tree. Written when the last
+    /// leaf splits.
+    rightmost_leaf: CachePadded<AtomicPtr<u8>>,
+    /// Pages of nodes a merge emptied, for new nodes of their kind: written
+    /// by merges, and splits that take a page.
+    free: CachePadded<FreeLists>,
     /// Owns keys and values that threads share: see the `Send` and `Sync`
     /// impls.
     _entries: PhantomData<*const (K, V)>,
     _strategy: PhantomData<fn() -> S>,
+}
+
+/// A value on cache lines of its own: writing it takes no line from threads
+/// that read what sits beside it. Two lines, which CPUs fetch in pairs.
+#[repr(align(128))]
+struct CachePadded<T>(T);
+
+impl<T> Deref for CachePadded<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for CachePadded<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
 }
 
 // SAFETY: a tree owns its pages, keys and values, as a `Box` owns its
@@ -70,169 +128,6 @@ unsafe impl<K: Send, V: Send, S> Send for LatchedTree<K, V, S> {}
 // (`node/latch.rs`, `node/optimistic.rs`).
 unsafe impl<K: Send + Sync, V: Send + Sync, S> Sync for LatchedTree<K, V, S> {}
 
-/// The allocator of a latched tree's pages: the map's, each page zeroed,
-/// so that every word of an internal node a racing reader loads, slots past
-/// its length included, is initialized, and every latch word starts unheld
-/// (`node/optimistic.rs`, `node/latch.rs`).
-struct ZeroedPages<'a, A>(&'a A);
-
-// SAFETY: every block is the map's allocator's, given back to it as it was
-// handed out: zeroing the bytes of a block changes nothing of its contract.
-unsafe impl<A: Allocator> Allocator for ZeroedPages<'_, A> {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        let page = self.0.allocate(layout)?;
-        // SAFETY: the block was just allocated for `layout`.
-        unsafe { page.write_bytes(0, layout.size()) };
-        Ok(page)
-    }
-
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: forwarded.
-        unsafe { self.0.deallocate(ptr, layout) }
-    }
-}
-
-/// A leaf of a latched tree, latched in mode `M` until dropped.
-struct HeldLeaf<K, V, S: InlineKeyStrategy<K>, M: LatchMode> {
-    leaf: Leaf<K, V, Latched<S>>,
-    held: M::Held,
-}
-
-/// How a leaf is latched: [`Shared`] or [`Exclusive`].
-trait LatchMode {
-    /// What letting go needs.
-    type Held: Copy;
-
-    fn lock(latch: &NodeLatch) -> Self::Held;
-
-    fn unlock(latch: &NodeLatch, held: Self::Held);
-}
-
-/// Latched for reading.
-enum Shared {}
-
-/// Latched for changing.
-enum Exclusive {}
-
-impl LatchMode for Shared {
-    type Held = ();
-
-    #[inline(always)]
-    fn lock(latch: &NodeLatch) {
-        latch.lock_shared();
-    }
-
-    #[inline(always)]
-    fn unlock(latch: &NodeLatch, (): ()) {
-        latch.unlock_shared();
-    }
-}
-
-impl LatchMode for Exclusive {
-    type Held = Version;
-
-    #[inline(always)]
-    fn lock(latch: &NodeLatch) -> Version {
-        latch.lock_exclusive()
-    }
-
-    #[inline(always)]
-    fn unlock(latch: &NodeLatch, version: Version) {
-        latch.unlock_exclusive(version);
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> HeldLeaf<K, V, S, M> {
-    #[inline(always)]
-    fn lock(leaf: Leaf<K, V, Latched<S>>) -> Self {
-        Self {
-            leaf,
-            held: M::lock(leaf.latch()),
-        }
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> Drop for HeldLeaf<K, V, S, M> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        M::unlock(self.leaf.latch(), self.held);
-    }
-}
-
-/// What a descent keeps of the internal nodes it goes through: nothing, for
-/// most operations, or each node, for a split ([`SplitPath`]).
-trait DescentPath<K, V, S> {
-    /// Forgets every node: the descent starts over.
-    fn clear(&mut self);
-
-    /// The next node down, read at `version`, and where the key went from it.
-    fn record(&mut self, node: Internal<K, V, Latched<S>>, version: Version, routed: Routed);
-}
-
-impl<K, V, S> DescentPath<K, V, S> for () {
-    #[inline(always)]
-    fn clear(&mut self) {}
-
-    #[inline(always)]
-    fn record(&mut self, _: Internal<K, V, Latched<S>>, _: Version, _: Routed) {}
-}
-
-/// An internal node a descent went through, at the version it read, and
-/// where the key went from it.
-struct PathLevel<K, V, S> {
-    node: Internal<K, V, Latched<S>>,
-    version: Version,
-    routed: Routed,
-}
-
-impl<K, V, S> Clone for PathLevel<K, V, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K, V, S> Copy for PathLevel<K, V, S> {}
-
-/// The internal nodes from the root down to a leaf's parent, for a split:
-/// level 0 is the root.
-struct SplitPath<K, V, S> {
-    levels: [Option<PathLevel<K, V, S>>; MAX_DEPTH],
-    depth: usize,
-}
-
-impl<K, V, S> SplitPath<K, V, S> {
-    fn new() -> Self {
-        Self {
-            levels: [None; MAX_DEPTH],
-            depth: 0,
-        }
-    }
-
-    /// Level `depth`, which the descent went through.
-    ///
-    /// # Panics
-    ///
-    /// If it didn't.
-    fn level(&self, depth: usize) -> PathLevel<K, V, S> {
-        self.levels[depth].expect("a level the descent went through")
-    }
-}
-
-impl<K, V, S> DescentPath<K, V, S> for SplitPath<K, V, S> {
-    fn clear(&mut self) {
-        self.depth = 0;
-    }
-
-    fn record(&mut self, node: Internal<K, V, Latched<S>>, version: Version, routed: Routed) {
-        self.levels[self.depth] = Some(PathLevel {
-            node,
-            version,
-            routed,
-        });
-        self.depth += 1;
-    }
-}
-
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// No tree.
     ///
@@ -243,142 +138,102 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     pub(crate) fn new() -> Self {
         assert!(
             NodePtr::<K, V, Latched<S>>::has_inline_keys(),
-            "a BCTreeMap's keys need inline keys"
+            "a BBTreeMap's keys need inline keys"
         );
         Self {
             root: AtomicPtr::new(ptr::null_mut()),
+            rightmost_leaf: CachePadded(AtomicPtr::new(ptr::null_mut())),
+            free: CachePadded(FreeLists::new()),
             _entries: PhantomData,
             _strategy: PhantomData,
         }
     }
 
+    /// The pages one operation allocates and frees, through `alloc`
+    /// ([`NodePages`]).
+    #[inline(always)]
+    fn pages<'t, A: Allocator>(&'t self, alloc: &'t A) -> NodePages<'t, A> {
+        NodePages::new(
+            &self.free,
+            alloc,
+            Leaf::<K, V, Latched<S>>::page_layout(),
+            Internal::<K, V, Latched<S>>::page_layout(),
+        )
+    }
+
     /// The root page, as the tree's pointer tags it; `None` without a tree.
     #[inline(always)]
     fn root_page(&self) -> Option<RootPage<K, V, Latched<S>>> {
+        Interleaving::switch_point();
         let tagged = NonNull::new(self.root.load(Ordering::Acquire))?;
         // SAFETY: a non-null root pointer is a root page of this tree's,
-        // tagged with its root's kind, stored by `root_page_or_new` or a
-        // split that raised the tree.
+        // tagged with its root's kind, stored by `start_tree` or an
+        // operation that changed the root's kind (`change_held`).
         Some(RootPage::of_node(Node::at(unsafe {
             NodePtr::from_tagged(tagged)
         })))
     }
 
-    /// The root page, or that of a new tree, from `alloc`, if there is none:
-    /// where an insert starts.
+    /// Whether `leaf` is the root, which has no minimum (D22).
     #[inline(always)]
-    fn root_page_or_new(&self, alloc: &impl Allocator) -> RootPage<K, V, Latched<S>> {
-        match self.root_page() {
-            Some(root_page) => root_page,
-            None => self.start_tree(alloc),
-        }
+    fn is_root(&self, leaf: Leaf<K, V, Latched<S>>) -> bool {
+        Interleaving::switch_point();
+        self.root.load(Ordering::Acquire) == leaf.node_ptr().tagged().as_ptr()
     }
 
+    /// Makes the tree, unless another thread did: a root page from `alloc`,
+    /// an empty leaf, which is the last leaf too.
     #[cold]
     #[inline(never)]
-    fn start_tree(&self, alloc: &impl Allocator) -> RootPage<K, V, Latched<S>> {
-        let root_page = RootPage::new(FreshPage::allocate(alloc));
-        let tagged = root_page.node().node_ptr().tagged();
+    fn start_tree(&self, alloc: &impl Allocator) {
+        let root_page = RootPage::<K, V, Latched<S>>::new(FreshPage::allocate(alloc));
+        let Node::Leaf(root) = root_page.node() else {
+            unreachable!("a new tree's root is a leaf");
+        };
+        // Held until the leaf is the last leaf too: a split of it reads
+        // whether it is (`insert.rs`).
+        let version = root.latch().lock_exclusive();
+        let tagged = root.node_ptr().tagged();
+        Interleaving::switch_point();
         match self.root.compare_exchange(
             ptr::null_mut(),
             tagged.as_ptr(),
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => root_page,
+            Ok(_) => {
+                Interleaving::switch_point();
+                self.rightmost_leaf
+                    .store(tagged.as_ptr(), Ordering::Release);
+                root.latch().unlock_exclusive(version);
+            }
             Err(_) => {
                 // SAFETY: the page is a new, empty root page that no other
                 // thread ever reached.
                 unsafe { root_page.free() }.deallocate(alloc);
-                self.root_page().expect("another thread made the tree")
             }
         }
     }
 
-    /// The leaf where `key` belongs, latched in mode `M`, and whether `key`
-    /// equals the separator left of it, whose entry is its head (D17); with
-    /// `path` keeping the internal nodes it went through.
-    ///
-    /// # Panics
-    ///
-    /// Without a tree.
-    #[inline(always)]
-    fn descend<Q, M: LatchMode, P: DescentPath<K, V, S>>(
-        &self,
-        key: &SearchKey<'_, K, Latched<S>, Q>,
-        path: &mut P,
-    ) -> (HeldLeaf<K, V, S, M>, bool)
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        'restart: loop {
-            path.clear();
-            let root_page = self.root_page().expect("a tree to descend");
-            let mut node = match root_page.node() {
-                Node::Leaf(leaf) => {
-                    let held = HeldLeaf::lock(leaf);
-                    // A split that raised the tree changed the tag first.
-                    if self.root.load(Ordering::Acquire) != leaf.node_ptr().tagged().as_ptr() {
-                        continue 'restart;
-                    }
-                    return (held, false);
-                }
-                Node::Internal(internal) => internal,
-            };
-            let mut version = node.latch().read_version();
-            let mut at_separator = false;
-            loop {
-                let Some(routed) = node.route_racing(key, version) else {
-                    continue 'restart;
-                };
-                let Some(child) = node.racing_child(routed.edge) else {
-                    continue 'restart;
-                };
-                at_separator |= routed.at_separator;
-                path.record(node, version, routed);
-                match child {
-                    Node::Leaf(leaf) => {
-                        let held = HeldLeaf::lock(leaf);
-                        if !node.latch().is_unchanged(version) {
-                            continue 'restart;
-                        }
-                        return (held, at_separator);
-                    }
-                    Node::Internal(child) => {
-                        let child_version = child.latch().read_version();
-                        if !node.latch().is_unchanged(version) {
-                            continue 'restart;
-                        }
-                        (node, version) = (child, child_version);
-                    }
-                }
-            }
+    /// Runs `operation`, one of bbtree's own, on the tree under the root
+    /// page, of which the caller holds every node the operation changes or
+    /// reads a separator of (module documentation); and if it changed the
+    /// root's kind, raising a root leaf or lowering the tree to one, points
+    /// the tree at the root page as its new kind, while the caller still
+    /// holds the root.
+    fn change_held<R>(&self, operation: impl FnOnce(&mut Tree<K, V, Latched<S>>) -> R) -> R {
+        let root_page = self.root_page().expect("a tree to change");
+        let mut tree = Tree::of_root_page(root_page);
+        let result = operation(&mut tree);
+        let changed = tree
+            .root_page()
+            .expect("bbtree's operations keep the root page");
+        let tagged = changed.node().node_ptr().tagged();
+        if tagged != root_page.node().node_ptr().tagged() {
+            Interleaving::switch_point();
+            self.root.store(tagged.as_ptr(), Ordering::Release);
         }
-    }
-
-    /// Runs `f` on the entry whose key equals `key`, while its leaf is
-    /// latched shared, and returns what `f` returned; `None` without one.
-    #[inline]
-    pub(crate) fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.root_page()?;
-        let key = SearchKey::new(key);
-        let (held, at_separator) = self.descend::<Q, Shared, ()>(&key, &mut ());
-        let leaf = held.leaf;
-        let (key, value) = if at_separator {
-            (leaf.head_key(), leaf.head_value())
-        } else {
-            let index = leaf.find(&key, ())?;
-            // SAFETY: a search returns the index of a key of the leaf.
-            unsafe { leaf.key_value_unchecked(index) }
-        };
-        let result = f(key, value);
-        drop(held);
-        Some(result)
+        result
     }
 
     /// Runs `f` on the entry whose key equals `key`, its value exclusive,
@@ -392,8 +247,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     {
         self.root_page()?;
         let key = SearchKey::new(key);
-        let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ());
-        let leaf = held.leaf;
+        let (held, at_separator) = self.descend::<Q, Exclusive, ()>(&key, &mut ()).ok()?;
+        let leaf = held.leaf();
         let (key, value) = if at_separator {
             (leaf.head_key(), leaf.head_value_mut())
         } else {
@@ -407,334 +262,108 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Some(result)
     }
 
-    /// Inserts `key` and `value` and returns `None`; or, if an equal key is
-    /// there, keeps it, drops `key`, replaces its value and returns the old
-    /// one, as std's `BTreeMap::insert` does. Pages come from `alloc`.
-    #[inline]
-    pub(crate) fn insert(&self, key: K, value: V, alloc: &impl Allocator) -> Option<V>
-    where
-        K: Ord,
-    {
-        let alloc = &ZeroedPages(alloc);
-        self.root_page_or_new(alloc);
-        let (held, at_separator) = self.descend::<K, Exclusive, ()>(&SearchKey::new(&key), &mut ());
-        match Self::insert_into(&held, at_separator, key, value) {
-            Ok(replaced) => replaced,
-            Err((key, value, _)) => {
-                drop(held);
-                self.insert_splitting(key, value, alloc)
-            }
-        }
-    }
-
-    /// Inserts into `held`, the leaf where `key` belongs, as [`Self::insert`]
-    /// does, if it holds `key` or has room; or gives both back, with the
-    /// edge where `key` goes in the full leaf.
-    #[inline(always)]
-    fn insert_into(
-        held: &HeldLeaf<K, V, S, Exclusive>,
-        at_separator: bool,
-        key: K,
-        value: V,
-    ) -> Result<Option<V>, (K, V, usize)>
-    where
-        K: Ord,
-    {
-        let leaf = held.leaf;
-        if at_separator {
-            // As std, the new key is dropped before the value changes.
-            drop(key);
-            return Ok(Some(mem::replace(leaf.head_value_mut(), value)));
-        }
-        match leaf.search_always_inlined(&SearchKey::new(&key)) {
-            Ok(index) => {
-                drop(key);
-                Ok(Some(mem::replace(leaf.value_mut(index), value)))
-            }
-            Err(edge) if leaf.len() < Leaf::<K, V, Latched<S>>::capacity() => {
-                leaf.insert_fit(edge, WindowedKey::new(key, leaf.prefix_len()), value);
-                Ok(None)
-            }
-            Err(edge) => Err((key, value, edge)),
-        }
-    }
-
-    /// [`Self::insert`] where the leaf was full: searches again, keeping
-    /// the internal nodes it goes through, and splits, until it inserts.
-    #[inline(never)]
-    fn insert_splitting(&self, mut key: K, mut value: V, alloc: &impl Allocator) -> Option<V>
-    where
-        K: Ord,
-    {
-        loop {
-            let mut path = SplitPath::new();
-            let (held, at_separator) =
-                self.descend::<K, Exclusive, _>(&SearchKey::new(&key), &mut path);
-            let edge;
-            (key, value, edge) = match Self::insert_into(&held, at_separator, key, value) {
-                Ok(replaced) => return replaced,
-                Err(full) => full,
-            };
-            match self.split_leaf(&path, held, edge, key, value, alloc) {
-                Ok(()) => return None,
-                Err(entry) => (key, value) = entry,
-            }
-        }
-    }
-
-    /// Splits `held`, the full leaf `path` leads to, and inserts `key` and
-    /// `value` at `edge` of it, carrying the split up as far as it goes; or,
-    /// if a node it changes changed since the descent read it, changes
-    /// nothing and gives both back.
-    ///
-    /// Every node it changes it holds, and changes in place, as bbtree's
-    /// insert does; readers that read one meanwhile fail their version check
-    /// (`node/optimistic.rs`). The halves of each split fit their prefixes
-    /// to their fences right after it (D26), while the nodes above, where
-    /// the fences are, are still as the descent read them.
-    fn split_leaf(
-        &self,
-        path: &SplitPath<K, V, S>,
-        held: HeldLeaf<K, V, S, Exclusive>,
-        edge: usize,
-        key: K,
-        value: V,
-        alloc: &impl Allocator,
-    ) -> Result<(), (K, V)>
-    where
-        K: Ord,
-    {
-        let depth = path.depth;
-        // The lowest node with room takes the split's separator; every node
-        // below it splits. Without one, the root splits and the tree grows.
-        let room = (0..depth)
-            .rev()
-            .find(|&level| path.level(level).routed.len < Internal::<K, V, Latched<S>>::capacity());
-        let first_changed = room.unwrap_or(0);
-        // The fences of the nodes that split are separators in the nodes
-        // above them: in the nodes the split changes, or, where the top one
-        // that splits is the first or last child of the node with room, in
-        // the nearest node above with a separator on that side, which the
-        // split holds too, unchanged, to read it.
-        let fence_holders = room.map_or([None, None], |top| {
-            let routed = path.level(top).routed;
-            let nearest_above = |holds: fn(Routed) -> bool| {
-                (0..top)
-                    .rev()
-                    .find(|&level| holds(path.level(level).routed))
-            };
-            let low = (routed.edge == 0)
-                .then(|| nearest_above(|routed| routed.edge > 0))
-                .flatten();
-            let high = (routed.edge == routed.len)
-                .then(|| nearest_above(|routed| routed.edge < routed.len))
-                .flatten();
-            [low, high.filter(|&high| Some(high) != low)]
-        });
-        let mut held_levels = [0; MAX_DEPTH + 2];
-        let mut held_count = 0;
-        for level in fence_holders
-            .into_iter()
-            .flatten()
-            .chain(first_changed..depth)
-        {
-            held_levels[held_count] = level;
-            held_count += 1;
-        }
-        if !Self::try_lock_levels(path, &held_levels[..held_count]) {
-            return Err((key, value));
-        }
-
-        // From the leaf up: split, fit the halves, carry the separator.
-        let leaf = held.leaf;
-        let split = leaf.split_insert(
-            edge,
-            WindowedKey::new(key, leaf.prefix_len()),
-            value,
-            FreshPage::allocate(alloc),
-        );
-        let separator_key = split.right.head_key();
-        Self::refit_halves(leaf, split.right, separator_key, path, depth);
-        let mut carried = (split.separator, Node::Leaf(split.right));
-        let mut level = depth;
-        let raised_leaf_root = loop {
-            let (separator, right) = carried;
-            let Some(parent_level) = level.checked_sub(1) else {
-                break self.raise(depth == 0, separator, right, alloc);
-            };
-            let parent = path.level(parent_level).node;
-            match parent.insert(
-                path.level(parent_level).routed.edge,
-                separator,
-                right,
-                alloc,
-            ) {
-                Insertion::Fit(_) => break None,
-                Insertion::Split(split) => {
-                    let separator_key = Node::Internal(split.right)
-                        .border_leaf::<FirstEdge>()
-                        .head_key();
-                    Self::refit_halves(parent, split.right, separator_key, path, parent_level);
-                    carried = (split.separator, Node::Internal(split.right));
-                    level = parent_level;
-                }
-            }
-        };
-
-        // A root that was a leaf is internal now: retag its pointer while it
-        // is still held; then let go of everything.
-        if let Some(root_page) = raised_leaf_root {
-            let tagged = root_page.node().node_ptr().tagged();
-            self.root.store(tagged.as_ptr(), Ordering::Release);
-        }
-        for level in first_changed..depth {
-            let PathLevel { node, version, .. } = path.level(level);
-            node.latch().unlock_exclusive(version);
-        }
-        for level in fence_holders.into_iter().flatten() {
-            let PathLevel { node, version, .. } = path.level(level);
-            node.latch().unlock_unchanged(version);
-        }
-        drop(held);
-        Ok(())
-    }
-
-    /// Takes the nodes at `levels` of `path` exclusively, at the versions
-    /// the descent read them at; or, if one changed since, none of them.
-    fn try_lock_levels(path: &SplitPath<K, V, S>, levels: &[usize]) -> bool {
-        for (count, &level) in levels.iter().enumerate() {
-            let PathLevel { node, version, .. } = path.level(level);
-            if !node.latch().try_lock_at(version) {
-                for &locked in &levels[..count] {
-                    let PathLevel { node, version, .. } = path.level(locked);
-                    node.latch().unlock_unchanged(version);
-                }
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Makes the tree a level taller, its root having split in place, with
-    /// `separator` between its node, the left half, and `right`: the root's
-    /// node moves to a fresh page, unlatched, and the root page's node
-    /// becomes an internal one above both halves, as `RootPage::raise`
-    /// does; for a root leaf, the caller holds it exclusively, and the root
-    /// page starts its internal node on zeroed bytes
-    /// (`RootPage::raise_latched_leaf`). Returns the root page if the root
-    /// was a leaf, whose pointer the caller tags anew.
-    fn raise(
-        &self,
-        root_was_leaf: bool,
-        separator: Separator<K, Latched<S>>,
-        right: Node<K, V, Latched<S>>,
-        alloc: &impl Allocator,
-    ) -> Option<RootPage<K, V, Latched<S>>> {
-        let root_page = self.root_page().expect("a tree to raise");
-        let raised = if root_was_leaf {
-            root_page.raise_latched_leaf(alloc)
-        } else {
-            root_page.raise(alloc)
-        };
-        let Node::Internal(root) = raised.node() else {
-            unreachable!("a raised root is internal");
-        };
-        if let Node::Internal(moved) = root.child(0) {
-            // It moved with the root's latch word, which the split holds.
-            moved.latch().reset();
-        }
-        root.insert_fit(0, separator, right);
-        root_was_leaf.then_some(raised)
-    }
-
-    /// Fits the prefixes of `left` and `right`, the halves of the node at
-    /// `level` of `path` (the leaf's at `path.depth`), with `separator_key`
-    /// between them, to their fences: the node's old fences outside, read
-    /// from the nodes above, which are still as the descent read them, and
-    /// `separator_key` between, no shorter than the parent's prefix (D44).
-    /// A half whose keys differ past its prefix reads no fence
-    /// (`Child::keys_differ_past_prefix`).
-    fn refit_halves<C: Child<K, V, Latched<S>>>(
-        left: C,
-        right: C,
-        separator_key: &K,
-        path: &SplitPath<K, V, S>,
-        level: usize,
-    ) {
-        let fences = OldFences { path, level };
-        let parent_prefix_len = level
-            .checked_sub(1)
-            .map_or(0, |parent| path.level(parent).node.prefix_len());
-        if !left.keys_differ_past_prefix() {
-            Self::refit(left, fences.low(), Some(separator_key), parent_prefix_len);
-        }
-        if !right.keys_differ_past_prefix() {
-            Self::refit(right, Some(separator_key), fences.high(), parent_prefix_len);
-        }
-    }
-
-    /// Fits `node`'s prefix to its fences `low` and `high`, no shorter than
-    /// its parent's (D44).
-    fn refit<C: Child<K, V, Latched<S>>>(
-        node: C,
-        low: Option<&K>,
-        high: Option<&K>,
-        parent_prefix_len: usize,
-    ) {
-        let prefix_len =
-            KeyInliner::fence_prefix_len::<Latched<S>>(low, high, 0).max(parent_prefix_len);
-        node.refit_prefix(prefix_len);
-    }
-
-    /// Panics unless the tree is a well-formed B+-tree of `length` entries,
-    /// with every node's prefix what its fences share
-    /// ([`Tree::check_invariants`]); once no other thread changes it.
+    /// Panics unless the tree is a well-formed B+-tree of `length` entries
+    /// ([`Tree::check_invariants`]), once no other thread changes it, whose
+    /// appends go to its last leaf.
     #[cfg(test)]
     pub(crate) fn check_invariants(&mut self, length: usize)
     where
         K: Ord,
     {
+        use super::node_stack::LastEdge;
+
         match self.root_page() {
-            Some(root_page) => Tree::of_root_page(root_page).check_invariants(length),
+            Some(root_page) => {
+                Tree::of_root_page(root_page).check_invariants(length);
+                let last_leaf = root_page.node().border_leaf::<LastEdge>();
+                assert_eq!(
+                    *self.rightmost_leaf.get_mut(),
+                    last_leaf.node_ptr().tagged().as_ptr(),
+                    "appends go to a leaf that is not the last"
+                );
+            }
             None => assert_eq!(length, 0, "a map without a tree has entries"),
         }
     }
 
+    /// How many keys each node holds, level by level from the root, each
+    /// level in key order: the shape a test sets up before threads race on
+    /// it. Empty without a tree.
+    #[cfg(all(test, shuttle))]
+    pub(crate) fn node_lengths(&mut self) -> std::vec::Vec<std::vec::Vec<usize>> {
+        use std::vec;
+        use std::vec::Vec;
+
+        use super::inspect::TreeView;
+
+        let Some(root_page) = self.root_page() else {
+            return Vec::new();
+        };
+        let tree = Tree::of_root_page(root_page);
+        let view = TreeView::new(&tree, 0);
+        let mut levels = Vec::new();
+        let mut level = vec![view.root().expect("a tree has a root")];
+        while !level.is_empty() {
+            levels.push(level.iter().map(|node| node.len()).collect());
+            level = (level.iter())
+                .flat_map(|node| (0..=node.len()).filter_map(|edge| node.child(edge)))
+                .collect();
+        }
+        levels
+    }
+
+    /// The keys of each leaf, in key order, each leaf's head first.
+    #[cfg(all(test, shuttle))]
+    pub(crate) fn leaf_keys(&mut self) -> std::vec::Vec<std::vec::Vec<K>>
+    where
+        K: Clone,
+    {
+        use std::vec;
+        use std::vec::Vec;
+
+        use super::inspect::TreeView;
+
+        let Some(root_page) = self.root_page() else {
+            return Vec::new();
+        };
+        let tree = Tree::of_root_page(root_page);
+        let view = TreeView::new(&tree, 0);
+        let mut level = vec![view.root().expect("a tree has a root")];
+        while !level[0].is_leaf() {
+            level = (level.iter())
+                .flat_map(|node| (0..=node.len()).filter_map(|edge| node.child(edge)))
+                .collect();
+        }
+        (level.iter())
+            .map(|leaf| {
+                (leaf.head_key().into_iter())
+                    .chain((0..leaf.len()).map(|index| leaf.key(index)))
+                    .cloned()
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// How many leading bytes every key of the tree shares (D50).
+    #[cfg(test)]
+    pub(crate) fn shared_prefix_len(&mut self) -> usize {
+        self.root_page()
+            .map_or(0, |root_page| root_page.shared_prefix().len())
+    }
+
     /// Takes the tree apart, with `alloc`, the allocator its pages came
-    /// from, once no other thread reaches it.
+    /// from, the pages on its free lists too, once no other thread reaches
+    /// it.
     pub(crate) fn destroy(&mut self, alloc: &impl Allocator) {
         if let Some(root_page) = self.root_page() {
             *self.root.get_mut() = ptr::null_mut();
+            *self.rightmost_leaf.get_mut() = ptr::null_mut();
             Tree::of_root_page(root_page).destroy(alloc);
         }
-    }
-}
-
-/// The fences a node on a split's path had before the split: the
-/// separators beside it in the nodes above, read from the nodes themselves,
-/// which the split holds, unchanged yet (`LatchedTree::split_leaf`).
-struct OldFences<'p, K, V, S> {
-    path: &'p SplitPath<K, V, S>,
-    /// The node's level: `path.depth` for the leaf.
-    level: usize,
-}
-
-impl<'p, K, V, S: InlineKeyStrategy<K>> OldFences<'p, K, V, S> {
-    /// The low fence; `None` on the tree's left border.
-    fn low(&self) -> Option<&'p K> {
-        self.nearest(|routed| routed.edge.checked_sub(1))
-    }
-
-    /// The high fence; `None` on the tree's right border.
-    fn high(&self) -> Option<&'p K> {
-        self.nearest(|routed| (routed.edge < routed.len).then_some(routed.edge))
-    }
-
-    /// The separator `beside` picks in the nearest node above that has one.
-    fn nearest(&self, beside: impl Fn(Routed) -> Option<usize>) -> Option<&'p K> {
-        (0..self.level).rev().find_map(|level| {
-            let PathLevel { node, routed, .. } = self.path.level(level);
-            beside(routed).map(|index| node.separator_key(index))
-        })
+        self.free.deallocate_all(
+            alloc,
+            Leaf::<K, V, Latched<S>>::page_layout(),
+            Internal::<K, V, Latched<S>>::page_layout(),
+        );
     }
 }

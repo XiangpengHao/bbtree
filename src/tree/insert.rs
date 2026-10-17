@@ -158,9 +158,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
 
     /// [`Self::insert`] of a key that shares what every key of the tree
     /// shares already: for [`Tree::insert`], which shrank it for the key
-    /// before it searched.
+    /// before it searched, and a latched tree's insert into a full leaf
+    /// (`tree/latched/insert.rs`).
     #[inline]
-    fn insert_prefixed(
+    pub(in crate::tree) fn insert_prefixed(
         &mut self,
         key: PrefixedKey<K>,
         value: V,

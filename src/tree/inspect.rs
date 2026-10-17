@@ -33,7 +33,7 @@ use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
 pub use super::batch::LaneFetch;
 
-/// A map's tree, read in place: see [`crate::BBTreeMap::inspect`].
+/// A map's tree, read in place: see [`crate::unsync::BBTreeMap::inspect`].
 pub struct TreeView<'a, K, V, S> {
     tree: &'a Tree<K, V, S>,
     root_page: Option<RootPage<K, V, S>>,
@@ -69,7 +69,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// The steps the map's exact-key lookup takes for `key`
-    /// ([`crate::BBTreeMap::get`]), node by node, through the same
+    /// ([`crate::unsync::BBTreeMap::get`]), node by node, through the same
     /// searches: `search` in each internal node, `find` in the
     /// leaf. A key found in an internal node is a separator, whose value is
     /// a head below (D17): the trace then goes on the way the value is read
@@ -156,7 +156,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         self.root_page?.shared_prefix().place_outside(&search)
     }
 
-    /// The lanes and executor of [`crate::BBTreeMap::get_many`] (doc 12),
+    /// The lanes and executor of [`crate::unsync::BBTreeMap::get_many`] (doc 12),
     /// run for `keys` and watched: every poll of a lane, in the executor's
     /// order, with the line the lane fetched before it yielded. They run
     /// whatever the map's size, but on a map without an internal root, where
@@ -235,7 +235,7 @@ impl LaneWatch for BatchRecorder<'_> {
     }
 }
 
-/// A batch lookup as [`crate::BBTreeMap::get_many`] runs it, poll by poll
+/// A batch lookup as [`crate::unsync::BBTreeMap::get_many`] runs it, poll by poll
 /// ([`TreeView::trace_many`]).
 pub struct BatchTrace<'a, K, V, S> {
     polls: Vec<BatchPoll<'a, K, V, S>>,
@@ -864,8 +864,8 @@ mod tests {
     use std::format;
 
     use super::*;
-    use crate::BBTreeMap;
     use crate::tree::test_support::TestRng;
+    use crate::unsync::BBTreeMap;
 
     /// What a walk through every node of a map sees.
     #[derive(Default)]

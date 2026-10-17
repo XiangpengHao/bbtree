@@ -8,6 +8,12 @@ repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
 
+# Shuttle explores the latched tree's thread interleavings in tests built
+# with `--cfg shuttle` (`src/tree/interleaving.rs`), like loom's `cfg(loom)`:
+# no feature, so `--all-features` builds and users never see it.
+[target.'cfg(shuttle)'.dev-dependencies]
+shuttle = "0.9.7"
+
 [features]
 # Read-only views of a map's nodes (`BBTreeMap::inspect`), for the visualizer
 # in `vis/`. No stability promise.
@@ -15,9 +21,4 @@ inspect = []
 
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
-
-# Every module with submodules is a folder with its own `mod.rs`, never a
-# `foo.rs` beside a `foo/`.
-[lints.clippy]
-self_named_module_files = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(shuttle)"] }

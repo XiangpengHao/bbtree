@@ -7,16 +7,16 @@
 
 use dioxus::prelude::*;
 
-use crate::batch_view::{Batcher, Playback, PlaybackCommand};
-use crate::inspected_tree::LoadedTree;
+use crate::batch_view::{Batcher, PlaybackCommand};
 use crate::scenarios::Scenario;
 use crate::shared_link::HistoryStep;
 use crate::trace::Tracer;
+use crate::workload::Builder;
 
-/// Listens for the keys on the whole page; draws nothing.
+/// Listens for the keys on the whole page, for the explorer; draws nothing.
 #[component]
 pub(crate) fn Shortcuts(
-    tree: Signal<Option<LoadedTree>>,
+    builder: Builder,
     tracer: Tracer,
     batcher: Batcher,
     search_open: Signal<bool>,
@@ -48,7 +48,7 @@ pub(crate) fn Shortcuts(
             "#,
         );
         while let Ok(key) = keys.recv::<String>().await {
-            let Some(tree) = tree.peek().clone() else {
+            let Some(tree) = builder.peek_tree() else {
                 continue;
             };
             let batch = batcher.is_shown();
@@ -61,9 +61,9 @@ pub(crate) fn Shortcuts(
                 }
                 "b" | "B" => batcher.start(),
                 "r" | "R" if batch => batcher.reseed(),
-                " " if batch => Playback::send(PlaybackCommand::Toggle),
-                "," if batch => Playback::send(PlaybackCommand::Back),
-                "." if batch => Playback::send(PlaybackCommand::Forward),
+                " " if batch => batcher.play(PlaybackCommand::Toggle),
+                "," if batch => batcher.play(PlaybackCommand::Back),
+                "." if batch => batcher.play(PlaybackCommand::Forward),
                 _ if batch => {}
                 " " => tracer.toggle_descent(),
                 "," => tracer.step_descent(-1),

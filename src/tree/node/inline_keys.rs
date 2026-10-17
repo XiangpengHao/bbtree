@@ -99,6 +99,21 @@ impl<K> KeyInliner<K> {
         }
     }
 
+    /// Whether `K`, under strategy `S`, is ordered by its own bytes alone,
+    /// and every bit pattern of them is a `K`: the std integers and byte
+    /// arrays [`Auto`] recognizes. A copy of such a key, read while a writer
+    /// changes it, compares without reading anything else, which a latched
+    /// tree's optimistic reader relies on (`optimistic.rs`); any other key's
+    /// order may follow pointers it holds.
+    ///
+    /// [`Auto`]: crate::Auto
+    #[inline(always)]
+    pub(in crate::tree) fn orders_by_own_bytes<S: InlineKeyStrategy<K>>() -> bool {
+        matches!(S::SOURCE, InlineKeySource::RecognizedStdTypes)
+            && (StdInteger::<K>::recognize().is_some()
+                || ByteString::<K>::recognize().is_some_and(ByteString::holds_its_bytes))
+    }
+
     /// `key`'s inline key at `offset`: what a node whose keys share their
     /// first `offset` bytes stores beside it. Always inlined, as the
     /// dispatch it is: called from enough places, LLVM outlined it, and
@@ -229,12 +244,6 @@ impl<K> KeyInliner<K> {
 /// as many as the node kind's [`InlineWidth`], in an unsigned integer of as
 /// many bytes, which orders like them.
 pub(in crate::tree) trait InlineSlot: Ord + VectorCount {
-    /// Whether one pass that counts every slot up to the capacity compiles to
-    /// vector compares on the build target, which makes it faster than a
-    /// binary search (`inline_key_search.rs`): 16- and 32-bit lanes on x86-64
-    /// and AArch64, but 64-bit ones only with AVX-512 (04, Q6).
-    const COUNT_AUTOVECTORIZES: bool;
-
     /// The first bytes of `inline_key`, which a node keeps.
     fn of_inline_key(inline_key: InlineWord) -> Self;
 
@@ -247,9 +256,6 @@ pub(in crate::tree) trait InlineSlot: Ord + VectorCount {
 macro_rules! narrow_inline_slot {
     ($slot:ty) => {
         impl InlineSlot for $slot {
-            const COUNT_AUTOVECTORIZES: bool =
-                cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
-
             #[inline]
             fn of_inline_key(inline_key: InlineWord) -> Self {
                 (inline_key >> (InlineWord::BITS - <$slot>::BITS)) as $slot
@@ -268,8 +274,6 @@ narrow_inline_slot!(u32);
 
 /// The whole inline key.
 impl InlineSlot for u64 {
-    const COUNT_AUTOVECTORIZES: bool = cfg!(target_feature = "avx512f");
-
     #[inline]
     fn of_inline_key(inline_key: InlineWord) -> Self {
         inline_key
@@ -692,7 +696,7 @@ where
         })
     }
 
-    pub(super) fn key(&self) -> &Q {
+    pub(in crate::tree) fn key(&self) -> &Q {
         self.key
     }
 
@@ -735,6 +739,22 @@ where
         }
         let offset = prefix_len.min(bytes.len().saturating_sub(WINDOW_LEN));
         bytes.get(offset).map(core::ptr::from_ref)
+    }
+
+    /// Whether the key, a recognized byte string, ends within the inline key
+    /// a node of kind `Kind`, a node of std byte strings, keeps at
+    /// `prefix_len`: a stored key that shares those first `prefix_len` bytes
+    /// and has an equal inline key is this key if their lengths are equal.
+    /// `false` for any other key.
+    #[inline(always)]
+    pub(super) fn ends_within_window<Kind: NodeKind>(&self, prefix_len: usize) -> bool {
+        let plan = NodePlan::<K>::of::<S, Kind>();
+        let (Some(KeyInliner::ByteString(_)), Some(width), Some(query)) =
+            (plan.inliner(), plan.inline_width(), self.recognized_bytes())
+        else {
+            return false;
+        };
+        query.bytes.len() <= prefix_len + width.byte_len()
     }
 
     /// The query's length tag, if it is a recognized byte string (D36).

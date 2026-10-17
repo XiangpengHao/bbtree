@@ -35,11 +35,11 @@ pub(crate) enum Suite {
     /// and kernel paths → `u64` at 1k: inserts and lookups.
     Small,
     /// What CI measures for every pull request and every commit to main
-    /// (.github/workflows/perf.yml), bbtree against std's `BTreeMap` only:
-    /// `u64 → u64` at 1k and at 1M, past the CI machine's 12 MiB L3, every
-    /// operation, and at 10M inserts and lookups; and strings → `u64` at 1k
-    /// and 1M, inserts and lookups. Generated keys only, since the CI machine
-    /// has no datasets.
+    /// (.github/workflows/perf.yml), bbtree's unsync map against std's
+    /// `BTreeMap` only: `u64 → u64` at 1k and at 1M, past the CI machine's
+    /// 12 MiB L3, every operation, and at 10M inserts and lookups; and
+    /// strings → `u64` at 1k and 1M, inserts and lookups. Generated keys
+    /// only, since the CI machine has no datasets.
     Ci,
 }
 
@@ -101,10 +101,12 @@ impl Suite {
     /// The maps the suite's workloads run on. The real-keys suite compares
     /// the ordered maps only: at 10M entries of long strings, building each
     /// map takes seconds, and the hash maps wouldn't fit its time budget. CI
-    /// compares bbtree with its baseline, std's `BTreeMap`.
+    /// compares bbtree's unsync map with its baseline, std's `BTreeMap`; the
+    /// batches, both bbtree maps, which have a batch API, with it too.
     pub(crate) fn maps(self) -> &'static [MapKind] {
         match self {
-            Self::RealKeys | Self::Ci | Self::Batch => &[MapKind::BBTree, MapKind::StdBTree],
+            Self::RealKeys | Self::Ci => &[MapKind::Unsync, MapKind::StdBTree],
+            Self::Batch => &[MapKind::Unsync, MapKind::BBTree, MapKind::StdBTree],
             Self::Headline
             | Self::Keys
             | Self::Values

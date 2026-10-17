@@ -57,8 +57,8 @@ What makes bbtree different is that we are more performant and more memory effic
 
 - [ ] Optimized on Apple M-series chips.
 - [x] Optimized on x86-64 with AVX512.
-- [ ] Good visualization for both tree layout and the batch interleaved search.
-- [ ] Compare with std Btree, Hashbrown.
+- [x] Good visualization for both tree layout and the batch interleaved search.
+- [x] Compare with std Btree, Hashbrown.
 - [ ] Workload sort: fastest sorting is to build a bbtree. 
 - [ ] Workload sort-merge join: no need to pre-sort.
 - [ ] Workload hashjoin: bbtree is faster than hashbrown in hash join.

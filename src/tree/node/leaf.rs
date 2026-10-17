@@ -160,8 +160,21 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         let Some(inline_keys) = self.inline_keys() else {
             return CandidateLine::Unknown;
         };
+        self.candidate_line_among(target, inline_keys, self.len())
+    }
+
+    /// [`Self::candidate_line`] for `target`, the key's inline key at the
+    /// leaf's prefix length, among `inline_keys`, the leaf's, `len` of them
+    /// live.
+    #[inline(always)]
+    pub(super) fn candidate_line_among(
+        self,
+        target: InlineTarget,
+        inline_keys: NodeInlineKeys<'_>,
+        len: usize,
+    ) -> CandidateLine {
         let index = if let Some(mask) = inline_keys.equality_mask(target.inline_key()) {
-            match mask.unique(self.len()) {
+            match mask.unique(len) {
                 SlotMatches::None => return CandidateLine::Absent,
                 SlotMatches::One(index) => index,
                 _ => return CandidateLine::Unknown,
@@ -244,7 +257,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// Whether the leaf holds fewer entries than [`Child::min_len`].
-    #[cfg(test)]
     pub(in crate::tree) fn is_underfull(self) -> bool {
         self.len() < <Self as Child<K, V, S>>::min_len()
     }

@@ -41,3 +41,5 @@ Phase 1 built (D51, D52).
 - [ ] we might want to benchmark the insert performance of roughly sorted data, compare with hashmap.
 
 - [ ] entry should also go through the right most leaf fast path.
+
+- [ ] We are better than radix tree: 1. support prefix search, 2. better memory usage, 3. faster scan.
