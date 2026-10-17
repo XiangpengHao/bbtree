@@ -18,14 +18,15 @@ mkdir -p "$out"
 
 # The rows of "$@" past their headers, each prefixed by $prefix, a cell's
 # last row winning: a cell is a row's first $key_fields fields. Rows of
-# maps the post no longer shows are left out: artmap, in both its forms,
-# and DashMap (2026-10-16), and bbtree's unsync map, alone or behind a lock
-# (2026-10-17).
+# maps the post no longer shows are left out: artmap, in both its forms
+# (2026-10-16), and bbtree's unsync map, alone or behind a lock
+# (2026-10-17). DashMap's are kept: the concurrent card draws it, a hash
+# map, for reference.
 rows() {
     local prefix=$1 key_fields=$2
     shift 2
     for file in "$@"; do
-        if [ -f "$file" ]; then tail -n +2 "$file" | { grep -v -e '^artmap' -e '^dashmap' -e '^bbtree-unsync' || true; } | sed "s/^/$prefix/"; fi
+        if [ -f "$file" ]; then tail -n +2 "$file" | { grep -v -e '^artmap' -e '^bbtree-unsync' || true; } | sed "s/^/$prefix/"; fi
     done | awk -F, -v n="$key_fields" '{
         key = $1; for (i = 2; i <= n; i++) key = key "," $i
         if (!(key in last)) order[++count] = key

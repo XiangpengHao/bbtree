@@ -1,5 +1,7 @@
 //! The post's second card: the maps threads share, as threads are added,
-//! at 10M entries: throughput, all threads together, a line a map. Gets
+//! at 10M entries, on 96 cores of AWS's c8a, a thread a core, not on the
+//! desktop the other cards ran on: throughput, all threads together, a
+//! line a map. Gets
 //! (half of them misses; bbtree's batched ones a line of their own),
 //! inserts, updates, and mixes of 10% updates with 90% lookups or 90%
 //! scans; a kind of key at a time.
@@ -7,9 +9,10 @@
 //! The lines are drawn for reading, not decoration: thread counts to
 //! scale from zero, so that a map whose throughput grows with its threads
 //! draws a straight line from the corner; bbtree's lines highlighted, the
-//! others dark; each line named at its end, so there is no legend to
-//! match colors against; and a crosshair that reads every line at the
-//! thread count under the pointer.
+//! others dark; DashMap, a hash map, for reference, faint and dotted, as a
+//! different kind of map; each line named at its end, so there is no
+//! legend to match colors against; and a crosshair that reads every line
+//! at the thread count under the pointer.
 
 use std::rc::Rc;
 
@@ -42,8 +45,21 @@ impl ConcurrentLine {
     fn label(&self) -> String {
         if self.batched {
             format!("{} (batched)", self.map.label())
+        } else if !self.map.is_ordered() {
+            format!("{} (unordered, hashtable)", self.map.label())
         } else {
             self.map.label().to_string()
+        }
+    }
+
+    /// The class of its marks: bbtree's highlighted, a hash map's faint.
+    fn series_class(&self) -> &'static str {
+        if self.map.is_ours() {
+            "chart-series ours"
+        } else if !self.map.is_ordered() {
+            "chart-series unordered"
+        } else {
+            "chart-series"
         }
     }
 
@@ -77,8 +93,9 @@ impl ConcurrentLine {
 }
 
 #[component]
-pub(crate) fn ConcurrentChart(measurements: Rc<Measurements>, spotlight: Spotlight) -> Element {
-    let mut keys = use_signal(|| MeasuredKeys::U64);
+pub(crate) fn ConcurrentChart(spotlight: Spotlight) -> Element {
+    let measurements = use_hook(|| Rc::new(Measurements::of_epyc_9r45()));
+    let mut keys = use_signal(|| MeasuredKeys::WikiTitles); // SCREENSHOT-TEMP
     let mut operation = use_signal(|| MeasuredOperation::Get);
     let frame = FrameWidth::use_new();
     let machine = measurements.machine();
@@ -124,14 +141,14 @@ pub(crate) fn ConcurrentChart(measurements: Rc<Measurements>, spotlight: Spotlig
             }
         }
         p { class: "chart-note",
-            "All threads together, 10M entries; higher is better. Up to 12 threads, one a core; past 12, the cores' second hardware threads. "
+            "All threads together, 10M entries; higher is better. A thread a core. "
             match operation() {
                 MeasuredOperation::Get => "Get: half hits, half misses; batched: get_many_copied, 64 keys a call. ",
                 MeasuredOperation::Mixed => "90% lookups, 10% updates. ",
                 MeasuredOperation::ScanMixed => "90% scans of 100 entries, 10% updates. ",
                 _ => "",
             }
-            "{machine.name}."
+            "{machine.name} ({machine.detail})."
             RepositoryLinks {
                 links: (MeasuredMap::CONCURRENT.into_iter())
                     .filter_map(MeasuredMap::repository_link)
@@ -196,9 +213,19 @@ fn ThroughputLines(
     width: f64,
     spotlight: Spotlight,
 ) -> Element {
+    /// An end name's average character, at its 12.5px.
+    const NAME_CHARACTER: f64 = 6.6;
     let narrow = FrameWidth::is_narrow(width);
     let height = if narrow { 300.0 } else { 380.0 };
-    let right = if narrow { 16.0 } else { 196.0 };
+    // Room for the longest name at the lines' ends, past its value.
+    let longest_name = (lines.iter())
+        .map(|line| line.label().chars().count())
+        .max();
+    let right = if narrow {
+        16.0
+    } else {
+        (66.0 + longest_name.unwrap_or(0) as f64 * NAME_CHARACTER).max(196.0)
+    };
     const LEFT: f64 = 44.0;
     const TOP: f64 = 30.0;
     const BOTTOM: f64 = 40.0;
@@ -236,6 +263,24 @@ fn ThroughputLines(
             Some((line.map, line.label(), *mops, y.at(*mops)))
         })
         .collect();
+    let label_class = |map: MeasuredMap| {
+        if map.is_ours() {
+            "end-label ours lands"
+        } else if !map.is_ordered() {
+            "end-label unordered lands"
+        } else {
+            "end-label lands"
+        }
+    };
+    let key_class = |map: MeasuredMap| {
+        if map.is_ours() {
+            "line-key ours"
+        } else if !map.is_ordered() {
+            "line-key unordered"
+        } else {
+            "line-key"
+        }
+    };
     let labels = EndLabel::placed(ends, 17.0, TOP, height - BOTTOM);
     let mut crosshair = use_signal(|| None::<u32>);
     let mut spotlight = spotlight;
@@ -314,11 +359,17 @@ fn ThroughputLines(
                         });
                         rsx! {
                             g {
-                                class: if line.map.is_ours() { "chart-series ours" } else { "chart-series" },
+                                class: line.series_class(),
                                 if line.map.is_ours() {
                                     path { class: "chart-highlight draws", path_length: 1, d: smooth.path() }
                                 }
-                                path { class: "chart-line draws", path_length: 1, style: "stroke:{line.map.line_color()}", d: smooth.path() }
+                                if line.map.is_ordered() {
+                                    path { class: "chart-line draws", path_length: 1, style: "stroke:{line.map.line_color()}", d: smooth.path() }
+                                } else {
+                                    // Dotted, its dashes in pixels: it fades in
+                                    // as the others finish drawing.
+                                    path { class: "chart-line lands", style: "stroke:{line.map.line_color()}", d: smooth.path() }
+                                }
                                 for (threads, mops) in line.points.iter().copied() {
                                     circle {
                                         class: "chart-point lands",
@@ -345,7 +396,7 @@ fn ThroughputLines(
                     {
                         let end_x = width - right;
                         rsx! {
-                            g { class: if label.map.is_ours() { "end-label ours lands" } else { "end-label lands" },
+                            g { class: label_class(label.map),
                                 circle {
                                     class: "chart-dot",
                                     style: "fill:{label.map.fill_color()}",
@@ -397,8 +448,8 @@ fn ThroughputLines(
             if narrow {
                 ul { class: "line-keys",
                     for label in labels.iter() {
-                        li { class: if label.map.is_ours() { "line-key ours" } else { "line-key" },
-                            span { class: "line-key-swatch", style: "background:{label.map.line_color()}" }
+                        li { class: key_class(label.map),
+                            span { class: "line-key-swatch", style: "--swatch:{label.map.line_color()}" }
                             strong { "{label.value:.1}" }
                             " {label.name}"
                         }

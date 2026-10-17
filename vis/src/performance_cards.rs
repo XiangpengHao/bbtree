@@ -58,7 +58,7 @@ impl PerformanceCard {
 
 #[component]
 pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotlight) -> Element {
-    let mut shown = use_signal(|| PerformanceCard::SingleThread);
+    let mut shown = use_signal(|| PerformanceCard::Concurrent); // SCREENSHOT-TEMP
     // The cards have been in view: their charts' motion may play.
     let mut seen = use_signal(|| false);
     let ids = ElementIds::of_current();
@@ -133,7 +133,7 @@ pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotli
                         SingleThreadChart { measurements: measurements.clone(), spotlight }
                     },
                     PerformanceCard::Concurrent => rsx! {
-                        ConcurrentChart { measurements: measurements.clone(), spotlight }
+                        ConcurrentChart { spotlight }
                     },
                     PerformanceCard::EndToEnd => rsx! {
                         EndToEndChart { measurements: measurements.clone(), spotlight }

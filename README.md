@@ -8,7 +8,11 @@
 [![shuttle](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=shuttle)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
 [![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
 
-bbtree is world's fastest ordered map:
+> B-trees are by far the most important access path structure in database and file systems.
+> — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
+
+
+bbtree is by far the fastest btree (ordered map):
 1. 5x faster than std's `BTreeMap` at single thread, 7x faster than `crossbeam-skiplist` at 12 threads.
 2. 30% lower memory usage, 5x lower p99 latency.
 3. Zero dependencies, `no_std` compatible.

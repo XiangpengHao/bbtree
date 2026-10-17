@@ -8,7 +8,7 @@
 # map, `bbtree::BBTreeMap`, which threads share, as "bbtree" in every tab;
 # bbtree's unsync map runs in none.
 #
-#   bench/tools/blog-runs.sh [tab1|tab2|memory|arch|all] [keys...]
+#   bench/tools/blog-runs.sh [tab1|tab2|tab2-extra|memory|arch|all] [keys...]
 #
 # Environment:
 #   ENTRIES      entries per map (10000000)
@@ -53,7 +53,7 @@ memory=$bench/target/release/bbtree-scaling-memory
 mkdir -p "$out"
 # Only the binaries the run needs: each is a fat-LTO link.
 case $what in
-    tab1 | tab2 | arch) bins=(--bin bbtree-scaling) ;;
+    tab1 | tab2 | tab2-extra | arch) bins=(--bin bbtree-scaling) ;;
     memory) bins=(--bin bbtree-scaling-memory) ;;
     *) bins=(--bin bbtree-scaling --bin bbtree-scaling-memory) ;;
 esac
@@ -112,6 +112,19 @@ tab2() {
     done
 }
 
+# Tab 2's cells that aren't in the post: DashMap, a hash map, measured
+# and left out, as tab 2's maps are measured; and bbtree's batched inserts.
+tab2_extra() {
+    local key=$1
+    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps dashmap \
+        --workloads get-half,update,mixed --measure throughput --seconds 0.5 \
+        --out "$out/tab2-reads-$key-dashmap"
+    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps dashmap \
+        --workloads insert --measure throughput --out "$out/tab2-inserts-$key-dashmap"
+    $timed "$scaling" --entries "$entries" --threads "$THREADS" --keys "$key" --maps bbtree \
+        --workloads insert-batch --measure throughput --out "$out/tab2-insert-batch-$key"
+}
+
 # Architectures: the single-thread gets of bbtree against std's B-tree
 # alone, on a machine other than the one the post was written on: lookups
 # half of which miss, of UUIDs unless other keys are named.
@@ -135,10 +148,11 @@ for key in "${keys[@]}"; do
     case $what in
         tab1) tab1 "$key" ;;
         tab2) tab2 "$key" ;;
+        tab2-extra) tab2_extra "$key" ;;
         memory) memory_of "$key" ;;
         arch) arch "$key" ;;
         all) tab1 "$key"; tab2 "$key"; memory_of "$key" ;;
-        *) echo "usage: $0 [tab1|tab2|memory|arch|all] [keys...]" >&2; exit 2 ;;
+        *) echo "usage: $0 [tab1|tab2|tab2-extra|memory|arch|all] [keys...]" >&2; exit 2 ;;
     esac
 done
 echo "results in $out; merge them for the post with bench/tools/blog-collect.sh $out"

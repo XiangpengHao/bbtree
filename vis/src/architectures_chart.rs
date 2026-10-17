@@ -58,7 +58,7 @@ impl ArchitectureMachine {
             name: self.name,
             detail: self.caption,
         };
-        let measurements = Measurements::of_single_thread(machine, self.throughput);
+        let measurements = Measurements::of_throughput(machine, self.throughput);
         let keys = MeasuredKeys::Uuid;
         let get = |map| measurements.single_thread_nanos(map, keys, MeasuredOperation::Get);
         Some(BaselineGroup {
