@@ -31,6 +31,7 @@ use core::cmp::Ordering as KeyOrdering;
 use core::mem::MaybeUninit;
 use core::sync::atomic::Ordering;
 
+use super::super::interleaving::Interleaving;
 use super::super::node::Node;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::internal::Internal;
@@ -506,6 +507,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     #[inline(always)]
     pub(super) fn root_version(&self, root: Internal<K, V, Latched<S>>) -> Option<Version> {
         let version = root.latch().read_version();
+        Interleaving::switch_point();
         (self.root.load(Ordering::Acquire) == root.node_ptr().tagged().as_ptr()).then_some(version)
     }
 

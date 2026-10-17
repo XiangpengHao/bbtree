@@ -22,7 +22,8 @@
 //!   went to (D45). Every operation on a whole tree starts there.
 //! - [`latched`] is a tree that threads share (`BBTreeMap`): the same
 //!   nodes with a latch word each (`node/latch.rs`), read optimistically
-//!   above the leaves (`node/optimistic.rs`) (D54).
+//!   above the leaves (`node/optimistic.rs`) (D54), with the points where
+//!   Shuttle may switch its threads in tests (`interleaving.rs`).
 //! - The rest of this module is the tree's operations, each in its own
 //!   feature's module. Node stacks from the root and the iterators' walks
 //!   along them (`node_stack.rs`, `walk.rs`), and searches that need no node
@@ -55,6 +56,7 @@ mod cut;
 mod insert;
 #[cfg(any(test, feature = "inspect"))]
 pub(crate) mod inspect;
+mod interleaving;
 #[cfg(any(test, fuzzing))]
 mod invariants;
 pub(crate) mod join;

@@ -676,4 +676,66 @@ after a lowering to a leaf, without checking the root pointer again. The
 model tests passed with both; the stress run's models crashed on the
 second only with about a leaf of keys, the root splitting and lowering
 over and over (`threads_raise_and_lower_the_root_around_one_leaf` keeps
-that shape). Those races need controlled schedules (Shuttle).
+that shape). Those races need controlled schedules.
+
+### Shuttle
+
+Shuttle (`map/shuttle_tests.rs`, `.github/workflows/shuttle.yml`) runs a test's
+threads one at a time and switches between them where the tree touches an
+atomic that threads share or waits for another thread
+(`tree/interleaving.rs`): a latch word, the root and last-leaf pointers, a
+free list, the header fields a racing read loads. Built with
+`--cfg shuttle`, like loom's `cfg(loom)`; other builds compile the points
+to nothing. Shuttle's own atomics would do the same, but the latch words
+live in node pages and racing reads load page fields in place. One thread
+runs at a time, so Shuttle finds bad interleavings, not reorderings of a
+weak memory model, nor torn reads of a node a writer is changing.
+
+Each schedule reruns the whole test, so the tests stay small. Values are
+64 bytes, so a leaf holds 12, and each test sets up a tree one operation
+from a change, its shape found by building it (`Shapes`): a full root leaf,
+two leaves a removal merges back into it, a full root of two levels, three
+levels a removal lowers to two, or one of these with a sibling filled so
+that a removal takes from it instead of merging. Small tests race two or
+three threads of one to four operations over one change: an empty tree
+started, emptied, raised from a leaf and lowered back, raised from two
+levels to three and lowered back, leaves and internal nodes taking from a
+full sibling, separators removed (the root's too), the shared prefix
+shrunk, the last leaf freed under appends, a freed page reused under a
+cloned range, and removals and `get_or_insert`s racing for one key. Three
+larger ones run random operations, every kind the map has, against
+per-thread models around one leaf, around the last leaves of three levels,
+and with string keys whose 4-byte windows tie. Every closure checks its
+value is the requested key's and not dropped, after a switch point: a
+closure that runs on an entry its thread has not latched sees another
+thread drop it. A test whose race may or may not reach its change counts
+the schedules that did, and fails if none did. Schedules cost about 60 ns a
+switch, a test thousands to hundreds of thousands of schedules.
+
+Checked by breaking the tree on purpose, a check at a time: the tests
+catch a scan or a descent that skips the root pointer's second read, a
+lookup that skips its leaf's or its parent's version, an append that skips
+its check of the last leaf, a removal that takes neither sibling leaf nor
+sibling internal node, and a new tree's root leaf let go before appends
+point at it. They miss two kinds of break. A descent that skips its check
+that the leaf's head is the separator it matched is not one: a removal of
+the separator holds every node from it down to the leaf, so a parent's
+version check fails first. And a change to a node its thread doesn't hold,
+as a removal of a separator that doesn't take the right border left of it,
+or a shrink of the shared prefix that doesn't take the right border, whose
+prefixes each refits: Shuttle runs a change whole between two switch points,
+so no reader sees it half done. A debug check that a latched node's writer
+holds it would catch those.
+
+It found two bugs the threaded tests and the stress run had not:
+
+- **A scan from either end** read the root's version without checking the
+  root pointer again (`scan.rs`, `descend_to_first_leaf`), the descent's
+  old bug: after a lowering to a leaf, it took the leaf's bytes for an edge
+  and latched whatever they pointed at.
+- **A lookup of a separator key**, batched or not, latched the leaf and
+  checked only that its head was the key (`batch.rs`, `read_head`;
+  `lookup.rs`, `find_optimistic`), not that the leaf was still at the
+  version read under its parent. A merge leaves the freed page's bytes as
+  they were, so the lookup ran the closure on a stale copy of an entry that
+  lives on in the sibling, which another thread could then remove and drop.
