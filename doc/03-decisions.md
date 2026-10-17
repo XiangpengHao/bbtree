@@ -933,8 +933,8 @@ Design and measurements in 07-node-plan.md.
   abort-on-unwind guard.
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
-  (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`) go when a change
-  breaks them.
+  (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
+  `fuzz/src/user_code_panics.rs`) go when a change breaks them.
 
 **D49. With inline keys, separator keys are leaf heads, and internal nodes keep no keys.** (2026-10-13)
 Design, census and measurements in 11-separator-key.md.
