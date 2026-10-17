@@ -25,10 +25,10 @@
 //! exclusive bit is clear: shared holders don't change what a reader reads,
 //! so an optimistic check ignores them.
 
-use core::hint;
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
+use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::leaf::Leaf;
 use crate::inline_key::InlineKeyStrategy;
@@ -91,6 +91,7 @@ impl NodeLatch {
     /// it exclusively; spins until then.
     #[inline(always)]
     pub(in crate::tree) fn read_version(&self) -> Version {
+        Interleaving::switch_point();
         let word = self.0.load(Ordering::Acquire);
         if word & Self::EXCLUSIVE == 0 {
             return Version(word & !Self::SHARED_MASK);
@@ -104,6 +105,7 @@ impl NodeLatch {
         let mut backoff = Backoff::new();
         loop {
             backoff.spin();
+            Interleaving::switch_point();
             let word = self.0.load(Ordering::Acquire);
             if word & Self::EXCLUSIVE == 0 {
                 return Version(word & !Self::SHARED_MASK);
@@ -117,6 +119,7 @@ impl NodeLatch {
     #[inline(always)]
     pub(in crate::tree) fn is_unchanged(&self, version: Version) -> bool {
         fence(Ordering::Acquire);
+        Interleaving::switch_point();
         self.0.load(Ordering::Relaxed) & !Self::SHARED_MASK == version.0
     }
 
@@ -125,6 +128,7 @@ impl NodeLatch {
     /// [`Self::unlock_exclusive`], at the same version.
     #[inline]
     pub(in crate::tree) fn try_lock_at(&self, version: Version) -> bool {
+        Interleaving::switch_point();
         let locked = self
             .0
             .compare_exchange(
@@ -145,6 +149,7 @@ impl NodeLatch {
     /// to the next version, which tells optimistic readers it changed.
     #[inline]
     pub(in crate::tree) fn unlock_exclusive(&self, version: Version) {
+        Interleaving::switch_point();
         self.0
             .store(version.0 + Self::VERSION_UNIT, Ordering::Release);
     }
@@ -153,6 +158,7 @@ impl NodeLatch {
     /// without waiting otherwise.
     #[inline]
     pub(in crate::tree) fn try_read_version(&self) -> Option<Version> {
+        Interleaving::switch_point();
         let word = self.0.load(Ordering::Acquire);
         (word & Self::EXCLUSIVE == 0).then_some(Version(word & !Self::SHARED_MASK))
     }
@@ -161,6 +167,7 @@ impl NodeLatch {
     /// `None` without waiting otherwise. Returns the version to let go at.
     #[inline]
     pub(in crate::tree) fn try_lock_exclusive(&self) -> Option<Version> {
+        Interleaving::switch_point();
         let word = self.0.load(Ordering::Relaxed);
         let version = Version(word);
         (word & (Self::EXCLUSIVE | Self::SHARED_MASK) == 0 && self.try_lock_at(version))
@@ -171,6 +178,7 @@ impl NodeLatch {
     /// spins until then. Returns the version to let go at.
     #[inline]
     pub(in crate::tree) fn lock_exclusive(&self) -> Version {
+        Interleaving::switch_point();
         let word = self.0.load(Ordering::Relaxed);
         let version = Version(word & !Self::SHARED_MASK);
         if word == version.0 && word & Self::EXCLUSIVE == 0 && self.try_lock_at(version) {
@@ -185,6 +193,7 @@ impl NodeLatch {
         let mut backoff = Backoff::new();
         loop {
             backoff.spin();
+            Interleaving::switch_point();
             let word = self.0.load(Ordering::Relaxed);
             if word & (Self::EXCLUSIVE | Self::SHARED_MASK) == 0 && self.try_lock_at(Version(word))
             {
@@ -197,21 +206,27 @@ impl NodeLatch {
     /// until then. Let go with [`Self::unlock_shared`].
     #[inline]
     pub(in crate::tree) fn lock_shared(&self) {
+        Interleaving::switch_point();
         let word = self.0.load(Ordering::Relaxed);
-        if word & Self::EXCLUSIVE == 0
-            && self
-                .0
-                .compare_exchange_weak(
-                    word,
-                    word + Self::SHARED_UNIT,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
-        {
+        if word & Self::EXCLUSIVE == 0 && self.try_add_shared_holder(word) {
             return;
         }
         self.lock_shared_contended();
+    }
+
+    /// Adds a shared holder to the word, if it is still `word`: `false` if
+    /// it changed, or spuriously.
+    #[inline(always)]
+    fn try_add_shared_holder(&self, word: u64) -> bool {
+        Interleaving::switch_point();
+        self.0
+            .compare_exchange_weak(
+                word,
+                word + Self::SHARED_UNIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
     }
 
     #[cold]
@@ -219,19 +234,11 @@ impl NodeLatch {
     fn lock_shared_contended(&self) {
         let mut backoff = Backoff::new();
         loop {
+            Interleaving::switch_point();
             let word = self.0.load(Ordering::Relaxed);
             if word & Self::EXCLUSIVE == 0 {
                 debug_assert!(word & Self::SHARED_MASK != Self::SHARED_MASK);
-                if self
-                    .0
-                    .compare_exchange_weak(
-                        word,
-                        word + Self::SHARED_UNIT,
-                        Ordering::Acquire,
-                        Ordering::Relaxed,
-                    )
-                    .is_ok()
-                {
+                if self.try_add_shared_holder(word) {
                     return;
                 }
             }
@@ -242,13 +249,14 @@ impl NodeLatch {
     /// Lets go of the node, held shared.
     #[inline]
     pub(in crate::tree) fn unlock_shared(&self) {
+        Interleaving::switch_point();
         self.0.fetch_sub(Self::SHARED_UNIT, Ordering::Release);
     }
 }
 
 /// Spinning while another thread holds a latch: twice as long each round,
 /// up to a cap. The crate has no `std`, so there is no scheduler to yield
-/// to.
+/// to, but for Shuttle's in its tests (`tree/interleaving.rs`).
 struct Backoff {
     round: u32,
 }
@@ -261,9 +269,7 @@ impl Backoff {
     }
 
     fn spin(&mut self) {
-        for _ in 0..1_u32 << self.round {
-            hint::spin_loop();
-        }
+        Interleaving::wait(1 << self.round);
         self.round = (self.round + 1).min(Self::MAX_ROUND);
     }
 }

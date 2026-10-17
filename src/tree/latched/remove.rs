@@ -26,6 +26,7 @@
 
 use core::borrow::Borrow;
 
+use super::super::interleaving::Interleaving;
 use super::super::node::Child;
 use super::super::node::Node;
 use super::super::node::inline_keys::SearchKey;
@@ -109,6 +110,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             if let Ok(removed) = self.try_remove_rebalancing(key, condition, &pages) {
                 return removed;
             }
+            // Another thread holds a node the removal needs.
+            Interleaving::wait(1);
         }
     }
 

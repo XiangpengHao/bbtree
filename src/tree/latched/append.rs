@@ -16,6 +16,7 @@ use core::cmp::Ordering as KeyOrdering;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
+use super::super::interleaving::Interleaving;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
@@ -79,6 +80,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// until the thread that makes the tree points it there.
     #[inline(always)]
     pub(super) fn rightmost_leaf(&self) -> Option<Leaf<K, V, Latched<S>>> {
+        Interleaving::switch_point();
         let tagged = NonNull::new(self.rightmost_leaf.load(Ordering::Acquire))?;
         // SAFETY: the pointer is to a leaf page of the tree, tagged, which
         // stays a leaf page while threads share the tree (`pages.rs`).
@@ -89,12 +91,14 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// whether it is the tree's last leaf.
     #[inline(always)]
     pub(super) fn is_rightmost_leaf(&self, leaf: Leaf<K, V, Latched<S>>) -> bool {
+        Interleaving::switch_point();
         self.rightmost_leaf.load(Ordering::Relaxed) == leaf.node_ptr().tagged().as_ptr()
     }
 
     /// Points appends at `leaf`, the tree's last leaf now, which the caller
     /// holds, as it holds the leaf that was last.
     pub(super) fn point_appends_to(&self, leaf: Leaf<K, V, Latched<S>>) {
+        Interleaving::switch_point();
         self.rightmost_leaf
             .store(leaf.node_ptr().tagged().as_ptr(), Ordering::Release);
     }

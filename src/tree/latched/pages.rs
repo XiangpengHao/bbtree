@@ -18,11 +18,11 @@
 
 use core::alloc::Layout;
 use core::cell::RefCell;
-use core::hint;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+use super::super::interleaving::Interleaving;
 use super::super::node::latch::Version;
 use super::super::node::page::LatchedNodeHeader;
 use super::super::node_stack::MAX_DEPTH;
@@ -56,14 +56,19 @@ impl FreeList {
 
     /// Runs `f` with the list locked.
     fn with_locked<R>(&self, f: impl FnOnce() -> R) -> R {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            hint::spin_loop();
+        loop {
+            Interleaving::switch_point();
+            if self
+                .locked
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+            Interleaving::wait(1);
         }
         let result = f();
+        Interleaving::switch_point();
         self.locked.store(false, Ordering::Release);
         result
     }
@@ -88,6 +93,7 @@ impl FreeList {
     /// The page on top of the list, taken off it, if any.
     fn pop(&self) -> Option<NonNull<u8>> {
         // Most allocations find the list empty: they write nothing to it.
+        Interleaving::switch_point();
         if self.top.load(Ordering::Relaxed).is_null() {
             return None;
         }

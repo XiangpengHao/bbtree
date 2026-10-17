@@ -9,8 +9,7 @@
 //! that side. So an operation that holds a border node holds what every key
 //! shares still, which a shrinking needs that node for.
 
-use core::hint;
-
+use super::super::interleaving::Interleaving;
 use super::super::node::Node;
 use super::super::node::latch::Latched;
 use super::super::node_stack::{FirstEdge, LastEdge, NodeEnd};
@@ -38,7 +37,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     .into_key();
             }
             drop(held_nodes);
-            hint::spin_loop();
+            Interleaving::wait(1);
         }
     }
 

@@ -62,6 +62,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use self::descent::{Exclusive, Shared};
 use self::pages::{FreeLists, NodePages};
+use super::interleaving::Interleaving;
 use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
@@ -161,6 +162,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// The root page, as the tree's pointer tags it; `None` without a tree.
     #[inline(always)]
     fn root_page(&self) -> Option<RootPage<K, V, Latched<S>>> {
+        Interleaving::switch_point();
         let tagged = NonNull::new(self.root.load(Ordering::Acquire))?;
         // SAFETY: a non-null root pointer is a root page of this tree's,
         // tagged with its root's kind, stored by `start_tree` or an
@@ -173,6 +175,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Whether `leaf` is the root, which has no minimum (D22).
     #[inline(always)]
     fn is_root(&self, leaf: Leaf<K, V, Latched<S>>) -> bool {
+        Interleaving::switch_point();
         self.root.load(Ordering::Acquire) == leaf.node_ptr().tagged().as_ptr()
     }
 
@@ -189,6 +192,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         // whether it is (`insert.rs`).
         let version = root.latch().lock_exclusive();
         let tagged = root.node_ptr().tagged();
+        Interleaving::switch_point();
         match self.root.compare_exchange(
             ptr::null_mut(),
             tagged.as_ptr(),
@@ -196,6 +200,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             Ordering::Acquire,
         ) {
             Ok(_) => {
+                Interleaving::switch_point();
                 self.rightmost_leaf
                     .store(tagged.as_ptr(), Ordering::Release);
                 root.latch().unlock_exclusive(version);
@@ -223,6 +228,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             .expect("bbtree's operations keep the root page");
         let tagged = changed.node().node_ptr().tagged();
         if tagged != root_page.node().node_ptr().tagged() {
+            Interleaving::switch_point();
             self.root.store(tagged.as_ptr(), Ordering::Release);
         }
         result
@@ -300,6 +306,64 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             }
             None => assert_eq!(length, 0, "a map without a tree has entries"),
         }
+    }
+
+    /// How many keys each node holds, level by level from the root, each
+    /// level in key order: the shape a test sets up before threads race on
+    /// it. Empty without a tree.
+    #[cfg(all(test, shuttle))]
+    pub(crate) fn node_lengths(&mut self) -> std::vec::Vec<std::vec::Vec<usize>> {
+        use std::vec;
+        use std::vec::Vec;
+
+        use super::inspect::TreeView;
+
+        let Some(root_page) = self.root_page() else {
+            return Vec::new();
+        };
+        let tree = Tree::of_root_page(root_page);
+        let view = TreeView::new(&tree, 0);
+        let mut levels = Vec::new();
+        let mut level = vec![view.root().expect("a tree has a root")];
+        while !level.is_empty() {
+            levels.push(level.iter().map(|node| node.len()).collect());
+            level = (level.iter())
+                .flat_map(|node| (0..=node.len()).filter_map(|edge| node.child(edge)))
+                .collect();
+        }
+        levels
+    }
+
+    /// The keys of each leaf, in key order, each leaf's head first.
+    #[cfg(all(test, shuttle))]
+    pub(crate) fn leaf_keys(&mut self) -> std::vec::Vec<std::vec::Vec<K>>
+    where
+        K: Clone,
+    {
+        use std::vec;
+        use std::vec::Vec;
+
+        use super::inspect::TreeView;
+
+        let Some(root_page) = self.root_page() else {
+            return Vec::new();
+        };
+        let tree = Tree::of_root_page(root_page);
+        let view = TreeView::new(&tree, 0);
+        let mut level = vec![view.root().expect("a tree has a root")];
+        while !level[0].is_leaf() {
+            level = (level.iter())
+                .flat_map(|node| (0..=node.len()).filter_map(|edge| node.child(edge)))
+                .collect();
+        }
+        (level.iter())
+            .map(|leaf| {
+                (leaf.head_key().into_iter())
+                    .chain((0..leaf.len()).map(|index| leaf.key(index)))
+                    .cloned()
+                    .collect()
+            })
+            .collect()
     }
 
     /// How many leading bytes every key of the tree shares (D50).
