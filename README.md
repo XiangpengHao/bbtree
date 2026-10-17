@@ -20,9 +20,9 @@ bbtree is by far the fastest btree (ordered map):
 5. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
-![https://bbtree.xiangpeng.systems/post/](doc/assets/readme-perf.png)
+![https://bbtree.xiangpeng.systems](doc/assets/readme-perf.png)
 
-Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post/bbtree-internals/).
+Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
 
 ## Usage
 
