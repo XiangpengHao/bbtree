@@ -254,26 +254,29 @@ At this thread count, `bbtree` is even faster than [DashMap](https://github.com/
 
 ### How do we make it correct?
 
-Performance optimization is easy, you simply ask Claude/Codex to make the code 10x faster for a workload, it's measureable, and LLMs can rentlessly iterate on it.
+Performance optimization is easy: you simply ask Claude or Codex to make the code 10× faster on a workload. Speed is measurable, and LLMs can iterate on it relentlessly.
 
-But making sure it is correct is hard. Correctness is implicit, you can never enumerate all DONOTs in the prompt, you can never write enough tests to prove it is correct, you can never neumerate all properties you want to hold. 
+But making sure the code is correct is hard. Correctness is implicit: you can never list every DON'T in the prompt, you can never write enough tests to prove the code correct, and you can never enumerate every property you want to hold.
 
-`bbtree` takes the following guards to approach correctness.
+`bbtree` has three guards to approach correctness.
 
 #### Guard 1: [Xiangpeng Hao](https://xiangpeng.systems)
 
-Xiangpeng is a real human sitting behind bbtree, he is the frontier to guard the correctness of the code.
-All of the code is written by LLMs, but Xiangpeng steers every design decisions, and holds accountability of the code.
+Xiangpeng is a real human behind `bbtree`, and the front line guarding the correctness of its code.
+All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code.
 
-He spents his PhD to write many many B-trees, including the one that runs in production at Microsoft (bftree). Choosing bbtree means you hire Xiangpeng and offload the attention to him.
+He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree[^bftree]). Choosing `bbtree` means you hire Xiangpeng, and offload your attention to him.
 
 #### Guard 2: LLMs
 
-No human can write better code than LLMs. All implementations are written by LLMs, and cross-checked by different LLM providers.
+No human can write better code than LLMs. All of the implementation is written by LLMs, and cross-checked by LLMs from different providers.
 
-#### Guard 3: Fuzzing, verification, DSTs
+#### Guard 3: fuzzing, verification, DSTs
 
-Conventional approaches still apply here: fuzzing generates random inputs and check the behavior is consistent with std BTreeMap; verification (verus) checks the critical properties of the code, e.g., keys in a node must be sorted in all conditions; DSTs (deterministic simulation testing) tests concurrent behaviors in a deterministic and principled way.
+Conventional approaches still apply here:
+1. **Fuzzing** runs random operations on `bbtree` and std's `BTreeMap` side by side, checks that every answer matches, and checks the whole tree's invariants after every operation.
+2. **Verification** with Verus[^verus] proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves.
+3. **DSTs** (deterministic simulation testing) with Shuttle[^shuttle] test concurrent behavior in a deterministic and principled way. 
 
 
 [^gray]: Jim Gray and Andreas Reuter, *Transaction Processing: Concepts and Techniques* (1993), as quoted by Goetz Graefe in [Modern B-Tree Techniques](https://doi.org/10.1561/1900000028) (2011).
@@ -315,6 +318,14 @@ Conventional approaches still apply here: fuzzing generates random inputs and ch
 [^pin]: crossbeam's [`SkipMap::get`](https://docs.rs/crossbeam-skiplist/0.1.3/crossbeam_skiplist/map/struct.SkipMap.html) pins an epoch on every call; scc's [`TreeIndex`](https://docs.rs/scc/latest/scc/tree_index/struct.TreeIndex.html) either takes a guard from the caller (`peek`) or pins one on every call (`peek_with`).
 
 [^tsm]: Michael Greenwald and David Cheriton, [The Synergy Between Non-Blocking Synchronization and Operating System Structure](https://www.usenix.org/legacy/publications/library/proceedings/osdi96/full_papers/greenwald/index.html) (OSDI 1996), which calls this type-stable memory.
+
+[^verus]: Andrea Lattuada et al., [Verus: Verifying Rust Programs using Linear Ghost Types](https://doi.org/10.1145/3586037) (OOPSLA 2023); code at [verus-lang/verus](https://github.com/verus-lang/verus).
+
+[^shuttle]: [Shuttle](https://github.com/awslabs/shuttle), a library for testing concurrent Rust code, from AWS.
+
+
+
+
 
 
 ## Status and decisions (2026-10-17, from the runs)
