@@ -7,6 +7,7 @@
 [![sanitizer](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/sanitizer.yml?branch=main&label=sanitizer)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
 [![shuttle](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=shuttle)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
 [![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
+[![verus](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/verus.yml?branch=main&label=verus)](https://github.com/XiangpengHao/bbtree/actions/workflows/verus.yml?query=branch%3Amain)
 
 > B-trees are by far the most important access path structure in database and file systems.
 > — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))

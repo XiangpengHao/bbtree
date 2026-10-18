@@ -1,5 +1,5 @@
-# Named for its README badge, as are miri.yml, sanitizer.yml, shuttle.yml and
-# fuzz.yml.
+# Named for its README badge, as are miri.yml, sanitizer.yml, shuttle.yml,
+# fuzz.yml and verus.yml.
 name: test
 
 on:

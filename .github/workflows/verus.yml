@@ -1,3 +1,4 @@
+# Named for its README badge.
 name: verus
 
 # The proofs in src/proof/ (doc/08-fuzzing-verification.md), checked by
@@ -8,7 +9,8 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Cancel a pull request's superseded runs.
+# Cancel a pull request's superseded runs. Every commit on main finishes its
+# run, so the README badge reports it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
