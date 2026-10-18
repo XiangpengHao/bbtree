@@ -45,6 +45,25 @@ impl<V> BBTreeMap<String, V> {
     }
 }
 
+impl BBTreeMap<String, u64> {
+    /// Asserts that every lookup of `case`'s probes answers as std's map
+    /// does: hits, and misses whose candidates' tags match, by length or
+    /// saturated.
+    fn assert_lookups_match(&mut self, case: &LengthTagCase) {
+        for probe in case.probes() {
+            let probe = probe.as_str();
+            let expected = case.value_of(probe).map(|index| index as u64);
+            assert_eq!(self.get(probe).copied(), expected, "{probe:.20}");
+            assert_eq!(
+                self.get_key_value(probe).map(|(key, _)| key.as_str()),
+                expected.map(|_| probe)
+            );
+            assert_eq!(self.contains_key(probe), expected.is_some());
+            assert_eq!(self.get_mut(probe).map(|value| *value), expected);
+        }
+    }
+}
+
 /// A map of the case's keys, each to its index.
 impl From<&LengthTagCase> for BBTreeMap<String, u64> {
     fn from(case: &LengthTagCase) -> Self {
@@ -69,33 +88,22 @@ fn leaves_keep_length_tags_where_these_tests_expect() {
     );
 }
 
-/// Every lookup of the shared cases answers as std's map does: hits, and
-/// misses whose candidates' tags match, by length or saturated.
+/// Every lookup of the shared cases answers as std's map does.
 #[test]
 fn length_tag_cases_match_std() {
     for case in LengthTagCase::all() {
-        let mut map = BBTreeMap::from(&case);
-        for probe in case.probes() {
-            let probe = probe.as_str();
-            let expected = case.value_of(probe).map(|index| index as u64);
-            assert_eq!(map.get(probe).copied(), expected, "{probe:.20}");
-            assert_eq!(
-                map.get_key_value(probe).map(|(key, _)| key.as_str()),
-                expected.map(|_| probe)
-            );
-            assert_eq!(map.contains_key(probe), expected.is_some());
-            assert_eq!(map.get_mut(probe).map(|value| *value), expected);
-        }
+        BBTreeMap::from(&case).assert_lookups_match(&case);
     }
 }
 
 /// The cases built to put two keys of each absent key's tag among its
 /// candidates do, by length or saturated: its lookup takes the two-candidate
-/// path.
+/// path, and answers as std's map does. Miri runs this one
+/// (`.config/nextest.toml`): `length_tag_cases_match_std` is too slow for it.
 #[test]
 fn absent_keys_have_two_candidates_of_their_tag() {
     for case in LengthTagCase::two_candidates_per_absent_key() {
-        let map = BBTreeMap::from(&case);
+        let mut map = BBTreeMap::from(&case);
         assert_eq!(map.leaf_depth(), 0);
         for absent in case.absent() {
             assert_eq!(
@@ -104,6 +112,7 @@ fn absent_keys_have_two_candidates_of_their_tag() {
                 "{absent:.20}"
             );
         }
+        map.assert_lookups_match(&case);
     }
 }
 
