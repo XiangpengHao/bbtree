@@ -12,8 +12,9 @@ use std::vec::Vec;
 use super::{BBTreeMap, RangeCloned};
 use crate::allocator::Global;
 use crate::inline_key::Auto;
+use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
-use crate::tree::test_support::TestRng;
+use crate::tree::test_support::{LengthTagCase, TestRng};
 
 /// Inserts `keys` in order, each with its position as its value, into a
 /// `BBTreeMap` and a `BTreeMap`, and checks that they agree on every
@@ -129,6 +130,47 @@ fn strings_match_std() {
     // Keys that lack what every key shares, before and after them all.
     absent.extend(["", "/usr", "/usr/shared", "a", "zz"].map(String::from));
     assert_matches_std(&keys, &absent);
+}
+
+/// A map of the case's keys, each to its index, as `u128`s: with 16-byte
+/// values, latched `String` leaves have room for length tags (D36).
+impl From<&LengthTagCase> for BBTreeMap<String, u128> {
+    fn from(case: &LengthTagCase) -> Self {
+        let mut map = Self::new();
+        for (index, key) in case.keys().iter().enumerate() {
+            map.insert(key.clone(), index as u128);
+        }
+        map.check_invariants(case.keys().len());
+        map
+    }
+}
+
+/// Every lookup of the shared length-tag cases answers as std's map does,
+/// the unlatched copies among them, which an exact tag may settle alone
+/// (`node/optimistic.rs`).
+#[test]
+fn length_tag_cases_match_std() {
+    if cfg!(target_pointer_width = "64") {
+        assert!(
+            LengthTagCase::leaves_keep_tags::<u128, Latched<Auto>>(),
+            "the cases test length tags only in leaves that keep them"
+        );
+    }
+    for case in LengthTagCase::all() {
+        let map = BBTreeMap::from(&case);
+        for probe in case.probes() {
+            let probe = probe.as_str();
+            let expected = case.value_of(probe).map(|index| index as u128);
+            assert_eq!(map.get_copied(probe), expected, "{probe:.20}");
+            assert_eq!(map.get_cloned(probe), expected);
+            assert_eq!(map.contains_key(probe), expected.is_some());
+            assert_eq!(map.get_many_copied([probe, probe]), [expected; 2]);
+            assert_eq!(
+                map.read(probe, |key, _| key.len()),
+                expected.map(|_| probe.len())
+            );
+        }
+    }
 }
 
 #[test]

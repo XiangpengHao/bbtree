@@ -103,11 +103,13 @@
 //!    count every slot without masking those out: a fresh page starts so,
 //!    and setting a shorter length refills the slots it leaves.
 //! 5. **Length tags follow keys.** Leaves whose plan keeps length tags
-//!    (`node_plan.rs`) keep each live key's byte length modulo 65536 in the
-//!    corresponding tag slot. `KeySlots` maintains these through every
-//!    mutation. All capacity slots start initialized; a search reads only
-//!    the tags of its candidates, and always confirms each one it selects
-//!    against the full key.
+//!    (`node_plan.rs`) keep each live key's byte length, saturated at
+//!    65,535, in the corresponding tag slot. `KeySlots` maintains these
+//!    through every mutation. All capacity slots start initialized; a search
+//!    reads only the tags of its candidates, and confirms each one it
+//!    selects against the full key. Only an unlatched copy of a key that
+//!    ends within its inline key (`optimistic.rs`) takes an equal tag below
+//!    65,535 for an equal length instead.
 //!
 //! Inline keys and prefix lengths steer searches only: whatever they hold,
 //! every position a search returns is in bounds, so a wrong `InlineKey`, or

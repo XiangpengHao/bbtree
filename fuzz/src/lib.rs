@@ -8,6 +8,9 @@
 //! - [`map_differential`]: map operations against std's map, one target per
 //!   row of the node plan, which is where key types take different paths
 //!   through the shared node code;
+//! - [`sync_map_differential`]: the sync map's operations against std's
+//!   map, on one thread, one target over every row it takes: the latched
+//!   layer over the same nodes;
 //! - [`set_algebra`]: the operations on two sets against std's sets, the
 //!   only set code that is not the map's;
 //! - [`user_code_panics`]: keys and values whose callbacks panic or lie,
@@ -23,6 +26,7 @@ pub mod map_differential;
 mod operation_list;
 mod position_mask;
 pub mod set_algebra;
+pub mod sync_map_differential;
 pub mod user_code_panics;
 
 #[cfg(test)]
@@ -34,6 +38,7 @@ mod tests {
 
     use crate::map_differential::{MapInput, MapTarget};
     use crate::set_algebra::SetInput;
+    use crate::sync_map_differential::SyncMapInput;
     use crate::user_code_panics::HostileInput;
 
     /// Inputs of pseudo-random bytes, of every length up to 16 KiB, the
@@ -112,6 +117,7 @@ mod tests {
                 "map_user_inline_keys" => MapTarget::UserInlineKeys,
                 "map_byte_arrays" => MapTarget::ByteArrays,
                 "map_plain_keys" => MapTarget::Plain,
+                "sync_map" => return Self::decode::<SyncMapInput>(&bytes).run(),
                 "set_algebra" => return Self::decode::<SetInput>(&bytes).run(),
                 "user_code_panics" => return Self::decode::<HostileInput>(&bytes).run(),
                 other => panic!("no fuzz target is named {other}"),
@@ -136,6 +142,11 @@ mod tests {
         RandomInputs::new(64).run_each(|input: &MapInput| {
             MapTarget::ALL.iter().for_each(|target| target.run(input));
         });
+    }
+
+    #[test]
+    fn sync_map_target_accepts_random_inputs() {
+        RandomInputs::new(256).run_each(SyncMapInput::run);
     }
 
     #[test]

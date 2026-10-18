@@ -18,7 +18,7 @@ use std::ops::Bound;
 
 use bbtree::unsync::BBTreeMap;
 use bbtree::unsync::bbtree_map::Entry;
-use bbtree::{Auto, InlineKey, InlineKeyStrategy, WithInlineKey};
+use bbtree::{Auto, BBTreeMap as SyncMap, InlineKey, InlineKeyStrategy, WithInlineKey};
 use libfuzzer_sys::arbitrary::{self, Arbitrary};
 
 use crate::key_recipe::{BorrowedLookup, FuzzKey, KeyRecipe, Stems, UserKey, WideKey};
@@ -90,8 +90,8 @@ pub struct MapInput {
 
 /// Which of a target's two maps an input runs on.
 #[derive(Arbitrary, Debug, Clone, Copy)]
-enum Fanout {
-    /// Nodes as wide as the key type gives, with `u64` values.
+pub(crate) enum Fanout {
+    /// Nodes as wide as the key type gives, with values of a word or two.
     Wide,
     /// Nodes of about a dozen entries, the minimum (D13), in leaves, or in
     /// both kinds where the key type allows.
@@ -100,13 +100,32 @@ enum Fanout {
 
 /// A range bound from the input.
 #[derive(Arbitrary, Debug, Clone, Copy)]
-enum InputBound {
+pub(crate) enum InputBound {
     Included(KeyRecipe),
     Excluded(KeyRecipe),
     Unbounded,
 }
 
 impl InputBound {
+    /// The range from `start` to `end`, or `None` if they are out of order,
+    /// for which every map under test panics, as std's does.
+    pub(crate) fn key_range<K: FuzzKey>(
+        start: Self,
+        end: Self,
+        stems: &Stems,
+    ) -> Option<(Bound<K>, Bound<K>)> {
+        let range = (start.key_bound(stems), end.key_bound(stems));
+        let out_of_order = match &range {
+            (Bound::Excluded(start), Bound::Excluded(end)) => start >= end,
+            (
+                Bound::Included(start) | Bound::Excluded(start),
+                Bound::Included(end) | Bound::Excluded(end),
+            ) => start > end,
+            _ => false,
+        };
+        (!out_of_order).then_some(range)
+    }
+
     fn key_bound<K: FuzzKey>(self, stems: &Stems) -> Bound<K> {
         match self {
             Self::Included(key) => Bound::Included(K::from_recipe(key, stems)),
@@ -119,7 +138,7 @@ impl InputBound {
 /// Which end each step of a walk takes from: bit `i % 32` for step `i`, set
 /// for the back.
 #[derive(Arbitrary, Debug, Clone, Copy)]
-struct Ends(u32);
+pub(crate) struct Ends(u32);
 
 impl Ends {
     fn takes_back(self, step: usize) -> bool {
@@ -279,7 +298,7 @@ enum MapOperation {
 }
 
 /// The value type of the maps under test, made from fuzzer input.
-trait FuzzValue: Clone + Ord + Debug {
+pub(crate) trait FuzzValue: Clone + Ord + Debug {
     fn from_input(input: u16) -> Self;
 
     /// Changes the value by `amount`, the same way every time.
@@ -293,6 +312,16 @@ impl FuzzValue for u64 {
 
     fn bump(&mut self, amount: u16) {
         *self = self.wrapping_add(u64::from(amount));
+    }
+}
+
+impl FuzzValue for u128 {
+    fn from_input(input: u16) -> Self {
+        u128::from(input)
+    }
+
+    fn bump(&mut self, amount: u16) {
+        *self = self.wrapping_add(u128::from(amount));
     }
 }
 
@@ -320,14 +349,21 @@ impl FuzzValue for BulkyValue {
 }
 
 /// A strategy the map targets run, and how they make a map of it from
-/// entries: as `collect` does, which std's API offers for the default
-/// strategy only (`map/from_entries.rs`), or by `extend`.
-trait FuzzStrategy<K: Ord>: InlineKeyStrategy<K> + Default {
+/// entries, the unsync map and the sync one alike: as `collect` does, which
+/// std's API offers for the default strategy only (`map/from_entries.rs`),
+/// or by `extend`.
+pub(crate) trait FuzzStrategy<K: Ord>: InlineKeyStrategy<K> + Default {
     fn collect<V>(entries: Vec<(K, V)>) -> BBTreeMap<K, V, Self>;
+
+    fn collect_sync<V>(entries: Vec<(K, V)>) -> SyncMap<K, V, Self>;
 }
 
 impl<K: Ord> FuzzStrategy<K> for Auto {
     fn collect<V>(entries: Vec<(K, V)>) -> BBTreeMap<K, V> {
+        entries.into_iter().collect()
+    }
+
+    fn collect_sync<V>(entries: Vec<(K, V)>) -> SyncMap<K, V> {
         entries.into_iter().collect()
     }
 }
@@ -335,6 +371,12 @@ impl<K: Ord> FuzzStrategy<K> for Auto {
 impl<K: Ord + InlineKey> FuzzStrategy<K> for WithInlineKey {
     fn collect<V>(entries: Vec<(K, V)>) -> BBTreeMap<K, V, Self> {
         let mut map = BBTreeMap::with_strategy(Self);
+        map.extend(entries);
+        map
+    }
+
+    fn collect_sync<V>(entries: Vec<(K, V)>) -> SyncMap<K, V, Self> {
+        let mut map = SyncMap::with_strategy(Self);
         map.extend(entries);
         map
     }
@@ -373,8 +415,8 @@ where
         K::from_recipe(recipe, self.stems)
     }
 
-    fn bounds(&self, start: InputBound, end: InputBound) -> (Bound<K>, Bound<K>) {
-        (start.key_bound(self.stems), end.key_bound(self.stems))
+    fn key_range(&self, start: InputBound, end: InputBound) -> Option<(Bound<K>, Bound<K>)> {
+        InputBound::key_range(start, end, self.stems)
     }
 
     fn entries(&self, entries: &[(KeyRecipe, u16)]) -> Vec<(K, V)> {
@@ -542,8 +584,7 @@ where
                 extract,
                 take,
             } => {
-                let bounds = self.bounds(start, end);
-                if !Self::out_of_order(&bounds) {
+                if let Some(bounds) = self.key_range(start, end) {
                     let (mut ours, mut theirs) = (extract.picker(), extract.picker());
                     let ours: Vec<_> = (self.ours.extract_if(bounds.clone(), |_, _| ours()))
                         .take(usize::from(take))
@@ -593,18 +634,6 @@ where
         }
     }
 
-    /// Whether both maps panic for these range bounds.
-    fn out_of_order<T: Ord>(bounds: &(Bound<T>, Bound<T>)) -> bool {
-        match bounds {
-            (Bound::Excluded(start), Bound::Excluded(end)) => start >= end,
-            (
-                Bound::Included(start) | Bound::Excluded(start),
-                Bound::Included(end) | Bound::Excluded(end),
-            ) => start > end,
-            _ => false,
-        }
-    }
-
     fn insert(&mut self, key: K, value: V) {
         let ours = self.ours.insert(key.clone(), value.clone());
         assert_eq!(ours, self.theirs.insert(key, value));
@@ -631,8 +660,7 @@ where
                 steps.assert_same_walk(self.ours.values(), self.theirs.values(), finish);
             }
             WalkSource::Range { start, end } => {
-                let bounds = self.bounds(start, end);
-                if !Self::out_of_order(&bounds) {
+                if let Some(bounds) = self.key_range(start, end) {
                     let (ours, theirs) =
                         (self.ours.range(bounds.clone()), self.theirs.range(bounds));
                     steps.assert_same_walk(ours, theirs, finish);
@@ -652,8 +680,7 @@ where
                 steps.assert_same_walk_mut(ours, theirs, |value| value.bump(amount));
             }
             WalkMutSource::Range { start, end } => {
-                let bounds = self.bounds(start, end);
-                if !Self::out_of_order(&bounds) {
+                if let Some(bounds) = self.key_range(start, end) {
                     let ours = self.ours.range_mut(bounds.clone());
                     let theirs = self.theirs.range_mut(bounds);
                     steps.assert_same_walk_mut(ours, theirs, |(_, value)| value.bump(amount));
@@ -743,13 +770,39 @@ impl<K: FuzzKey, V: FuzzValue, S: FuzzStrategy<K>> BorrowedLookup<K>
 
 /// How a walk takes its first items: `steps` of them, each from the end
 /// `ends` picks.
-#[derive(Clone, Copy)]
-struct Steps {
+#[derive(Arbitrary, Debug, Clone, Copy)]
+pub(crate) struct Steps {
     steps: u8,
     ends: Ends,
 }
 
 impl Steps {
+    /// Takes the first items of both iterators, each from the end `ends`
+    /// picks, until they run out: they must match, and `bump` changes each
+    /// one, in both. Their size hints aren't compared: the sync map's
+    /// iterators give none.
+    pub(crate) fn assert_same_steps<T: PartialEq + Debug>(
+        self,
+        ours: &mut impl DoubleEndedIterator<Item = T>,
+        theirs: &mut impl DoubleEndedIterator<Item = T>,
+        mut bump: impl FnMut(&mut T),
+    ) {
+        for step in 0..usize::from(self.steps) {
+            let items = if self.ends.takes_back(step) {
+                (ours.next_back(), theirs.next_back())
+            } else {
+                (ours.next(), theirs.next())
+            };
+            let (Some(mut our_item), Some(mut their_item)) = items else {
+                assert!(items.0.is_none() && items.1.is_none());
+                return;
+            };
+            assert_eq!(our_item, their_item);
+            bump(&mut our_item);
+            bump(&mut their_item);
+        }
+    }
+
     /// Takes the first items of both iterators, then the rest as `finish`
     /// says: they must match all along, and so must their size hints.
     fn assert_same_walk<I, J>(self, mut ours: I, mut theirs: J, finish: WalkFinish)

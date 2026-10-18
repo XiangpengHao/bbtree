@@ -5,7 +5,9 @@ The blog post is along with the visualization.
 The post's text as the site shows it (`vis/src/post.rs`,
 `vis/src/how_it_works.rs`). Bracketed lines mark where a figure or the
 charts sit; each figure of "How it works" shows one idea and nothing else,
-given here as what it draws, a sketch, and its caption.
+given here as what it draws and plays, a sketch of where it ends, and its
+caption. Each plays once the reader sees it, on one timeline
+(`vis/src/timeline.rs`), and the reader can replay, step and change it.
 
 Title: bbtree: fastest ordered map in the world
 
@@ -49,9 +51,12 @@ Every key in a node lies between the node's two fences (the separators beside it
 The node stores only that length, a `u16`, and keeps the 8 bytes *after* it.
 No fence key is stored.
 
-[Figure 1: four Wikipedia titles as the benchmarks store them, each with
-the bytes they share dimmed; their first 8 bytes; and the 8 bytes past
-what they share (`prefix_keys_figure.rs`).]
+[Figure 1: four neighboring keys of a key set (Wikipedia titles as the
+benchmarks store them, Linux paths, URLs; the reader picks), an 8-byte
+window framed on each, and what it holds. It plays: the window holds on
+the keys' first 8 bytes, which tie, then slides past what they share, the
+shared bytes dimming, and what it holds and the verdict turn over; a
+switch puts it back (`prefix_keys_figure.rs`).]
 
 ```text
 key                              first 8 bytes   8 bytes past the shared 20
@@ -65,7 +70,7 @@ List_of_bridges_in_Albania       List_of_        lbania··
                                  compare in full decided in a register
 ```
 
-> Four Wikipedia titles. Their first 8 bytes are the same, so a plain prefix decides nothing. They share their first 20 bytes, `List_of_bridges_in_A`: a node whose keys all share them skips them, and keeps the next 8 bytes, which tell the keys apart.
+> Four neighboring Wikipedia titles. Their first 8 bytes are the same, so a plain prefix decides nothing. They share their first 20 bytes: a node whose keys all share them skips them, and keeps the next 8 bytes, which tell the keys apart.
 
 When we added prefix keys, Wikipedia lookups went from 1,073 to 704 ns and loaded half as many cache lines from DRAM.
 Skipping shared prefixes made lookups of Linux paths another 1.5× faster (693 → 457 ns at 1M).
@@ -83,18 +88,19 @@ One AVX-512 instruction compares the target with 32 two-byte keys at once, and a
 A whole internal node is two 64-byte vectors: no loop, no branch, every load issued at once.
 Empty slots hold the largest value, so they never count.
 
-[Figure 2: one count. Eight slots, the last empty, the target under each,
-the mask, the count (`key_count_figure.rs`).]
+[Figure 2: the count against binary search over eight slots, the last
+empty. It plays a step a unit: the count's marks land together in step
+one, binary search's probes one a step; a slider moves the target and they
+race again (`key_count_figure.rs`).]
 
 ```text
+target 45
 prefix keys      3  11  27  40  58  71  90  max
-target          45  45  45  45  45  45  45   45
-key < target     1   1   1   1   0   0   0    0
-
-                4 ones: go to child 4
+count            1   1   1   1   0   0   0    0    child 4, in 1 step
+binary search            2   3   1                 child 4, in 3 steps
 ```
 
-> One compare checks every slot against the target; counting the ones gives the child to follow. Binary search would take 3 steps here, each waiting for the last, and 6 in a full node of 49 children.
+> Move the target. The count compares every slot at once and has the child after one step; binary search probes one slot at a time, each probe waiting for the last: 3 steps here, and 6 in a full node of 49 children.
 
 On ARM, the same count runs in NEON.
 On an M1 Pro, it took a 10M `u64` lookup from 390 to 174 ns, and from 1,678 instructions to 407.
@@ -112,7 +118,9 @@ bbtree lays out each node so that a lookup touches as few as possible:
 3. **Leaves keep each key next to its value**, aligned so that a pair never straddles two lines: the line that confirms the key brings the value with it.
 
 [Figure 3: the leaf of one `u64` lookup in the site's 1M-key tree, a cell
-a 64-byte line, the lines it read lit, from bbtree's page map and trace
+a 64-byte line, the lines it read lighting up in the order it read them,
+from bbtree's page map and trace; "Another key" looks up a random key of
+the tree, and pointing at a line says what it holds
 (`cache_lines_figure.rs`). Only the leaf: the site runs bbtree built for
 wasm32, whose 4-byte pointers give internal nodes another layout than a
 64-bit machine's; a leaf of `u64` keys and values is the same on both.]
@@ -125,7 +133,7 @@ prefix          keys and values
 keys
 ```
 
-> The leaf of one `u64` lookup, a cell a 64-byte line. The lookup reads the lines lit: the prefix keys, then the one line that holds the key and its value. An internal node reads the same way: its prefix keys, then one child pointer.
+> The leaf of one `u64` lookup, a cell a 64-byte line, lit in the order the lookup reads them: the prefix keys, then the one line that holds the key and its value. Look up another key: still three lines. An internal node reads the same way, its prefix keys, then one child pointer.
 
 And no software prefetch.
 Prefetch hides a bad layout instead of fixing it: when we tried it, misses got 12–33% slower, and DRAM traffic went up 4–6×.
@@ -149,7 +157,10 @@ While it waits for memory, the other lanes search.
 [Figure 4: four `u64` keys looked up together in the site's 1M-key tree,
 a row each: each search a block and, from each prefetch to that key's
 next search, the line on its way; time counted in searches, from
-bbtree's trace of the batch (`batch_lanes_figure.rs`).]
+bbtree's trace of the batch. It plays as the explorer plays a batch: each
+search lands as it runs, each line fills on its way, a playhead walks the
+searches and a count says how many lines are on their way; pointing at a
+row lights its key (`batch_lanes_figure.rs`).]
 
 ```text
 131072   ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■
@@ -184,7 +195,8 @@ Lookups read their leaf the same way: `get_copied` copies the value out and chec
 A lookup, hit or miss, writes nothing to shared memory.
 
 [Figure 5: one node's version, a writer, and two readers, a column each,
-time running down (`versions_figure.rs`).]
+time running down. It plays a moment a unit: a playhead walks down and
+each act reveals as it passes (`versions_figure.rs`).]
 
 ```text
 version     writer      reader 1      reader 2

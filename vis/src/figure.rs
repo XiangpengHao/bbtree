@@ -112,10 +112,6 @@ impl Figure {
         self.trees.tree(self.link.workload())
     }
 
-    pub(crate) fn tracer(&self) -> Tracer {
-        self.tracer
-    }
-
     pub(crate) fn batcher(&self) -> Batcher {
         self.batcher
     }

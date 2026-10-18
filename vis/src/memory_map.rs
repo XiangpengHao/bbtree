@@ -89,12 +89,17 @@ impl PageMarks {
         )
     }
 
-    /// Whether the lookup surely read each of `page`'s cache lines.
-    pub(crate) fn lines_surely_read(&self, page: &PageMap) -> Vec<bool> {
+    /// When, in its search's order of reads, the lookup surely read each
+    /// of `page`'s cache lines: a rank, earlier reads lower, equal for
+    /// lines read together; `None` for a line it didn't surely read.
+    pub(crate) fn line_read_order(&self, page: &PageMap) -> Vec<Option<usize>> {
         MapDrawing::of(page, self)
             .lines
             .iter()
-            .map(|line| line.is_some_and(|line| line.certainty == Certainty::Certain))
+            .map(|line| {
+                line.filter(|line| line.certainty == Certainty::Certain)
+                    .map(|line| line.phase as usize)
+            })
             .collect()
     }
 

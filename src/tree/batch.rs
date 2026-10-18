@@ -176,7 +176,7 @@ where
                         index = candidate as u16;
                         self.prefix_len = Leaf::at(self.node).prefix_len() as u16;
                         Prefetcher::watched(self.watch, LaneFetch::CandidateEntry, line).await;
-                        if Leaf::<K, V, S>::plan().has_length_tags() {
+                        if Leaf::<K, V, S>::plan().is_for_heap_byte_strings() {
                             // SAFETY: the candidate is an initialized key of
                             // this leaf, and the prefix the leaf's; neither
                             // changes while the tree is borrowed.

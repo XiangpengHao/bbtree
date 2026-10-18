@@ -12,7 +12,7 @@
 //! | std integers | the impl's width in both | nothing | `Ord` (D19) |
 //! | every key under `WithInlineKey` | the impl's width in both | nothing | `Ord` (D19) |
 //! | std byte arrays | 2 / 2 (D32) | nothing | bytes; an exact-key lookup's one candidate all at once (D38) |
-//! | std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36) | bytes, past the tie |
+//! | std heap byte strings | 8 / 4 (D43) | leaf: length tags, where they fit (D36) | bytes, past the tie |
 //!
 //! Every row with inline keys keeps its separator keys in leaves, each the
 //! head of the leftmost leaf right of it, and its internal nodes keep only
@@ -69,7 +69,8 @@ pub(in crate::tree) struct NodePlan<K> {
     /// the key again (D43).
     rehydrates_windows: bool,
     /// Whether the node stores each key's length, whose 2-byte tags filter an
-    /// exact-key lookup's candidates (D36).
+    /// exact-key lookup's candidates (D36): a leaf of heap byte strings,
+    /// where its layout has room for them.
     length_tags: bool,
     /// The search over the candidates: the keys whose inline keys equal the
     /// search key's.
@@ -153,10 +154,10 @@ impl<K> NodePlan<K> {
     /// Std heap byte strings, such as `String`, `Vec<u8>`, `Box<str>` and
     /// `&str`, which hold their bytes elsewhere: a tie costs a read past the
     /// node. Leaves keep 8 bytes of each inline key, and each key's length
-    /// (D36). Internal nodes, which most searches pass through without
-    /// ending at a key, keep 4 bytes, and read a window's other 4 from its
-    /// key when they hand it out (D43). Keys whose inline keys tie compare
-    /// by their bytes past the tie.
+    /// where their layout has room for it (D36). Internal nodes, which most
+    /// searches pass through without ending at a key, keep 4 bytes, and read
+    /// a window's other 4 from its key when they hand it out (D43). Keys
+    /// whose inline keys tie compare by their bytes past the tie.
     #[inline(always)]
     fn for_heap_byte_strings<Kind: NodeKind>(inliner: KeyInliner<K>) -> Self {
         let leaf = Kind::IS_LEAF;
@@ -168,7 +169,7 @@ impl<K> NodePlan<K> {
                 InlineWidth::Four
             }),
             rehydrates_windows: !leaf,
-            length_tags: leaf,
+            length_tags: Kind::has_room_for_length_tags(),
             candidate_search: KeySearch::EarlyExit,
             ..Self::without_inline_keys()
         }
@@ -194,14 +195,15 @@ impl<K> NodePlan<K> {
         self.rehydrates_windows
     }
 
-    /// Whether the node stores each key's length as a 2-byte tag (D36).
+    /// Whether the node stores each key's length as a 2-byte tag (D36): a
+    /// leaf of heap byte strings whose layout has room for them.
     #[inline(always)]
     pub(in crate::tree) fn has_length_tags(self) -> bool {
         self.length_tags
     }
 
     /// The tag the node stores for `key`, if it stores length tags: its
-    /// length in bytes, truncated to 16 bits.
+    /// length in bytes, saturated at 65,535.
     #[inline(always)]
     pub(in crate::tree) fn length_tag(self, key: &K) -> Option<u16> {
         self.length_tags.then(|| {
@@ -255,8 +257,15 @@ impl<K> NodePlan<K> {
     /// benchmark's `String` lookups ran 449 instructions instead of 433.
     #[inline(always)]
     pub(in crate::tree) fn inlines_node_search(self) -> bool {
-        !self
-            .byte_string()
+        !self.is_for_heap_byte_strings()
+    }
+
+    /// Whether the keys are std heap byte strings, whose ties read their
+    /// bytes past the node: the batch fetches a lone candidate's first line
+    /// of them ahead (`doc/12-batch-api.md`).
+    #[inline(always)]
+    pub(in crate::tree) fn is_for_heap_byte_strings(self) -> bool {
+        self.byte_string()
             .is_some_and(|byte_string| !byte_string.holds_its_bytes())
     }
 
@@ -330,6 +339,7 @@ mod tests {
     use super::{KeySearch, NodePlan};
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
     use crate::tree::node::internal::Internal;
+    use crate::tree::node::latch::Latched;
     use crate::tree::node::leaf::Leaf;
     use crate::tree::node::page::NodeKind;
     use crate::tree::test_support::Tracked;
@@ -474,11 +484,12 @@ mod tests {
                 candidate_search: KeySearch::EarlyExit,
                 ..PlanRow::without_inline_keys(all_keys_search)
             };
+            // Leaves of `()` values have no room for length tags; see
+            // `leaves_keep_length_tags_where_they_fit` for leaves that do.
             assert_eq!(
                 PlanRow::of::<K, Auto, Leaf<K, (), Auto>>(),
                 PlanRow {
                     inline_width: Some(InlineWidth::Eight),
-                    length_tags: true,
                     ..base
                 }
             );
@@ -499,12 +510,35 @@ mod tests {
         assert_heap_byte_string::<&[u8]>(KeySearch::Branchless);
     }
 
+    /// A leaf's plan tags each key with its length, saturated
+    /// (`length_tags.rs`), where the leaf keeps tags; an internal node's,
+    /// and a leaf's without room for tags, never does.
     #[test]
-    fn length_tags_are_byte_lengths() {
-        let leaf = NodePlan::<String>::of::<Auto, Leaf<String, (), Auto>>();
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+    fn tagged_leaves_tag_keys_with_their_lengths() {
+        let leaf = NodePlan::<String>::of::<Auto, Leaf<String, u64, Auto>>();
         assert_eq!(leaf.length_tag(&String::from("tags")), Some(4));
-        assert_eq!(leaf.length_tag(&"x".repeat(65_537)), Some(1));
-        let internal = NodePlan::<String>::of::<Auto, Internal<String, (), Auto>>();
+        assert_eq!(leaf.length_tag(&"x".repeat(65_537)), Some(u16::MAX));
+        let untagged = NodePlan::<String>::of::<Auto, Leaf<String, (), Auto>>();
+        assert_eq!(untagged.length_tag(&String::from("tags")), None);
+        let internal = NodePlan::<String>::of::<Auto, Internal<String, u64, Auto>>();
         assert_eq!(internal.length_tag(&String::from("tags")), None);
+    }
+
+    /// A leaf's plan keeps length tags only where its layout has room for
+    /// them, which the values' size and alignment and the latch word decide
+    /// (D36).
+    #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+    fn leaves_keep_length_tags_where_they_fit() {
+        fn keeps_tags<V, S: InlineKeyStrategy<String>>() -> bool {
+            NodePlan::<String>::of::<S, Leaf<String, V, S>>().has_length_tags()
+        }
+        assert!(keeps_tags::<u64, Auto>());
+        assert!(!keeps_tags::<u64, Latched<Auto>>());
+        assert!(!keeps_tags::<u128, Auto>());
+        assert!(keeps_tags::<u128, Latched<Auto>>());
+        assert!(!keeps_tags::<(), Auto>());
+        assert!(!keeps_tags::<String, Auto>());
     }
 }

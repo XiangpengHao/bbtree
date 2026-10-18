@@ -590,7 +590,7 @@ where
                                 }
                                 return;
                             }
-                            if Leaf::<K, V, Latched<S>>::plan().has_length_tags() {
+                            if Leaf::<K, V, Latched<S>>::plan().is_for_heap_byte_strings() {
                                 let line = LatchedTree::candidate_bytes_line(
                                     leaf, version, &self.key, index, prefix_len,
                                 );

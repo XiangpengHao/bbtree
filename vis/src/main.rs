@@ -46,6 +46,7 @@ mod single_thread_chart;
 mod site;
 mod slot_table;
 mod spotlight;
+mod timeline;
 mod trace;
 mod tree_shape;
 mod tree_summary;

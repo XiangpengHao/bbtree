@@ -98,7 +98,10 @@ From the original note:
   drawn plain, from fixed example keys and numbers, which claim no tree's
   state; what a lookup did (the leaf's lines it read, a batch's searches
   and prefetches) drawn from a real tree's views, as the explorer reads
-  them. Rejected: the explorer's own panels as figures (the first post's:
+  them. Each figure plays once seen and the reader can change it (another
+  key set, target or key; replay, step): its time is one number, written
+  to the figure as `--t` by the loop the batch view plays with
+  (`timeline.rs`), every mark derived from it in CSS. Rejected: the explorer's own panels as figures (the first post's:
   each panel showed far more than its paragraph needed), the explorer
   pinned beside scrolling prose (at half width it loses its inspector,
   scroll fights its playback, and phones need figures anyway), and the

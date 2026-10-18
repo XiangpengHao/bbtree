@@ -86,7 +86,10 @@ a real tree: it names the tree and the lookup (`ExplorerLink`), draws what
 it needs of bbtree's views (the leaf's lines the lookup read, the batch's
 searches and prefetches), and links to the explorer, which opens on the
 same lookup. Figures of one workload share one tree, built as the reader
-nears the first of them. The explorer's keyboard shortcuts and its address
+nears the first of them. Each figure plays once seen, on a timeline
+(`timeline.rs`, the loop the batch view plays with): the browser writes its
+time to the figure as `--t` and every mark follows in CSS; the reader
+replays it, steps it, or changes what it shows. The explorer's keyboard shortcuts and its address
 are the explorer's only: on the post, Space scrolls.
 
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,

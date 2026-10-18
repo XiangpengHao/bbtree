@@ -2390,7 +2390,7 @@
     align-content: start;
     grid-template-columns:
       [wide-start] minmax(16px, 1fr)
-      [text-start] minmax(0, 620px)
+      [text-start] minmax(0, 720px)
       [text-end] minmax(16px, 1fr)
       [wide-end];
     padding: 56px 0 72px;
@@ -2454,7 +2454,7 @@
   .post > .figure {
     grid-column: wide;
     justify-self: center;
-    width: min(760px, calc(100% - 32px));
+    width: min(920px, calc(100% - 32px));
     margin: 12px 0 28px;
   }
   .figure {
@@ -2556,74 +2556,212 @@
   }
 
   /* The figures of how it works: each one idea, in the explorer's hues;
-   * what a lookup reads in the highlighter. */
+   * what a lookup reads in the highlighter. A figure that plays has a
+   * timeline (timeline.rs): its loop writes the time to `--t`, and every
+   * mark derives from it in CSS, from its own start `--s` and length `--d`,
+   * so nothing redraws while it plays. */
   .diagram {
-    padding: 20px 20px 18px;
+    padding: 18px 20px 16px;
     background: var(--panel);
     font-size: 13px;
   }
-  .prefix-keys {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+  .timeline {
+    --t: -1;
+  }
+  .figure-toolbar {
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 8px 14px;
+    justify-content: space-between;
+    gap: 10px 16px;
+    margin-bottom: 16px;
   }
-  .prefix-keys-head,
-  .prefix-keys-foot {
-    font-size: 12px;
-    color: var(--muted);
+  .figure-readout {
+    margin: 0;
+    color: var(--graphite);
   }
-  .prefix-keys-key {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+  .figure-readout .data {
+    color: var(--ink);
+    font-weight: 500;
   }
-  .prefix-keys-shared {
-    color: var(--muted);
+  .figure-toolbar .button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .prefix-keys-window {
-    background: var(--compare-soft);
-    border-radius: 3px;
+
+  /* A timeline's controls: play, and the bar of its time. */
+  .timeline-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+  }
+  .timeline-controls .icon-button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    padding: 0;
+  }
+  .timeline-bar {
+    position: relative;
+    flex: 1;
+    height: 20px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .timeline-bar::before {
+    content: "";
+    position: absolute;
+    inset: 8px 0;
+    border-radius: 2px;
+    background: var(--well);
+  }
+  .timeline-fill {
+    position: absolute;
+    inset: 8px auto 8px 0;
+    width: 100%;
+    border-radius: 2px;
+    background: var(--ink);
+    transform-origin: left center;
+    transform: scaleX(clamp(0, calc(var(--t) / var(--total)), 1));
+  }
+  .timeline-bar:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+  }
+
+  /* Prefix keys: the window slides past the shared bytes (`--t` 1 to 2),
+   * and what it holds, and what that decides, turn over halfway. */
+  .window-slide {
+    --slid: clamp(0, calc(var(--t) - 1), 1);
+    --turned: clamp(0, calc((var(--t) - 1.5) * 5), 1);
+  }
+  .window-keys {
+    display: grid;
+    grid-template-columns: max-content auto;
+    justify-content: start;
+    align-items: center;
+    gap: 9px 28px;
+    padding: 3px 2px;
+  }
+  .window-row {
+    display: contents;
+  }
+  .window-key {
+    position: relative;
+    isolation: isolate;
+    white-space: pre;
+    font-size: 13.5px;
+  }
+  @media (max-width: 640px) {
+    .window-keys {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 4px;
+    }
+    .window-key {
+      font-size: 11.5px;
+    }
+    .window-bytes {
+      justify-self: start;
+      margin-bottom: 8px;
+    }
+  }
+  .window-shared {
+    color: color-mix(in srgb, var(--muted) calc(var(--slid) * 100%), var(--ink));
+  }
+  .window-frame {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    left: -2px;
+    z-index: -1;
+    width: calc(8ch + 4px);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--compare) 22%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--compare);
+    transform: translateX(calc(var(--slid) * var(--shared) * 1ch));
+    transition: transform 420ms var(--ease-out);
+  }
+  .window-bytes {
+    display: grid;
+    flex: none;
+  }
+  .window-bytes > * {
+    grid-area: 1 / 1;
   }
   .byte-chip {
-    padding: 2px 6px;
+    padding: 3px 7px;
     border-radius: 4px;
     white-space: pre;
     letter-spacing: 0.04em;
+    transition: opacity 240ms var(--ease-out);
   }
   .byte-chip.tied {
     background: var(--well);
     color: var(--graphite);
+    opacity: calc(1 - var(--turned));
   }
   .byte-chip.apart {
     background: var(--compare-soft);
     box-shadow: inset 0 0 0 1px var(--compare);
+    opacity: var(--turned);
   }
-  @media (max-width: 560px) {
-    .prefix-keys {
-      grid-template-columns: auto auto;
-      justify-content: start;
-    }
-    .prefix-keys-key {
-      display: none;
-    }
+  .window-verdict {
+    display: grid;
+    margin: 14px 0 0;
+    font: 600 13.5px var(--font-ui);
+  }
+  .window-verdict > * {
+    grid-area: 1 / 1;
+    transition: opacity 240ms var(--ease-out);
+  }
+  .verdict.tied {
+    color: var(--graphite);
+    opacity: calc(1 - var(--turned));
+  }
+  .verdict.apart {
+    color: var(--ink);
+    opacity: var(--turned);
+  }
+
+  /* The count and binary search: the count's marks land together in step
+   * one; each probe lands in its own step. */
+  .count-target {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    font: 500 13px var(--font-ui);
+    color: var(--graphite);
+  }
+  .count-target input {
+    flex: 1;
+    max-width: 280px;
+    accent-color: var(--ink);
+  }
+  .count-target output {
+    min-width: 2ch;
+    color: var(--ink);
+    font-size: 15px;
   }
   .key-count {
     display: grid;
-    grid-template-columns: auto repeat(8, minmax(0, 44px));
-    justify-content: start;
+    grid-template-columns: auto repeat(8, minmax(0, 46px)) minmax(0, 1fr);
     align-items: center;
     gap: 6px;
     text-align: center;
   }
   .key-count-label {
-    padding-right: 6px;
+    grid-column: 1;
+    padding-right: 8px;
     text-align: left;
     font: 12px var(--font-ui);
     color: var(--muted);
+    white-space: nowrap;
   }
   .key-count-cell {
-    padding: 5px 0;
+    padding: 6px 0;
     border-radius: 4px;
     background: var(--compare-soft);
   }
@@ -2632,9 +2770,6 @@
     box-shadow: inset 0 0 0 1px var(--rule-strong);
     color: var(--muted);
   }
-  .key-count-cell.target {
-    background: var(--well);
-  }
   .key-count-cell.smaller {
     background: var(--slot-smaller);
     color: var(--panel);
@@ -2642,41 +2777,87 @@
   .key-count-cell.larger {
     background: var(--slot-larger);
   }
+  .key-count-cell.unprobed {
+    background: none;
+  }
+  .key-count-cell.mask {
+    opacity: clamp(0, calc((var(--t) + 0.02) * 4), 1);
+    transform: scale(calc(0.6 + 0.4 * clamp(0, calc((var(--t) + 0.02) * 4), 1)));
+  }
+  .key-count-cell.probe {
+    opacity: clamp(0, calc((var(--t) - var(--s) + 0.02) * 4), 1);
+    transform: scale(calc(0.6 + 0.4 * clamp(0, calc((var(--t) - var(--s) + 0.02) * 4), 1)));
+    font-weight: 600;
+  }
   .key-count-result {
-    grid-column: 2 / -1;
-    padding-top: 4px;
+    padding-left: 10px;
     text-align: left;
     font: 600 13px var(--font-ui);
+    white-space: nowrap;
   }
+  .count-done {
+    opacity: clamp(0, calc((var(--t) - 0.9) * 10), 1);
+  }
+  .binary-done {
+    opacity: clamp(0, calc((var(--t) - var(--steps) + 0.1) * 10), 1);
+  }
+  @media (max-width: 640px) {
+    .key-count {
+      grid-template-columns: auto repeat(8, minmax(0, 1fr));
+      gap: 4px;
+    }
+    .key-count-result {
+      grid-column: 2 / -1;
+      padding: 0 0 6px;
+    }
+    .key-count-cell {
+      font-size: 12px;
+    }
+  }
+
+  /* A leaf's lines: each line the lookup read lights in its step. */
   .cache-lines-name {
-    margin: 0 0 6px;
+    margin: 0 0 8px;
+    min-height: 1.6em;
     color: var(--graphite);
-  }
-  .cache-lines-name strong {
-    color: var(--ink);
-    font-weight: 600;
   }
   .cache-lines-grid {
     display: grid;
-    grid-template-columns: repeat(var(--lines), minmax(0, 36px));
+    grid-template-columns: repeat(var(--lines), minmax(0, 1fr));
     column-gap: 3px;
-    row-gap: 4px;
+    row-gap: 6px;
+    max-width: 700px;
   }
   .cache-line {
+    position: relative;
     grid-row: 1;
-    height: 26px;
+    height: 34px;
+    padding: 0;
+    border: 0;
     border-radius: 3px;
     background: var(--well);
     box-shadow: inset 0 0 0 1px var(--rule);
+    cursor: pointer;
   }
-  .cache-line.read {
+  .cache-line.read::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 3px;
     background: var(--marker);
     box-shadow: inset 0 0 0 1.5px var(--marker-strong);
+    opacity: clamp(0, calc((var(--t) - var(--s)) * 5), 1);
+  }
+  .cache-line:hover,
+  .cache-line:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 1px;
+    z-index: 1;
   }
   .cache-lines-span {
     grid-row: 2;
     min-width: 0;
-    padding-top: 3px;
+    padding-top: 4px;
     border-top: 1.5px solid var(--rule-strong);
     font-size: 12px;
     color: var(--muted);
@@ -2687,42 +2868,95 @@
   .cache-lines-span:empty {
     border-top-color: transparent;
   }
-  .batch-lanes {
+
+  /* A batch's rows: searches land as they run, each line fills on its
+   * way, and the playhead walks the searches. */
+  .batch-lanes-flight {
+    margin: 0 0 12px;
+    font: 500 13px var(--font-ui);
+    color: var(--graphite);
+  }
+  .flight-count {
+    display: inline-block;
+    min-width: 1.4em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--marker);
+    color: var(--ink);
+    text-align: center;
+  }
+  .batch-lanes-rows {
+    position: relative;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    gap: 8px 14px;
+    gap: 6px;
   }
   .batch-lanes-row {
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    align-items: center;
+    gap: 14px;
+    transition: opacity 160ms var(--ease-out);
+  }
+  .batch-lanes.pointing .batch-lanes-row:not(.lit) {
+    opacity: 0.35;
+  }
+  .batch-lanes-plot {
     width: 100%;
-    height: 16px;
+    height: 22px;
   }
   .batch-lanes-search {
     fill: var(--ink);
+    opacity: clamp(0.1, calc((var(--t) - var(--s)) * 40 + 0.1), 1);
+  }
+  .batch-lanes-track {
+    fill: var(--marker);
+    opacity: 0.18;
   }
   .batch-lanes-way {
     fill: var(--marker);
+    transform-box: fill-box;
+    transform-origin: left center;
+    transform: scaleX(clamp(0, calc((var(--t) - var(--s)) / var(--d)), 1));
+  }
+  .batch-lanes-playhead {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    left: calc(78px + (100% - 78px) * clamp(0, var(--t), var(--total)) / var(--total));
+    width: 1.5px;
+    background: var(--link);
+    opacity: clamp(0, calc((var(--t) + 1) * 4), 1);
+    pointer-events: none;
   }
   .batch-lanes-legend {
-    grid-column: 1 / -1;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 6px 8px;
-    margin: 6px 0 0;
+    margin: 12px 0 0;
     font-size: 12px;
     color: var(--muted);
   }
   .batch-lanes-legend .legend-mark + * {
     margin-right: 8px;
   }
+
+  /* The node's version over time: each act reveals as the playhead
+   * passes it, top to bottom. */
   .versions {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    grid-auto-rows: 30px;
+    grid-template-rows: 20px repeat(var(--moments), 32px);
     gap: 4px 8px;
-    max-width: 560px;
+    max-width: 600px;
     margin: 0 auto;
+  }
+  .versions-lifeline {
+    grid-row: 2 / -1;
+    justify-self: center;
+    width: 0;
+    border-left: 1px dashed var(--rule-strong);
   }
   .versions-head {
     grid-row: 1;
@@ -2732,8 +2966,11 @@
     color: var(--muted);
   }
   .act {
-    display: grid;
-    place-items: center;
+    --shown: clamp(0, calc((var(--t) - var(--s)) / var(--d)), 1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
     padding: 0 4px;
     border: 1px solid var(--rule-strong);
     border-radius: 4px;
@@ -2741,6 +2978,12 @@
     font: 12px var(--font-data);
     text-align: center;
     line-height: 1.15;
+    clip-path: inset(0 0 calc((1 - var(--shown)) * 100%) 0 round 4px);
+  }
+  .act .icon {
+    width: 13px;
+    height: 13px;
+    flex: none;
   }
   .act.version {
     border-color: transparent;
@@ -2762,6 +3005,16 @@
     background: var(--error-soft);
     color: var(--error);
     font-weight: 600;
+  }
+  .versions-playhead {
+    position: absolute;
+    left: -6px;
+    right: -6px;
+    top: calc(24px + clamp(0, var(--t), var(--moments)) * 36px - 2px);
+    height: 1.5px;
+    background: var(--link);
+    opacity: clamp(0, calc((var(--t) + 1) * 4), 1);
+    pointer-events: none;
   }
 
   .post-section {
@@ -3235,22 +3488,7 @@
     line-height: 1.55;
     color: var(--muted);
   }
-  /* The one-thread panels scale with their box: on a phone, their text
-   * is larger in its own units, so that it reads at 11 px or more. The
-   * wide charts are drawn a unit a pixel and need none of this. */
   @media (max-width: 640px) {
-    .chart-panel:not(.wide) .chart-svg .chart-row-label {
-      font-size: 15px;
-    }
-    .chart-panel:not(.wide) .chart-svg .chart-value {
-      font-size: 14px;
-    }
-    .chart-panel:not(.wide) .chart-svg .chart-tick {
-      font-size: 15px;
-    }
-    .chart-panel:not(.wide) .chart-svg .chart-row-note {
-      font-size: 15px;
-    }
     .card-body {
       padding: 14px 12px 12px;
     }

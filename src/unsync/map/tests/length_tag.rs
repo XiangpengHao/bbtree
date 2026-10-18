@@ -1,5 +1,6 @@
 //! Length tags (D36): which of a lookup's candidates, the keys whose inline
-//! keys equal its own, have its length. Every map here holds
+//! keys equal its own, have its length. The cases (`LengthTagCase`) are
+//! shared with the concurrent map's tests; maps of their own here hold
 //! [`OUTSIDE_KEY`], so that the tree keeps no shared prefix (D50) and the
 //! other keys tie on their inline keys.
 
@@ -11,6 +12,8 @@ use std::iter;
 use std::string::String;
 use std::vec::Vec;
 
+use crate::inline_key::Auto;
+use crate::tree::test_support::LengthTagCase;
 use crate::unsync::BBTreeMap;
 
 /// A key that shares no byte with the others: their inline keys in the root
@@ -24,8 +27,7 @@ const LENGTH_TAGGED: bool = cfg!(target_pointer_width = "64");
 
 impl<V> BBTreeMap<String, V> {
     /// How many of `probe`'s candidates in the leaf its lookup ends in have
-    /// its length tag: its length, truncated to 16 bits (D36); `None` if the
-    /// leaf keeps no length tags.
+    /// its length tag; `None` if the leaf keeps no length tags.
     fn candidates_of_its_length(&self, probe: &str) -> Option<usize> {
         let trace = self.inspect().trace(probe);
         let leaf_step = trace.last().expect("the lookup reads a leaf");
@@ -34,7 +36,7 @@ impl<V> BBTreeMap<String, V> {
             .expect("the leaf has inline keys")
             .map(|index| leaf_step.node().length_tag(index))
             .collect();
-        let tag = probe.len() as u16;
+        let tag = u16::try_from(probe.len()).unwrap_or(u16::MAX);
         tags.map(|tags| {
             tags.into_iter()
                 .filter(|&candidate| candidate == tag)
@@ -43,76 +45,65 @@ impl<V> BBTreeMap<String, V> {
     }
 }
 
-#[test]
-fn two_length_candidates_check_hits_and_misses_on_either_side() {
-    let mut map = BBTreeMap::<String, u64>::new();
-    // Every probe below ties with every key but the outside one, and two of
-    // them, with another key between them, have its length.
-    for (index, key) in [
-        "shared-prefix/a",
-        "shared-prefix/c0",
-        "shared-prefix/g11",
-        "shared-prefix/t0",
-        "shared-prefix/x111",
-        OUTSIDE_KEY,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        map.insert(String::from(key), index as u64);
+/// A map of the case's keys, each to its index.
+impl From<&LengthTagCase> for BBTreeMap<String, u64> {
+    fn from(case: &LengthTagCase) -> Self {
+        let mut map = Self::new();
+        for (index, key) in case.keys().iter().enumerate() {
+            map.insert(key.clone(), index as u64);
+        }
+        map.check_invariants();
+        map
     }
-    assert_eq!(map.leaf_depth(), 0);
-    map.check_invariants();
-    let missing = ["shared-prefix/b0", "shared-prefix/m0", "shared-prefix/z0"];
-    for probe in ["shared-prefix/c0", "shared-prefix/t0"]
-        .iter()
-        .chain(&missing)
-    {
-        assert_eq!(
-            map.candidates_of_its_length(probe),
-            LENGTH_TAGGED.then_some(2),
-            "{probe}"
-        );
-    }
-    assert_eq!(map.get("shared-prefix/c0"), Some(&1));
-    assert_eq!(map.get("shared-prefix/t0"), Some(&3));
-    for probe in missing {
-        assert_eq!(map.get(probe), None);
-        assert_eq!(map.get_mut(probe), None);
-    }
-    *map.get_mut("shared-prefix/c0").unwrap() += 10;
-    *map.get_mut("shared-prefix/t0").unwrap() += 20;
-    assert_eq!(map.get("shared-prefix/c0"), Some(&11));
-    assert_eq!(map.get("shared-prefix/t0"), Some(&23));
 }
 
-/// Two candidates whose lengths differ by 65 536 have the same tag: equal
-/// tags only let a lookup go on to compare the keys.
 #[test]
-fn two_length_candidates_confirm_modulo_collisions() {
-    let mut map = BBTreeMap::<String, u64>::new();
-    let short = String::from("shared-prefix/c0");
-    let long = format!("shared-prefix/t0{}", "\0".repeat(65536));
-    map.insert(short.clone(), 1);
-    map.insert(String::from("shared-prefix/m11"), 2);
-    map.insert(long.clone(), 3);
-    map.insert(String::from(OUTSIDE_KEY), 4);
-    map.check_invariants();
-    let missing = [
-        String::from("shared-prefix/t0"),
-        format!("{short}{}", "\0".repeat(65536)),
-        format!("{long}{}", "\0".repeat(65536)),
-    ];
-    for probe in [&short, &long].into_iter().chain(&missing) {
-        assert_eq!(
-            map.candidates_of_its_length(probe),
-            LENGTH_TAGGED.then_some(2)
-        );
+fn leaves_keep_length_tags_where_these_tests_expect() {
+    assert_eq!(
+        LengthTagCase::leaves_keep_tags::<u64, Auto>(),
+        LENGTH_TAGGED
+    );
+    assert_eq!(
+        LengthTagCase::leaves_keep_tags::<usize, Auto>(),
+        LENGTH_TAGGED
+    );
+}
+
+/// Every lookup of the shared cases answers as std's map does: hits, and
+/// misses whose candidates' tags match, by length or saturated.
+#[test]
+fn length_tag_cases_match_std() {
+    for case in LengthTagCase::all() {
+        let mut map = BBTreeMap::from(&case);
+        for probe in case.probes() {
+            let probe = probe.as_str();
+            let expected = case.value_of(probe).map(|index| index as u64);
+            assert_eq!(map.get(probe).copied(), expected, "{probe:.20}");
+            assert_eq!(
+                map.get_key_value(probe).map(|(key, _)| key.as_str()),
+                expected.map(|_| probe)
+            );
+            assert_eq!(map.contains_key(probe), expected.is_some());
+            assert_eq!(map.get_mut(probe).map(|value| *value), expected);
+        }
     }
-    assert_eq!(map.get(short.as_str()), Some(&1));
-    assert_eq!(map.get(long.as_str()), Some(&3));
-    for probe in &missing {
-        assert_eq!(map.get(probe.as_str()), None);
+}
+
+/// The cases built to put two keys of each absent key's tag among its
+/// candidates do, by length or saturated: its lookup takes the two-candidate
+/// path.
+#[test]
+fn absent_keys_have_two_candidates_of_their_tag() {
+    for case in LengthTagCase::two_candidates_per_absent_key() {
+        let map = BBTreeMap::from(&case);
+        assert_eq!(map.leaf_depth(), 0);
+        for absent in case.absent() {
+            assert_eq!(
+                map.candidates_of_its_length(absent),
+                LENGTH_TAGGED.then_some(2),
+                "{absent:.20}"
+            );
+        }
     }
 }
 
@@ -181,16 +172,4 @@ fn length_collisions_and_mutations_preserve_exact_key_lookups() {
         actual.iter().collect::<Vec<_>>(),
         expected.iter().collect::<Vec<_>>()
     );
-
-    // Keys of different lengths may have the same zero-padded inline key,
-    // and the same tag modulo 65 536. Neither makes them equal.
-    let mut zero_keys = BBTreeMap::<String, usize>::new();
-    for (index, len) in [0, 1, 2, 65536].into_iter().enumerate() {
-        zero_keys.insert("\0".repeat(len), index);
-    }
-    zero_keys.check_invariants();
-    for (index, len) in [0, 1, 2, 65536].into_iter().enumerate() {
-        assert_eq!(zero_keys.get("\0".repeat(len).as_str()), Some(&index));
-    }
-    assert_eq!(zero_keys.get("\0".repeat(65537).as_str()), None);
 }

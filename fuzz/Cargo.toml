@@ -59,6 +59,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sync_map"
+path = "fuzz_targets/sync_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "set_algebra"
 path = "fuzz_targets/set_algebra.rs"
 test = false

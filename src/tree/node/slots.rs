@@ -895,9 +895,8 @@ impl KeyColumns {
 ///
 /// Invariant: the columns have the keys' capacity, and are those of the
 /// plan and layout of `Kind` (`node_plan.rs`, `layout.rs`). A live length
-/// tag is its key's length,
-/// truncated to 16 bits; tags never order keys and need no prefix
-/// adjustment.
+/// tag is its key's length, saturated at 65,535; tags never order keys and
+/// need no prefix adjustment.
 pub(super) struct KeySlots<K, S, Kind> {
     keys: Slots<K>,
     columns: KeyColumns,

@@ -39,6 +39,7 @@ use super::inline_keys::{InlineTarget, KeyInliner, SearchKey};
 use super::internal::Internal;
 use super::latch::{NodeLatch, Version};
 use super::leaf::{CandidateLine, Leaf};
+use super::length_tags::LengthTags;
 use super::page::{NodeKind, NodePtr};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -209,8 +210,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// while writers may change it: `index` is a candidate whose inline key,
     /// at the leaf's `prefix_len`, equals `key`'s. `Some` for a byte string
     /// that ends within its inline key, which equal lengths then make equal,
-    /// as the length tags tell (D36); `None` where only the keys' bytes tell.
-    /// What it says holds only if the leaf's version is unchanged after.
+    /// as the length tags tell where they are exact (D36); `None` where only
+    /// the keys' bytes tell. What it says holds only if the leaf's version is
+    /// unchanged after.
     ///
     /// `key` shares the leaf's prefix if it routed here through nodes whose
     /// versions held.
@@ -233,7 +235,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if !key.ends_within_window::<Self>(prefix_len) {
             return None;
         }
-        let query_tag = key.length_tag()?;
+        let query_tag = key.length_tag().filter(|&tag| LengthTags::is_exact(tag))?;
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree; its length tags were initialized with it (invariant 5), and
         // tag `index`, below the capacity, is in the page, aligned for a

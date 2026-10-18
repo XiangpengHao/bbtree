@@ -84,6 +84,20 @@
             pkgs.perf
           ];
         };
+
+        # The fuzzing workflow's shell on the same runner
+        # (.github/workflows/fuzz.yml): the nightly that builds the targets
+        # with AddressSanitizer, cargo-fuzz, the symbolizer for the
+        # sanitizer's stack traces, and gh, which fetches the corpora the
+        # last run saved.
+        devShells.fuzz = pkgs.mkShell {
+          packages = [
+            rustNightly.minimal
+            pkgs.cargo-fuzz
+            pkgs.gh
+          ];
+          ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
+        };
       }
     );
 }

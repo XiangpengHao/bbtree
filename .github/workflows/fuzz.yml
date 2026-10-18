@@ -2,9 +2,15 @@
 name: fuzzing
 
 # Fuzzing (doc/08-fuzzing-verification.md), weekly and for every release
-# (ci.yml): every target in turn, each for its share of the run, continuing
-# from the corpora the last run saved, so that the runs add up. A crash fails
-# the run and is saved as an artifact.
+# (ci.yml), for 30 minutes: every target in turn, each for its share of the
+# run in as many processes as the machine has threads, continuing from the
+# corpora the last run saved, so that the runs add up. A crash fails the run
+# and is saved as an artifact.
+#
+# It runs on the self-hosted bare-metal runner that perf.yml measures on
+# (label `bbtree-perf`, nixhome's hosts/pittsburgh): 12 threads where
+# GitHub's runners have 4. The runner takes one job at a time, so a fuzzing
+# run and a measurement queue behind each other.
 on:
   schedule:
     # Wednesdays at 10:17 UTC: 5:17 in the morning in Madison under daylight
@@ -16,7 +22,7 @@ on:
       minutes:
         description: Fuzzing time, in minutes, shared among the targets
         type: number
-        default: 90
+        default: 30
   workflow_call:
     inputs:
       minutes:
@@ -42,28 +48,19 @@ env:
 jobs:
   fuzz:
     name: fuzz
-    runs-on: ubuntu-latest
-    # The longest run is a release's, 120 minutes; the rest is building and
-    # saving.
-    timeout-minutes: 180
-    env:
-      # The cargo-fuzz that install-action fetches is a musl build, which
-      # builds the targets for musl unless told otherwise, and AddressSanitizer
-      # refuses musl's statically linked libc.
-      FUZZ_TRIPLE: x86_64-unknown-linux-gnu
+    runs-on: [self-hosted, bbtree-perf]
+    # A run of 30 minutes; the rest is building and saving.
+    timeout-minutes: 60
+    defaults:
+      run:
+        # The nightly, cargo-fuzz and gh, from the flake (`devShells.fuzz`).
+        shell: nix develop .#fuzz --command bash -euo pipefail {0}
     steps:
       - uses: actions/checkout@v4
-
-      # Keep this exact nightly aligned with flake.nix.
-      - name: Install Rust (nightly-2026-10-07)
-        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-10-07
-
-      - name: Install cargo-fuzz
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
+          # The code checked out runs next; it gets no token. The corpora
+          # fetch below gets its own.
+          persist-credentials: false
 
       - name: Fetch the corpora of the last run
         env:
@@ -83,34 +80,35 @@ jobs:
       # With AddressSanitizer, cargo-fuzz's default, and the library's debug
       # assertions, its own cross-checks.
       - name: Build the targets
-        run: cargo fuzz build --debug-assertions --target "$FUZZ_TRIPLE"
+        run: cargo fuzz build --debug-assertions
 
       - name: Fuzz
         env:
-          RUN_MINUTES: ${{ inputs.minutes || 90 }}
+          RUN_MINUTES: ${{ inputs.minutes || 30 }}
         run: |
-          # Each target's minutes in the weekly run of 90, by how much code a
+          # Each target's share of the run, in percent, by how much code a
           # bug there would reach and how much harm it would do
-          # (doc/08-fuzzing-verification.md); other runs scale them.
+          # (doc/08-fuzzing-verification.md).
           budget=(
-            "map_heap_byte_strings 20"
-            "user_code_panics 20"
-            "map_integers 12"
-            "map_user_inline_keys 12"
-            "map_plain_keys 10"
-            "set_algebra 10"
+            "sync_map 20"
+            "map_heap_byte_strings 18"
+            "user_code_panics 16"
+            "map_integers 11"
+            "map_user_inline_keys 11"
+            "map_plain_keys 9"
+            "set_algebra 9"
             "map_byte_arrays 6"
           )
           failed=()
           echo "| target | seconds | result |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
           for entry in "${budget[@]}"; do
-            read -r target weekly_minutes <<< "$entry"
-            seconds=$(( weekly_minutes * 60 * RUN_MINUTES / 90 ))
+            read -r target percent <<< "$entry"
+            seconds=$(( percent * 60 * RUN_MINUTES / 100 ))
             echo "::group::$target, $seconds s"
             # A crash ends the target's run, not the others'. An input that
             # runs over a minute is reported as a hang.
-            if cargo fuzz run --debug-assertions --target "$FUZZ_TRIPLE" "$target" -- \
+            if cargo fuzz run --debug-assertions "$target" -- \
                 -max_total_time="$seconds" -fork="$(nproc)" -timeout=60; then
               result=clean
             else

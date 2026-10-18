@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use crate::chart_scale::{LinearScale, Nanos};
+use crate::chart_scale::{FrameWidth, LinearScale, Nanos};
 use crate::measurements::{MeasuredKeys, MeasuredMap, MeasuredOperation, Measurements};
 use crate::repository_links::RepositoryLinks;
 use crate::spotlight::{Hint, Spotlight};
@@ -120,24 +120,33 @@ fn TimePanel(
     greatest: f64,
     spotlight: Spotlight,
 ) -> Element {
-    const WIDTH: f64 = 440.0;
-    const LABEL: f64 = 150.0;
     const ROW: f64 = 32.0;
     const BAR: f64 = 11.0;
     const TOP: f64 = 4.0;
     const AXIS: f64 = 26.0;
+    // Drawn at the panel's width, a unit a pixel, so its text reads at the
+    // size the page sets, on a phone as on a desk.
+    let frame = FrameWidth::use_new();
+    let width = frame.get();
+    let label = if FrameWidth::is_narrow(width) {
+        136.0
+    } else {
+        150.0
+    };
     let height = TOP + ROW * rows.len() as f64 + AXIS;
-    let times = LinearScale::reaching(greatest, (LABEL, WIDTH - 56.0));
+    let times = LinearScale::reaching(greatest, (label, width - 56.0));
     let mut spotlight = spotlight;
     rsx! {
-        figure { class: "chart-panel",
+        figure { class: "chart-panel wide",
             figcaption { class: "panel-title",
                 strong { {keys.label()} }
                 span { class: "panel-detail", " · {keys.detail()}" }
             }
+            div { class: "chart-frame", onresize: move |resized| frame.measure(resized),
+            if width > 0.0 {
             svg {
                 class: "chart-svg",
-                view_box: "0 0 {WIDTH} {height}",
+                view_box: "0 0 {width} {height}",
                 role: "img",
                 "aria-label": "{keys.label()}: mean time per operation by map",
                 for tick in times.ticks() {
@@ -182,7 +191,7 @@ fn TimePanel(
                         };
                         rsx! {
                             if !ordered {
-                                line { class: "unordered-rule", x1: 0, x2: WIDTH - 8.0, y1: row_top, y2: row_top }
+                                line { class: "unordered-rule", x1: 0, x2: width - 8.0, y1: row_top, y2: row_top }
                             }
                             g {
                                 class: match (row.map.is_ours(), ordered) {
@@ -199,17 +208,17 @@ fn TimePanel(
                                     spotlight.move_hint((point.x, point.y));
                                 },
                                 onmouseleave: move |_| spotlight.clear(),
-                                rect { class: "chart-hit", x: 0, y: row_top, width: WIDTH, height: ROW }
+                                rect { class: "chart-hit", x: 0, y: row_top, width, height: ROW }
                                 text {
                                     class: "chart-row-label",
-                                    x: LABEL - 12.0,
+                                    x: label - 12.0,
                                     y: if row.batched_nanos.is_some() || row.nanos.is_none() { middle + 4.0 } else { bar_top + BAR - 1.5 },
                                     text_anchor: "end",
                                     {row.map.label()}
                                 }
                                 if let Some(nanos) = row.nanos {
                                     if !ordered {
-                                        text { class: "chart-row-note", x: LABEL + 4.0, y: bar_top + BAR + 11.0,
+                                        text { class: "chart-row-note", x: label + 4.0, y: bar_top + BAR + 11.0,
                                             "unordered, no scans"
                                         }
                                     }
@@ -222,7 +231,7 @@ fn TimePanel(
                                         "{Nanos(nanos)}"
                                     }
                                 } else {
-                                    text { class: "chart-row-note", x: LABEL + 4.0, y: middle + 4.0,
+                                    text { class: "chart-row-note", x: label + 4.0, y: middle + 4.0,
                                         "can't scan: it keeps no order"
                                     }
                                 }
@@ -240,6 +249,8 @@ fn TimePanel(
                         }
                     }
                 }
+            }
+            }
             }
             div { class: "sr-only",
                 table {

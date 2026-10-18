@@ -52,6 +52,11 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
 // SAFETY: as for `PageType`; internal nodes are not leaves.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Internal<K, V, S> {
     const IS_LEAF: bool = false;
+
+    #[inline(always)]
+    fn has_room_for_length_tags() -> bool {
+        false
+    }
 }
 
 impl<K, V, S> Internal<K, V, S> {

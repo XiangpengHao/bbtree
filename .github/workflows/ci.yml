@@ -234,7 +234,7 @@ jobs:
     if: needs.plan.outputs.release == 'true'
     uses: ./.github/workflows/fuzz.yml
     with:
-      minutes: 120
+      minutes: 30
 
   release-package:
     name: release package

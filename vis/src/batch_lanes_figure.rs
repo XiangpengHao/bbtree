@@ -1,17 +1,21 @@
 //! The post's figure of a batch (doc 14, Figure 4): four keys looked up
-//! together on one thread, a row a key, each search a block and, from each
-//! prefetch to that key's next search, the line on its way. Read from
-//! bbtree's own run of the batch (`TreeView::trace_many`, `batch_run.rs`),
-//! and drawn whole, time counted in searches as the explorer counts it:
-//! the trace says nothing of when a line arrives.
+//! together on one thread, a row a key, played search by search: each
+//! search lands as it runs, and from each prefetch to that key's next
+//! search the line fills on its way, while the other keys search. Read from
+//! bbtree's own run of the batch (`TreeView::trace_many`, `batch_run.rs`)
+//! and played as the explorer plays it (`BatchRun::timeline`): time counted
+//! in searches, since the trace says nothing of when a line arrives.
+//! Pointing at a row lights its key.
 
 use std::ops::Range;
 
 use dioxus::prelude::*;
 
 use crate::batch_run::BatchRun;
+use crate::element_ids::ElementIds;
 use crate::figure::{Figure, FigureFrame, TreeStore};
 use crate::shared_link::ExplorerLink;
+use crate::timeline::TimelineControls;
 use crate::workload::{InsertOrder, KeyKind, Workload};
 
 /// A batch's run, as rows of searches and lines on their way.
@@ -34,19 +38,21 @@ impl LaneRows {
             .map(|read| start + 1.0..read)
     }
 
+    /// How many lines are on their way while search `search` runs.
+    fn on_their_way_during(&self, search: usize) -> usize {
+        let during = search as f64 + 0.5;
+        (0..self.run.polls().len())
+            .filter(|&index| {
+                self.on_its_way(index)
+                    .is_some_and(|way| way.contains(&during))
+            })
+            .count()
+    }
+
     /// The most lines on their way at once, over the batch.
     fn most_on_their_way(&self) -> usize {
-        let polls = self.run.polls().len();
-        (0..polls)
-            .map(|search| {
-                let during = search as f64 + 0.5;
-                (0..polls)
-                    .filter(|&index| {
-                        self.on_its_way(index)
-                            .is_some_and(|way| way.contains(&during))
-                    })
-                    .count()
-            })
+        (0..self.run.polls().len())
+            .map(|search| self.on_their_way_during(search))
             .max()
             .unwrap_or(0)
     }
@@ -71,7 +77,7 @@ pub(crate) fn BatchLanesFigure(trees: TreeStore) -> Element {
     rsx! {
         FigureFrame {
             figure,
-            room: (210, 230),
+            room: (250, 280),
             caption: rsx! {
                 "Four "
                 code { "u64" }
@@ -81,19 +87,61 @@ pub(crate) fn BatchLanesFigure(trees: TreeStore) -> Element {
                 }
             },
             if let Some(rows) = rows {
-                div { class: "diagram batch-lanes",
-                    for (lane , key) in rows.keys.iter().enumerate() {
-                        span { key: "key-{lane}", class: "batch-lanes-key data", {key.as_str()} }
+                BatchLanes { rows }
+            }
+        }
+    }
+}
+
+/// The rows, played on the batch's timeline.
+#[component]
+fn BatchLanes(rows: LaneRows) -> Element {
+    let element = ElementIds::of_current().id("batch-lanes");
+    let now = use_signal(|| None::<usize>);
+    let playing = use_signal(|| true);
+    let mut pointed = use_signal(|| None::<usize>);
+    let timeline = rows.run.timeline();
+    let (run_at, run_timeline, controls_at) = (element.clone(), timeline.clone(), element.clone());
+    use_future(move || {
+        let (timeline, element) = (run_timeline.clone(), run_at.clone());
+        async move { timeline.run(&element, now, playing).await }
+    });
+    let in_flight = now().map_or(0, |search| rows.on_their_way_during(search));
+    let total = rows.run.duration();
+    rsx! {
+        div {
+            id: element,
+            class: if pointed().is_some() { "diagram timeline batch-lanes pointing" } else { "diagram timeline batch-lanes" },
+            style: "--total:{total}",
+            p { class: "batch-lanes-flight",
+                "lines on their way: "
+                span { class: "flight-count data", "{in_flight}" }
+            }
+            div { class: "batch-lanes-rows", onmouseleave: move |_| pointed.set(None),
+                for (lane , key) in rows.keys.iter().enumerate() {
+                    div {
+                        key: "{lane}",
+                        class: if pointed() == Some(lane) { "batch-lanes-row lit" } else { "batch-lanes-row" },
+                        onmouseenter: move |_| pointed.set(Some(lane)),
+                        span { class: "batch-lanes-key data", {key.as_str()} }
                         svg {
-                            class: "batch-lanes-row",
-                            view_box: "0 0 {rows.run.duration()} 1",
+                            class: "batch-lanes-plot",
+                            view_box: "0 0 {total} 1",
                             preserve_aspect_ratio: "none",
                             "aria-hidden": "true",
                             for index in rows.polls_of(lane) {
                                 g { key: "{index}",
                                     if let Some(way) = rows.on_its_way(index) {
                                         rect {
+                                            class: "batch-lanes-track",
+                                            x: way.start,
+                                            y: 0.4,
+                                            width: way.end - way.start,
+                                            height: 0.2,
+                                        }
+                                        rect {
                                             class: "batch-lanes-way",
+                                            style: "--s:{way.start};--d:{way.end - way.start}",
                                             x: way.start,
                                             y: 0.4,
                                             width: way.end - way.start,
@@ -102,6 +150,7 @@ pub(crate) fn BatchLanesFigure(trees: TreeStore) -> Element {
                                     }
                                     rect {
                                         class: "batch-lanes-search",
+                                        style: "--s:{rows.run.start(index)}",
                                         x: rows.run.start(index) + 0.08,
                                         y: 0.1,
                                         width: 0.84,
@@ -111,13 +160,21 @@ pub(crate) fn BatchLanesFigure(trees: TreeStore) -> Element {
                             }
                         }
                     }
-                    p { class: "batch-lanes-legend",
-                        span { class: "legend-mark search" }
-                        "search"
-                        span { class: "legend-mark prefetch" }
-                        "line on its way, from the key's prefetch to its next search"
-                    }
                 }
+                div { class: "batch-lanes-playhead", "aria-hidden": "true" }
+            }
+            p { class: "batch-lanes-legend",
+                span { class: "legend-mark search" }
+                "search"
+                span { class: "legend-mark prefetch" }
+                "line on its way, from the key's prefetch to its next search"
+            }
+            TimelineControls {
+                element: controls_at,
+                timeline,
+                now,
+                playing,
+                label: "The batch, search by search",
             }
         }
     }

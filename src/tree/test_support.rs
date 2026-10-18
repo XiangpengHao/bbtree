@@ -1,9 +1,10 @@
 //! Test-only helpers: a deterministic PRNG, which also walks two iterators
 //! alike from random ends and makes random range bounds; steps from either
-//! end of an iterator; hashes; keys and values made from numbers; drop
-//! tracking; padded and over-aligned test types; nodes of a known kind,
-//! trees built through the node API, and a check of inline keys. The map's
-//! and the set's tests use the first seven.
+//! end of an iterator; hashes; keys and values made from numbers; byte-string
+//! keys that length tags tell apart; drop tracking; padded and over-aligned
+//! test types; nodes of a known kind, trees built through the node API, and
+//! a check of inline keys. The maps' and the set's tests use the first
+//! eight.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +17,7 @@ use core::ops::Bound;
 use std::format;
 use std::hash::DefaultHasher;
 use std::string::String;
+use std::vec;
 use std::vec::Vec;
 
 use super::invariants::NodeChecks;
@@ -171,6 +173,170 @@ impl FromNumber for () {
 impl FromNumber for String {
     fn from_number(number: usize) -> Self {
         format!("{number:010}")
+    }
+}
+
+/// Byte-string keys whose lookups the leaves' length tags filter (D36), for
+/// the tests of both maps: keys that tie on their inline keys and differ in
+/// length, by a few bytes or past where tags saturate, and keys the map
+/// lacks that tie with them.
+pub(crate) struct LengthTagCase {
+    /// What the map holds; each key's value is its index.
+    keys: Vec<String>,
+    /// Keys the map lacks, to look up besides its own.
+    absent: Vec<String>,
+}
+
+impl LengthTagCase {
+    /// A key that shares no byte with the others of its case: the tree then
+    /// keeps no shared prefix (D50), and its root leaf takes its inline keys
+    /// from their first byte, where the others tie.
+    const OUTSIDE_KEY: &str = "z";
+
+    /// The length from which keys' tags saturate.
+    const SATURATED_LEN: usize = 65_535;
+
+    /// Every case.
+    pub(crate) fn all() -> Vec<Self> {
+        let mut cases = Vec::from(Self::two_candidates_per_absent_key());
+        cases.extend([
+            Self::lone_candidates_longer_by_64_kib(),
+            Self::lone_candidate_in_leaves_with_a_prefix(),
+            Self::saturated_key_within_its_inline_key(),
+            Self::zero_keys(),
+        ]);
+        cases
+    }
+
+    /// Cases where two keys, with another key between them, have each
+    /// absent key's tag, so that its lookup compares the upper, then maybe
+    /// the lower: keys of its length, and keys whose saturated tags match
+    /// though their lengths don't.
+    pub(crate) fn two_candidates_per_absent_key() -> [Self; 2] {
+        let saturated =
+            |stem: &str, extra| format!("{stem}{}", "\0".repeat(Self::SATURATED_LEN + extra));
+        [
+            Self::outside_and(
+                [
+                    "shared-prefix/a",
+                    "shared-prefix/c0",
+                    "shared-prefix/g11",
+                    "shared-prefix/t0",
+                    "shared-prefix/x111",
+                ]
+                .map(String::from),
+                ["shared-prefix/b0", "shared-prefix/m0", "shared-prefix/z0"].map(String::from),
+            ),
+            Self::outside_and(
+                [
+                    saturated("shared-prefix/c0", 0),
+                    String::from("shared-prefix/m11"),
+                    saturated("shared-prefix/t0", 65),
+                ],
+                [
+                    saturated("shared-prefix/c0", 5),
+                    saturated("shared-prefix/m0", 0),
+                    saturated("shared-prefix/t0", 0),
+                    saturated("shared-prefix/z", 4_465),
+                ],
+            ),
+        ]
+    }
+
+    /// Absent keys that end within their inline keys, each with one
+    /// candidate, 65,536 bytes longer: a tag that wrapped would have the
+    /// absent key's length, and an unlatched copy would take it for it.
+    fn lone_candidates_longer_by_64_kib() -> Self {
+        Self::outside_and(
+            [
+                format!("user:042{}", "x".repeat(65_536)),
+                format!("a{}", "\0".repeat(65_536)),
+            ],
+            [String::from("user:042"), String::from("a")],
+        )
+    }
+
+    /// As [`Self::lone_candidates_longer_by_64_kib`], among enough keys
+    /// that leaves keep a prefix: the absent key's inline key ends in zeros
+    /// past its end, where the long key has them too.
+    fn lone_candidate_in_leaves_with_a_prefix() -> Self {
+        let name = |number: usize| format!("k{number:07}");
+        let mut keys: Vec<String> = (0..3_000)
+            .filter(|&number| number != 1_500)
+            .map(name)
+            .collect();
+        keys.push(format!(
+            "{}{}{}",
+            name(1_500),
+            "\0".repeat(8),
+            "y".repeat(65_528)
+        ));
+        Self {
+            keys,
+            absent: vec![name(1_500)],
+        }
+    }
+
+    /// Absent keys of 65,535 bytes or more, whose tags saturate, that end
+    /// within their inline keys, each with one candidate whose tag
+    /// saturates too: equal saturated tags tell nothing of lengths. A key
+    /// that long ends within its inline key only in a leaf whose fences
+    /// share 65,527 bytes or more: one between two others, as the tree's
+    /// shared prefix stops at 64 bytes (D50).
+    fn saturated_key_within_its_inline_key() -> Self {
+        let shared = "p".repeat(Self::SATURATED_LEN - 5);
+        let name = |number: usize| format!("{shared}a{number:04}");
+        let mut keys: Vec<String> = (0..80).filter(|&number| number != 40).map(name).collect();
+        keys.push(format!("{}{}x", name(40), "\0".repeat(6)));
+        Self {
+            keys,
+            absent: vec![name(40), format!("{}\0", name(40))],
+        }
+    }
+
+    /// Keys of zeros alone, whose zero-padded inline keys are all equal, of
+    /// lengths whose tags are equal or saturate.
+    fn zero_keys() -> Self {
+        let zeros = |len| "\0".repeat(len);
+        Self {
+            keys: [0, 1, 2, 65_536].map(zeros).into(),
+            absent: [3, 65_535, 65_537].map(zeros).into(),
+        }
+    }
+
+    /// A case of `keys` and the outside key, which lacks `absent`.
+    fn outside_and(keys: impl Into<Vec<String>>, absent: impl Into<Vec<String>>) -> Self {
+        let mut keys = keys.into();
+        keys.push(String::from(Self::OUTSIDE_KEY));
+        Self {
+            keys,
+            absent: absent.into(),
+        }
+    }
+
+    pub(crate) fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    pub(crate) fn absent(&self) -> &[String] {
+        &self.absent
+    }
+
+    /// What to look up: every key, and the keys the map lacks.
+    pub(crate) fn probes(&self) -> impl Iterator<Item = &String> {
+        self.keys.iter().chain(&self.absent)
+    }
+
+    /// The value a map built from the case's keys holds for `probe`: its
+    /// index among the keys.
+    pub(crate) fn value_of(&self, probe: &str) -> Option<usize> {
+        self.keys.iter().position(|key| key == probe)
+    }
+
+    /// Whether the leaves of a map of `String` keys and `V` values, under
+    /// strategy `S`, keep length tags, which the cases need to test them.
+    pub(crate) fn leaves_keep_tags<V, S: InlineKeyStrategy<String>>() -> bool {
+        Leaf::<String, V, S>::plan().has_length_tags()
     }
 }
 
