@@ -265,7 +265,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Panics unless the tree is a well-formed B+-tree of `length` entries
     /// ([`Tree::check_invariants`]), once no other thread changes it, whose
     /// appends go to its last leaf.
-    #[cfg(test)]
+    #[cfg(any(test, fuzzing))]
     pub(crate) fn check_invariants(&mut self, length: usize)
     where
         K: Ord,

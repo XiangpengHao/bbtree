@@ -18,7 +18,7 @@ use dioxus::prelude::*;
 use crate::batch_run::BatchRun;
 use crate::batch_view::Batcher;
 use crate::inspected_tree::LoadedTree;
-use crate::memory_map::SlotLook;
+use crate::memory_map::{PageLines, SlotLook};
 
 use crate::trace::Tracer;
 use crate::tree_shape::NodeAt;
@@ -31,8 +31,6 @@ struct PageStrip {
 }
 
 impl PageStrip {
-    const LINE_BYTES: usize = 64;
-
     /// The strip as one background: a band a line, in its array's tint,
     /// `cell` px wide with a pixel between.
     fn background(&self, cell: f64) -> String {
@@ -61,31 +59,10 @@ impl PageStrip {
     }
 
     fn of(page: &PageMap) -> Self {
-        let count = page.size().div_ceil(Self::LINE_BYTES);
-        let mut bytes: Vec<Vec<(&'static str, usize)>> = vec![Vec::new(); count];
-        for array in page.arrays() {
-            let class = array.contents().class();
-            for slot in 0..array.capacity() {
-                let range = array.slot_bytes(slot);
-                for line in range.start / Self::LINE_BYTES..range.end.div_ceil(Self::LINE_BYTES) {
-                    let from = range.start.max(line * Self::LINE_BYTES);
-                    let to = range.end.min((line + 1) * Self::LINE_BYTES);
-                    let tally = &mut bytes[line.min(count - 1)];
-                    match tally.iter_mut().find(|(seen, _)| *seen == class) {
-                        Some((_, total)) => *total += to - from,
-                        None => tally.push((class, to - from)),
-                    }
-                }
-            }
-        }
-        let lines = bytes
-            .into_iter()
-            .map(|tally| {
-                tally
-                    .into_iter()
-                    .max_by_key(|&(_, total)| total)
-                    .map_or("", |(class, _)| class)
-            })
+        let lines = PageLines::of(page)
+            .holds()
+            .iter()
+            .map(|holds| holds.map_or("", |contents| contents.class()))
             .collect();
         Self { lines }
     }

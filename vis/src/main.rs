@@ -1,15 +1,17 @@
 //! bbtree in the browser, as a site of two pages from one build
 //! (`site.rs`): the explorer, where you look keys up in a bbtree and watch
 //! how it finds them, from bbtree's own read-only views of its nodes
-//! (`explorer.rs`); and a post whose figures are the explorer's panels
-//! (`post.rs`, `figure.rs`). See `doc/10-visualization.md`.
+//! (`explorer.rs`); and the post (`post.rs`), whose figures that show a
+//! lookup read the same trees (`figure.rs`). See `doc/10-visualization.md`.
 
 mod architectures_chart;
 mod baseline_bars;
+mod batch_lanes_figure;
 mod batch_run;
 mod batch_timeline;
 mod batch_tree;
 mod batch_view;
+mod cache_lines_figure;
 mod chart_scale;
 mod concepts;
 mod concurrent_chart;
@@ -20,8 +22,10 @@ mod end_to_end_chart;
 mod explorer;
 mod fences;
 mod figure;
+mod how_it_works;
 mod icons;
 mod inspected_tree;
+mod key_count_figure;
 mod lane_program;
 mod measurements;
 mod memory_chart;
@@ -32,6 +36,7 @@ mod path_tree;
 mod performance_cards;
 mod popover;
 mod post;
+mod prefix_keys_figure;
 mod query_key;
 mod repository_links;
 mod scenarios;
@@ -41,9 +46,11 @@ mod single_thread_chart;
 mod site;
 mod slot_table;
 mod spotlight;
+mod timeline;
 mod trace;
 mod tree_shape;
 mod tree_summary;
+mod versions_figure;
 mod workload;
 
 use dioxus::prelude::*;

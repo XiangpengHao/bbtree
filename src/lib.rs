@@ -12,6 +12,7 @@ extern crate std;
 mod allocator;
 mod inline_key;
 mod map;
+mod proof;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the tree's tests use the rest of its API")

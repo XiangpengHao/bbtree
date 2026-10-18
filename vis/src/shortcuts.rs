@@ -7,9 +7,10 @@
 
 use dioxus::prelude::*;
 
-use crate::batch_view::{Batcher, PlaybackCommand};
+use crate::batch_view::Batcher;
 use crate::scenarios::Scenario;
 use crate::shared_link::HistoryStep;
+use crate::timeline::PlaybackCommand;
 use crate::trace::Tracer;
 use crate::workload::Builder;
 

@@ -89,6 +89,20 @@ impl PageMarks {
         )
     }
 
+    /// When, in its search's order of reads, the lookup surely read each
+    /// of `page`'s cache lines: a rank, earlier reads lower, equal for
+    /// lines read together; `None` for a line it didn't surely read.
+    pub(crate) fn line_read_order(&self, page: &PageMap) -> Vec<Option<usize>> {
+        MapDrawing::of(page, self)
+            .lines
+            .iter()
+            .map(|line| {
+                line.filter(|line| line.certainty == Certainty::Certain)
+                    .map(|line| line.phase as usize)
+            })
+            .collect()
+    }
+
     /// Whether slot `slot` of an array of `contents` is where the lookup
     /// ended.
     fn is_result(&self, contents: SlotContents, slot: usize) -> bool {
@@ -136,6 +150,53 @@ impl PageMarks {
             }
             _ => None,
         }
+    }
+}
+
+/// What each of a page's cache lines mostly holds: the slot array that
+/// takes most of its bytes, arrays of one hue counted together; `None`
+/// where the line is padding.
+pub(crate) struct PageLines {
+    holds: Vec<Option<SlotContents>>,
+}
+
+impl PageLines {
+    pub(crate) fn of(page: &PageMap) -> Self {
+        let count = page.size().div_ceil(LINE);
+        let mut bytes: Vec<Vec<(SlotContents, usize)>> = vec![Vec::new(); count];
+        for array in page.arrays() {
+            let contents = array.contents();
+            for slot in 0..array.capacity() {
+                let range = array.slot_bytes(slot);
+                for line in range.start / LINE..range.end.div_ceil(LINE) {
+                    let from = range.start.max(line * LINE);
+                    let to = range.end.min((line + 1) * LINE);
+                    let tally = &mut bytes[line.min(count - 1)];
+                    match tally
+                        .iter_mut()
+                        .find(|(seen, _)| seen.class() == contents.class())
+                    {
+                        Some((_, total)) => *total += to - from,
+                        None => tally.push((contents, to - from)),
+                    }
+                }
+            }
+        }
+        let holds = bytes
+            .into_iter()
+            .map(|tally| {
+                tally
+                    .into_iter()
+                    .max_by_key(|&(_, total)| total)
+                    .map(|(contents, _)| contents)
+            })
+            .collect();
+        Self { holds }
+    }
+
+    /// Line by line, from the page's start.
+    pub(crate) fn holds(&self) -> &[Option<SlotContents>] {
+        &self.holds
     }
 }
 

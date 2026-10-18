@@ -51,6 +51,10 @@ pub(crate) unsafe trait PageType: Sized {
 /// that kind's offsets and capacity, from the start of its page.
 pub(in crate::tree) unsafe trait NodeKind: PageType {
     const IS_LEAF: bool;
+
+    /// Whether the layout of nodes of this kind has room for length tags
+    /// beside 8-byte inline keys (D36): only some leaves' does.
+    fn has_room_for_length_tags() -> bool;
 }
 
 /// An allocated page of type `P` ([`Leaf`], [`Internal`] or [`RootPage`]),
@@ -506,6 +510,15 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) fn has_separator_keys_in_heads() -> bool {
         NodePlan::of::<S, Internal<K, V, S>>().has_separator_keys_in_heads()
+    }
+
+    /// Whether the map's leaves, with 8-byte inline keys, have room for
+    /// length tags (D36): a leaf's plan keeps them only where they fit.
+    #[inline(always)]
+    pub(super) fn leaf_has_room_for_length_tags() -> bool {
+        NodeLayout::<K, V>::leaf(Some(InlineWidth::Eight), true, Self::is_latched())
+            .length_tags_offset
+            .is_some()
     }
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {

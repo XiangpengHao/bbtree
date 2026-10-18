@@ -1,12 +1,11 @@
-//! A figure of the post: the explorer's own panels, drawn in place from a
-//! link to the explorer (`ExplorerLink`), on a tree the post builds once
-//! for every figure that shows it. A figure builds its tree as the reader
-//! nears it and starts its lookup once the reader sees it, so the lookup
-//! plays where it is read; its link opens the same lookup in the explorer.
+//! A figure of the post that reads a tree: what a lookup, or a batch, did,
+//! named by a link to the explorer (`ExplorerLink`), on a tree the post
+//! builds once for every figure that shows it. A figure builds its tree as
+//! the reader nears it and runs its lookup once the reader sees it; its
+//! link opens the same lookup in the explorer.
 //!
-//! Each figure owns what its panels share in the explorer (the tracer, the
-//! batcher, the spotlight, the inspector's tab), so clicking in one figure
-//! changes it alone; all of them point things out in the page's one hint.
+//! Each figure owns what the explorer's panels would share (the tracer, the
+//! batcher, the inspector's tab), so one figure's lookup is its own.
 
 use dioxus::prelude::*;
 
@@ -15,7 +14,6 @@ use crate::element_ids::ElementIds;
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::InspectorTab;
 use crate::shared_link::ExplorerLink;
-use crate::spotlight::{PointerHint, Spotlight};
 use crate::trace::Tracer;
 use crate::workload::Workload;
 
@@ -77,7 +75,6 @@ pub(crate) struct Figure {
     trees: TreeStore,
     tracer: Tracer,
     batcher: Batcher,
-    spotlight: Spotlight,
     tab: Signal<InspectorTab>,
     /// Whether the reader has come within a screen of the figure, and
     /// whether they have seen it.
@@ -85,31 +82,13 @@ pub(crate) struct Figure {
     seen: Signal<bool>,
     /// Whether the figure's lookup has started.
     started: Signal<bool>,
-    /// Whether it opens at the end of its lookup's way down, for a figure
-    /// whose way down another figure has played.
-    still: bool,
     ids: ElementIds,
 }
 
 impl Figure {
-    /// The figure of what `link` names, on a tree of `trees`, saying what
-    /// is pointed at in the page's `hint`, playing its lookup's way down: a
-    /// hook, for the figure's component.
-    pub(crate) fn use_new(link: ExplorerLink, trees: TreeStore, hint: PointerHint) -> Self {
-        Self::use_playing_or_still(link, trees, hint, false)
-    }
-
-    /// The same, opening at the end of its lookup's way down.
-    pub(crate) fn use_still(link: ExplorerLink, trees: TreeStore, hint: PointerHint) -> Self {
-        Self::use_playing_or_still(link, trees, hint, true)
-    }
-
-    fn use_playing_or_still(
-        link: ExplorerLink,
-        trees: TreeStore,
-        hint: PointerHint,
-        still: bool,
-    ) -> Self {
+    /// The figure of what `link` names, on a tree of `trees`: a hook, for
+    /// the figure's component.
+    pub(crate) fn use_new(link: ExplorerLink, trees: TreeStore) -> Self {
         // A figure shows what its link names, the same at every visit.
         let seed = use_signal(|| 1);
         let figure = Self {
@@ -117,12 +96,10 @@ impl Figure {
             trees,
             tracer: Tracer::use_new(seed),
             batcher: Batcher::use_new(seed),
-            spotlight: Spotlight::use_new(hint),
             tab: use_signal(|| InspectorTab::Page),
             near: use_signal(|| false),
             seen: use_signal(|| false),
             started: use_signal(|| false),
-            still,
             ids: ElementIds::of_current(),
         };
         let advancing = figure.clone();
@@ -135,21 +112,8 @@ impl Figure {
         self.trees.tree(self.link.workload())
     }
 
-    pub(crate) fn tracer(&self) -> Tracer {
-        self.tracer
-    }
-
-    pub(crate) fn spotlight(&self) -> Spotlight {
-        self.spotlight
-    }
-
     pub(crate) fn batcher(&self) -> Batcher {
         self.batcher
-    }
-
-    /// The inspector's tab, which the figure owns.
-    pub(crate) fn tab(&self) -> Signal<InspectorTab> {
-        self.tab
     }
 
     /// Whether the figure's lookup has started, so its panels draw.
@@ -161,8 +125,9 @@ impl Figure {
         self.ids.id("figure")
     }
 
-    /// Builds the figure's tree once the reader nears it, and starts its
-    /// lookup once they see it and the tree is built.
+    /// Builds the figure's tree once the reader nears it, and runs its
+    /// lookup once they see it and the tree is built, to its end: a figure
+    /// draws what the lookup did, whole.
     fn advance(&self) {
         let workload = self.link.workload();
         if (self.near)() {
@@ -176,10 +141,8 @@ impl Figure {
             started.set(true);
             self.link
                 .start_on(&tree, self.tracer, self.batcher, self.tab);
-            if self.still {
-                let mut tracer = self.tracer;
-                tracer.step_descent(isize::MAX);
-            }
+            let mut tracer = self.tracer;
+            tracer.step_descent(isize::MAX);
         }
     }
 

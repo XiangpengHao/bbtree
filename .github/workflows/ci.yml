@@ -1,4 +1,5 @@
-# Named for its README badge, as are miri.yml, sanitizer.yml and fuzz.yml.
+# Named for its README badge, as are miri.yml, sanitizer.yml, shuttle.yml,
+# fuzz.yml and verus.yml.
 name: test
 
 on:
@@ -226,15 +227,16 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -C link-arg=-zstack-size=8388608
         run: cargo test --target wasm32-wasip1 --lib --all-features
 
-  # The release checks: the fuzzing takes hours, so it runs for releases (and
-  # weekly, in fuzz.yml) rather than for every change.
+  # The release checks: the fuzzing takes half an hour on the shared runner,
+  # so it runs for releases (and weekly, in fuzz.yml) rather than for every
+  # change.
   release-fuzz:
     name: release fuzz
     needs: plan
     if: needs.plan.outputs.release == 'true'
     uses: ./.github/workflows/fuzz.yml
     with:
-      minutes: 120
+      minutes: 30
 
   release-package:
     name: release package

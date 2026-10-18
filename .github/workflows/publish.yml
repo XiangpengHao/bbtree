@@ -42,6 +42,8 @@ jobs:
     permissions:
       # The tag and the GitHub release.
       contents: write
+      # To start fuzz.yml on main.
+      actions: write
     concurrency:
       group: publish
       cancel-in-progress: false
@@ -78,4 +80,19 @@ jobs:
           else
             gh release create "v$VERSION" --target "$GITHUB_SHA" \
               --title "Release v$VERSION" --generate-notes
+          fi
+
+      # The release was fuzzed before it merged, in ci.yml, whose runs the
+      # README's fuzzing badge doesn't count: a run of fuzz.yml on main, now
+      # the release, shows it there.
+      - name: Fuzz the release on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          started=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow fuzz.yml \
+            --commit "$GITHUB_SHA" --json databaseId --jq length)
+          if [ "$started" -gt 0 ]; then
+            echo "fuzz.yml already runs on $GITHUB_SHA"
+          else
+            gh workflow run fuzz.yml --repo "$GITHUB_REPOSITORY" --ref main
           fi

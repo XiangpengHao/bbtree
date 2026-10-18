@@ -252,7 +252,8 @@ version read, the parent checked after. Then, in place:
   std integer or byte array, is copied with the value and compared once
   the version holds; a byte string that ends within the leaf's 8-byte
   inline key is the candidate if their lengths are equal (D36), as the
-  leaf's length tags tell, so no heap byte is read. Every slot read is a
+  leaf's length tags tell where they are exact, below 65,535, so no heap
+  byte is read. Every slot read is a
   `MaybeUninit` until the version holds. A head the descent matched is
   copied and compared the same way.
 - **Otherwise** the lookup latches the leaf shared, checks that it is still

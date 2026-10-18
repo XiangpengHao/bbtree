@@ -16,7 +16,7 @@ pub(crate) const AUTHOR_PAGE: &str = "https://xiangpeng.systems";
 pub(crate) enum SitePage {
     /// Look keys up in a tree of the reader's choosing.
     Explorer,
-    /// The post, its figures drawn by the explorer's panels.
+    /// The post, with its figures.
     Post,
 }
 

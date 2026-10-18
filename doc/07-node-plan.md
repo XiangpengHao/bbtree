@@ -43,7 +43,7 @@ documented with its reason:
 | std integers | the impl's width in both | nothing | as the key type picks (D19) |
 | every key under `WithInlineKey` | the impl's width in both | nothing | as the key type picks (D19) |
 | std byte arrays | 2 / 2 (D32) | nothing | binary; one candidate compares whole (D38) |
-| std heap byte strings | 8 / 4 (D43) | leaf: length tags (D36) | binary |
+| std heap byte strings | 8 / 4 (D43) | leaf: length tags, where they fit (D36) | binary |
 
 The rows differ in what a tie costs: a load from the node (arrays), a read
 past the node (heap strings), or user code, which the nodes call only while

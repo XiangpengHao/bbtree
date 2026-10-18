@@ -348,14 +348,24 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, fuzzing))]
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
-    /// Panics unless the tree is well formed, as a `BBTreeMap`'s, and holds
-    /// `length` entries.
-    pub(crate) fn check_invariants(&mut self, length: usize) {
+    /// Panics unless the map is a well-formed B+-tree of `length` entries,
+    /// as `unsync::BBTreeMap::check_invariants` checks its own, whose
+    /// appends go to its last leaf. Compiled for tests and for fuzzing
+    /// builds (`--cfg fuzzing`, which `cargo fuzz` sets), where the fuzz
+    /// targets (`fuzz/`) call it; the map keeps no length, so the caller
+    /// says how many entries it holds.
+    ///
+    /// Calls `Ord` and the strategy's inline-key encoding: a map whose keys
+    /// break their contracts fails it.
+    pub fn check_invariants(&mut self, length: usize) {
         self.tree.check_invariants(length);
     }
+}
 
+#[cfg(test)]
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// How many leading bytes every key shares (D50).
     pub(crate) fn shared_prefix_len(&mut self) -> usize {
         self.tree.shared_prefix_len()

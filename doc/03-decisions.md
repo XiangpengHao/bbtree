@@ -700,17 +700,21 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 **D36. String leaves keep 2-byte length tags in spare padding.** (2026-10-10)
 
 - **What:** for recognized heap byte strings, a leaf stores each key's
-  length mod 65,536 in 2 bytes, only where existing padding holds the whole
-  tag array before the head's key (D49). Where the head's key took the
-  padding's end, as in `String` → `u64`, the leaf gives up an entry to keep
-  them (24 → 23); where tags never fit, as in `String` → `String`, it has
-  none. Allocation size doesn't change. `KeySlots` moves tags with their
+  length, saturated at 65,535, in 2 bytes, only where existing padding
+  holds the whole tag array before the head's key (D49). Where the head's
+  key took the padding's end, as in `String` → `u64`, the leaf gives up an
+  entry to keep them (24 → 23); where tags never fit, as in `String` →
+  `String`, or a latched `String` → `u64` (D54), it has none, and its plan
+  says so. Allocation size doesn't change. `KeySlots` moves tags with their
   keys.
 - **Search:** tags are read only when the 8-byte summaries leave more than
   one candidate. No tag matches: absent. One: compare that full key. Two:
   compare the upper key, then the lower only if the query sorts below it.
   Three or more: the old binary search, so equal-length keys never cause
-  a linear scan. A tag never decides equality on its own: it's truncated.
+  a linear scan. The search confirms each candidate a tag picks against
+  the full key. D57's unlatched copy alone takes an equal tag for an equal
+  length, for a key that ends within its inline key, and only below
+  65,535: a saturated tag tells nothing of length.
 - **Why:** path keys tie in their 8-byte windows inside leaves. On 1M
   paths, heap key reads per lookup fall from 1.98 to about 1.0 for hits
   and 2.18 to 0.20 for misses.
@@ -1248,7 +1252,8 @@ Design and measurements in 09-concurrency.md, "Lookups".
   reads, where the leaf settles the key without following a pointer: a key
   ordered by its own bytes (std integers, byte arrays) is copied and
   compared, and a byte string that ends within its 8-byte inline key is
-  the candidate of the same length (D36). Otherwise the lookup latches the
+  the candidate of the same length, where the leaf's length tags tell it
+  exactly (D36). Otherwise the lookup latches the
   same leaf at the same version and searches it; a leaf that changed sends
   it the latched way, which waits rather than race again.
 - **Why `Copy`:** a closure, or a clone of a value that owns memory, can't

@@ -13,6 +13,7 @@
 use bbtree::inspect::{LaneFetch, TraceOutcome};
 
 use crate::inspected_tree::LoadedTree;
+use crate::timeline::Timeline;
 use crate::trace::Trace;
 use crate::tree_shape::NodeAt;
 
@@ -128,6 +129,25 @@ impl BatchRun {
     /// When the line poll `index` fetched is read: its lane's next poll.
     pub(crate) fn read_at(&self, index: usize) -> Option<f64> {
         self.next[index].map(|next| self.start(next))
+    }
+
+    /// The batch as a timeline to play: a step a poll, about eight seconds
+    /// a batch but no poll a blur or a crawl, the first round slow enough
+    /// to follow each lane's first poll.
+    pub(crate) fn timeline(&self) -> Timeline {
+        let polls = self.polls.len();
+        let lanes = self.lanes.len();
+        let first_round = if lanes < polls {
+            self.start(lanes)
+        } else {
+            self.duration()
+        };
+        Timeline::new(
+            (0..polls).map(|poll| self.start(poll)).collect(),
+            self.duration(),
+            (8000.0 / self.duration().max(1.0)).clamp(70.0, 260.0),
+        )
+        .with_slow_start(first_round, 560.0)
     }
 
     pub(crate) fn lanes(&self) -> &[Trace] {

@@ -56,6 +56,11 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Leaf<K, V, S> {
 // SAFETY: as for `PageType`; leaves are leaves.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Leaf<K, V, S> {
     const IS_LEAF: bool = true;
+
+    #[inline(always)]
+    fn has_room_for_length_tags() -> bool {
+        NodePtr::<K, V, S>::leaf_has_room_for_length_tags()
+    }
 }
 
 impl<K, V, S> Leaf<K, V, S> {
