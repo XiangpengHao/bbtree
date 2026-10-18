@@ -1,11 +1,13 @@
 # Named for its README badge.
 name: fuzzing
 
-# Fuzzing (doc/08-fuzzing-verification.md), weekly and for every release
-# (ci.yml), for 30 minutes: every target in turn, each for its share of the
+# Fuzzing (doc/08-fuzzing-verification.md), for 30 minutes: weekly; for
+# every release, before it merges (ci.yml) and on main once it's published
+# (publish.yml); and on demand. Every target in turn, each for its share of the
 # run in as many processes as the machine has threads, continuing from the
 # corpora the last run saved, so that the runs add up. A crash fails the run
-# and is saved as an artifact.
+# and is saved as an artifact. A release merges, and so publishes, only once
+# its run passes (ci.yml's merge gate): every version on crates.io was fuzzed.
 #
 # It runs on the self-hosted bare-metal runner that perf.yml measures on
 # (label `bbtree-perf`, nixhome's hosts/pittsburgh): 12 threads where
@@ -17,6 +19,9 @@ on:
     # time, 4:17 otherwise. Off the hour, when GitHub delays scheduled runs
     # the most.
     - cron: "17 10 * * 3"
+  # By hand, and by publish.yml once a release is out: the README badge
+  # follows this workflow's runs on main, which the release's own fuzzing,
+  # run from ci.yml, isn't.
   workflow_dispatch:
     inputs:
       minutes:
@@ -35,8 +40,8 @@ permissions:
   # To fetch the corpora that the last run saved.
   actions: read
 
-# Weekly and manual runs that overlap would both start from the same corpora.
-# A release's run is in a group of its own, so that it never waits behind
+# Weekly and dispatched runs that overlap would both start from the same
+# corpora. A release's run is in a group of its own, so that it never waits behind
 # them; ci.yml cancels it when a newer commit replaces the release's.
 concurrency:
   group: fuzz-${{ github.event_name == 'pull_request' && github.ref || 'corpora' }}
@@ -67,8 +72,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p fuzz/corpus
-          # The newest corpora that a run saved, weekly or a release's (those
-          # are ci.yml's runs); the first run starts from nothing.
+          # The newest corpora that a run saved, weekly, dispatched or a
+          # release's (those are ci.yml's runs); the first run starts from
+          # nothing.
           run_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=fuzz-corpora&per_page=100" \
             --jq '[.artifacts[] | select(.expired | not)] | max_by(.created_at) | .workflow_run.id // empty')
           if [ -n "$run_id" ]; then

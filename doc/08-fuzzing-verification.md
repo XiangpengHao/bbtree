@@ -56,9 +56,11 @@ Its narrow maps hold the same 328-byte values, which lookups clone.
   with lying keys, which may panic as std's does.
 - **Schedule.** `.github/workflows/fuzz.yml`, on the self-hosted bare-metal
   runner `pittsburgh` (label `bbtree-perf`, which `perf.yml` shares, so their
-  runs queue behind each other): Wednesdays at 10:17 UTC for 30 minutes, and
-  for 30 minutes for every release (`ci.yml`), in the shares above, each
-  target with `-fork=$(nproc)` (12 processes on its i5-11400). Each run
+  runs queue behind each other), for 30 minutes: Wednesdays at 10:17 UTC;
+  for every release, before it merges (`ci.yml`, which it gates) and on
+  main once it's published (`publish.yml`, for the README badge, which
+  counts only `fuzz.yml`'s own runs); and on demand. In the shares above,
+  each target with `-fork=$(nproc)` (12 processes on its i5-11400). Each run
   continues from the last run's corpora and saves its own for the next. Push
   CI builds the harnesses, runs them on pseudo-random inputs and replays
   `fuzz/regressions/`.
@@ -69,7 +71,7 @@ Locally, from the repository root:
 cargo fuzz run --debug-assertions map_heap_byte_strings -- -max_total_time=60
 ```
 
-A crash the weekly run finds is minimized (`cargo fuzz tmin`), then kept as
+A crash a run finds is minimized (`cargo fuzz tmin`), then kept as
 `fuzz/regressions/<target>/<what it found>` with its fix.
 
 ### Found
@@ -85,3 +87,35 @@ A crash the weekly run finds is minimized (`cargo fuzz tmin`), then kept as
   separator". The builder now counts the entries it took and dropped, and
   the walk subtracts them. Found by the harness's own test on its first
   pseudo-random input.
+
+## What Verus proves
+
+Verus proves code that bbtree runs: the `proof` module (`src/proof/`) holds
+the code with its specs and proofs, in `verus!` blocks, and the rest of the
+crate calls the code. A normal build erases the specs and proofs, so vstd,
+Verus's library of them, is purely ghost. Fuzzing
+samples inputs; a proof covers all of them, so proofs go where the inputs are
+unbounded and a bug gives wrong answers that no sanitizer sees.
+
+- **Inline keys of the std key types** (`src/proof/inline_key.rs`). The
+  `InlineKey` impls for byte strings, `u64`, `u128`, `i64` and `i128` call
+  `ProvenInlineKey`, which is proven to keep `InlineKey`'s contract: for
+  every key and offset, the inline key is bytes `offset..offset + 8` of the
+  key's encoding, big-endian, zero past its end (the overlapping loads of
+  strings under 8 bytes and the shifts included); keys order like their
+  encodings (the sign flip included); and so where two encodings agree
+  before `offset` and their inline keys there differ, the keys order like
+  the inline keys (`lemma_inline_keys_order_keys`). The statements are in
+  `inline_key.rs`, the proofs in `inline_key/lemmas.rs`.
+- **Trusted, not proven** (`src/proof/std_specs.rs`): what `first_chunk`,
+  `last_chunk`, `checked_shl` and `from_be_bytes` do, which vstd has no
+  specs for, and that std orders byte strings and integers as
+  `lexicographically_before` and `<` say. Writing the loads as byte indexing
+  instead, which Verus knows, made LLVM gather the bytes in vectors rather
+  than load them with one `movbe`.
+- **Not proven:** that the nodes keep only the first 2 or 4 bytes of an
+  inline key (`InlineWidth`), and every search and node change built on
+  inline keys. Fuzzing and `check_invariants` cover those.
+
+Locally: `cargo verus verify` (about two seconds once vstd is verified;
+Verus comes from `flake.nix`), and `verusfmt` formats `src/proof/`. CI: `.github/workflows/verus.yml`.

@@ -7,6 +7,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
+# Verus's specs and proofs, purely ghost, gone after compilation.
+vstd = { version = "=0.0.0-2026-08-30-0159", default-features = false }
 
 # Shuttle explores the latched tree's thread interleavings in tests built
 # with `--cfg shuttle` (`src/tree/interleaving.rs`), like loom's `cfg(loom)`:
@@ -21,4 +23,9 @@ inspect = []
 
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(shuttle)"] }
+# Verus sets `verus_only` while it verifies: the proofs' modules, which only
+# it reads, are behind it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(shuttle)", "cfg(verus_only)"] }
+
+[package.metadata.verus]
+verify = true

@@ -39,6 +39,91 @@
             "wasm32-wasip1"
           ];
         };
+        # Verus proves src/proof/ (doc/08-fuzzing-verification.md). Keep the
+        # version in sync with the `vstd` pin in Cargo.toml, and
+        # verusRustToolchain with the release's rust-toolchain.toml.
+        verusVersion = "0.2026.08.30.b432e82";
+        verusRustToolchain = pkgs.rust-bin.stable."1.97.1".default.override {
+          extensions = [
+            "rustc-dev"
+            "llvm-tools"
+            "rust-src"
+          ];
+        };
+        verus = pkgs.stdenvNoCC.mkDerivation {
+          pname = "verus";
+          version = verusVersion;
+
+          src = pkgs.fetchzip {
+            url = "https://github.com/verus-lang/verus/releases/download/release%2F${verusVersion}/verus-${verusVersion}-x86-linux.zip";
+            hash = "sha256-VMM0e9/Gb6fBFIqGoZaB+XLdwph2s5KuIdX6gmSY/ss=";
+            stripRoot = false;
+          };
+
+          strictDeps = true;
+
+          nativeBuildInputs = [
+            pkgs.makeWrapper
+            pkgs.autoPatchelfHook
+          ];
+          buildInputs = [
+            pkgs.zlib
+            pkgs.stdenv.cc.cc.lib
+          ];
+          autoPatchelfIgnoreMissingDeps = [
+            "librustc_driver*"
+            "libLLVM*"
+            "libstd-*"
+          ];
+
+          installPhase = ''
+            runHook preInstall
+
+            mkdir -p "$out/bin"
+            cp -r verus-x86-linux/* "$out"/
+
+            mv "$out/verus" "$out/verus-bin"
+            mv "$out/cargo-verus" "$out/cargo-verus-bin"
+
+            makeWrapper "$out/rust_verify" "$out/verus" \
+              --set VERUS_ROOT "$out" \
+              --set VERUS_Z3_PATH "$out/z3" \
+              --prefix LD_LIBRARY_PATH : "${verusRustToolchain}/lib"
+
+            makeWrapper "$out/cargo-verus-bin" "$out/cargo-verus" \
+              --set VERUS_ROOT "$out" \
+              --set VERUS_Z3_PATH "$out/z3" \
+              --prefix LD_LIBRARY_PATH : "${verusRustToolchain}/lib"
+
+            chmod +x "$out/rust_verify" "$out/z3" "$out/cargo-verus-bin" "$out/verus-bin" || true
+
+            ln -s "$out/verus" "$out/bin/verus"
+            ln -s "$out/cargo-verus" "$out/bin/cargo-verus"
+            ln -s "$out/rust_verify" "$out/bin/rust_verify"
+            ln -s "$out/z3" "$out/bin/z3"
+
+            runHook postInstall
+          '';
+        };
+        verusfmt = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
+          pname = "verusfmt";
+          version = "0.7.2";
+
+          src = pkgs.fetchFromGitHub {
+            owner = "verus-lang";
+            repo = "verusfmt";
+            tag = "v${finalAttrs.version}";
+            hash = "sha256-TE1Qyk5y8G/Kid6/BmUIMZ8Fr+y8GkLkRrzXGFHVe7I=";
+          };
+
+          cargoHash = "sha256-QY8Sju3AzfGiSp6V2TsuUlT1EmW3rOdhp3EeU1XM3Bg=";
+
+          # Its tests check that rustfmt leaves `verus!` blocks alone.
+          nativeCheckInputs = [
+            pkgs.cargo
+            pkgs.rustfmt
+          ];
+        });
       in
       {
         devShells.default = pkgs.mkShell {
@@ -71,6 +156,8 @@
             pkgs.dioxus-cli
             pkgs.tailwindcss_4
             pkgs.binaryen
+            verus
+            verusfmt
           ];
           ASAN_SYMBOLIZER_PATH = "${llvmPackages.llvm}/bin/llvm-symbolizer";
         };
@@ -82,6 +169,15 @@
           packages = [
             rustNightly.minimal
             pkgs.perf
+          ];
+        };
+
+        # The Verus workflow's shell (.github/workflows/verus.yml): cargo, and
+        # Verus with the toolchain of its own it brings.
+        devShells.verus = pkgs.mkShell {
+          packages = [
+            rustNightly.minimal
+            verus
           ];
         };
 

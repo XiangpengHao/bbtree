@@ -13,7 +13,7 @@
 
 
 bbtree is by far the fastest btree (ordered map):
-1. 5x faster than std's `BTreeMap` at single thread, 7x faster than `crossbeam-skiplist` at 12 threads.
+1. 5x faster than std's `BTreeMap` at single thread, 12x faster than `crossbeam-skiplist` at 96 threads.
 2. 30% lower memory usage, 5x lower p99 latency.
 3. Zero dependencies, `no_std` compatible.
 4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.

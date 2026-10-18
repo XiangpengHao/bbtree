@@ -16,7 +16,6 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::mem::size_of;
 
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
 /// compare like the bytes they come from (see [`InlineKey`]).
@@ -72,6 +71,9 @@ impl InlineWidth {
 /// compares the full keys. Offsets past 0 let the map skip bytes that all the
 /// keys of a node share.
 ///
+/// The impls for std byte strings and the 64- and 128-bit integers are
+/// proven, by Verus, to keep this contract (`src/proof/inline_key.rs`).
+///
 /// Where the map uses this impl, every key under [`WithInlineKey`] and the
 /// std integers under [`Auto`], the nodes keep the first [`Self::WIDTH`]
 /// bytes of each inline key, all 8 unless the impl says fewer: kept bytes
@@ -124,40 +126,9 @@ pub trait InlineKey: Ord {
 
 /// Its bytes are its encoding: byte strings order like their bytes.
 impl InlineKey for [u8] {
-    /// With loads of a fixed size only, so no call to `memcpy`: the 8 bytes
-    /// at `offset` if there are as many; otherwise the last 8, shifted so that
-    /// the bytes from `offset` lead and zeros follow; or, for a string of
-    /// fewer than 8 bytes, overlapping 4-, 2- or 1-byte loads, shifted the
-    /// same way.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        const WINDOW_LEN: usize = size_of::<InlineWord>();
-        if let Some(window) = self
-            .get(offset..)
-            .and_then(<[u8]>::first_chunk::<WINDOW_LEN>)
-        {
-            return InlineWord::from_be_bytes(*window);
-        }
-        let (word, word_start) = match self.last_chunk::<WINDOW_LEN>() {
-            Some(last) => (InlineWord::from_be_bytes(*last), self.len() - WINDOW_LEN),
-            None => {
-                let word = if let Some(first) = self.first_chunk::<4>() {
-                    let last = self.last_chunk::<4>().expect("the first four bytes fit");
-                    (InlineWord::from(u32::from_be_bytes(*first)) << 32)
-                        | (InlineWord::from(u32::from_be_bytes(*last)) << (8 * (8 - self.len())))
-                } else if let Some(first) = self.first_chunk::<2>() {
-                    let last = *self.last().expect("the first two bytes fit");
-                    (InlineWord::from(u16::from_be_bytes(*first)) << 48)
-                        | (InlineWord::from(last) << (8 * (8 - self.len())))
-                } else {
-                    InlineWord::from(self.first().copied().unwrap_or(0)) << 56
-                };
-                (word, 0)
-            }
-        };
-        // The window starts past `word_start`, as it didn't fit.
-        let shift_bytes = (offset - word_start).min(WINDOW_LEN);
-        word.checked_shl((8 * shift_bytes) as u32).unwrap_or(0)
+        crate::proof::ProvenInlineKey::inline_key_at(self, offset)
     }
 }
 
@@ -195,15 +166,9 @@ impl<const N: usize> InlineKey for [u8; N] {
 impl InlineKey for u64 {
     const WIDTH: InlineWidth = InlineWidth::Two;
 
-    /// The bytes before `offset` shifted out, which leaves the window on
-    /// top, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        if offset < size_of::<Self>() {
-            self << (8 * offset)
-        } else {
-            0
-        }
+        crate::proof::ProvenInlineKey::inline_key_at(self, offset)
     }
 }
 
@@ -212,15 +177,9 @@ impl InlineKey for u64 {
 impl InlineKey for u128 {
     const WIDTH: InlineWidth = InlineWidth::Two;
 
-    /// The bytes before `offset` shifted out, which leaves the window in the
-    /// top 8 bytes, zeros after the last byte.
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        if offset < size_of::<Self>() {
-            ((self << (8 * offset)) >> InlineWord::BITS) as InlineWord
-        } else {
-            0
-        }
+        crate::proof::ProvenInlineKey::inline_key_at(self, offset)
     }
 }
 
@@ -231,7 +190,7 @@ impl InlineKey for i64 {
 
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        (self.cast_unsigned() ^ (1 << 63)).inline_key_at(offset)
+        crate::proof::ProvenInlineKey::inline_key_at(self, offset)
     }
 }
 
@@ -242,7 +201,7 @@ impl InlineKey for i128 {
 
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
-        (self.cast_unsigned() ^ (1 << 127)).inline_key_at(offset)
+        crate::proof::ProvenInlineKey::inline_key_at(self, offset)
     }
 }
 
