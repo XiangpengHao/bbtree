@@ -24,8 +24,10 @@
 //! shrinks the shared prefix, and the border nodes' prefixes with it, reading
 //! no key ([`Tree::shrink_shared_prefix_for`]).
 //!
-//! An operation changes the tree's shape without calling user encodings, so
-//! a panicking `InlineKey` can't stop it halfway. A prefix that must shrink
+//! An operation changes the tree's shape without calling user encodings,
+//! but behind an abort-on-unwind guard (a key's hash tag, and the window an
+//! internal node of 4-byte inline keys reads again from its key), so a
+//! panicking `InlineKey` can't stop it halfway. A prefix that must shrink
 //! meanwhile shrinks to the parent's: its windows shift back, filled from
 //! the parent's separator that bounds the node ([`Window::moved_back_to`],
 //! `tree/node/mod.rs`). Once the operation is done and its entry counted,
@@ -126,7 +128,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
             // Well-ordered encodings already imply this floor. Keep the
             // numerical parent/child invariant even when a user encoding
             // lies (D44): later structural moves must only move windows
-            // backwards, without invoking that encoding.
+            // backwards, without computing prefixes from that encoding.
             let prefix_len = KeyInliner::fence_prefix_len::<S>(child_low, child_high, shared_len)
                 .max(node.prefix_len());
             child.refit_prefix(prefix_len);

@@ -152,7 +152,8 @@ impl FromNumber for i128 {
 
 /// Ten digits, of whose inline keys the nodes keep `BYTES`, 2 or 4: past a
 /// node's prefix, keys tie on them often, and the strings decide. All have
-/// one length, so their hash tag is their last digit instead.
+/// one length, so their hash tag is their last digit instead. Ties compare
+/// as the strings' do, from where keys differ.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct NarrowName<const BYTES: usize>(String);
 
@@ -163,6 +164,7 @@ impl<const BYTES: usize> InlineKey for NarrowName<BYTES> {
         InlineWidth::Four
     };
     const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
 
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.0.inline_key_at(offset)
@@ -171,12 +173,62 @@ impl<const BYTES: usize> InlineKey for NarrowName<BYTES> {
     fn hash_tag(&self) -> u8 {
         self.0.bytes().last().unwrap_or(0)
     }
+
+    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
+        self.0.cmp_from(&other.0, equal_len)
+    }
 }
 
 impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
     fn from_number(number: usize) -> Self {
         Self(String::from_number(number))
     }
+}
+
+/// A newtype that takes every hook of its string's impl: leaves keep 8
+/// bytes of its inline keys and its hash tags, internal nodes 4 bytes, which
+/// they read again from its keys as they move them (D43), ties compare from
+/// where keys differ, and the check against what every key shares compares
+/// 32 bytes at a time (D50), as for `Auto`'s strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PathName(String);
+
+impl InlineKey for PathName {
+    const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
+
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        self.0.inline_key_at(offset)
+    }
+
+    fn hash_tag(&self) -> u8 {
+        self.0.hash_tag()
+    }
+
+    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
+        self.0.cmp_from(&other.0, equal_len)
+    }
+
+    fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
+        self.0.cmp_prefix(prefix)
+    }
+}
+
+/// Behind a long shared head ([`shared_prefix_key`]), as paths are.
+impl FromNumber for PathName {
+    fn from_number(number: usize) -> Self {
+        Self(shared_prefix_key(number))
+    }
+}
+
+/// A newtype with every hook matches std through inserts that split, and
+/// removals that merge and move entries between nodes: the moves read
+/// internal windows again from its keys.
+#[test]
+fn keys_with_every_hook_match_std() {
+    let workload = Workload::new(10_000, 1 << 13);
+    workload.run::<PathName, u64, WithInlineKey>(82);
+    workload.run::<PathName, String, WithInlineKey>(83);
 }
 
 /// Keys behind a long shared head, which the tree keeps as its shared prefix
@@ -356,8 +408,9 @@ fn a_keys_own_hash_tags_narrow_its_candidates() {
 }
 
 /// A key with a consistent `Ord` and an `InlineKey` that breaks its
-/// contract in one of the ways of [`Lie`], in its inline keys and its hash
-/// tags.
+/// contract in one of the ways of [`Lie`], in its inline keys, its hash tags
+/// and its comparison from where keys differ. Its internal nodes keep 4
+/// bytes, and read lying windows again as they move keys.
 struct LyingKey<'r> {
     number: u32,
     lie: Lie,
@@ -366,12 +419,13 @@ struct LyingKey<'r> {
 
 #[derive(Clone, Copy)]
 enum Lie {
-    /// The same inline key and hash tag for every key: consistent after
-    /// all, as ties decide nothing, so answers stay right.
+    /// The same inline key and hash tag for every key, and ties compared
+    /// by `Ord`: consistent after all, as ties decide nothing, so answers
+    /// stay right.
     Constant,
-    /// Inline keys ordered against the keys.
+    /// Inline keys, and ties, ordered against the keys.
     Reversed,
-    /// A random inline key and hash tag on every call.
+    /// A random inline key, hash tag and order of ties on every call.
     Random,
 }
 
@@ -397,6 +451,7 @@ impl Ord for LyingKey<'_> {
 
 impl InlineKey for LyingKey<'_> {
     const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
 
     fn inline_key_at(&self, _offset: usize) -> InlineWord {
         match self.lie {
@@ -411,6 +466,14 @@ impl InlineKey for LyingKey<'_> {
             Lie::Constant => 7,
             Lie::Reversed => self.number as u8,
             Lie::Random => self.rng.below(4) as u8,
+        }
+    }
+
+    fn cmp_from(&self, other: &Self, _equal_len: usize) -> Ordering {
+        match self.lie {
+            Lie::Constant => self.cmp(other),
+            Lie::Reversed => other.cmp(self),
+            Lie::Random => [Ordering::Less, Ordering::Equal, Ordering::Greater][self.rng.below(3)],
         }
     }
 }

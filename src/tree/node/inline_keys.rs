@@ -51,8 +51,9 @@ pub(in crate::tree) enum KeyInliner<K> {
     /// [`Auto`]: crate::Auto
     ByteString(ByteString<K>),
     /// `K`'s [`InlineKey`] impl, of whose inline keys the nodes keep
-    /// `width` bytes, and its hash tag if the impl gives one: any key's under
-    /// [`WithInlineKey`], and a std integer's, without one, under [`Auto`].
+    /// `width` bytes, and its hash tag and comparison from where keys differ
+    /// if the impl gives them: any key's under [`WithInlineKey`], and a std
+    /// integer's, without them, under [`Auto`].
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     /// [`Auto`]: crate::Auto
@@ -60,6 +61,8 @@ pub(in crate::tree) enum KeyInliner<K> {
         inline_key_at: fn(&K, usize) -> InlineWord,
         width: InlineWidth,
         hash_tag: Option<fn(&K) -> u8>,
+        cmp_from: Option<fn(&K, &K, usize) -> Ordering>,
+        cmp_prefix: fn(&K, &[u8]) -> Ordering,
     },
 }
 
@@ -75,6 +78,17 @@ impl<K> Copy for KeyInliner<K> {}
 /// only by an unwind out of that call, it panics again, and a panic while
 /// unwinding aborts (D48). Forgotten once the call returns.
 struct AbortOnUnwind;
+
+impl AbortOnUnwind {
+    /// `user_code`'s result, or an abort if it panics.
+    #[inline(always)]
+    fn call<R>(user_code: impl FnOnce() -> R) -> R {
+        let guard = Self;
+        let result = user_code();
+        mem::forget(guard);
+        result
+    }
+}
 
 impl Drop for AbortOnUnwind {
     fn drop(&mut self) {
@@ -100,6 +114,8 @@ impl<K> KeyInliner<K> {
                         inline_key_at: integer.inline_key_at(),
                         width: integer.width(),
                         hash_tag: None,
+                        cmp_from: None,
+                        cmp_prefix: integer.cmp_prefix(),
                     })
                 })
             }
@@ -107,10 +123,14 @@ impl<K> KeyInliner<K> {
                 inline_key_at,
                 width,
                 hash_tag,
+                cmp_from,
+                cmp_prefix,
             } => Some(Self::InlineKeyTrait {
                 inline_key_at,
                 width,
                 hash_tag,
+                cmp_from,
+                cmp_prefix,
             }),
         }
     }
@@ -142,6 +162,24 @@ impl<K> KeyInliner<K> {
         }
     }
 
+    /// `key`'s inline key at `offset`, read while keys move: by an internal
+    /// node that keeps fewer bytes of it than a leaf, for a window it hands
+    /// out (D43). A key's own impl runs behind an abort-on-unwind guard
+    /// (D48), as unwinding would leave the move half done.
+    #[inline(always)]
+    pub(in crate::tree) fn inline_key_at_while_keys_move(
+        self,
+        key: &K,
+        offset: usize,
+    ) -> InlineWord {
+        match self {
+            Self::ByteString(_) => self.inline_key_at(key, offset),
+            Self::InlineKeyTrait { inline_key_at, .. } => {
+                AbortOnUnwind::call(|| inline_key_at(key, offset))
+            }
+        }
+    }
+
     /// `key`'s hash tag (D36), or `None` if the keys have none: a std byte
     /// string's from its bytes, and a key's own impl's otherwise. Leaves
     /// call it as they write a key, while they move keys too, so a panic in
@@ -152,10 +190,7 @@ impl<K> KeyInliner<K> {
             Self::ByteString(byte_string) => Some(byte_string.bytes(key).hash_tag()),
             Self::InlineKeyTrait { hash_tag, .. } => {
                 let hash_tag = hash_tag?;
-                let abort_on_unwind = AbortOnUnwind;
-                let tag = hash_tag(key);
-                mem::forget(abort_on_unwind);
-                Some(tag)
+                Some(AbortOnUnwind::call(|| hash_tag(key)))
             }
         }
     }
@@ -393,15 +428,16 @@ impl Window {
 
 /// The bytes of a std byte string being searched for. Windows read these
 /// bytes directly: a search visits only a few prefix lengths, so preparing
-/// every possible window would copy mostly bytes that it never reads.
+/// every possible window would copy mostly bytes that it never reads. Std
+/// byte strings' `InlineKey::cmp_from` compares them too.
 #[derive(Clone, Copy)]
-struct SearchBytes<'q> {
+pub(crate) struct SearchBytes<'q> {
     bytes: &'q [u8],
 }
 
 impl<'q> SearchBytes<'q> {
     #[inline]
-    fn new(bytes: &'q [u8]) -> Self {
+    pub(crate) fn new(bytes: &'q [u8]) -> Self {
         Self { bytes }
     }
 
@@ -436,10 +472,10 @@ impl<'q> SearchBytes<'q> {
         bytes.get(offset..)?.first_chunk()
     }
 
-    /// How the key orders against `shared`, the bytes every key of the tree
-    /// starts with (D50). It orders as `<[u8]>::cmp` orders the key's first
-    /// `shared.len()` bytes against them: a key ending inside them goes
-    /// first.
+    /// How the key's bytes, padded with zeros, order against `prefix` in its
+    /// first `prefix.len()` bytes: `Equal` if the key has them, or ends
+    /// inside them with only zeros after it there. Std byte strings'
+    /// `InlineKey::cmp_prefix` (D50).
     ///
     /// The bytes are almost always equal, and may be many (file-path keys
     /// can share 64). So whole 32-byte chunks first test equality without
@@ -448,13 +484,13 @@ impl<'q> SearchBytes<'q> {
     /// Always inlined, with no call: a call anywhere in the search loop
     /// makes every search keep its state in stack slots (D41).
     #[inline(always)]
-    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
+    pub(crate) fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
         let query = self.bytes;
-        let end = shared.len();
+        let end = prefix.len();
         let mut offset = 0;
         while end - offset >= SHARED_PREFIX_CHUNK_LEN
             && let Some(query_chunk) = Self::chunk_at(query, offset)
-            && Self::chunk_at(shared, offset) == Some(query_chunk)
+            && Self::chunk_at(prefix, offset) == Some(query_chunk)
         {
             offset += SHARED_PREFIX_CHUNK_LEN;
         }
@@ -462,19 +498,29 @@ impl<'q> SearchBytes<'q> {
             let remaining = end - offset;
             let dropped_bits = 8 * WINDOW_LEN.saturating_sub(remaining) as u32;
             let query_window = query.inline_key_at(offset) >> dropped_bits;
-            let shared_window = shared.inline_key_at(offset) >> dropped_bits;
-            if query_window != shared_window {
-                return query_window.cmp(&shared_window);
+            let prefix_window = prefix.inline_key_at(offset) >> dropped_bits;
+            if query_window != prefix_window {
+                return query_window.cmp(&prefix_window);
             }
             offset += WINDOW_LEN;
         }
-        // Every window equal: the key has the bytes, or ends inside them
-        // with only zeros after it in `shared`.
-        if query.len() < end {
-            Ordering::Less
-        } else {
-            Ordering::Equal
-        }
+        Ordering::Equal
+    }
+
+    /// How the key orders against `shared`, the bytes every key of the tree
+    /// starts with (D50), as `<[u8]>::cmp` orders the key's first
+    /// `shared.len()` bytes against them: as [`Self::cmp_prefix`] does, but
+    /// a key ending inside them goes first, as every std byte string of the
+    /// tree is at least as long.
+    #[inline(always)]
+    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
+        self.cmp_prefix(shared).then_with(|| {
+            if self.bytes.len() < shared.len() {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        })
     }
 
     /// Orders the key against `stored`, a std byte string, as `<[u8]>::cmp`
@@ -487,7 +533,7 @@ impl<'q> SearchBytes<'q> {
     /// The last word ends where the shorter string does and may start before
     /// the bytes left to compare: the bytes it repeats are equal.
     #[inline]
-    fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
+    pub(crate) fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
         let query = self.bytes;
         let both_len = query.len().min(stored.len());
         if equal_len < both_len && both_len < WINDOW_LEN {
@@ -831,20 +877,10 @@ where
     pub(in crate::tree) fn cmp_shared_prefix(&self, shared: &[u8]) -> Option<Ordering> {
         match KeyInliner::<K>::resolve::<S>()? {
             KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.cmp_shared(shared)),
-            inliner @ KeyInliner::InlineKeyTrait { .. } => {
-                let query = SameType::<K, Q>::recognize()?.cast(self.key);
-                let mut offset = 0;
-                while offset < shared.len() {
-                    let dropped_bits = 8 * WINDOW_LEN.saturating_sub(shared.len() - offset) as u32;
-                    let query_window = inliner.inline_key_at(query, offset) >> dropped_bits;
-                    let shared_window = shared.inline_key_at(offset) >> dropped_bits;
-                    if query_window != shared_window {
-                        return Some(query_window.cmp(&shared_window));
-                    }
-                    offset += WINDOW_LEN;
-                }
-                Some(Ordering::Equal)
-            }
+            KeyInliner::InlineKeyTrait { cmp_prefix, .. } => Some(cmp_prefix(
+                SameType::<K, Q>::recognize()?.cast(self.key),
+                shared,
+            )),
         }
     }
 
@@ -852,21 +888,31 @@ where
     /// that `target` is for, whose inline key equals this key's in the bytes
     /// the node keeps. Std byte strings compare from past the bytes known
     /// equal ([`SearchBytes::cmp_from`]): the node's prefix, and the bytes of
-    /// each inline key its plan stores. The search key shares the prefix
-    /// because it lies between the node's fences, as every key in the node
-    /// does. Other keys compare by `Q`'s `Ord`.
+    /// each inline key its plan stores. So do keys whose impl has
+    /// `InlineKey::cmp_from`, looked up by their own type. The search key
+    /// shares the prefix because it lies between the node's fences, as every
+    /// key in the node does. Other keys compare by `Q`'s `Ord`.
     #[inline]
     pub(super) fn cmp_tied<Kind: NodeKind>(&self, target: Window, stored: &K) -> Ordering
     where
         Q: Ord,
     {
         let plan = NodePlan::<K>::of::<S, Kind>();
-        if let Some(KeyInliner::ByteString(byte_string)) = plan.inliner()
-            && let Some(width) = plan.inline_width()
-            && let Some(query) = self.recognized_bytes()
-        {
+        if let Some(width) = plan.inline_width() {
             let equal_len = target.prefix_len + width.byte_len();
-            return query.cmp_from(byte_string.bytes(stored), equal_len);
+            if let Some(KeyInliner::ByteString(byte_string)) = plan.inliner()
+                && let Some(query) = self.recognized_bytes()
+            {
+                return query.cmp_from(byte_string.bytes(stored), equal_len);
+            }
+            if let Some(KeyInliner::InlineKeyTrait {
+                cmp_from: Some(cmp_from),
+                ..
+            }) = plan.inliner()
+                && let Some(same_type) = SameType::<K, Q>::recognize()
+            {
+                return cmp_from(same_type.cast(self.key), stored, equal_len);
+            }
         }
         self.key.cmp(stored.borrow())
     }

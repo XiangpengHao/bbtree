@@ -10,7 +10,7 @@
 //! |---|---|---|---|
 //! | without inline keys | none | nothing | `Ord` (D19) |
 //! | std integers | the impl's width in both | nothing | `Ord` (D19) |
-//! | every key under `WithInlineKey` | the impl's width in both | leaf: hash tags, if the impl has them and they fit (D36) | `Ord` (D19) |
+//! | every key under `WithInlineKey` | the impl's width in both; 8 / 4 with `cmp_from` (D43) | leaf: hash tags, if the impl has them and they fit (D36) | `Ord` (D19), or the impl's `cmp_from` past the tie |
 //! | std byte arrays | 2 / 2 (D32) | nothing | bytes; an exact-key lookup's one candidate all at once (D38) |
 //! | std heap byte strings | 8 / 4 (D43) | leaf: hash tags, where they fit (D36) | bytes, past the tie |
 //!
@@ -21,15 +21,16 @@
 //! separator keys (D17).
 //!
 //! What sets the rows apart is what a tie costs. A key with an `InlineKey`
-//! impl orders by its `Ord`, which may be user code: the nodes call it only
-//! while searching, never while keys move (D26). A std byte array holds its
-//! bytes in the node, so a tie costs a load from a node already read. A std
-//! heap byte string holds them elsewhere, so a tie costs a read past the
-//! node. Its leaves keep long inline keys and the keys' hash tags, their
-//! lengths, to avoid one. Its internal nodes, which most searches pass through without ending
-//! at a key, keep short ones. Reading a std byte string's window calls no
-//! user code, so its internal nodes may read a window's other bytes from
-//! the key while keys move (D43).
+//! impl orders by its `Ord`, or its `cmp_from`, which may be user code: the
+//! nodes call it only while searching, never while keys move (D26). A std
+//! byte array holds its bytes in the node, so a tie costs a load from a node
+//! already read. A std heap byte string holds them elsewhere, so a tie costs
+//! a read past the node. Its leaves keep long inline keys and the keys' hash
+//! tags, their lengths, to avoid one. Its internal nodes, which most
+//! searches pass through without ending at a key, keep short ones, as do
+//! those of keys whose impl has `cmp_from`. They read a window's other bytes
+//! from its key while keys move (D43), a key's own impl behind an
+//! abort-on-unwind guard (D48).
 //!
 //! Layouts, slots, searches and prefix upkeep read the plan, or the
 //! [`KeyInliner`] it is made from; none of them asks what the key type is.
@@ -97,8 +98,16 @@ impl<K> NodePlan<K> {
         };
         match inliner {
             KeyInliner::InlineKeyTrait {
-                width, hash_tag, ..
-            } => Self::with_inline_key_impl::<Kind>(inliner, width, hash_tag.is_some()),
+                width,
+                hash_tag,
+                cmp_from,
+                ..
+            } => Self::with_inline_key_impl::<Kind>(
+                inliner,
+                width,
+                hash_tag.is_some(),
+                cmp_from.is_some(),
+            ),
             KeyInliner::ByteString(byte_string) if byte_string.holds_its_bytes() => {
                 Self::for_byte_arrays(inliner)
             }
@@ -125,15 +134,28 @@ impl<K> NodePlan<K> {
     /// width, and keys whose inline keys tie compare with `Ord`, searched as
     /// the key type picks. Leaves keep the impl's hash tags, if it has them,
     /// where their layout has room for them (D36).
+    ///
+    /// An impl with `cmp_from` compares ties past the bytes known equal
+    /// instead (`SearchKey::cmp_tied`). Then, as for std heap byte strings,
+    /// internal nodes keep 4 bytes of 8-byte inline keys, and read a
+    /// window's other 4 from its key when they hand it out (D43): the extra
+    /// ties cost little only because they skip what is known equal.
     #[inline(always)]
     fn with_inline_key_impl<Kind: NodeKind>(
         inliner: KeyInliner<K>,
         width: InlineWidth,
         has_hash_tag: bool,
+        has_cmp_from: bool,
     ) -> Self {
+        let narrower_inside = has_cmp_from && width == InlineWidth::Eight && !Kind::IS_LEAF;
         Self {
             inliner: Some(inliner),
-            inline_width: Some(width),
+            inline_width: Some(if narrower_inside {
+                InlineWidth::Four
+            } else {
+                width
+            }),
+            rehydrates_windows: narrower_inside,
             hash_tags: has_hash_tag && Kind::has_room_for_hash_tags(width),
             ..Self::without_inline_keys()
         }
@@ -422,22 +444,41 @@ mod tests {
             two_bytes
         );
 
-        // A std byte string under `WithInlineKey` is a key like any other.
+        // A std byte array under `WithInlineKey` is a key like any other.
         let eight_bytes = PlanRow {
             inline_width: Some(InlineWidth::Eight),
             ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
         };
         assert_eq!(
-            PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
-            eight_bytes
-        );
-        assert_eq!(
-            PlanRow::of::<String, WithInlineKey, Internal<String, (), WithInlineKey>>(),
+            PlanRow::of::<[u8; 32], WithInlineKey, Leaf<[u8; 32], (), WithInlineKey>>(),
             eight_bytes
         );
         assert_eq!(
             PlanRow::of::<[u8; 32], WithInlineKey, Internal<[u8; 32], (), WithInlineKey>>(),
             eight_bytes
+        );
+    }
+
+    /// An impl with `cmp_from`, as `String`'s, keeps 4 bytes of its 8-byte
+    /// inline keys in internal nodes, which read a window's others from its
+    /// key (D43), and all 8 in leaves.
+    #[test]
+    fn inline_key_impls_with_cmp_from_keep_four_bytes_inside() {
+        let leaf = PlanRow {
+            inline_width: Some(InlineWidth::Eight),
+            ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
+        };
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
+            leaf
+        );
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Internal<String, (), WithInlineKey>>(),
+            PlanRow {
+                inline_width: Some(InlineWidth::Four),
+                rehydrates_windows: true,
+                ..leaf
+            }
         );
     }
 
@@ -522,6 +563,8 @@ mod tests {
         assert_eq!(
             PlanRow::of::<String, WithInlineKey, Internal<String, u64, WithInlineKey>>(),
             PlanRow {
+                inline_width: Some(InlineWidth::Four),
+                rehydrates_windows: true,
                 hash_tags: false,
                 ..tagged
             }

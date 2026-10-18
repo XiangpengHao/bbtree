@@ -12,6 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::TypeId;
 use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::{mem, ptr, slice};
 
@@ -203,6 +204,7 @@ impl<T: ?Sized> ByteString<T> {
 pub(in crate::tree) struct StdInteger<T> {
     inline_key_at: fn(&T, usize) -> InlineWord,
     width: InlineWidth,
+    cmp_prefix: fn(&T, &[u8]) -> Ordering,
 }
 
 impl<T> Clone for StdInteger<T> {
@@ -242,16 +244,23 @@ impl<T> StdInteger<T> {
     #[inline(always)]
     unsafe fn of<Integer: InlineKey>() -> Self {
         let inline_key_at: fn(&Integer, usize) -> InlineWord = Integer::inline_key_at;
-        // SAFETY: `T` is `Integer` (the caller's promise), so the two
+        let cmp_prefix: fn(&Integer, &[u8]) -> Ordering = Integer::cmp_prefix;
+        // SAFETY: `T` is `Integer` (the caller's promise), so each two
         // function pointer types are one type.
-        let inline_key_at = unsafe {
-            mem::transmute::<fn(&Integer, usize) -> InlineWord, fn(&T, usize) -> InlineWord>(
-                inline_key_at,
+        let (inline_key_at, cmp_prefix) = unsafe {
+            (
+                mem::transmute::<fn(&Integer, usize) -> InlineWord, fn(&T, usize) -> InlineWord>(
+                    inline_key_at,
+                ),
+                mem::transmute::<fn(&Integer, &[u8]) -> Ordering, fn(&T, &[u8]) -> Ordering>(
+                    cmp_prefix,
+                ),
             )
         };
         Self {
             inline_key_at,
             width: Integer::WIDTH,
+            cmp_prefix,
         }
     }
 
@@ -265,6 +274,12 @@ impl<T> StdInteger<T> {
     #[inline(always)]
     pub(in crate::tree) fn width(self) -> InlineWidth {
         self.width
+    }
+
+    /// The integer's [`InlineKey::cmp_prefix`].
+    #[inline(always)]
+    pub(in crate::tree) fn cmp_prefix(self) -> fn(&T, &[u8]) -> Ordering {
+        self.cmp_prefix
     }
 }
 

@@ -41,14 +41,15 @@ documented with its reason:
 |---|---|---|---|
 | without inline keys | none | nothing | as the key type picks (D19) |
 | std integers | the impl's width in both | nothing | as the key type picks (D19) |
-| every key under `WithInlineKey` | the impl's width in both | leaf: hash tags, if the impl has them and they fit (D36) | as the key type picks (D19) |
+| every key under `WithInlineKey` | the impl's width in both; 8 / 4 with `cmp_from` (D43) | leaf: hash tags, if the impl has them and they fit (D36) | as the key type picks (D19); past the tie with `cmp_from` |
 | std byte arrays | 2 / 2 (D32) | nothing | binary; one candidate compares whole (D38) |
 | std heap byte strings | 8 / 4 (D43) | leaf: hash tags, where they fit (D36) | binary |
 
 The rows differ in what a tie costs: a load from the node (arrays), a read
 past the node (heap strings), or user code, which the nodes call only while
 searching (`InlineKey` impls), but for a hash tag, which a leaf computes as
-it writes a key, behind an abort-on-unwind guard (D36, D48). Layout, slots, searches and prefix upkeep read
+it writes a key, and a window an internal node reads again from its key,
+both behind an abort-on-unwind guard (D36, D43, D48). Layout, slots, searches and prefix upkeep read
 the plan; none asks what the key type is.
 
 **3. Columns: arrays that move with the keys** (`KeyColumns`, `KeyCells`,
@@ -116,24 +117,46 @@ place; timings vary more between runs (29.9–42.4 ns at baseline) than this.
 
 The debug test suite runs in 75 s, against 86 s before.
 
-## Rejected: a public `KeyBytes` trait
+## Keys with their own impl, at `Auto`'s speed
 
-A `KeyBytes` trait (`fn key_bytes(&self) -> &[u8]`, `Ord` equal to byte
-order) with a `WithKeyBytes` strategy would let a newtype around a byte string
-break ties by its bytes, as `Auto` does for std strings. It was built and
-measured, then removed:
+A key with its own `InlineKey` impl gets what std heap byte strings get
+under `Auto` through three hooks, with defaults, so an impl without them
+runs as before:
 
-- 1M lookups of `String`-newtype paths behind a 64-byte shared prefix took
-  311 ns with `WithKeyBytes` and 315 ns with `WithInlineKey`, run to run
-  noise, and `WithKeyBytes` ran more instructions.
-- What makes std heap strings fast on paths is hash tags and 4-byte
-  internal summaries. Both read keys while keys move, which user code
-  can't do safely. What was left, comparing bytes past a tie
-  instead of `memcmp` from the start, saves nothing.
-- A public trait is permanent API for no measured gain.
+- `HAS_HASH_TAG` and `hash_tag`: leaves keep each key's tag (D36).
+- `HAS_CMP_FROM` and `cmp_from`: ties compare past the bytes the inline
+  keys showed equal, and internal nodes keep 4 bytes of 8-byte inline keys
+  (D43). The two go together: 4 bytes inside pays only with the skip.
+- `cmp_prefix`: a search's check against what every key shares (D50),
+  by default a window at a time; the std byte strings' impls compare 32
+  bytes at a time, as `Auto` does.
 
-Its panic test stays, as a test of a panicking `InlineKey`
-(`a_panicking_inline_key_leaves_a_valid_map`).
+A newtype around a std byte string takes all three from its string.
+
+Both call user code while keys move: a leaf computes a key's tag as it
+writes it, and an internal node of 4-byte inline keys reads a window's
+other bytes from its key. Both run behind an abort-on-unwind guard (D48).
+
+On 10M paths, ns per hit / miss and DRAM lines per hit, one run each:
+
+| variant | hit | miss | lines |
+|---|--:|--:|--:|
+| `Auto`: 4 bytes inside, ties past the tie | 481 | 385 | 17.2 |
+| `Auto`, 8 bytes inside | 565 | 427 | 18.6 |
+| `Auto`, ties from byte 0 | 661 | 482 | 28.0 |
+| `WithInlineKey`, hash tags only: 8 bytes inside, `memcmp` from byte 0 | 596 | 451 | 21.6 |
+| `WithInlineKey`, hash tags and `cmp_from`, D50's check a window at a time | 540 | 423 | 18.8 |
+| the same, without D50's check (a measurement only) | 486 | 376 | 16.6 |
+| `WithInlineKey`, every hook, the strings' `cmp_prefix` | 486–491 | 376–389 | 18.4 |
+
+The check a window at a time read what two 32-byte loads read, but its 8
+ascending windows of the query's first line drew 1.7 more lines per hit
+of hardware-prefetch fills past the key. With every hook, the demand reads
+from DRAM are `Auto`'s, and the time too.
+
+An earlier `KeyBytes` trait, which only compared ties past the tie, showed
+no gain at 1M (311 vs 315 ns), with 8 bytes inside and no tags: the skip
+pays at 10M, and most through the 4-byte summaries it allows.
 
 ## Adding a specialization
 

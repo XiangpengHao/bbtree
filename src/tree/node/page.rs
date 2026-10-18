@@ -1307,8 +1307,8 @@ mod tests {
             Some(InlineWidth::Four)
         );
         assert_eq!(
-            NodePtr::<String, u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_INTERNAL
+            NodePtr::<[u8; 32], u64, WithInlineKey>::internal_layout(),
+            NodeLayout::<[u8; 32], u64>::EIGHT_BYTE_INLINE_INTERNAL
         );
         assert!(NodePtr::<Tracked<'_>, u64, WithInlineKey>::has_inline_keys());
         assert!(!NodePtr::<Tracked<'_>, u64, Auto>::has_inline_keys());

@@ -934,7 +934,9 @@ mod tests {
 
     /// `Auto`'s heap byte strings keep 4-byte inline keys in internal nodes,
     /// whatever the leaves' 8-byte ones and the value type, and no keys
-    /// (D49): `(8 + 4n → 8) + 8(n + 1) ≤ 512`, n = 41, edges at 176.
+    /// (D49): `(8 + 4n → 8) + 8(n + 1) ≤ 512`, n = 41, edges at 176. So do
+    /// keys whose impl has `cmp_from`, as `String`'s does, under
+    /// `WithInlineKey`; those whose impl hasn't keep 8, as `[u8; 32]`.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn auto_heap_byte_internal_nodes_keep_four_bytes() {
@@ -953,7 +955,11 @@ mod tests {
         );
         assert_eq!(
             NodePtr::<String, u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_INTERNAL,
+            NodePtr::<String, u64, Auto>::internal_layout(),
+        );
+        assert_eq!(
+            NodePtr::<[u8; 32], u64, WithInlineKey>::internal_layout(),
+            NodeLayout::<[u8; 32], u64>::EIGHT_BYTE_INLINE_INTERNAL,
         );
     }
 

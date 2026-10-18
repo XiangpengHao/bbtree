@@ -244,7 +244,9 @@ Design in 04-inline-key.md.
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
   Windows stay 8 bytes for every key type; nodes keep `WIDTH` of them.
-  It gives a hash tag too, if `HAS_HASH_TAG` (D36).
+  It gives a hash tag too, if `HAS_HASH_TAG` (D36), compares ties from
+  where keys differ, if `HAS_CMP_FROM` (D43), and compares itself against
+  what every key shares (`cmp_prefix`, D50).
 - **Why not a plain trait with a default:** "default for every type, override for
   `String`" needs specialization, which is nightly-only and years from stable.
 - **TODO:** when specialization is stable, switch to it, and drop the std-type
@@ -846,13 +848,22 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   leaves and use 4-byte ones in internal nodes. Internal capacity rises
   25 → 28 for `String` and 31 → 36 for `&str`/`Box<str>`; pages stay
   1 KiB. A window an internal node hands out, which may go into a leaf, is
-  read again from its key, the head below (D49), for all 8 bytes. Custom
-  strategies and fixed arrays keep their width.
+  read again from its key, the head below (D49), for all 8 bytes. Fixed
+  arrays keep their width.
+- **Keys with their own impl:** under `WithInlineKey`, an 8-byte impl that
+  sets `HAS_CMP_FROM` gets the same 8 / 4, and its ties compare with its
+  `InlineKey::cmp_from`, past the bytes known equal, as std strings' do
+  (`SearchBytes::cmp_from`, which std byte strings' impls share). The
+  windows its internal nodes read again call its `inline_key_at` while
+  keys move, behind an abort-on-unwind guard (D48). An impl without it
+  keeps its width in both kinds and compares ties with `Ord`.
 - **Why:** about 94% of lookups pass through an internal node without
   ending there, so the extra ties from 4 bytes cost little (JSON: +0.02
   heap reads per hit), while the summaries shrink from 4 cache lines to 2.
   In leaves, 4 bytes would more than double JSON's heap comparisons, so
-  leaves stay at 8.
+  leaves stay at 8. The ties are cheap only because they compare from
+  where keys differ: from byte 0, each reads a key's first lines, which
+  path keys share. So 4 bytes go with the comparison, never without it.
 - **Search on baseline x86-64:** 17–32 four-byte summaries use one SSE2
   packing step and trailing-one counts; above 32, the compiler's count
   (04 Q6). A second packing step for 33–64 cut instructions but was slower
@@ -860,6 +871,14 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 - **Measured,** 10M native: JSON inserts 314.1 → 282.5 ns, hits
   343.8 → 320.4, misses 282.3 → 235.4; paths about 1.3% faster. Baseline
   x86-64, owned `String`: JSON hits 408.7 → 390.6, misses 335.5 → 297.3.
+  On 10M paths, with hash tags (D36), ns per hit / miss and DRAM lines per
+  hit, one run each: 4 bytes inside and ties from where keys differ
+  481 / 385, 17.2 lines; 8 bytes inside 565 / 427, 18.6; 4 bytes with
+  ties from byte 0 661 / 482, 28.0. Paths as `String` under
+  `WithInlineKey`, from hash tags only (8 bytes inside, `memcmp` from byte
+  0) to `cmp_from` and 8 / 4: 589 / 459 → 575 / 457 ns, 905 → 812
+  instructions and 21.6 → 19.0 lines per hit; with `cmp_prefix` too
+  (D50), 486–491 / 376–389 ns against `Auto`'s 481–489 / 375–383.
 - **Cost:** on baseline x86-64 with borrowed keys (2M diagnostic), path
   misses are 2.2% slower; the other borrowed cells improved about 2%.
 
@@ -944,9 +963,6 @@ Design and measurements in 07-node-plan.md.
   internal search); the rest within ±9, of which set lookups +2 (an LLVM
   speculation drops `inbounds` and keeps one null test). Debug tests 86 → 75 s, from
   narrowing type recognition before comparing type identities.
-- **Rejected:** a public `KeyBytes` trait and `WithKeyBytes` strategy for
-  byte-ordered newtypes: no measured gain over `WithInlineKey` (311 vs
-  315 ns per lookup on path newtypes).
 
 **D48. A panic in user code is not reconciled.** (2026-10-12)
 
@@ -960,7 +976,8 @@ Design and measurements in 07-node-plan.md.
   User code runs between structural changes, not inside one, so unwinding
   never leaves what unchecked code trusts (lengths, node minimums) half
   done (D26, D37). A change that must call it inside one goes behind an
-  abort-on-unwind guard, as a key's hash tag does (D36).
+  abort-on-unwind guard, as a key's hash tag (D36), and the window an
+  internal node reads again from its key (D43), do.
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
   (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
@@ -1021,7 +1038,20 @@ Design in 05-fence-key.md, "The shared prefix".
   query against those bytes once, before the root. A query without them
   sorts before or after every key and reads no node: a lookup misses, a
   range or an entry starts at the first or last leaf edge. Below, every
-  node skips its prefix unchecked.
+  node skips its prefix unchecked. Std byte strings compare 32 bytes at a
+  time. A key with an `InlineKey` impl compares by its
+  `InlineKey::cmp_prefix`: by default a window at a time against the
+  shared bytes read as words; the std byte strings' impls 32 bytes at a
+  time, as `Auto` does, which a newtype takes from its string.
+- **Why the trait has `cmp_prefix`:** on 10M paths, which share 64 bytes,
+  the check was all that kept `String` under `WithInlineKey`, with every
+  other hook (D36, D43), from `Auto`'s speed: 540 / 423 ns per hit / miss
+  with windows against `Auto`'s 481–489 / 375–391, and 486 / 376 without
+  the check. The demand reads from DRAM were `Auto`'s (15.5 lines per
+  hit); the 8 ascending windows of the query's first line drew 1.7 more
+  lines per hit of hardware-prefetch fills past the key, which two 32-byte
+  loads don't, unrolled or not. With the strings' `cmp_prefix`: 486–491 /
+  376–389 ns, and 610 instructions per hit to `Auto`'s 626.
 - **Upkeep, reading no key:** an insert whose key shares less shrinks the
   bytes first, and the border nodes with them, by D26's window shift; an
   empty tree starts from its first key's. Removals leave them: the rest

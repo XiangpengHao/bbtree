@@ -26,7 +26,7 @@ misbehaves. Eight targets, in `fuzz/fuzz_targets/`, over the harnesses in
 | `map_heap_byte_strings` | `Vec<u8>`: 8/4-byte windows (D43), hash tags (D36); the most row-specific code | 18% |
 | `user_code_panics` | `Ord`, `InlineKey`, `Clone`, `Drop` that panic or lie: memory safety of every unsafe path, panic isolation (D26), D44 | 16% |
 | `map_integers` | `u64`: 2-byte windows past shared bytes (D31); the most common keys with inline keys | 11% |
-| `map_user_inline_keys` | a user's `InlineKey` under `WithInlineKey`, at the default width: prefixes kept without calling it while keys move, its own hash tags, the last byte (D36), borrowed lookups by `Ord` alone (D19) | 11% |
+| `map_user_inline_keys` | a user's `InlineKey` under `WithInlineKey`, at the default width: prefixes kept without calling it while keys move, internal windows read again from its keys (D43), its own hash tags, the last byte (D36), ties compared from where keys differ, its bytes' check against what every key shares (D50), borrowed lookups by `Ord` alone (D19) | 11% |
 | `map_plain_keys` | no inline keys: `u32`, branchless (D19); 64-byte keys whose trees reach three levels from a few hundred entries | 9% |
 | `set_algebra` | the operations on two sets: strategy choice, the merge of two walks (`unsync/set/merge.rs`), std's prints | 9% |
 | `map_byte_arrays` | `[u8; 16]`: separator keys in heads (D49), whole-key equality (D38) | 6% |

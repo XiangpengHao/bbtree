@@ -461,7 +461,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// Separator `index`'s window: its inline key at the node's prefix
     /// length, or [`Window::NONE`] in a node without inline keys. A node
     /// whose plan keeps fewer bytes than a leaf does reads the window from
-    /// the key again (D43), in its head (D49).
+    /// the key again (D43), in its head (D49): callers move keys, so a key's
+    /// own impl runs behind an abort-on-unwind guard.
     ///
     /// # Panics
     ///
@@ -475,7 +476,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let prefix_len = self.prefix_len();
         let inline_key = match plan.inliner() {
             Some(inliner) if plan.rehydrates_windows() => {
-                inliner.inline_key_at(self.separator_key(index), prefix_len)
+                inliner.inline_key_at_while_keys_move(self.separator_key(index), prefix_len)
             }
             _ => inline_keys.inline_key(index),
         };
