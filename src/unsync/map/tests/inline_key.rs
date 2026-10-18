@@ -541,15 +541,14 @@ fn a_panicking_inline_key_leaves_a_sound_map() {
     assert_eq!(map.len(), map.iter().rev().count());
 }
 
-/// An `InlineKey` that panics while `retain`, `extract_if` or `append` builds
-/// a tree of the entries it keeps loses at most the entries it was placing:
-/// the map counts only those it holds, every value is dropped once, none
-/// leaked, and the tree's borders keep its shared prefix (D50), so that a key
-/// past the last goes in last. The panic lands on every call in turn:
-/// computing an entry's inline key, fitting the prefix of a node a new leaf
-/// closes, fitting the border when the walk or the merge finishes, joining
-/// back the entries past a bounded range, and putting back what a dropped
-/// `extract_if` did not visit.
+/// An `InlineKey` that panics while `retain` or `extract_if` removes entries,
+/// or while `append` builds a tree of the entries it keeps, loses at most the
+/// entries it was moving: the map counts only those it holds, every value is
+/// dropped once, none leaked, and the tree's borders keep its shared prefix
+/// (D50), so that a key past the last goes in last. The panic lands on every
+/// call in turn: computing an entry's inline key, fitting the prefix of a node
+/// a new leaf closes or a removal changed, and fitting the border when the
+/// merge finishes.
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_inline_key_in_a_bulk_change_leaves_a_valid_map() {

@@ -1,27 +1,14 @@
 //! [`BBTreeMap`]: an ordered map with the API and behavior of std's
-//! `BTreeMap` (D1), on nodes sized in 1 KB or 512-byte steps without parent
-//! pointers (D11, D15, D21), as a B+-tree that stores each key once (D17).
+//! `BTreeMap` (D1). It is a B+-tree that stores each key once (D17), on
+//! nodes sized in 1 KB or 512-byte steps, without parent pointers (D11, D15,
+//! D21).
 //!
-//! The map owns a [`Tree`], which has no root page until the first insert,
-//! so that [`BBTreeMap::new`] allocates nothing. Exact-key lookups and ordinary
-//! fitting inserts descend from the root; increasing inserts can reuse a
-//! last leaf remembered after a split. An insert that splits records a
-//! node stack for going back up (`tree/node_stack.rs`, `tree/insert.rs`), and
-//! so does removing, for merges (`tree/remove.rs`); an entry keeps its node
-//! stack (`entry.rs`). Iterating walks the tree from both ends at once, each
-//! end a node stack (`iter.rs`, `iter_mut.rs`, on `tree/walk.rs`); iterating
-//! by value takes the tree apart as it goes (`into_iter.rs`), as dropping the
-//! map does. Bulk changes drain entries in order and build trees of full nodes
-//! (`append.rs`, `from_entries.rs`, on `tree/build.rs`); `split_off` cuts
-//! the tree along a node stack (`tree/cut.rs`), and `extract_if` cuts out its
-//! range, rebuilds what it keeps of it, and joins the rest back on
-//! (`extract_if.rs`, `tree/join.rs`).
-//!
-//! The strategy parameter `S` decides which keys have inline keys (D18,
-//! `inline_key.rs`); every method is the same for every `S`. The allocator
-//! parameter `A` is where the map's pages come from (D8, `allocator.rs`):
-//! the map holds it, and gives it to every operation on its tree that
-//! allocates or frees a page.
+//! The map owns a [`Tree`], which has no root page until the first insert, so
+//! that [`BBTreeMap::new`] allocates nothing. The strategy parameter `S`
+//! decides which keys have inline keys (D18, `inline_key.rs`); every method
+//! is the same for every `S`. The allocator parameter `A` is where the map's
+//! pages come from (D8, `allocator.rs`): the map holds it, and gives it to
+//! every operation on its tree that allocates or frees a page.
 
 #![forbid(unsafe_code)]
 
@@ -65,9 +52,9 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// relative to other keys while it is in the map; the behavior that results
 /// is unspecified but memory-safe.
 ///
-/// Its nodes store an inline key beside each key, the first bytes of the
-/// key's encoding in a register, that searches compare first, when the
-/// strategy `S` gives the key type one: by default ([`Auto`]), std byte
+/// Its nodes store an inline key beside each key, when the strategy `S`
+/// gives the key type one: the first bytes of the key's encoding, in a
+/// register, which searches compare first. By default ([`Auto`]), std byte
 /// strings, 16-, 20- and 32-byte arrays, and 64- and 128-bit integers have
 /// them, and other keys don't. [`WithInlineKey`] gives them to any
 /// key type that implements [`InlineKey`]. Either way, every method behaves
@@ -398,10 +385,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     ///
     /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
     /// before the first change. So does every call to its `InlineKey` with
-    /// [`WithInlineKey`], but for those an insert makes last, once the entry
-    /// is in and counted, if it split nodes, to fit their inline keys to
-    /// their new fences: if one of those panics, the map has the new entry.
-    /// Either way, it stays valid.
+    /// [`WithInlineKey`], except those an insert makes last, once the entry
+    /// is in and counted: if it split nodes, it fits their inline keys to
+    /// their new fences. If one of those calls panics, the map has the new
+    /// entry. Either way, it stays valid.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
@@ -420,11 +407,11 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     ///
     /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
     /// before the first change. So does every call to its `InlineKey` with
-    /// [`WithInlineKey`], but for those a removal makes last, once the entry
-    /// is out and counted, if it merged nodes or moved entries between them
-    /// or removed a key from an internal node, to fit their inline keys to
-    /// their new fences: if one of those panics, the entry is gone. Either
-    /// way, the map stays valid.
+    /// [`WithInlineKey`], except those a removal makes last, once the entry
+    /// is out and counted: if it merged nodes, moved entries between them or
+    /// removed a separator, it fits their inline keys to their new fences.
+    /// If one of those calls panics, the entry is gone. Either way, the map
+    /// stays valid.
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     ///
@@ -529,7 +516,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
             length: upper_length,
             alloc: self.alloc.clone(),
         };
-        cut.finish(Some(&mut self.tree), &mut upper.tree);
+        cut.finish(&mut self.tree, &mut upper.tree);
         upper
     }
 }
@@ -539,7 +526,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
     /// Panics unless the map is a well-formed B+-tree of `len()` entries
     /// (D17): in order, balanced, every node at least at its minimum, every
     /// separator's value in a leaf's head, and every node's inline keys and
-    /// prefix as its keys and fences give them; `Tree::check_invariants`
+    /// prefix as its keys and fences give them. `Tree::check_invariants`
     /// (`tree/invariants.rs`) lists each check. Compiled for tests and for
     /// fuzzing builds (`--cfg fuzzing`, which `cargo fuzz` sets), where the
     /// fuzz targets (`fuzz/`) call it.
@@ -550,8 +537,9 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
         self.tree.check_invariants(self.length);
     }
 
-    /// Checks identical tree shape, keys and prefix lengths, for batch
-    /// equivalence tests and fuzzing. Values are compared through iteration.
+    /// Panics unless both maps have the same length, tree shape, keys and
+    /// prefix lengths: for batch equivalence tests and fuzzing. It compares
+    /// no values; callers compare those by iterating.
     pub fn check_same_nodes(&self, other: &Self) {
         assert_eq!(self.length, other.length);
         self.tree.check_same_nodes(&other.tree);

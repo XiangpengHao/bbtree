@@ -1,9 +1,9 @@
 //! Looking up an iterator's elements in a large set a batch at a time, for
 //! the operations on two sets that search one for the other's elements
 //! (`intersection`, `difference`, `is_subset`): a batch's lookups overlap
-//! their waits for memory (doc 12). The iterator still hands out its
-//! elements one by one, so the operations print and hint as std's, which
-//! look each up alone.
+//! their waits for memory (doc 12). The iterator still moves one element at
+//! a time, so the operations' size hints are std's, which look each element
+//! up alone.
 
 #![forbid(unsafe_code)]
 

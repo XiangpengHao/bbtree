@@ -14,32 +14,30 @@
 //! | std byte arrays | 2 / 2 (D32) | nothing | bytes; an exact-key lookup's one candidate all at once (D38) |
 //! | std heap byte strings | 8 / 4 (D43) | leaf: length tags, where they fit (D36) | bytes, past the tie |
 //!
-//! Every row with inline keys keeps its separator keys in leaves, each the
-//! head of the leftmost leaf right of it, and its internal nodes keep only
-//! inline keys and children (D49): their searches compare inline keys, and
-//! read a separator's key, down in its leaf, only on a tie. Without inline
-//! keys, internal nodes keep their separator keys (D17).
+//! With inline keys, every row keeps its separator keys as leaf heads, and
+//! its internal nodes keep only inline keys and children (D49). Their
+//! searches compare inline keys, and read a separator's key, down in its
+//! leaf, only on a tie. Without inline keys, internal nodes keep their
+//! separator keys (D17).
 //!
 //! What sets the rows apart is what a tie costs. A key with an `InlineKey`
 //! impl orders by its `Ord`, which may be user code: the nodes call it only
 //! while searching, never while keys move (D26). A std byte array holds its
 //! bytes in the node, so a tie costs a load from a node already read. A std
 //! heap byte string holds them elsewhere, so a tie costs a read past the
-//! node: its leaves keep long inline keys and the keys' lengths to avoid
-//! one, and its internal nodes, which most searches pass through without
-//! ending at a key, keep short ones. Reading a std byte string's window
-//! calls no user code, so its internal nodes may read a window's other
-//! bytes from the key while keys move (D43).
+//! node. Its leaves keep long inline keys and the keys' lengths to avoid
+//! one. Its internal nodes, which most searches pass through without ending
+//! at a key, keep short ones. Reading a std byte string's window calls no
+//! user code, so its internal nodes may read a window's other bytes from
+//! the key while keys move (D43).
 //!
-//! Layouts (`layout.rs`), slots (`slots.rs`), searches (`leaf.rs`,
-//! `internal.rs`) and prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`)
-//! read the plan, or the [`KeyInliner`] it is made from; none of them asks
-//! what the key type is.
+//! Layouts, slots, searches and prefix upkeep read the plan, or the
+//! [`KeyInliner`] it is made from; none of them asks what the key type is.
 //!
 //! A plan is a pure function of `K`, `S` and the node kind, which folds to a
 //! constant after monomorphization. Code asks for it where it uses it, from
 //! those types, and never receives it as an argument or keeps it in a
-//! field: a plan handed across a call that is not inlined would be a value
+//! field. A plan handed across a call that is not inlined would be a value
 //! read at run time, and the code behind the call would serve every plan.
 
 #![forbid(unsafe_code)]
@@ -57,8 +55,8 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
 /// their keys apart, for keys `K` under one map's strategy: a row of the
-/// table above, for one kind. See the module documentation for how to get
-/// one.
+/// module documentation's table, for one kind. The module documentation also
+/// says how to get one.
 pub(in crate::tree) struct NodePlan<K> {
     /// How the keys get inline keys, or `None` if they have none.
     inliner: Option<KeyInliner<K>>,
@@ -134,12 +132,12 @@ impl<K> NodePlan<K> {
         }
     }
 
-    /// Std byte arrays, `[u8; 16]`, `[u8; 20]` and `[u8; 32]`, which hold
-    /// their bytes in the node: a tie costs a load from the node, so 2 bytes
-    /// of each inline key do, which pack more of them per cache line (D32).
-    /// Keys whose inline keys tie compare by their bytes, and an exact-key
-    /// lookup's one candidate by all of them at once, a length the compiler
-    /// knows (D38).
+    /// Std byte arrays (`[u8; 16]`, `[u8; 20]` and `[u8; 32]`) hold their
+    /// bytes in the node, where a tie costs only a load. So 2 bytes of each
+    /// inline key do, which packs more of them per cache line (D32). Keys
+    /// whose inline keys tie compare by their bytes. An exact-key lookup
+    /// compares its one candidate by all of them at once, in a length the
+    /// compiler knows (D38).
     #[inline(always)]
     fn for_byte_arrays(inliner: KeyInliner<K>) -> Self {
         Self {
@@ -214,15 +212,6 @@ impl<K> NodePlan<K> {
         })
     }
 
-    /// Whether each separator key is the head of the leftmost leaf right of
-    /// it, where its value is too, rather than a key of its internal node
-    /// (D49): for keys with inline keys, the same in both kinds. Internal
-    /// nodes then keep only inline keys and children.
-    #[inline(always)]
-    pub(in crate::tree) fn has_separator_keys_in_heads(self) -> bool {
-        self.inliner.is_some()
-    }
-
     /// How a search runs over all of a node's keys when it has no inline key
     /// to compare with theirs: in nodes without inline keys, and for a lookup
     /// through a borrowed form the nodes can't encode (D19). The key type
@@ -249,12 +238,10 @@ impl<K> NodePlan<K> {
     /// Whether every lookup's node search is inlined (`leaf.rs`,
     /// `internal.rs`), or left to LLVM at each caller, as for std heap byte
     /// strings; an insert's leaf search is always inlined. Other keys' node
-    /// searches are short, and LLVM outlined some, each level then returning
-    /// through the stack: 10M `[u8; 32]` lookups ran 442 instructions each
-    /// instead of 271. A heap byte string's search reads keys past the node,
-    /// so a call costs little beside it, and inlined into every lookup it
-    /// made the lookup twice the code, with its state on the stack: the
-    /// benchmark's `String` lookups ran 449 instructions instead of 433.
+    /// searches are short; LLVM may outline them, and then each level returns
+    /// through the stack. A heap byte string's search reads keys past the
+    /// node, so a call costs little beside it. Inlined into every lookup, it
+    /// doubles the lookup's code and puts its state on the stack (D41).
     #[inline(always)]
     pub(in crate::tree) fn inlines_node_search(self) -> bool {
         !self.is_for_heap_byte_strings()

@@ -1,6 +1,6 @@
 //! Inline keys (`doc/04-inline-key.md`, D18): register-sized windows of a
-//! key's encoding that nodes store beside their keys and search first, so
-//! that a search reads the full keys, and the heap bytes behind them, only
+//! key's encoding that nodes store beside their keys and search first. A
+//! search then reads the full keys, and the heap bytes behind them, only
 //! where inline keys tie.
 //!
 //! - [`InlineKey`] is how a key type gives its keys inline keys; std byte
@@ -27,16 +27,16 @@ pub type InlineWord = u64;
 /// How many bytes of each inline key the nodes keep: the first 2, the first
 /// 4, or all 8 of the window that [`InlineKey::inline_key_at`] gives.
 ///
-/// Narrower inline keys pack more of a node's into each cache line, and
-/// compare in more vector lanes at once, but tie more often: inline keys that
-/// tie say nothing, and the search then compares the keys themselves. A key
-/// stored in the node, such as an integer, makes a tie cheap, and 2 bytes
-/// past the bytes a node's keys share rarely tie on keys whose bytes are
-/// dense. A key behind a pointer, such as a `String`, reads the heap on a
-/// tie: 8 bytes, the default, tie least.
-/// With [`Auto`], heap byte strings keep eight bytes in leaves and four
-/// in internal nodes; explicit [`WithInlineKey`] strategies use their
-/// declared width in both kinds.
+/// Narrower inline keys pack more of a node's inline keys into each cache
+/// line, and compare in more vector lanes at once, but tie more often:
+/// inline keys that tie say nothing, and the search then compares the keys
+/// themselves. A key stored in the node, such as an integer, makes a tie
+/// cheap, and 2 bytes past the bytes a node's keys share rarely tie on keys
+/// whose bytes are dense. A key behind a pointer, such as a `String`, reads
+/// the heap on a tie: 8 bytes, the default, tie least.
+///
+/// With [`Auto`], heap byte strings keep 8 bytes in leaves and 4 in internal
+/// nodes; [`WithInlineKey`] keeps the impl's declared width in both kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineWidth {
     /// The first 2 bytes: the std integers' width, and under [`Auto`], fixed
@@ -63,7 +63,7 @@ impl InlineWidth {
 /// byte string that orders like the key.
 ///
 /// The contract: every key has an encoding such that if `a`'s encoding sorts
-/// before `b`'s, both padded with zeros, then `a < b`; and
+/// before `b`'s, both padded with zeros, then `a < b`. And
 /// `inline_key_at(offset)` is that encoding's bytes `offset..offset + 8`,
 /// big-endian, zero past its end. So where the encodings of two keys agree
 /// before `offset` and their inline keys at `offset` differ, the keys order
@@ -74,9 +74,9 @@ impl InlineWidth {
 /// The impls for std byte strings and the 64- and 128-bit integers are
 /// proven, by Verus, to keep this contract (`src/proof/inline_key.rs`).
 ///
-/// Where the map uses this impl, every key under [`WithInlineKey`] and the
-/// std integers under [`Auto`], the nodes keep the first [`Self::WIDTH`]
-/// bytes of each inline key, all 8 unless the impl says fewer: kept bytes
+/// Where the map uses this impl (every key under [`WithInlineKey`], and the
+/// std integers under [`Auto`]), the nodes keep the first [`Self::WIDTH`]
+/// bytes of each inline key, all 8 unless the impl says fewer. Kept bytes
 /// that differ order the keys the same way, and kept bytes that tie say
 /// nothing.
 ///
@@ -231,14 +231,16 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
 /// The key types recognized are the byte strings `String`, `str`,
 /// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,
 /// `[u8; 20]` and `[u8; 32]`, and the integers `u64`, `i64`, `u128` and
-/// `i128`, through their [`InlineKey`] impls, by their type alone: a newtype
-/// around one of them is another type, and needs [`WithInlineKey`]. A lookup
-/// uses the inline keys when the type it looks up with is recognized too, as
-/// `&str` is for `String` keys; otherwise it compares full keys, as a map
-/// without inline keys does.
-/// Fixed byte arrays keep two bytes per inline key. Heap-backed byte strings
-/// keep eight in leaves to limit allocation reads on prefix ties, and four
-/// in internal nodes to keep routing metadata compact.
+/// `i128`. Their inline keys are those their [`InlineKey`] impls give. They
+/// are recognized by their type alone: a newtype around one of them is
+/// another type, and needs [`WithInlineKey`]. A lookup uses the inline keys
+/// when the type it looks up with is recognized too, as `&str` is for
+/// `String` keys; otherwise it compares full keys, as a map without inline
+/// keys does.
+///
+/// Fixed byte arrays keep 2 bytes per inline key. Heap-backed byte strings
+/// keep 8 in leaves, to read the heap less on prefix ties, and 4 in internal
+/// nodes, to keep those compact.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Auto;
 
@@ -248,7 +250,7 @@ pub struct Auto;
 /// A lookup uses the inline keys when it looks up with the key type itself.
 /// A lookup through another borrowed form of the key (a `Q` other than `K`
 /// in [`BBTreeMap::read`]) has no inline key to compare, and compares full
-/// keys instead: inline keys only speed up the search, so the answer is the
+/// keys instead. Inline keys only speed up the search, so the answer is the
 /// same.
 ///
 /// [`BBTreeMap::read`]: crate::BBTreeMap::read

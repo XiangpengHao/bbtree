@@ -4,8 +4,7 @@
 //!
 //! Removing the elements a predicate picks: [`ExtractIf`], on the map's walk
 //! (`map/extract_if.rs`), with the predicate seeing each element alone, as
-//! std's. Like the map's, it cuts the range out of the set, and puts its
-//! kept elements back: O(log n) beyond the range's elements.
+//! std's.
 
 #![forbid(unsafe_code)]
 
@@ -442,10 +441,6 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// remaining elements will be retained. Use `extract_if().for_each(drop)`
     /// if you do not need the returned iterator, or [`retain`] with a negated
     /// predicate if you also do not need to restrict the range.
-    ///
-    /// Unlike std's, which passes over the range in place, this walk cuts the
-    /// range out of the set, and puts its kept elements back: O(log n)
-    /// beyond the range's elements.
     ///
     /// [`retain`]: BBTreeSet::retain
     ///

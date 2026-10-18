@@ -526,10 +526,10 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Leaf<K
         self.has_head().then(|| self.head_value().tracked_id())
     }
 
-    /// The id of the head's key, if the leaf has a head and separator keys
-    /// are heads (D49).
+    /// The id of the head's key, if the leaf has a head and the map has inline
+    /// keys (D49).
     pub(super) fn head_key_id(self) -> Option<usize> {
-        (self.has_head() && NodePtr::<K, V, S>::has_separator_keys_in_heads())
+        (self.has_head() && NodePtr::<K, V, S>::has_inline_keys())
             .then(|| self.head_key().tracked_id())
     }
 }
@@ -563,8 +563,8 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K
     }
 
     /// The id of the key of the separator just left of this node, given
-    /// `separator`, as it came out of its node: its own, where internal
-    /// nodes keep keys, or the leftmost leaf's head's under this node (D49).
+    /// `separator`, as it came out of its node: its own without inline keys, or
+    /// with them the leftmost leaf's head's under this node (D49).
     pub(super) fn separator_key_id(self, separator: &Separator<K, S>) -> usize {
         match separator.key() {
             Some(key) => key.tracked_id(),

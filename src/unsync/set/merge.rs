@@ -4,20 +4,16 @@
 //!
 //! A cursor takes its set's keys from the walk a run at a time
 //! (`tree/walk.rs`): all the keys left in a leaf, which the walk moves past
-//! at once, or a separator alone. Stepping through a run touches neither the
-//! walk nor its count. A merge's fold keeps both runs in locals, which live
-//! in registers, and touches each walk once per run; `next` keeps them in the
-//! iterator and does as little per element.
+//! at once, or, where the walk crosses into another leaf, the next key
+//! alone. Stepping through a run touches neither the walk nor its count. A
+//! merge's fold keeps both runs in locals, which live in registers, and
+//! touches each walk once per run; `next` keeps them in the iterator and
+//! does as little per element.
 //!
-//! The iterators' `next` is always inlined: called out of line, once per
+//! The iterators' `next` is always inlined. Called out of line, once per
 //! element, it reaches the cursors through a pointer, and each step waits on
-//! the last one's stores to them; inlined into the caller's loop, they stay
-//! in its frame, which the CPU forwards from cheaply. Measured on a union of
-//! two 10k sets: 162k cycles out of line, 105k inlined, std's 108k.
-//!
-//! The iterators built on cursors print what std's print, rebuilding std's
-//! iterators from what is left and from which element std's would hold,
-//! taken out of its walk ([`HeldSide`]).
+//! the previous step's stores to them. Inlined into the caller's loop, the
+//! cursors stay in its frame, which the CPU forwards from cheaply.
 
 #![forbid(unsafe_code)]
 
@@ -89,51 +85,14 @@ impl<'a, T, S: InlineKeyStrategy<T>> SetCursor<'a, T, S> {
     fn len(&self) -> usize {
         self.run.len() + self.iter.len()
     }
-
-    /// The elements left, for printing.
-    fn remaining(&self) -> impl Iterator<Item = &'a T> + Clone {
-        self.run.chain(self.iter.clone())
-    }
-
-    /// The next element, without moving: for printing one std's walk holds
-    /// taken out.
-    pub(super) fn first_remaining(&self) -> Option<&'a T> {
-        self.remaining().next()
-    }
-
-    /// What is left, printed as std's `Iter` over it is: `Iter([1, 2])`;
-    /// without its first element if `first_held`, as std's walk holds that
-    /// one taken out.
-    pub(super) fn printed_as_iter(&self, first_held: bool) -> PrintedAsIter<'_, 'a, T, S> {
-        PrintedAsIter {
-            cursor: self,
-            first_held,
-        }
-    }
 }
 
-/// A cursor's elements left, which print as std's `Iter` over them does.
-pub(super) struct PrintedAsIter<'c, 'a, T, S> {
-    cursor: &'c SetCursor<'a, T, S>,
-    first_held: bool,
-}
-
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsIter<'_, '_, T, S> {
+/// Prints the elements left.
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for SetCursor<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let elements = self.cursor.remaining().skip(usize::from(self.first_held));
-        f.debug_tuple("Iter").field(&PrintedList(elements)).finish()
-    }
-}
-
-/// The elements of an iterator, printed as a list.
-struct PrintedList<I>(I);
-
-impl<I: Iterator + Clone> fmt::Debug for PrintedList<I>
-where
-    I::Item: fmt::Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.0.clone()).finish()
+        f.debug_list()
+            .entries(self.run.chain(self.iter.clone()))
+            .finish()
     }
 }
 
@@ -152,24 +111,6 @@ impl<'a, T> MergeStep<'a, T> {
             Self::Left(element) | Self::Right(element) | Self::Both(element) => element,
         }
     }
-}
-
-/// Which side's element std's merge (`MergeIterInner`) holds, taken out of
-/// its iterator: after a step that compared two elements and handed out the
-/// other side's, that side's; otherwise neither. For printing as std's does.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum HeldSide {
-    Neither,
-    Left,
-    Right,
-}
-
-/// The element std's merge holds, printed as std's `Peeked` is.
-#[derive(Debug)]
-#[expect(dead_code, reason = "read by `Debug` alone, printing as std's")]
-enum Peeked<'a, T> {
-    A(&'a T),
-    B(&'a T),
 }
 
 /// Two sets' cursors, merged in order.
@@ -199,42 +140,46 @@ impl<'a, T, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
     pub(super) fn lens(&self) -> (usize, usize) {
         (self.left.len(), self.right.len())
     }
+}
 
-    /// The merge, printed as std's `MergeIterInner` is after the same steps,
-    /// holding the element of `held`'s side taken out of its iterator.
-    pub(super) fn printed_as_merge_iter(&self, held: HeldSide) -> PrintedAsMergeIter<'_, 'a, T, S> {
-        PrintedAsMergeIter { sides: self, held }
+/// Prints each side's elements left.
+impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for MergeSides<'_, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MergeSides")
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .finish()
     }
 }
 
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
-    /// The next step of the merge, moving past it, and which side std's
-    /// merge would hold an element of then; `None` once both sides are done.
+    /// The next step of the merge, moving past it; `None` once both sides are
+    /// done.
     #[inline]
-    pub(super) fn next_step(&mut self) -> Option<(MergeStep<'a, T>, HeldSide)> {
+    pub(super) fn next_step(&mut self) -> Option<MergeStep<'a, T>> {
         match (self.left.peek(), self.right.peek()) {
             (Some(left), Some(right)) => Some(match left.cmp(right) {
                 Ordering::Less => {
                     self.left.advance();
-                    (MergeStep::Left(left), HeldSide::Right)
+                    MergeStep::Left(left)
                 }
                 Ordering::Greater => {
                     self.right.advance();
-                    (MergeStep::Right(right), HeldSide::Left)
+                    MergeStep::Right(right)
                 }
                 Ordering::Equal => {
                     self.left.advance();
                     self.right.advance();
-                    (MergeStep::Both(left), HeldSide::Neither)
+                    MergeStep::Both(left)
                 }
             }),
             (Some(left), None) => {
                 self.left.advance();
-                Some((MergeStep::Left(left), HeldSide::Neither))
+                Some(MergeStep::Left(left))
             }
             (None, Some(right)) => {
                 self.right.advance();
-                Some((MergeStep::Right(right), HeldSide::Neither))
+                Some(MergeStep::Right(right))
             }
             (None, None) => None,
         }
@@ -333,27 +278,5 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> MergeSides<'a, T, S> {
             }
         }
         ControlFlow::Continue(accumulator)
-    }
-}
-
-/// A merge's sides, which print as std's `MergeIterInner` over them does.
-pub(super) struct PrintedAsMergeIter<'m, 'a, T, S> {
-    sides: &'m MergeSides<'a, T, S>,
-    held: HeldSide,
-}
-
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsMergeIter<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { sides, held } = *self;
-        let peeked = match held {
-            HeldSide::Neither => None,
-            HeldSide::Left => sides.left.first_remaining().map(Peeked::A),
-            HeldSide::Right => sides.right.first_remaining().map(Peeked::B),
-        };
-        f.debug_tuple("MergeIterInner")
-            .field(&sides.left.printed_as_iter(held == HeldSide::Left))
-            .field(&sides.right.printed_as_iter(held == HeldSide::Right))
-            .field(&peeked)
-            .finish()
     }
 }

@@ -1,12 +1,14 @@
-//! [`Slots`]: a fixed-capacity array of slots inside a node page, and the
-//! only code that moves keys, values and edges within and between nodes,
-//! whole pages aside (`page.rs`; D9, D12, D14, D29).
-//! [`InlineKeySlots`] are a node's inline keys at its kind's width,
-//! [`KeyColumns`] every array a node keeps beside its keys, [`KeySlots`]
-//! moves a node's keys together with them (D18), [`SeparatorSlots`] an
-//! internal node's separators, keys or windows (D49), and [`NodeKeys`]
-//! lends a node's keys in place, as a [`KeyList`], which holds the node's
-//! two binary searches (D19).
+//! [`Slots`]: a fixed-capacity array of slots inside a node page. Apart from
+//! whole pages (`page.rs`), this is the only code that moves keys, values
+//! and edges within and between nodes (D9, D12, D14, D29).
+//!
+//! - [`InlineKeySlots`]: a node's inline keys at its kind's width.
+//! - [`KeyColumns`]: every array a node keeps beside its keys.
+//! - [`KeySlots`]: moves a node's keys together with their columns (D18).
+//! - [`SeparatorSlots`]: an internal node's separators, keys or windows
+//!   (D49).
+//! - [`NodeKeys`]: lends a node's keys in place, as a [`KeyList`], which
+//!   holds the node's two binary searches (D19).
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -32,9 +34,10 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
 /// `unsafe` and states which slots it expects to be initialized.
 ///
 /// Slots side by side move a run with one copy; strided ones move slot by
-/// slot, the bytes between them belonging to other fields. Moving whole
-/// strides, the other fields with them, is [`Self::shift_strides_up`] and
-/// [`Self::shift_strides_down`]: how a node shifts its entries in one copy.
+/// slot, as the bytes between them belong to other fields.
+/// [`Self::shift_strides_up`] and [`Self::shift_strides_down`] move whole
+/// strides, other fields included: that is how a node shifts its entries in
+/// one copy.
 ///
 /// Invariant: `stride` is at least `size_of::<T>()` and a multiple of
 /// `align_of::<T>()`, and the `capacity` slots are aligned for `T` and lie
@@ -87,7 +90,6 @@ impl<T> Slots<T> {
         self.stride == size_of::<T>()
     }
 
-    /// How many slots there are.
     #[inline(always)]
     pub(super) fn capacity(self) -> usize {
         self.capacity
@@ -102,9 +104,9 @@ impl<T> Slots<T> {
     }
 
     /// A copy of slot `index`'s value, loaded through the slots' pointer,
-    /// which forms no reference: in a latched tree, a reader may load the
-    /// slots of an internal node a writer is changing, and its version check
-    /// throws away what it loaded then (`optimistic.rs`).
+    /// forming no reference. In a latched tree, a reader may load the slots
+    /// of an internal node that a writer is changing. Its version check then
+    /// throws away what it loaded (`optimistic.rs`).
     ///
     /// # Safety
     ///
@@ -178,9 +180,10 @@ impl<T> Slots<T> {
         debug_assert!(index <= len && len < self.capacity);
         // SAFETY: `index <= len < len + 1 <= capacity`, so every slot named
         // is in bounds. The tail `index..len` is initialized and moves into
-        // `index + 1..len + 1`, which frees slot `index` for `value`: side by
-        // side in one copy (overlapping, hence `copy_to`), strided from the
-        // top, so that each slot is read before it is written over.
+        // `index + 1..len + 1`, which frees slot `index` for `value`. Side by
+        // side, it moves in one copy (overlapping, hence `copy_to`); strided,
+        // slot by slot from the top, so that each slot is read before it is
+        // written over.
         unsafe {
             if self.is_contiguous() {
                 if index < len {
@@ -210,10 +213,10 @@ impl<T> Slots<T> {
         debug_assert!(index < len && len <= self.capacity);
         // SAFETY: `index < len <= capacity`, so every slot named is in
         // bounds. Slot `index` is initialized and is read out; the
-        // initialized tail `index + 1..len` then moves into `index..len - 1`:
-        // side by side in one copy (overlapping, hence `copy_to`), strided
-        // from the bottom, so that each slot is read before it is written
-        // over.
+        // initialized tail `index + 1..len` then moves into `index..len - 1`.
+        // Side by side, it moves in one copy (overlapping, hence `copy_to`);
+        // strided, slot by slot from the bottom, so that each slot is read
+        // before it is written over.
         unsafe {
             let removed = self.slot(index).read();
             if self.is_contiguous() {
@@ -264,9 +267,9 @@ impl<T> Slots<T> {
     }
 
     /// Shifts the whole strides of slots `index..len` up by one slot, into
-    /// `index + 1..len + 1`, with the other fields between them: the entries
-    /// of a node whose slots these are the first fields of. Slot `index`'s
-    /// stride holds stale bytes afterwards.
+    /// `index + 1..len + 1`, with the other fields between them. They are
+    /// the entries of a node whose first fields are these slots. Slot
+    /// `index`'s stride holds stale bytes afterwards.
     ///
     /// # Safety
     ///
@@ -289,7 +292,7 @@ impl<T> Slots<T> {
 
     /// Shifts the whole strides of slots `index + 1..len` down by one slot,
     /// into `index..len - 1`, with the other fields between them, over the
-    /// stride of slot `index`; that of `len - 1` holds stale bytes
+    /// stride of slot `index`. The stride of slot `len - 1` holds stale bytes
     /// afterwards.
     ///
     /// # Safety
@@ -456,12 +459,12 @@ pub(super) trait KeyList<'a, K: 'a>: Copy {
     fn slice(self, range: Range<usize>) -> Self;
 
     /// `Ok(i)` if key `i` equals `key`, otherwise `Err(i)` with `i` where it
-    /// belongs, by a branchless binary search: every search runs the full
-    /// `log2(len)` steps with no early exit, and each step only picks the
-    /// next `base` with `select_unpredictable`, which compiles to a
-    /// conditional move instead of a mispredicted branch. The loop narrows
-    /// to `base`, the last key not greater than `key` (or 0), and one final
-    /// comparison classifies it.
+    /// belongs, by a branchless binary search. Every search runs the full
+    /// `log2(len)` steps with no early exit. Each step only picks the next
+    /// `base` with `select_unpredictable`, which compiles to a conditional
+    /// move instead of a mispredicted branch. The loop narrows to `base`, the
+    /// last key not greater than `key` (or 0), and one final comparison
+    /// classifies it.
     ///
     /// In bounds by construction, whatever `Ord` answers: the loop keeps
     /// `base + size <= len` and probes only
@@ -497,8 +500,8 @@ pub(super) trait KeyList<'a, K: 'a>: Copy {
     }
 
     /// `Ok(i)` if key `i` is the one searched for, otherwise `Err(i)` with
-    /// `i` where it belongs, by a binary search that stops as soon as
-    /// it finds it: `cmp_key(probe)` orders the key searched for against key
+    /// `i` where it belongs, by a binary search that stops as soon as it
+    /// finds it. `cmp_key(probe)` orders the key searched for against key
     /// `probe`.
     ///
     /// In bounds by construction, whatever `cmp_key` answers: the loop keeps
@@ -538,12 +541,11 @@ impl<'a, K> KeyList<'a, K> for NodeKeys<'a, K> {
     }
 }
 
-/// A node's inline-key slots (D18): `capacity` of them, side by side, each
-/// the first bytes of an inline key, as many as the node kind's
-/// [`InlineWidth`], stored as the [`InlineSlot`] of that width. The
-/// operations mirror those of [`Slots`], with the same contracts, and speak
-/// in inline keys: a write keeps an inline key's first bytes, and a read
-/// gives them back, zeros after.
+/// A node's inline-key slots (D18): `capacity` [`InlineSlot`]s of the node
+/// kind's [`InlineWidth`], side by side. The operations mirror those of
+/// [`Slots`], with the same contracts, and speak in inline keys: a write
+/// keeps an inline key's first bytes, and a read gives them back, zeros
+/// after.
 ///
 /// Every node of the same kind and map has the same width, a constant of its
 /// kind, key type and strategy, so each typed operation uses one width.
@@ -701,13 +703,13 @@ impl InlineKeySlots {
     }
 }
 
-/// What a node keeps beside its keys, or in an internal node that keeps
-/// none (D49), in their place: one slot per key or separator, in arrays of
-/// their own that every move moves alike: its inline keys (D18) and, in a
-/// leaf whose plan keeps them and whose layout has room, its keys' length
-/// tags (D36). Another
-/// such array is a field here and a cell of [`KeyCells`]; the code that
-/// moves keys ([`KeySlots`]) doesn't change.
+/// The arrays a node keeps beside its keys, one slot per key or separator,
+/// which every move moves alike. With inline keys, an internal node keeps
+/// them in place of keys (D49). They are the node's inline keys (D18) and,
+/// in a leaf whose plan keeps them and whose layout has room, its keys'
+/// length tags (D36). Adding another such array takes a field here and a
+/// cell of [`KeyCells`]; the code that moves keys ([`KeySlots`]) doesn't
+/// change.
 ///
 /// Each operation mirrors the [`Slots`] operation of its name, with the same
 /// contract for every array.
@@ -728,10 +730,10 @@ pub(super) struct KeyCells {
     length_tag: u16,
 }
 
-/// Every method is `#[inline(always)]`: which arrays a node keeps, and at
+/// Every method is `#[inline(always)]`. Which arrays a node keeps, and at
 /// what width, is a constant of its plan (`node_plan.rs`) only where the
-/// method is inlined into code that knows the node's kind and map; called,
-/// it would be a value tested at run time.
+/// method is inlined into code that knows the node's kind and map. Behind a
+/// call, it would be a value tested at run time.
 impl KeyColumns {
     /// # Safety
     ///
@@ -751,21 +753,19 @@ impl KeyColumns {
         }
     }
 
-    /// The inline-key slots, if the node has them.
     #[inline(always)]
     pub(super) fn inline_keys(self) -> Option<InlineKeySlots> {
         self.inline_keys
     }
 
-    /// The length-tag slots, if the node has them.
     #[inline(always)]
     pub(super) fn length_tags(self) -> Option<Slots<u16>> {
         self.length_tags
     }
 
-    /// Fills every slot of a node that holds no keys yet: each inline key
-    /// with the greatest, all ones, as slots past the length hold (invariant
-    /// 4 in `tree/node/mod.rs`), and each length tag with 0.
+    /// Fills every slot of a node that holds no keys yet. Each inline key
+    /// gets the greatest, all ones, as slots past the length hold (invariant
+    /// 4 in `tree/node/mod.rs`); each length tag gets 0.
     ///
     /// # Safety
     ///
@@ -884,14 +884,14 @@ impl KeyColumns {
 
 /// A node's key slots and the columns beside them ([`KeyColumns`]), for a
 /// node of kind `Kind` of a map with strategy `S`. Every operation moves a
-/// key and its cells together, so that inline key `i` is always key `i`'s;
-/// each mirrors the [`Slots`] operation of its name, with the same contract
+/// key and its cells together, so that inline key `i` is always key `i`'s.
+/// Each mirrors the [`Slots`] operation of its name, with the same contract
 /// for every array.
 ///
-/// The node stores its keys' windows at its prefix length (05-fence-key.md):
-/// a key read out comes with its window there, and a key written in must
-/// come with its window there, which debug builds check. A key read out of
-/// a node without inline keys comes with [`Window::NONE`].
+/// The node stores its keys' windows at its prefix length (05-fence-key.md).
+/// A key read out comes with its window there. A key written in must come
+/// with its window there, which debug builds check. A key read out of a
+/// node without inline keys comes with [`Window::NONE`].
 ///
 /// Invariant: the columns have the keys' capacity, and are those of the
 /// plan and layout of `Kind` (`node_plan.rs`, `layout.rs`). A live length
@@ -1037,9 +1037,9 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
         }
     }
 
-    /// [`Self::insert`] in a node of entries whose first fields the keys
-    /// are (D29): shifts entries `index..len` up whole, with what they pair
-    /// the keys with, in one copy, then writes the key. The caller writes
+    /// [`Self::insert`] in a node of entries whose first fields are the
+    /// keys (D29). It shifts entries `index..len` up whole, with what pairs
+    /// with each key, in one copy, then writes the key. The caller writes
     /// what pairs with it.
     ///
     /// # Safety
@@ -1081,17 +1081,17 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
         }
     }
 
-    /// [`Self::remove`] in a node of entries whose first fields the keys
-    /// are (D29): takes key `index` out, then shifts entries `index + 1..len`
-    /// down whole, with what they pair the keys with, in one copy. The
-    /// caller has taken out what pairs with key `index` first.
+    /// [`Self::remove`] in a node of entries whose first fields are the
+    /// keys (D29). It takes key `index` out, then shifts entries
+    /// `index + 1..len` down whole, with what pairs with each key, in one
+    /// copy. The caller has taken out what pairs with key `index` first.
     ///
     /// # Safety
     ///
     /// As for [`Self::remove`], and as for [`Slots::shift_strides_down`] for
-    /// the keys: the strides of keys `index..len`, their entries, lie in the
-    /// node, and what pairs with key `index` holds nothing that needs
-    /// dropping.
+    /// the keys:
+    /// - the strides of keys `index..len`, their entries, lie in the node;
+    /// - what pairs with key `index` holds nothing that needs dropping.
     #[inline(always)]
     pub(super) unsafe fn remove_shifting_entries(
         self,
@@ -1149,7 +1149,7 @@ pub(super) enum SeparatorSlots<K, V, S> {
     /// The separator keys themselves, which the node keeps.
     Keys(KeySlots<K, S, Internal<K, V, S>>),
     /// The separators' windows at the node's prefix length, in its inline
-    /// keys: each key is the head of the leftmost leaf right of it (D49).
+    /// keys; the keys themselves are leaf heads (D49).
     Windows {
         columns: KeyColumns,
         prefix_len: usize,

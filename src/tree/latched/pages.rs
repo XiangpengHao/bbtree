@@ -5,16 +5,16 @@
 //! later checks they were current. A node a merge emptied may be such a
 //! pointer's target, so its page can't go back to the allocator, which
 //! could hand it to anything. It goes on the tree's free list for its kind
-//! instead ([`FreeLists`]), and comes back only as a node of that kind, with
-//! the latch word it had, whose version only grows: a reader that reaches it
-//! reads a node of the kind its pointer says, and its check fails. The pages
-//! go back to the allocator when the map is dropped.
+//! instead ([`FreeLists`]). It comes back only as a node of that kind, with
+//! the latch word it had, whose version only grows. So a reader that
+//! reaches it reads a node of the kind its pointer says, and its version
+//! check fails. The pages go back to the allocator when the map is dropped.
 //!
-//! An operation allocates and frees through [`NodePages`], which hands out a
-//! free page of the kind first, holds every node page it hands out until
-//! the operation is done, and keeps the pages the operation frees until
-//! then too, after the operation lets go of its nodes: a page is free only
-//! once its latch word says it changed.
+//! An operation allocates and frees through [`NodePages`]. It hands out a
+//! free page of the kind first, and holds every node page it hands out
+//! until the operation is done. It keeps the pages the operation frees
+//! until then too, after the operation lets go of its nodes: a page is free
+//! only once its latch word says it changed.
 
 use core::alloc::Layout;
 use core::cell::RefCell;
@@ -54,7 +54,6 @@ impl FreeList {
         }
     }
 
-    /// Runs `f` with the list locked.
     fn with_locked<R>(&self, f: impl FnOnce() -> R) -> R {
         loop {
             Interleaving::switch_point();
@@ -144,9 +143,9 @@ impl FreeLists {
 ///   operation links it into the tree, other threads find it held until
 ///   the operation is done with it.
 /// - Freeing a node page keeps it until this is dropped, then puts it on
-///   the free list of its kind: the operation lets go of its nodes first,
-///   which tells readers the page changed, before another thread may take
-///   it.
+///   the free list of its kind. The operation drops this last, after it
+///   lets go of its nodes, which tells readers the page changed; only then
+///   may another thread take the page.
 /// - Any other page, the root's, comes fresh and unlatched, and goes back
 ///   to `alloc` at once: the tree keeps its root page for life.
 pub(super) struct NodePages<'t, A> {
@@ -157,10 +156,11 @@ pub(super) struct NodePages<'t, A> {
     taken: RefCell<TakenPages>,
 }
 
-/// The node pages an operation took: those it allocated, latched at a
-/// version, a page per level split and one for a raised root's node, and
-/// those it freed, a page per level merged and the root's child when the
-/// root lowers.
+/// The node pages an operation took:
+/// - those it allocated, each latched at a version: a page per level split,
+///   and one for a raised root's node;
+/// - those it freed, each with whether it is a leaf's: a page per level
+///   merged, and the root's child when the root lowers.
 struct TakenPages {
     allocated: [Option<(NonNull<u8>, Version)>; MAX_DEPTH + 2],
     allocated_len: usize,
@@ -199,10 +199,10 @@ impl<'t, A: Allocator> NodePages<'t, A> {
     }
 
     /// A page fresh from `alloc` for `layout`, its latch word unheld. A
-    /// leaf's is read past what its node writes only under its latch; any
-    /// other page is zeroed, an internal node's or the root's, which may hold
-    /// one, so that every edge an optimistic reader may read before its
-    /// check is initialized.
+    /// leaf's page is read past what its node writes only under its latch.
+    /// Any other page, an internal node's or the root's (which may hold
+    /// one), is zeroed, so that every edge an optimistic reader may read
+    /// before its check is initialized.
     fn allocate_fresh(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         let page = self.alloc.allocate(layout)?;
         // SAFETY: the block was just allocated for `layout`, a latched tree's

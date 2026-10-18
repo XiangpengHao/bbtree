@@ -9,7 +9,7 @@ use core::iter::FusedIterator;
 use core::ops::BitXor;
 
 use super::BBTreeSet;
-use super::merge::{HeldSide, MergeSides, MergeStep};
+use super::merge::{MergeSides, MergeStep};
 use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
@@ -24,8 +24,6 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
               without modifying either input set"]
 pub struct SymmetricDifference<'a, T: 'a, S = Auto> {
     sides: MergeSides<'a, T, S>,
-    /// The side std's would hold an element of, taken out of its iterator.
-    held: HeldSide,
 }
 
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for SymmetricDifference<'a, T, S> {
@@ -35,9 +33,7 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for SymmetricDifference<'a, T
     #[inline(always)]
     fn next(&mut self) -> Option<&'a T> {
         loop {
-            let (step, held) = self.sides.next_step()?;
-            self.held = held;
-            match step {
+            match self.sides.next_step()? {
                 MergeStep::Left(element) | MergeStep::Right(element) => return Some(element),
                 MergeStep::Both(_) => {}
             }
@@ -72,16 +68,14 @@ impl<T, S> Clone for SymmetricDifference<'_, T, S> {
     fn clone(&self) -> Self {
         Self {
             sides: self.sides.clone(),
-            held: self.held,
         }
     }
 }
 
-/// Prints as std's does: `SymmetricDifference(MergeIterInner(..))`.
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for SymmetricDifference<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("SymmetricDifference")
-            .field(&self.sides.printed_as_merge_iter(self.held))
+            .field(&self.sides)
             .finish()
     }
 }
@@ -113,7 +107,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     {
         SymmetricDifference {
             sides: MergeSides::new(self.iter(), other.iter()),
-            held: HeldSide::Neither,
         }
     }
 }

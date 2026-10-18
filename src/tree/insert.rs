@@ -1,21 +1,23 @@
-//! Inserting into a tree: an owner may remember the last leaf after a split,
-//! allowing a greater key to append directly while it has room. Otherwise a
-//! downward search finds the entry or vacant leaf edge. A fitting insertion
-//! needs no ancestors. If the leaf is full, a
-//! second search records its node stack (`node_stack.rs`) for splitting. Going
-//! back up the node stack, each node takes its split child's separator and
-//! right half, splitting in turn if it is full; a root that splits raises the
-//! tree, moving the root node down a level, under a new root in the root
-//! page. A separator's value stays in the right half, as the head
-//! of its leftmost leaf (D17), and so does its key where separator keys are
-//! heads (D49); its inline key goes up with it (D18), moved back to its new
-//! node's prefix length. Once
-//! the entry is in and counted, the halves of every split fit their prefixes
-//! to their new fences (`prefix.rs`).
+//! Inserting into a tree.
 //!
-//! The node stack then goes back down to the new entry, through whichever half
-//! of each split took it, so that a vacant entry can hand it out, or keep it
-//! as an occupied one.
+//! An insertion that goes through a node stack, as one into a full leaf
+//! does, remembers the tree's last leaf if the new entry ends up last in it
+//! (D45). A greater key then appends there directly while the leaf has room.
+//! Otherwise a search down the tree finds the key, or the leaf edge where it
+//! belongs. An insertion that fits its leaf needs no ancestors.
+//!
+//! If the leaf is full, a second search records a node stack for the split.
+//! Going back up it, each node takes its split child's separator and right
+//! half, and splits in turn if it is full. A root that splits raises the
+//! tree: the root node moves down a level, under a new root in the root
+//! page. A separator's value stays in the right half, as its head (D17), and
+//! with inline keys so does its key (D49). Its inline key goes up, moved
+//! back to its new node's prefix length (D18).
+//!
+//! Once the entry is in and counted, the halves of every split fit their
+//! prefixes to their new fences (`prefix.rs`). The node stack then goes back
+//! down to the new entry, through whichever half of each split took it, so
+//! that a vacant entry can hand it out, or keep it as an occupied one.
 
 #![forbid(unsafe_code)]
 
@@ -35,26 +37,28 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Inserts `key`/`value` and returns `None`, counting the entry in
     /// `length`; or, if an equal key is there, keeps that key, drops `key`,
     /// replaces its value and returns the old one, as std's
-    /// `BTreeMap::insert` does. For a separator key, the value replaced is a
-    /// leaf's head (D17).
+    /// `BTreeMap::insert` does. For a separator key, the value replaced is
+    /// its head (D17).
     ///
-    /// Every page a split needs comes from `alloc`, the map's allocator,
-    /// asked for at the time of the split; so does the page the root node
-    /// moves to when the tree grows a level, and the tree's root page if it
-    /// has none.
+    /// Every page a split needs comes from `alloc`, the map's allocator, at
+    /// the time of the split. So do the page the root node moves to when the
+    /// tree grows a level, and the tree's root page if it has none.
     ///
-    /// Every `Ord` call happens while validating an append or searching, and
-    /// every `InlineKey` call while validating an append, checking what the
-    /// key shares with every key (D50), searching, or computing its inline
-    /// key next, before anything changes but the shared prefix and the border
-    /// prefixes that follow it, so a panicking `Ord` or `InlineKey` there
-    /// leaves the tree with the same entries. After a split, the split nodes'
-    /// prefixes fit their new fences, which calls `InlineKey` again, once the
-    /// entry is in and counted (`prefix.rs`): a panic then leaves a valid
-    /// tree that has it. `alloc` is called on the way back up, possibly
-    /// after the leaf has changed: a failed allocation calls
-    /// `handle_alloc_error`, which aborts by default, and one that panics
-    /// leaves a memory-safe tree that is missing entries.
+    /// Panics in user code:
+    ///
+    /// - `Ord` runs only while checking an append or searching. `InlineKey`
+    ///   runs only while checking an append, checking what the key shares
+    ///   with every key (D50), searching, or computing the key's inline key.
+    ///   All of these run before anything changes but the shared prefix and
+    ///   the border prefixes that follow it, so a panic there leaves the
+    ///   tree with the same entries.
+    /// - After a split, the split nodes' prefixes fit their new fences
+    ///   (`prefix.rs`), which calls `InlineKey` again once the entry is in
+    ///   and counted. A panic then leaves a valid tree that has the entry.
+    /// - `alloc` is called on the way back up, possibly after the leaf has
+    ///   changed. A failed allocation calls `handle_alloc_error`, which
+    ///   aborts by default; an allocator that panics leaves a memory-safe
+    ///   tree that is missing entries.
     #[inline(always)]
     pub(crate) fn insert(
         &mut self,
@@ -74,7 +78,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             }
             Err(key) => key,
         };
-        // The search skips every node's prefix unchecked.
+        // Shrink first: the search skips every node's prefix unchecked.
         let key = self.shrink_shared_prefix_for(key, alloc);
         match self
             .root_mut()
@@ -98,11 +102,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         self.insert_with_stack(key, value, alloc, length)
     }
 
-    /// A full leaf needs ancestors to split. Keep that node stack, and the
-    /// call stack space it takes, out of fitting inserts. Search again
-    /// rather than trusting the first result: even an inconsistent `Ord` may
-    /// now find an existing key or a different leaf with room, both handled
-    /// by the ordinary path.
+    /// Inserts into a full leaf, which needs a node stack to split. Outlined
+    /// to keep that node stack, and the machine stack it takes, out of
+    /// fitting inserts. It searches again rather than trusting the first
+    /// result: an inconsistent `Ord` may now find an existing key or a
+    /// different leaf with room, which this handles too.
     #[inline(never)]
     pub(in crate::tree) fn insert_with_stack(
         &mut self,
@@ -129,9 +133,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
-    /// A node stack at the only edge of a new tree's root, an empty leaf, made
-    /// in `tree`, which has none, from `alloc`: where a vacant entry of a map
-    /// without a tree inserts ([`Self::insert`]).
+    /// Makes a new tree in `tree`, which has none, from `alloc`, and returns
+    /// a node stack at the only edge of its root, an empty leaf. A vacant
+    /// entry of a map without a tree inserts there ([`Self::insert`]).
     pub(crate) fn at_new_root(tree: &'a mut Tree<K, V, S>, alloc: &impl Allocator) -> Self {
         debug_assert!(!tree.has_root(), "a new tree in place of one");
         *tree = Tree::new(alloc);
@@ -140,11 +144,11 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         stack
     }
 
-    /// Inserts `key` and `value` at the leaf edge the node stack ends at,
+    /// Inserts `key` and `value` at the leaf edge the node stack ends at. It
     /// counts the entry in `length`, fits the prefixes of the nodes that
-    /// split, and moves the node stack to the new entry; pages come as for
-    /// [`Tree::insert`]. Compares no keys. First, what every key of the tree
-    /// shares shrinks to what `key` shares too
+    /// split, and moves the node stack to the new entry. Pages come as for
+    /// [`Tree::insert`]. Compares no keys. First, it shrinks what every key
+    /// of the tree shares to what `key` shares too
     /// ([`Self::shrink_shared_prefix_for`]).
     ///
     /// # Panics
@@ -173,8 +177,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         assert!(index <= leaf.len(), "edge index out of bounds");
         let prefix_len = leaf.prefix_len();
         if leaf.len() < Leaf::<K, V, S>::capacity() {
-            // Compute the inline key before the first change, as on the
-            // split node stack, so a panic leaves the tree unchanged.
+            // Compute the inline key before the first change, as a split
+            // does, so a panic leaves the tree unchanged.
             leaf.insert_fit(index, key.window_at(prefix_len), value);
             *length += 1;
         } else {
@@ -199,11 +203,11 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         // The leaf is full: `NodeStackMut::insert` comes here only then.
         let key = key.window_at(leaf.prefix_len());
         let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc));
-        // Both arrays go by how many levels the split has climbed from the
-        // leaf, which a new root above doesn't change. In each node that
-        // split, the index that leads to the new entry in the half that took
-        // it: its key's in the leaf, and above, the edge to the child that
-        // holds it.
+        // Both arrays are indexed by how many levels the split has climbed
+        // from the leaf, which a new root above doesn't change. Here, in each
+        // node that split, the index leading to the new entry in the half
+        // that took it: in the leaf, the entry's own; above, the edge to the
+        // child that holds it.
         let mut indexes_in_halves = [0; MAX_DEPTH + 1];
         indexes_in_halves[0] = split.inserted.index();
         // Above each node that split, where the separator between its halves

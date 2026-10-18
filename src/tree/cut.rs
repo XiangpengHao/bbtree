@@ -1,49 +1,49 @@
 //! Cutting a tree in two at a key: [`Tree::split_off_at`], for the map's
-//! `split_off` and `extract_if`.
+//! `split_off`.
 //!
-//! A search finds the leaf edge on the given side of the key
-//! ([`KeySide`]), where the cut goes; for a key that is a separator, the
-//! edge before it is the end of the rightmost leaf left of it. Up the node
-//! stack from there, each node is cut at the node stack's edge
-//! (`Leaf::cut_off_at`, `Internal::cut_off_at`): it keeps what lies left of
-//! the node stack, and what lies right of it goes into a new node, after the
-//! part cut off from the node below as its first child. The new nodes make a
-//! tree as tall as the old one, with the keys past the cut.
+//! A search finds the leaf edge on the given side of the key ([`KeySide`]),
+//! where the cut goes. For a key that is a separator, the edge before it is
+//! the end of the rightmost leaf left of it. Up the node stack from there,
+//! each node is cut at the node stack's edge (`Leaf::cut_off_at`,
+//! `Internal::cut_off_at`). It keeps what lies left of the node stack; what
+//! lies right goes into a new node, after the part cut off the node below,
+//! as its first child. The new nodes make a tree as tall as the old one,
+//! with the keys past the cut.
 //!
 //! The nodes on the node stack become the borders of the two trees, whose
-//! prefix is what every key of the tree shares (D50): before the cut, their
-//! prefixes go back to the root's, from the root down, reading no key. Both
-//! trees keep what the tree's keys shared; their keys share at least that.
+//! prefix is what every key of the tree shares (D50). So before the cut,
+//! their prefixes go back to the root's, from the root down, reading no key.
+//! Both trees keep what the old tree's keys shared; their keys share at
+//! least that.
 //!
 //! Along the cut, nodes on both sides may hold fewer keys than their
-//! minimum, down to none. Fixing the left tree's right border and the right
-//! tree's left border, from the top down, brings them back
-//! ([`Tree::fix_border`]). A separator left at the start of the right
-//! tree, with nothing left of it, comes down along that border, by a merge
-//! or a move, into the tree's first leaf, with its value, the head of the
-//! leaf right of it (D17).
+//! minimum, down to none. [`Tree::fix_border`] brings them back, from the
+//! top down, along the left tree's right border and the right tree's left
+//! border. A separator left at the start of the right tree, with nothing
+//! left of it, comes down that border into the tree's first leaf, by a merge
+//! or a move. It brings its value, which was its head (D17).
 //!
 //! The nodes beside the borders, which entries moved over from, then fit
-//! their prefixes to their new fences, reading keys: once both trees are
-//! where a panic can't lose them, and counted. So the cut hands out the
-//! right tree only through [`Cut::finish`], which puts it there, and fits
-//! both.
+//! their prefixes to their new fences, reading keys. They do so only once
+//! both trees are counted and where a panic can't lose them. So the cut
+//! hands out the right tree only through [`Cut::finish`], which puts it
+//! there and fits both.
 //!
-//! That touches the nodes along the node stack and the two borders: O(log n)
-//! of them. The two maps' lengths come from counting the entries of the
-//! shorter tree, a node at a time, as std's do ([`Cut::lengths`]).
+//! The cut touches the nodes along the node stack and the two borders:
+//! O(log n) of them. The two maps' lengths come from counting the entries of
+//! the shorter tree, a node at a time, as std's do ([`Cut::lengths`]).
 //!
 //! # Borders
 //!
-//! Bringing the nodes along one edge of a tree up to their minimum (D22),
-//! from the top down: [`Tree::fix_border`]. A tree cut in two needs it
-//! along both sides of the cut, and a tree built from the left (`build.rs`)
-//! along its right edge: there, nodes may hold any number of keys, down to
-//! none, where every other node holds its minimum.
+//! [`Tree::fix_border`] brings the nodes along one edge of a tree up to
+//! their minimum (D22), from the top down. A tree cut in two needs it along
+//! both sides of the cut. A tree built from the left (`build.rs`) needs it
+//! along its right edge. There, nodes may hold any number of keys, down to
+//! none, while every other node holds its minimum.
 //!
-//! It reads no key: the nodes beside the border that give it entries keep
+//! It reads no key. The nodes beside the border that give it entries keep
 //! their prefixes, which still fit their narrower fences, until the
-//! operation fits them, once it is done ([`Tree::refit_border_siblings`]).
+//! operation fits them once it is done ([`Tree::refit_border_siblings`]).
 
 #![forbid(unsafe_code)]
 
@@ -61,11 +61,11 @@ use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Cuts the tree at the leaf edge on `side` of `key`: keeps what lies
-    /// before it, and returns what lies after, both with their borders along
-    /// the cut brought up to their minimum ([`Self::fix_border`]), in a
-    /// [`Cut`], which hands it out once it fits the nodes beside those
-    /// borders.
+    /// Cuts the tree at the leaf edge on `side` of `key`. Keeps what lies
+    /// before the cut, and returns what lies after it in a [`Cut`]. Both
+    /// trees have their borders along the cut brought up to their minimum
+    /// ([`Self::fix_border`]). The `Cut` hands out the part after once it
+    /// fits the nodes beside those borders.
     ///
     /// Every `Ord` call happens first, in the search, before anything
     /// changes. Pages come from and go back to `alloc`, the map's allocator,
@@ -92,11 +92,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 }
 
-/// A tree just cut in two ([`Tree::split_off_at`]): the part after the cut,
-/// which it hands out only once the nodes beside both borders along the
-/// cut, which gave the borders entries, fit their prefixes to their new
-/// fences. Until then they keep prefixes that still fit, as searches
-/// allow, but shorter than their fences share.
+/// The part after a cut ([`Tree::split_off_at`]). It comes out only once
+/// the nodes beside both borders along the cut, which gave the borders
+/// entries, fit their prefixes to their new fences. Until then those nodes
+/// keep prefixes that still fit, which searches allow, but shorter than
+/// what their fences share.
 #[must_use = "the part after the cut comes out only through `finish`"]
 pub(crate) struct Cut<K, V, S> {
     upper: Tree<K, V, S>,
@@ -116,33 +116,29 @@ impl<K, V, S: InlineKeyStrategy<K>> Cut<K, V, S> {
         }
     }
 
-    /// Puts the part after the cut into `upper`, a tree without a root
-    /// page, and then fits the prefixes of the nodes beside the borders
-    /// along the cut, reading keys: `lower`'s, the part before it, if
-    /// given, and `upper`'s. Both trees should be where a panic can't lose
-    /// them, and counted. A `lower` that is only taken apart needs no
-    /// fitting.
-    pub(crate) fn finish(self, lower: Option<&mut Tree<K, V, S>>, upper: &mut Tree<K, V, S>) {
+    /// Puts the part after the cut into `upper`, a tree without a root page.
+    /// Then fits the prefixes of the nodes beside the borders along the cut,
+    /// in `lower` (the part before it) and in `upper`, reading keys. Both
+    /// trees should be counted and where a panic can't lose them.
+    pub(crate) fn finish(self, lower: &mut Tree<K, V, S>, upper: &mut Tree<K, V, S>) {
         debug_assert!(!upper.has_root(), "the part after a cut replaced a tree");
         *upper = self.upper;
-        if let Some(lower) = lower {
-            lower.refit_border_siblings::<LastEdge>();
-        }
+        lower.refit_border_siblings::<LastEdge>();
         upper.refit_border_siblings::<FirstEdge>();
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
-    /// Cuts the tree along the node stack, which ends at a leaf edge: each
-    /// node on it, from the leaf up, keeps what lies left of the node stack,
-    /// and what lies right of it goes into a new node, after the part cut off
-    /// from the node below. Returns the top of the new nodes, as tall as the
-    /// root, on plain pages from `alloc`, which nothing owns until the caller
-    /// makes it a tree's root. Nodes on either side of the cut may be left
-    /// with fewer keys than their minimum, down to none. Compares no keys.
+    /// Cuts the tree along the node stack, which ends at a leaf edge. Each
+    /// node on it, from the leaf up, keeps what lies left of the node stack;
+    /// what lies right goes into a new node, after the part cut off the node
+    /// below. Returns the top of the new nodes, as tall as the root, on plain
+    /// pages from `alloc`; nothing owns them until the caller makes the top
+    /// a tree's root. Nodes on either side of the cut may be left with fewer
+    /// keys than their minimum, down to none. Compares no keys.
     ///
-    /// The nodes on the node stack become the two trees' borders: first, their
-    /// prefixes move back to what every key shares (D50).
+    /// The nodes on the node stack become the two trees' borders, so first
+    /// their prefixes move back to what every key shares (D50).
     ///
     /// # Panics
     ///
@@ -177,16 +173,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Makes every node along the tree's `End` edge, its last children for
-    /// [`LastEdge`] or its first for [`FirstEdge`], hold at least
-    /// its minimum, by merging it with its sibling or moving keys over from
-    /// it, from the root down; and lowers the tree while its root is left
-    /// without keys, until the root has some or is a leaf. Every other node
-    /// must hold its minimum already. Emptied pages go back to `alloc`.
+    /// Makes every node along the tree's `End` edge (its last children for
+    /// [`LastEdge`], its first for [`FirstEdge`]) hold at least its minimum,
+    /// from the root down. Each node merges with its sibling or takes keys
+    /// over from it. The tree lowers while its root is left without keys,
+    /// until the root has some or is a leaf. Every other node must hold its
+    /// minimum already. Emptied pages go back to `alloc`.
     ///
     /// Going down, each node on the edge is brought to one key more than its
     /// minimum, so that a merge one level down, which takes one of its keys,
-    /// leaves it at its minimum still.
+    /// still leaves it at its minimum.
     pub(in crate::tree) fn fix_border<End: NodeEnd>(&mut self, alloc: &impl Allocator) {
         self.lower_while_root_empty(alloc);
         if let Node::Internal(mut node) = self.root_mut() {
@@ -218,12 +214,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
-    /// Brings the child on the `End` side, the right one for
-    /// [`LastEdge`], to at least one key more than its minimum: merges
-    /// the two children if they fit in one node with their separator, or
-    /// else moves keys over from the other child, which, too full to merge
-    /// and holding its minimum, can spare them. Returns the child on the
-    /// `End` side, merged or not.
+    /// Brings the child on the `End` side (the right one for [`LastEdge`])
+    /// to at least one key more than its minimum. Merges the two children if
+    /// they fit in one node with their separator. Otherwise it moves keys
+    /// over from the other child, which can spare them: it is too full to
+    /// merge and holds its minimum. Returns the child on the `End` side,
+    /// merged or not.
     fn stock_border_child<End: NodeEnd>(mut self, alloc: &impl Allocator) -> C {
         let target = C::min_len() + 1;
         let border_len = |siblings: &Self| {

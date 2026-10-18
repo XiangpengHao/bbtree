@@ -1,19 +1,20 @@
-//! Looking a key up in a latched tree (`doc/09-concurrency.md`, Lookups):
-//! the descent reads the internal nodes optimistically, as every
+//! Looking a key up in a latched tree (`doc/09-concurrency.md`, Lookups,
+//! D57). The descent reads the internal nodes optimistically, as every
 //! operation's does, and the leaf too, at the version it was at
 //! ([`Optimistic`]).
 //!
 //! - **A key the leaf's inline keys rule out** is absent once the leaf's
-//!   version, unchanged after, confirms what was read: a miss writes no
+//!   version, unchanged after the read, confirms it: a miss writes no
 //!   latch.
-//! - **A copy** of a `Copy` value ([`LatchedTree::get_copied`]) is read unlatched,
-//!   then the version checked, as a sequence lock reads, where the leaf
-//!   settles the key: a key ordered by its own bytes is read and compared
-//!   as a copy, and a byte string that ends within its inline key is the
-//!   candidate of the same length (D36); others compare latched.
+//! - **A copy** of a `Copy` value ([`LatchedTree::get_copied`]) is read
+//!   unlatched, then the version checked, as a sequence lock reads. This
+//!   works where the leaf settles the key. A key ordered by its own bytes
+//!   is read and compared as a copy, and a byte string that ends within its
+//!   inline key is the candidate of the same length (D36). Other keys
+//!   compare latched.
 //! - **Otherwise** the leaf is latched shared and, if it is still at that
-//!   version, searched, and the caller's closure runs on the entry while it
-//!   holds.
+//!   version, searched. The caller's closure runs on the entry while the
+//!   latch is held.
 //!
 //! A leaf that changed meanwhile sends the lookup the latched way, which
 //! waits for a writer rather than race it again.
@@ -47,41 +48,25 @@ pub(super) enum RacingRead<K, V> {
 }
 
 impl<K, V> RacingRead<K, V> {
-    /// Reads `leaf`, read at a version, where the descent found `key`
-    /// belongs, its head if `at_separator`: [`Unsettled`] if only the keys'
-    /// bytes tell, and they aren't ordered by their own bytes, or the
-    /// inline keys tie.
+    /// Reads the head of `leaf`, which the caller read at a version; the
+    /// descent found the key at the head's separator. [`Unsettled`] if the
+    /// leaf has no head, or the keys aren't ordered by their own bytes: only
+    /// such a key can be compared as a copy.
     #[inline(always)]
-    pub(super) fn of<S: InlineKeyStrategy<K>, Q>(
+    pub(super) fn of_head<S: InlineKeyStrategy<K>>(
         leaf: Leaf<K, V, Latched<S>>,
-        key: &SearchKey<'_, K, Latched<S>, Q>,
-        at_separator: bool,
-    ) -> Result<Self, Unsettled>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        let own_bytes = KeyInliner::<K>::orders_by_own_bytes::<S>();
-        if at_separator {
-            return match leaf.load_racing_head_entry() {
-                Some(head) if own_bytes => Ok(Self::Entry(head)),
-                // A leaf without a head lost the separator the key matched.
-                _ => Err(Unsettled),
-            };
-        }
-        match leaf.candidate_line_racing(key) {
-            (CandidateLine::Absent, _) => Ok(Self::Absent),
-            (CandidateLine::One(index, _), prefix_len) => {
-                Self::of_candidate(leaf, key, index, prefix_len)
-            }
-            (CandidateLine::Unknown, _) => Err(Unsettled),
+    ) -> Result<Self, Unsettled> {
+        match leaf.load_racing_head_entry() {
+            Some(head) if KeyInliner::<K>::orders_by_own_bytes::<S>() => Ok(Self::Entry(head)),
+            // A leaf without a head lost the separator the key matched.
+            _ => Err(Unsettled),
         }
     }
 
-    /// Reads candidate `index` of `leaf`, read at a version: the one key
-    /// whose inline key, at `prefix_len`, the leaf's then, equals `key`'s.
-    /// [`Unsettled`] if only the keys' bytes tell, and they aren't ordered
-    /// by their own bytes.
+    /// Reads candidate `index` of `leaf`, which the caller read at a
+    /// version: the one key whose inline key, at `prefix_len` (the leaf's
+    /// then), equals `key`'s. [`Unsettled`] if only the keys' bytes tell,
+    /// and they aren't ordered by their own bytes.
     #[inline(always)]
     pub(super) fn of_candidate<S: InlineKeyStrategy<K>, Q>(
         leaf: Leaf<K, V, Latched<S>>,
@@ -103,9 +88,9 @@ impl<K, V> RacingRead<K, V> {
         }
     }
 
-    /// The value read, if the entry read is `key`'s; [`Unsettled`] if the
-    /// head read, `at_separator`, isn't: the separator `key` matched was
-    /// removed since.
+    /// The value read, if the entry read is `key`'s. If `at_separator`, the
+    /// entry read is the head, and [`Unsettled`] if it isn't `key`'s: the
+    /// separator `key` matched was removed since.
     ///
     /// # Safety
     ///
@@ -229,10 +214,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Where `key`'s entry is, by an optimistic descent and a read of its
-    /// leaf in place: settled unlatched where the leaf's inline keys rule
+    /// leaf in place. Settled unlatched where the leaf's inline keys rule
     /// the key out, or, if `COPIES`, where the leaf settles a candidate,
-    /// whose value it copies ([`RacingRead`]); otherwise in the leaf,
-    /// latched shared while still at the version the descent read.
+    /// whose value it copies ([`RacingRead`]). Otherwise found in the leaf,
+    /// latched shared if still at the version the descent read.
     ///
     /// # Panics
     ///
@@ -251,7 +236,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         };
         let leaf = at.leaf();
         let (racing, candidate) = if at_separator {
-            (COPIES.then(|| RacingRead::of(leaf, key, true)), None)
+            (COPIES.then(|| RacingRead::of_head(leaf)), None)
         } else {
             match leaf.candidate_line_racing(key) {
                 (CandidateLine::Absent, _) => (Some(Ok(RacingRead::Absent)), None),
@@ -342,10 +327,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// The index of `key`'s entry in `leaf`, which the caller holds at the
-    /// version it read `candidate` at: the one key whose inline key, at the
-    /// prefix length with it, equals `key`'s, if it is `key`; without a
-    /// candidate, the leaf's own search, compiled apart for each
-    /// `call_site` (`Leaf::find`).
+    /// version it read `candidate` at. `candidate` is the one key whose
+    /// inline key, at the prefix length given with it, equals `key`'s: the
+    /// index is its, if it is `key`. Without a candidate, the leaf's own
+    /// search, compiled separately for each `call_site` (`Leaf::find`).
     #[inline(always)]
     pub(super) fn find_latched<Q, CallSite>(
         leaf: Leaf<K, V, Latched<S>>,

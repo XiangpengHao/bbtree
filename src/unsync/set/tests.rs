@@ -253,25 +253,19 @@ where
     /// Combines these sets with `other`, both ways, and with themselves, by
     /// every operation on two sets, lazy and building a set, against std's.
     fn assert_same_set_operations(&self, other: &Self, rng: &TestRng) {
-        let printed = self.theirs.len().max(other.theirs.len()) <= PRINTED_LEN;
         for (a, b) in [(self, other), (other, self), (self, self)] {
             let (ours, theirs) = ((&a.ours, &b.ours), (&a.theirs, &b.theirs));
             let difference = (ours.0.difference(ours.1), theirs.0.difference(theirs.1));
-            Self::assert_same_combination(rng, difference.0, difference.1, printed);
+            Self::assert_same_combination(rng, difference.0, difference.1);
             let intersection = (ours.0.intersection(ours.1), theirs.0.intersection(theirs.1));
-            Self::assert_same_combination(rng, intersection.0, intersection.1, printed);
+            Self::assert_same_combination(rng, intersection.0, intersection.1);
             let union = (ours.0.union(ours.1), theirs.0.union(theirs.1));
-            Self::assert_same_combination(rng, union.0, union.1, printed);
+            Self::assert_same_combination(rng, union.0, union.1);
             let symmetric_difference = (
                 ours.0.symmetric_difference(ours.1),
                 theirs.0.symmetric_difference(theirs.1),
             );
-            Self::assert_same_combination(
-                rng,
-                symmetric_difference.0,
-                symmetric_difference.1,
-                printed,
-            );
+            Self::assert_same_combination(rng, symmetric_difference.0, symmetric_difference.1);
             assert_eq!(ours.0.is_subset(ours.1), theirs.0.is_subset(theirs.1));
             assert_eq!(ours.0.is_superset(ours.1), theirs.0.is_superset(theirs.1));
             assert_eq!(ours.0.is_disjoint(ours.1), theirs.0.is_disjoint(theirs.1));
@@ -297,10 +291,10 @@ where
             (ours.0.intersection(ours.1), theirs.0.intersection(theirs.1)),
             (ours.1.intersection(ours.0), theirs.1.intersection(theirs.0)),
         ] {
-            Self::assert_same_combination(rng, ours, theirs, false);
+            Self::assert_same_combination(rng, ours, theirs);
         }
         let difference = (ours.0.difference(ours.1), theirs.0.difference(theirs.1));
-        Self::assert_same_combination(rng, difference.0, difference.1, false);
+        Self::assert_same_combination(rng, difference.0, difference.1);
         assert_eq!(ours.0.is_subset(ours.1), theirs.0.is_subset(theirs.1));
         assert_eq!(ours.1.is_superset(ours.0), theirs.1.is_superset(theirs.0));
         assert_eq!(ours.0.is_disjoint(ours.1), theirs.0.is_disjoint(theirs.1));
@@ -312,15 +306,14 @@ where
         }
     }
 
-    /// Steps `ours` and `theirs`, over the same combination of two sets,
-    /// alike to their ends: the same items and size hints, and the same
-    /// prints while `printed`. Their `min` and `fold` from the start, and
-    /// clones taken at a random step, folded and stepped, go on alike too.
+    /// Steps `ours` and `theirs`, over the same combination of two sets, alike
+    /// to their ends: the same items and size hints. Their `min` and `fold`
+    /// from the start, and clones taken at a random step, folded and stepped,
+    /// go on alike too.
     fn assert_same_combination<'a>(
         rng: &TestRng,
-        mut ours: impl Iterator<Item = &'a T> + Clone + Debug,
-        mut theirs: impl Iterator<Item = &'a T> + Clone + Debug,
-        printed: bool,
+        mut ours: impl Iterator<Item = &'a T> + Clone,
+        mut theirs: impl Iterator<Item = &'a T> + Clone,
     ) where
         T: 'a,
     {
@@ -329,9 +322,6 @@ where
         let mut clones = None;
         loop {
             assert_eq!(ours.size_hint(), theirs.size_hint());
-            if printed {
-                assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
-            }
             if clones.is_none() && rng.below(8) == 0 {
                 clones = Some((ours.clone(), theirs.clone()));
             }
@@ -620,6 +610,22 @@ fn extending_by_reference_matches_std() {
     ours.extend(&numbers);
     theirs.extend(&numbers);
     assert!(ours.iter().eq(&theirs));
+}
+
+/// The operations on two sets print what each side has left.
+#[test]
+fn set_operations_print_what_is_left() {
+    let (a, b) = (BBTreeSet::from([1, 2, 3]), BBTreeSet::from([2, 4]));
+    let mut union = a.union(&b);
+    union.next();
+    assert_eq!(
+        format!("{union:?}"),
+        "Union(MergeSides { left: [2, 3], right: [2, 4] })"
+    );
+    assert_eq!(
+        format!("{:?}", a.intersection(&b)),
+        "Intersection(Stitch(MergeSides { left: [1, 2, 3], right: [2, 4] }))"
+    );
 }
 
 /// Iterators over nothing, made by `Default` or over an empty set, print as

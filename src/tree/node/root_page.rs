@@ -1,15 +1,15 @@
-//! The root's page: the root node, of either kind, in room for the larger,
-//! and after it the root area, what the tree keeps in place of a parent:
-//! what every key shares (D50, `tree/shared_prefix.rs`).
+//! The root page: the root node, of either kind, in room for the larger,
+//! and after it the root area, which the tree keeps in place of a parent.
+//! The root area holds what every key shares (D50, `tree/shared_prefix.rs`).
 //!
-//! A tree keeps its root page for life, however tall it grows: the root
-//! node's kind changes in place, as InnoDB's root page does. Raising the
-//! tree moves the root node to a fresh page of its kind and makes the root
-//! an internal node above it; lowering it moves the root's only child up
-//! into the root page and frees the child's page. Every other page holds
-//! the kind it was allocated for, at that kind's size (D21), and an edge's
-//! tag tells its kind (`page.rs`). The tree's pointer to its root page is
-//! the root's edge: its tag tells the root's kind, and changes with it.
+//! A tree keeps its root page for life, however tall it grows; the root
+//! node's kind changes in place, as InnoDB's root page does (D52). Raising
+//! the tree moves the root node to a fresh page of its kind and makes the
+//! root an internal node above it. Lowering it moves the root's only child
+//! up into the root page and frees the child's page. Every other page holds
+//! the kind it was allocated for, at that kind's size (D21). The tree's
+//! pointer to its root page is the root's edge: its tag tells the root's
+//! kind, and changes with it.
 
 use core::alloc::Layout;
 use core::mem::size_of;
@@ -19,23 +19,22 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::interleaving::Interleaving;
-use super::Node;
 use super::internal::Internal;
 use super::leaf::Leaf;
 use super::page::{FreshPage, NodePtr, PageByType, PageType};
+use super::{Child, Node};
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
 /// A tree's root page, by a pointer to it tagged with the root node's kind,
-/// as an edge to the node would be: the root node at its start, and the
-/// root area after room for a node of either kind.
+/// as an edge to the node would be.
 ///
-/// A handle like the node handles, with their contracts (`tree/node/mod.rs`):
+/// A handle like the node handles, with their contracts (`tree/node/mod.rs`);
 /// the tree's owner gives it its access (`tree/root.rs`). Changing the root's
 /// kind ([`Self::raise`], [`Self::lower`]) consumes the handle and returns
-/// the page's new one: a copy of the old one tells the old kind, and is not
-/// used again.
+/// the page's new one. A copy of the old handle tells the old kind, and is
+/// not used again.
 pub(crate) struct RootPage<K, V, S> {
     node: NodePtr<K, V, S>,
 }
@@ -48,10 +47,9 @@ impl<K, V, S> Clone for RootPage<K, V, S> {
 
 impl<K, V, S> Copy for RootPage<K, V, S> {}
 
-// SAFETY: a root page is used with this layout only: the root node at its
+// SAFETY: a root page is used with this layout only. The root node is at its
 // start, with its kind's layout, which fits in the page and whose alignment
-// divides the page's, and the root area, what every key shares, after the
-// larger kind's page.
+// divides the page's. The root area follows the larger kind's page.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for RootPage<K, V, S> {
     fn page_layout() -> Layout {
         let (leaf, internal) = (
@@ -78,9 +76,9 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         root_page
     }
 
-    /// The root page for `top`, the top node of a tree on plain pages whose
-    /// keys share `shared_prefix`, in `page`: moves `top` there, and returns
-    /// `top`'s emptied page. For a tree made on plain pages: a copy
+    /// Makes `page` the root page for `top`, moving `top` there, and returns
+    /// it with `top`'s emptied page. `top` is the top node of a tree made on
+    /// plain pages, whose keys share `shared_prefix`: a copy
     /// (`tree/clone.rs`), or the part a cut makes (`tree/cut.rs`).
     pub(in crate::tree) fn from_node(
         page: FreshPage<Self>,
@@ -173,10 +171,11 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         unsafe { &*self.area() }
     }
 
-    /// [`Self::shared_prefix`] of a latched tree, while a thread holding the
-    /// root may be changing it: a copy, read through the raw pointer, which
-    /// the root's version vouches for once checked (`tree/latched`); `None`
-    /// if, as read first, it has no bytes, which most trees read alone.
+    /// [`Self::shared_prefix`] of a latched tree, read while a thread holding
+    /// the root may be changing it. Returns a copy, read through the raw
+    /// pointer, which the root's version vouches for once checked
+    /// (`tree/latched`). `None` if its length, read first, is 0: most trees
+    /// read only that byte.
     ///
     /// # Safety
     ///
@@ -185,18 +184,16 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
         Interleaving::switch_point();
         // SAFETY: the root area was written with the page, which is
-        // allocated (caller); its length is a byte, read as an atomic, and a
-        // racing write makes the copy one that the version check throws
-        // away.
+        // allocated (caller). Its length is a byte, read as an atomic. A
+        // racing write makes the copy one that the version check throws away.
         unsafe {
             let len = AtomicU8::from_ptr(self.area().byte_add(SharedPrefix::LEN_OFFSET).cast());
             (len.load(Ordering::Relaxed) != 0).then(|| self.area().read())
         }
     }
 
-    /// What every key of the tree shares, to change: keeping every node
-    /// along the tree's borders at its length is the caller's business
-    /// (`tree/prefix.rs`).
+    /// What every key of the tree shares, to change. The caller keeps every
+    /// node along the tree's borders at its length (`tree/prefix.rs`).
     pub(in crate::tree) fn shared_prefix_mut<'a>(self) -> &'a mut SharedPrefix {
         // SAFETY: the root area was written with the page; the access is
         // exclusive while the caller borrows it (the handles' contract).
@@ -224,10 +221,11 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         Node::at(moved)
     }
 
-    /// Makes the tree a level taller: moves the root node to a fresh page of
+    /// Makes the tree a level taller. Moves the root node to a fresh page of
     /// its kind, from `alloc`, and makes the root an internal node with that
-    /// node as its only child, at the tree's shared prefix length (D50), as
-    /// the old one had, on both borders. Returns the page's new handle.
+    /// node as its only child. The new root, on both borders, is at the
+    /// tree's shared prefix length (D50), as the old one was. Returns the
+    /// page's new handle.
     pub(in crate::tree) fn raise(self, alloc: &impl Allocator) -> Self {
         let child = self.move_node_out(alloc);
         // SAFETY: the root page is aligned to and as large as an internal
@@ -259,19 +257,6 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         // nothing pointed to the child's page but that edge.
         let (node, emptied) = unsafe { Self::move_in(self.node.page(), root.child(0)) };
         (Self { node }, emptied)
-    }
-
-    /// Moves the root node to a fresh page of its kind, from `alloc`, for
-    /// another tree to hang under an edge (`tree/join.rs`), and returns it
-    /// there, with this page, which holds nothing anymore.
-    pub(in crate::tree) fn into_node(
-        self,
-        alloc: &impl Allocator,
-    ) -> (Node<K, V, S>, FreshPage<Self>) {
-        let top = self.move_node_out(alloc);
-        // SAFETY: the root node's contents moved to `top`, and the root area
-        // holds nothing to drop; the caller gives up the page with `self`.
-        (top, unsafe { self.free() })
     }
 
     /// Gives the page back.

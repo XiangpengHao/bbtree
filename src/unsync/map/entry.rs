@@ -2,12 +2,12 @@
 //! into one key's place in a map, as std's.
 //!
 //! An entry keeps the node stack its search found, from the root down to the
-//! key or to the leaf edge where it goes (`tree/node_stack.rs`): every `Ord`
-//! call happens in `entry`, as in std. Reading or changing an occupied entry
-//! goes straight to the node at the end of the node stack; removing it, or
-//! inserting into a vacant one, goes back up the node stack, comparing no
-//! keys. An insert leaves the node stack at the new entry, wherever the splits
-//! took it, which is how `insert` hands out its value.
+//! key or to the leaf edge where it goes (`tree/node_stack.rs`). So every
+//! `Ord` call happens in `entry`, as in std. Reading or changing an occupied
+//! entry goes straight to the node at the end of the node stack; removing it,
+//! or inserting into a vacant one, goes back up the node stack, comparing no
+//! keys. An insert leaves the node stack at the new entry, wherever the
+//! splits took it, which is how `insert` hands out its value.
 
 #![forbid(unsafe_code)]
 

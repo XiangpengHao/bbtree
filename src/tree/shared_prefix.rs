@@ -1,9 +1,8 @@
-//! What every key of a tree shares, from its first byte (D50): the prefix of
-//! the nodes along the tree's borders, which lack a fence on one side, and
-//! of its root, which lacks both (05-fence-key.md). A search checks a query
-//! against it once, at the top, so that every node may skip its prefix
-//! unchecked. The root's page keeps it, after the root node
-//! (`node/root_page.rs`).
+//! What every key of a tree shares, from its first byte (D50). It is the prefix
+//! of the nodes along the tree's borders, which lack a fence on one side, and
+//! of its root, which lacks both (`prefix.rs`). A search checks a query against
+//! it once, at the top, so that every node may skip its prefix unchecked. The
+//! root's page keeps it, after the root node (`node/root_page.rs`).
 
 #![forbid(unsafe_code)]
 
@@ -15,16 +14,16 @@ use super::node::inline_keys::{KeyInliner, SearchKey, Window};
 use crate::inline_key::{InlineKey, InlineKeyStrategy};
 
 /// The leading bytes of the encoding of every key of a tree (D18), as many
-/// as they all share, at most [`Self::MAX_LEN`]; none for a tree whose keys
+/// as they all share, at most [`Self::MAX_LEN`]. None for a tree whose keys
 /// have no inline keys, share no byte, or that held no key yet.
 ///
-/// Invariant: every key of the tree's encoding starts with these bytes, and
-/// a byte string key is at least as long; every node along the tree's
-/// borders has this prefix length. `len <= MAX_LEN`.
+/// Invariant: the encoding of every key of the tree starts with these
+/// bytes, and a byte-string key is at least as long. Every node along the
+/// tree's borders has this prefix length. `len <= MAX_LEN`.
 ///
-/// A plain value, which the root's page holds in place: a lookup in a tree
-/// whose keys share nothing reads its length alone, which a latched tree's
-/// descent reads at [`Self::LEN_OFFSET`] while another thread may write it
+/// A plain value, held in place in the root page. A lookup in a tree whose
+/// keys share nothing reads only its length, which a latched tree's descent
+/// reads at [`Self::LEN_OFFSET`] while another thread may write it
 /// (`node/root_page.rs`).
 #[derive(Clone)]
 #[repr(C)]
@@ -56,7 +55,6 @@ impl SharedPrefix {
         shared
     }
 
-    /// The bytes themselves.
     pub(in crate::tree) fn as_bytes(&self) -> &[u8] {
         &self.bytes[..usize::from(self.len)]
     }
@@ -82,10 +80,10 @@ impl SharedPrefix {
         self.len = self.len().min(len) as u8;
     }
 
-    /// The window of these bytes at `prefix_len`, at most their length:
-    /// what a node whose prefix shrinks from these bytes' length to
-    /// `prefix_len` fills its windows from ([`Window::moved_back_to`]), as
-    /// every key of the node shares these bytes. Taken before they shrink.
+    /// The window of these bytes at `prefix_len`, at most their length. A
+    /// node whose prefix shrinks from these bytes' length to `prefix_len`
+    /// fills its windows from it ([`Window::moved_back_to`]), as every key of
+    /// the node shares these bytes. Taken before they shrink.
     pub(in crate::tree) fn window_at(&self, prefix_len: usize) -> Window {
         let bytes = self.as_bytes();
         debug_assert!(prefix_len <= bytes.len());

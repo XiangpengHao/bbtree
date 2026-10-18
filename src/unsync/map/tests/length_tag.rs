@@ -116,9 +116,9 @@ fn absent_keys_have_two_candidates_of_their_tag() {
     }
 }
 
-/// Lookups among keys that tie on their inline keys, whose lengths pick out
-/// one candidate, two, or more; then through inserts that split, removals,
-/// a cut, a join and a copy, which must keep every length tag right.
+/// Lookups among keys that tie on their inline keys, whose lengths pick out one
+/// candidate, two, or more; then through inserts that split, removals, a cut,
+/// an append and a copy, which must keep every length tag right.
 #[test]
 fn length_collisions_and_mutations_preserve_exact_key_lookups() {
     // Tails of lengths that one key has, then two, three, and so on.

@@ -1,39 +1,43 @@
-//! Per-node prefix stripping (`doc/05-fence-key.md`): a node with inline keys
-//! skips the leading bytes that its two fences share, and stores each key's
-//! window past them.
+//! Per-node prefix stripping (D26, `doc/05-fence-key.md`): a node with
+//! inline keys skips the leading bytes its two fences share, and stores each
+//! key's window past them.
 //!
-//! A node's fences are the separators beside it in its ancestors: the key
-//! left of its edge in the nearest ancestor where it is not the first edge,
-//! and the key right of it in the nearest where it is not the last. Nothing
-//! stores them. A node's prefix length is what they share; every key in the
-//! node lies between them, so it shares that prefix, whatever is inserted.
-//! Along the tree's left and right borders, where a fence is missing, it is
-//! what every key of the tree shares, which the tree keeps with its root and
-//! a search checks first (D50): a key outside it is outside every node.
+//! A node's fences are the separators beside it in its ancestors. The low fence
+//! is the key left of the node's edge in the nearest ancestor where that edge
+//! is not the first. The high fence is the key right of it in the nearest
+//! ancestor where it is not the last. Nothing stores them. A node's prefix
+//! length is what its fences share. Every key in the node lies between them, so
+//! it shares that prefix, whatever is inserted. Along the tree's left and right
+//! borders, where a fence is missing, the prefix is what every key of the tree
+//! shares. The tree keeps that with its root, and a search checks it first
+//! (D50): a key outside it is outside every node.
 //!
 //! A child's fences lie within its parent's, so its prefix is never shorter
-//! than its parent's: for keys a ≤ b ≤ c, what a and c share is the shorter
-//! of what a and b share and what b and c share.
+//! than its parent's (D44). For keys a ≤ b ≤ c, what a and c share is the
+//! shorter of what a and b share and what b and c share.
 //!
-//! A prefix changes only when a fence does, which only a separator change
-//! does: a split adds one, a merge takes one out, a move between siblings or
-//! a removal replaces one, and a cut leaves nodes without one. The nodes
-//! whose fences changed then read their keys for their new windows
-//! ([`Child::refit_prefix`]). Along the borders, a key that doesn't share
-//! what the tree's keys share shrinks it, and the border nodes with it,
-//! reading no key ([`Tree::shrink_shared_prefix_for`]).
+//! A prefix changes only when a fence does, and only a separator change moves a
+//! fence. A split adds a separator, a merge takes one out, a move between
+//! siblings or a removal replaces one, and a cut leaves nodes without one. The
+//! nodes whose fences changed then read their keys for their new windows
+//! ([`Child::refit_prefix`]). A key that lacks what the tree's keys share
+//! shrinks the shared prefix, and the border nodes' prefixes with it, reading
+//! no key ([`Tree::shrink_shared_prefix_for`]).
 //!
-//! An operation changes the tree's shape without calling user encodings,
-//! so that a panicking `InlineKey` can't stop it halfway. A prefix may have
-//! to shrink during it: it shrinks to the parent's, the shift of a window
-//! filled from the parent's separator ([`Window::moved_back_to`]), which
-//! bounds the node (`tree/node/mod.rs`). Once it is done, and its entry
-//! counted, the nodes whose fences changed are fit to them: the halves of
-//! each split ([`NodeStackMut::refit_split_halves`]), the nodes a removal
-//! merged or moved entries between (`remove.rs`), the siblings a cut's
-//! borders took entries from ([`Tree::refit_border_siblings`]), the spines
-//! below a join's separator (`join.rs`), and a built tree's nodes as they
-//! close (`build.rs`), down a border ([`NodeStackMut::refit_border_below`]).
+//! An operation changes the tree's shape without calling user encodings, so
+//! a panicking `InlineKey` can't stop it halfway. A prefix that must shrink
+//! meanwhile shrinks to the parent's: its windows shift back, filled from
+//! the parent's separator that bounds the node ([`Window::moved_back_to`],
+//! `tree/node/mod.rs`). Once the operation is done and its entry counted,
+//! the nodes whose fences changed are fit to them:
+//!
+//! - the halves of each split ([`NodeStackMut::refit_split_halves`]);
+//! - the nodes a removal merged or moved entries between (`remove.rs`);
+//! - the siblings a cut's borders took entries from
+//!   ([`Tree::refit_border_siblings`]);
+//! - a built tree's nodes as they close, down a border (`build.rs`,
+//!   [`NodeStackMut::refit_border_below`]).
+//!
 //! A removed separator's successor is the one change read first
 //! ([`NodeStackMut::refit_left_of_separator`]).
 //!
@@ -54,13 +58,12 @@ use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// Fits the prefixes of the nodes an insert split to their fences, from
-    /// the leaves up, so that each node's sees its children's; the node stack,
-    /// which ends at the new entry, ends there again afterwards.
+    /// the leaves up, so each node's fit sees its children's. The node stack
+    /// ends at the new entry before and after.
     ///
-    /// `separator_indexes[climbed]`, for each `climbed` from 1 to
-    /// `levels_climbed` levels up the node stack from its bottom, is where
-    /// the node stack's node there holds the separator between the two
-    /// halves of the node below it that split.
+    /// For each `climbed` from 1 to `levels_climbed`, the node `climbed`
+    /// levels up the node stack holds, at `separator_indexes[climbed]`, the
+    /// separator between the two halves of its child that split.
     ///
     /// Calls `InlineKey`: an insert does this last, once its entry is in and
     /// counted, so that a panic leaves a map that has it.
@@ -86,11 +89,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         }
     }
 
-    /// Fits the prefixes of the bottom node's children at `edges`, an
-    /// internal node's, to what their fences share, reading the fences
-    /// unless the child's own inline keys tell they share no more
-    /// ([`Child::keys_differ_past_prefix`]), and, if a prefix changes, the
-    /// child's keys.
+    /// Fits the prefixes of the children at `edges` of the bottom node, an
+    /// internal node, to what their fences share. It reads the fences unless
+    /// the child's own inline keys show they share no more
+    /// ([`Child::keys_differ_past_prefix`]). If a prefix changes, it reads
+    /// the child's keys too.
     pub(in crate::tree) fn refit_children_to_fences<const N: usize>(&mut self, edges: [usize; N]) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
@@ -122,7 +125,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
                 .or(high);
             // Well-ordered encodings already imply this floor. Keep the
             // numerical parent/child invariant even when a user encoding
-            // lies: later structural moves must only move windows
+            // lies (D44): later structural moves must only move windows
             // backwards, without invoking that encoding.
             let prefix_len = KeyInliner::fence_prefix_len::<S>(child_low, child_high, shared_len)
                 .max(node.prefix_len());
@@ -131,8 +134,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     }
 
     /// Fits the prefixes of the nodes below the bottom node's child at
-    /// `edge`, down that child's `End` border, from the leaf up, so that
-    /// each node's sees its children's; the child itself is the caller's to
+    /// `edge`, down that child's `End` border, from the leaf up so each
+    /// node's fit sees its children's. The child itself is the caller's to
     /// fit, with its sibling if that changed too. The node stack ends at the
     /// bottom node again, at `edge`.
     pub(in crate::tree) fn refit_border_below<End: NodeEnd>(&mut self, edge: usize) {
@@ -150,13 +153,13 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         }
     }
 
-    /// Before the separator the node stack ends at, `s`, in an internal node,
-    /// gives way to its successor, `s'`, the first key of the leftmost leaf
-    /// right of it (D17): shrinks the prefixes of the nodes along the right
-    /// border under the edge left of `s`, whose upper fence `s'` becomes, to
-    /// what they will share with it, from the top down, reading keys. Their
-    /// fences are still what they were, which a shorter prefix fits too, so
-    /// a removal does this before it changes anything.
+    /// Prepares the separator the node stack ends at, `s` in an internal
+    /// node, to give way to its successor `s'`, the first key of its head's
+    /// leaf (D17). `s'` becomes the upper fence of the nodes along the right
+    /// border under the edge left of `s`. This shrinks their prefixes, from
+    /// the top down, to what they will share with `s'`, reading keys. A
+    /// shorter prefix still fits their current fences, so a removal does
+    /// this before it changes anything.
     ///
     /// A node there has fences `low` and `s`, so its new prefix is the
     /// shorter of its own and what `s` and `s'` share: `low ≤ s ≤ s'`.
@@ -174,7 +177,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has keys");
             // Arbitrary user encodings may report fewer shared bytes than
             // the parent's current prefix. Shrinking the border below it
-            // would break the numerical invariant used by key movement.
+            // would break the numerical invariant used by key movement
+            // (D44).
             let separator = node.separator_key(index);
             KeyInliner::common_prefix_len::<S>(separator, successor).max(node.prefix_len())
         };
@@ -194,12 +198,13 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     }
 
     /// Moves the prefix of every node on the node stack back to the root's,
-    /// what every key of the tree shares (D50), from the root down, each
-    /// filled from its parent's key beside the node stack, which is one of its
-    /// fences, once the parent's is the root's too. For a cut along the node
-    /// stack (`cut.rs`), whose nodes become the borders of two trees, both of
-    /// whose keys share what this tree's do. Reads no key; no user encoding
-    /// runs. The node stack stays where it is.
+    /// what every key of the tree shares (D50), from the root down. Each
+    /// node's windows are filled from its parent's key beside the node
+    /// stack, one of its fences, once the parent's prefix is the root's too.
+    /// For a cut along the node stack (`cut.rs`): its nodes become the
+    /// borders of two trees, whose keys both share what this tree's do.
+    /// Reads no key, and no user encoding runs. The node stack stays where
+    /// it is.
     pub(super) fn move_prefixes_back_to_root(&mut self) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
@@ -226,10 +231,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Fits the prefix of the node beside each node along the tree's `End`
-    /// border to its fences, from the root down: after
-    /// [`Tree::fix_border`], which moves entries over from those nodes,
-    /// into the border, without reading a key. The border's own nodes keep
-    /// the root's fence on that side, and so its prefix (D50).
+    /// border to its fences, from the root down. Runs after
+    /// [`Tree::fix_border`], which moves entries from those nodes into the
+    /// border without reading a key. The border's own nodes keep the root's
+    /// fence on that side, and so its prefix (D50).
     pub(super) fn refit_border_siblings<End: NodeEnd>(&mut self) {
         if !NodePtr::<K, V, S>::has_inline_keys() {
             return;
@@ -247,12 +252,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 }
 
-/// A key that shares what every key of its tree shares (D50): what a
-/// search that skips each node's prefix unchecked needs, and what an
-/// insert computes the key's window from. Only the tree makes one, by
-/// shrinking what its keys share to what the key shares too
-/// ([`Tree::shrink_shared_prefix_for`]), or by checking it
-/// ([`Self::checked`]).
+/// A key that shares what every key of its tree shares (D50). A search that
+/// skips each node's prefix unchecked needs one, and an insert computes the
+/// key's window from it. Only the tree makes one: by shrinking what its keys
+/// share to what the key shares too ([`Tree::shrink_shared_prefix_for`]), or
+/// by checking it ([`Self::checked`]).
 pub(in crate::tree) struct PrefixedKey<K>(K);
 
 impl<K> PrefixedKey<K> {
@@ -269,11 +273,12 @@ impl<K> PrefixedKey<K> {
         }
     }
 
-    /// `key`, which a latched tree's descent found shares what every key of
-    /// the tree shares, at a version of the root it checked, into the leaf
-    /// it holds, where the key belongs (`tree/latched`): the leaf's prefix,
-    /// which only a thread holding it changes, is what its fences share, or
-    /// the shared prefix on a border, and `key` lies between them.
+    /// `key`, which a latched tree's descent (`tree/latched`) found shares
+    /// what every key of the tree shares, at a root version it checked, on
+    /// its way into the leaf it holds, where the key belongs. The leaf's
+    /// prefix is what its fences share, or the shared prefix on a border,
+    /// and `key` lies between the fences. Only a thread holding the leaf
+    /// changes its prefix.
     pub(in crate::tree) fn checked_by_descent(key: K) -> Self {
         Self(key)
     }
@@ -282,7 +287,6 @@ impl<K> PrefixedKey<K> {
         &self.0
     }
 
-    /// The key itself.
     pub(in crate::tree) fn into_key(self) -> K {
         self.0
     }
@@ -299,19 +303,19 @@ impl<K> PrefixedKey<K> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Shrinks what every key of the tree shares to what `key` shares too,
-    /// before the tree takes it (D50), and returns `key`, which shares it
-    /// now: a tree whose keys share bytes `key` lacks shrinks to what `key`
-    /// shares with them, and so do the nodes that take the root's fences,
-    /// along its borders. Without a tree, there is a new one from `alloc`
-    /// first. An empty tree, whose prefix nothing bounds yet, takes `key`'s
-    /// first bytes, and its root leaf takes them as its prefix. Calls
-    /// `InlineKey` with [`WithInlineKey`](crate::WithInlineKey), before it
-    /// changes anything but making the tree.
+    /// before the tree takes it (D50), and returns `key`, which now shares
+    /// it. The nodes along the borders, which take the root's fences, shrink
+    /// their prefixes with it. Without a tree, it first makes one from
+    /// `alloc`. An empty tree, whose prefix nothing bounds yet, takes `key`'s
+    /// first bytes as what every key shares, and its root leaf takes them as
+    /// its prefix. Calls `InlineKey` with
+    /// [`WithInlineKey`](crate::WithInlineKey), before it changes anything
+    /// but making the tree.
     ///
     /// Every insert does this, and almost every one changes nothing: the
-    /// check is inline, and making the tree or starting or shrinking the
-    /// prefix is not. Always inline: the batch's inserts, more callers,
-    /// outlined it, which cost a 10M JSON random insert about 75 ns.
+    /// check is inline, while making the tree and starting or shrinking the
+    /// prefix are not. Always inline, so the batch's inserts, as extra
+    /// callers, don't outline it (D53).
     #[inline(always)]
     pub(in crate::tree) fn shrink_shared_prefix_for(
         &mut self,
@@ -332,25 +336,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         PrefixedKey(key)
     }
 
-    /// Shrinks what every key of this tree and of `right` shares to what
-    /// both share with `key` (D50), and returns `key` with its window there:
-    /// the separator that joins the two trees (`join.rs`). Calls `InlineKey`
-    /// before it changes anything.
-    pub(in crate::tree) fn shrink_shared_prefixes_for_separator(
-        &mut self,
-        right: &mut Self,
-        key: K,
-    ) -> WindowedKey<K, S> {
-        let shared_with_key = |tree: &Self| tree.shared_prefix().len_shared_with::<K, S>(&key);
-        let len = shared_with_key(self).min(shared_with_key(right));
-        let separator = WindowedKey::new(key, len);
-        self.shrink_shared_prefix_to(len);
-        right.shrink_shared_prefix_to(len);
-        separator
-    }
-
-    /// Makes `key`'s first bytes what every key of the tree, which has none
-    /// yet, shares, and the prefix of `root`, its empty root leaf.
+    /// Makes `key`'s first bytes what every key of the tree shares, for a
+    /// tree with no keys yet, and the prefix of `root`, its empty root leaf.
     #[cold]
     #[inline(never)]
     fn start_shared_prefix(&mut self, root: Leaf<K, V, S>, key: &K) {
@@ -360,10 +347,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 
     /// Shrinks what every key of the tree shares to its first `len` bytes,
-    /// if there are more, and the nodes along its borders with it: before
-    /// the tree takes a key that shares only those, or joins another tree,
-    /// around a separator, whose keys do. Reads no key and calls no
-    /// `InlineKey`.
+    /// if there are more, and the border nodes' prefixes with it. For a key
+    /// the tree is about to take, which shares only those bytes. Reads no key
+    /// and calls no `InlineKey`.
     #[inline]
     fn shrink_shared_prefix_to(&mut self, len: usize) {
         if len < self.shared_prefix().len() {

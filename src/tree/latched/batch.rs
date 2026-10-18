@@ -1,29 +1,31 @@
-//! Batched lookups in a tree that threads share (doc 12,
-//! `doc/09-concurrency.md`): bbtree's lanes and executor (`tree/batch.rs`)
-//! on the optimistic descent (`descent.rs`). Each key descends in its own
-//! lane, which prefetches the line it reads next and yields, so that one
-//! lane's wait for memory overlaps the others' searches.
+//! Batched lookups and inserts in a tree that threads share (doc 12,
+//! `doc/09-concurrency.md`, D55): the unsync tree's lanes and executor
+//! (`tree/batch.rs`) on the optimistic descent (`descent.rs`). Each key
+//! descends in its own lane, which prefetches the line it reads next and
+//! yields, so that one lane's wait for memory overlaps the others' searches.
 //!
-//! A suspended lane holds no latch. It reads the internal nodes and its
-//! leaf's inline keys optimistically, at versions it checks, and latches the
-//! leaf only in the poll that searches it, runs the closure and lets go. So
-//! no lane waits for a latch another lane of its batch holds, and a lane that
-//! another thread's change sends back starts over from the root alone.
+//! A suspended lane holds no latch. It reads the internal nodes and its leaf's
+//! inline keys optimistically, at versions it checks. It latches the leaf only
+//! in the poll that searches it, runs the closure and lets go. So no lane waits
+//! for a latch another lane of its batch holds, and a lane that another
+//! thread's change sends back starts over from the root alone.
 //!
 //! - **Internal nodes**, as the descent reads them: route the key, fetch the
 //!   chosen edge, read it, check the node's version; fetch the child's
 //!   header, read its version, check the node's again.
-//! - **The leaf**: its inline keys, read at the version the lane read, rule
-//!   the key out, which that version, unchanged, then confirms without a
-//!   latch; or name its one candidate, whose entry the lane fetches before
-//!   it latches the leaf. A heap key's bytes the lane fetches too, their
-//!   address read with the leaf latched a moment. Latched shared, the leaf
-//!   still at that version, the lane compares the candidate and runs the
-//!   closure. Ties go to the leaf's search, latched.
-//! - **Copies** ([`LatchedTree::get_many_copied`]): a lane that copies a `Copy`
-//!   value copies the candidate's unlatched instead, then checks the leaf's
-//!   version, where the leaf settles the key as a single [`LatchedTree::get_copied`]
-//!   does (`lookup.rs`): such a hit writes nothing either.
+//! - **The leaf**: its inline keys, read at the version the lane read,
+//!   either rule the key out or name its one candidate. A key ruled out is
+//!   absent once that version, unchanged, confirms it, without a latch. A
+//!   candidate's entry the lane fetches before it latches the leaf. For a
+//!   heap key it fetches the key's bytes too, their address read with the
+//!   leaf latched a moment. Then, with the leaf latched shared and still at
+//!   that version, the lane compares the candidate and runs the closure.
+//!   Ties go to the leaf's search, latched.
+//! - **Copies** ([`LatchedTree::get_many_copied`]): a lane that copies a
+//!   `Copy` value copies the candidate's unlatched instead, then checks the
+//!   leaf's version. That works where the leaf settles the key, as for a
+//!   single [`LatchedTree::get_copied`] (`lookup.rs`); such a hit writes
+//!   nothing either.
 //! - **Separators**: a key equal to one is its leaf's head, which the lane
 //!   checks with the leaf latched, as the descent does.
 
@@ -136,8 +138,8 @@ struct ReadBatch<'t, K, V, S, B> {
 }
 
 /// One key's lookup in a batch: the batch, and the key, whose search key is
-/// made once (doc 12). With the few locals of [`Self::read`], all a
-/// suspended lane holds: 88 bytes for `u64` keys.
+/// made once (doc 12). With the few locals of [`Self::read`], this is all a
+/// suspended lane holds.
 struct Lane<'b, 'q, K, V, S, Q: ?Sized, B> {
     batch: &'b ReadBatch<'b, K, V, S, B>,
     key: SearchKey<'q, K, Latched<S>, Q>,
@@ -202,13 +204,14 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Whether the tree is large enough for batches to pay for their lanes:
-    /// about an L2 of leaf pages, as bbtree's cutoff (doc 12). Below, the
-    /// lanes find their lines in cache and cost more than they save. The
-    /// tree keeps no length, so its height tells instead: a tree that splits
-    /// grew has three internal levels only past 2·m² leaves, m half an
-    /// internal node's capacity, about 1,150 leaf pages for `u64` keys,
-    /// just over L2's 1 MiB. Read optimistically, a hint. Tests batch on
-    /// every tree with an internal root, to reach the lanes on small trees.
+    /// about an L2 of leaf pages, as the unsync tree's cutoff (doc 12, D55).
+    /// Below that, the lanes find their lines in cache and cost more than they
+    /// save. The tree keeps no length, so its height tells instead. A tree
+    /// grown by splits has three internal levels only past 2·m² leaves, m being
+    /// half an internal node's capacity: about 1,150 leaf pages for `u64` keys,
+    /// just over a 1 MiB L2. The height is read optimistically, so it is a
+    /// hint. Tests batch on every tree with an internal root, to reach the
+    /// lanes on small trees.
     fn batches(&self) -> bool {
         let Some(root_page) = self.root_page() else {
             return false;
@@ -233,9 +236,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 }
 
-/// Where a batched insert's key goes, as its lane found it: the leaf, the
-/// version the lane read it at, and whether the key matched a separator,
-/// the leaf's head then (D17), which the insert checks.
+/// Where a batched insert's key goes, as its lane found it: the leaf, and the
+/// version the lane read it at. Also whether the key matched a separator, and
+/// so is the leaf's head (D17), which the insert checks.
 struct Destination<K, V, S> {
     leaf: Leaf<K, V, Latched<S>>,
     version: Version,
@@ -301,11 +304,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         self.insert_batch(entries, alloc)
     }
 
-    /// Finds the leaf of every key first, in lanes, then inserts the entries
-    /// in input order, each into its leaf if still at the version its lane
-    /// read, as moved on by the batch's own inserts there; otherwise, or
-    /// where the leaf is full, as a single insert does. Outlined, to keep
-    /// the lanes out of appends and small trees.
+    /// Finds every key's leaf first, in lanes, then inserts the entries in
+    /// input order. Each goes into its leaf if the leaf is still at the version
+    /// its lane read, as moved on by the batch's own inserts there. Otherwise,
+    /// or where the leaf is full, it goes in as a single insert does. Outlined,
+    /// to keep the lanes out of appends and small trees.
     #[inline(never)]
     fn insert_batch<const N: usize>(
         &self,
@@ -362,11 +365,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         })
     }
 
-    /// Inserts `key` and `value` into the leaf `destination` names, latched
-    /// exclusively at the version its lane read it at, which held the key's
-    /// place then, if the leaf has room or the key; returns the replaced
-    /// value. The leaf is at the next version after. Otherwise changes
-    /// nothing and gives the entry back ([`Fallback`]).
+    /// Inserts `key` and `value` into the leaf `destination` names, and returns
+    /// the replaced value. That takes latching the leaf exclusively at the
+    /// version its lane read it at, when it held the key's place, and a leaf
+    /// with room or with the key. The leaf is at the next version after.
+    /// Otherwise changes nothing and gives the entry back ([`Fallback`]).
     #[inline(always)]
     fn insert_at(
         &self,
@@ -452,8 +455,9 @@ where
                             if !node.latch().is_unchanged(version) {
                                 continue 'restart;
                             }
-                            // The insertion shifts the entries from there,
-                            // as bbtree's batch fetches (`tree/batch.rs`).
+                            // The insertion shifts the entries from there: hint
+                            // that line, as the unsync tree's batch does
+                            // (`tree/batch.rs`).
                             if let Some(line) = leaf.racing_insertion_line(&self.key) {
                                 Prefetcher::hint(line);
                             }
@@ -486,8 +490,8 @@ where
     Q: Ord + ?Sized,
     B: EntryVisit<K, V, S>,
 {
-    /// Looks the key up, writing what the batch's visit made of its entry
-    /// to `output`, if the tree has one. As bbtree's lane, one flat async
+    /// Looks the key up, writing what the batch's visit made of its entry to
+    /// `output`, if the tree has one. As the unsync tree's lane, one flat async
     /// block that returns unit (doc 12).
     #[expect(
         clippy::manual_async_fn,
@@ -552,7 +556,7 @@ where
                 };
                 let found = if at_separator {
                     if B::COPIES
-                        && let Ok(read) = RacingRead::of(leaf, &self.key, true)
+                        && let Ok(read) = RacingRead::of_head(leaf)
                     {
                         let visit = &self.batch.visit;
                         LatchedTree::settle_copy(leaf, version, read, &self.key, true, visit)
@@ -617,12 +621,12 @@ where
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// What `visit` makes of the entry of `key` in `leaf`, latched shared,
-    /// if the leaf is still at `version`, the version it was read at to find
-    /// `candidate`: the one key whose inline key, at the prefix length with
-    /// it, equals `key`'s. `None` if that key isn't `key`. Without a
-    /// candidate, the leaf's own search. Synchronous: the latch is never
-    /// held across a lane's yield.
+    /// What `visit` makes of the entry of `key` in `leaf`, latched shared, if
+    /// the leaf is still at `version`, the version it was read at to find
+    /// `candidate`. That is the one key whose inline key, at the prefix length
+    /// given with it, equals `key`'s; `None` if it isn't `key`. Without a
+    /// candidate, the leaf's own search. Synchronous: the latch is never held
+    /// across a lane's yield (D55).
     #[inline(always)]
     fn read_in_leaf<Q, B: EntryVisit<K, V, S>>(
         leaf: Leaf<K, V, Latched<S>>,
@@ -647,11 +651,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(result)
     }
 
-    /// What `visit` makes of the value `read`, read unlatched from `leaf`,
-    /// its head if `at_separator`, if the leaf is still at `version`, which
-    /// it was read at, and the entry read is `key`'s (`lookup.rs`); `None`
-    /// for a candidate that isn't. [`Restart`] if the leaf changed, or lost
-    /// the head `key` matched.
+    /// What `visit` makes of the value `read`, read unlatched from `leaf` (from
+    /// its head if `at_separator`). That takes the leaf still at `version`,
+    /// which it was read at, and the entry read being `key`'s (`lookup.rs`);
+    /// `None` for a candidate that isn't. [`Restart`] if the leaf changed, or
+    /// lost the head `key` matched.
     #[inline(always)]
     fn settle_copy<Q, B: EntryVisit<K, V, S>>(
         leaf: Leaf<K, V, Latched<S>>,
@@ -676,12 +680,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// The first line of `candidate`'s heap bytes that comparing it with
-    /// `key` reads, as [`Self::read_in_leaf`]'s candidate, read with the leaf
-    /// latched shared if it is still at `version`; `None` if the comparison
-    /// reads none. The lane lets go before it fetches the line: a pointer
-    /// into a key is read only under the latch, and a prefetch of a stale
-    /// one is harmless.
+    /// The first line of `candidate`'s heap bytes that comparing it with `key`
+    /// reads, for [`Self::read_in_leaf`]. It is read with the leaf latched
+    /// shared, if the leaf is still at `version`; `None` if the comparison
+    /// reads none. The lane lets go before it fetches the line: a pointer into
+    /// a key is read only under the latch, and a prefetch of a stale one is
+    /// harmless.
     fn candidate_bytes_line<Q>(
         leaf: Leaf<K, V, Latched<S>>,
         version: Version,
@@ -703,12 +707,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(line)
     }
 
-    /// What `visit` makes of `leaf`'s head, latched shared, if the leaf is
-    /// still at `version`, the version it was read at under its parent, and
-    /// its head's key is `key`, which matched the separator left of the
-    /// leaf; that separator may have been removed since, its successor the
-    /// head now. A leaf that changed since may have merged into its sibling
-    /// and been freed, its bytes a stale copy of entries that live on there.
+    /// What `visit` makes of `leaf`'s head, latched shared. That takes the leaf
+    /// still at `version`, the version it was read at under its parent, and its
+    /// head's key being `key`, which matched the separator left of the leaf.
+    /// That separator may have been removed since, and its successor be the
+    /// head now. A leaf that changed since may have merged into its sibling and
+    /// been freed, its bytes a stale copy of entries that live on there.
     /// Synchronous, as [`Self::read_in_leaf`].
     fn read_head<Q, B: EntryVisit<K, V, S>>(
         leaf: Leaf<K, V, Latched<S>>,

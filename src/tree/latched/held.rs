@@ -1,19 +1,21 @@
 //! What an operation that changes more than its leaf holds.
 //!
-//! An operation takes every node it will change, and every node it will
-//! read a separator of, before it changes any ([`HeldNodes`]): internal
-//! nodes by a compare-and-swap at the version it read them at, or at the
-//! version they are at, and leaves by an exclusive latch, all without
-//! waiting. It holds its own leaf already, and waits for nothing while it
-//! does, so no two operations wait on each other: a node another thread
-//! holds, or one that changed, makes it let go of all and start over.
+//! Before it changes any node, an operation takes every node it will change
+//! or read a separator of ([`HeldNodes`]), all without waiting:
+//! - internal nodes by a compare-and-swap at the version it read them at,
+//!   or at the version they are at;
+//! - leaves by an exclusive latch.
+//!
+//! It holds its own leaf already, and waits for nothing while it does, so
+//! no two operations wait on each other. A node another thread holds, or
+//! one that changed, makes it let go of all and start over.
 //!
 //! Holding a node holds its separators' keys too, though they are heads of
 //! leaves below (D49): only a thread holding the node changes them. A
-//! separator's head changes when the separator is removed, replaced by its
-//! successor, or when a merge or a move between siblings rotates it through
-//! the node; each of those holds the node. So bbtree's operations, run on
-//! the held nodes, read every key they need where it is.
+//! separator's head changes when the separator is removed and replaced by
+//! its successor, or when a merge or a move between siblings rotates it
+//! through the node; each of those holds the node. So the unsync tree's
+//! operations, run on the held nodes, read every key they need where it is.
 
 use super::super::node::internal::Internal;
 use super::super::node::latch::{Latched, Version};
@@ -36,9 +38,10 @@ struct TakenNodes<N, const CAP: usize> {
     len: usize,
 }
 
-/// The most internal nodes one operation holds: a removal's path, the
-/// sibling of each node on it and the border under a separator it removes;
-/// or the root and the nodes along both borders, for the shared prefix.
+/// The most internal nodes one operation holds. A removal holds its path,
+/// the sibling of each node on it and the border under a separator it
+/// removes. A shrinking of the shared prefix holds the root and the nodes
+/// along both borders.
 const HELD_INTERNALS: usize = 3 * MAX_DEPTH + 2;
 
 /// The most leaves one operation holds besides its own: a sibling and the

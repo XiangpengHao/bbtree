@@ -10,7 +10,6 @@
 
 mod allocator;
 mod batch;
-mod concat;
 mod differential;
 mod drops;
 mod inline_key;

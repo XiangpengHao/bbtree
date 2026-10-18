@@ -1,7 +1,7 @@
-//! Taking an owned tree apart: [`Tree::destroy`], a walk that moves every
-//! entry out from the front and frees each node once past it
-//! ([`DyingWalk`]), dropped at once; and [`Node::destroy`], the same for
-//! nodes on plain pages, under no root page.
+//! Taking an owned tree apart. [`Tree::destroy`] drops a [`DyingWalk`] at
+//! once, which moves every entry out from the front and frees each node once
+//! past it. [`Node::destroy`] does the same for nodes on plain pages, under
+//! no root page.
 
 #![forbid(unsafe_code)]
 
@@ -13,15 +13,15 @@ use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Takes the tree apart, if there is one: drops every key and value in
+    /// Takes the tree apart, if there is one. Drops every key and value in
     /// ascending key order, each key before its value, as std's `BTreeMap`
     /// does (D1), and gives every page back to `alloc`, the map's
-    /// allocator. A separator's value is its right leaf's head (D17),
-    /// dropped right after the separator's key.
+    /// allocator. A separator's value is its head (D17), dropped right
+    /// after the separator's key.
     ///
     /// If a key's or value's `Drop` panics, the rest is still taken apart, in
-    /// the same order, before the panic goes on, as in std's collections:
-    /// either way, every key and value is dropped once and every page
+    /// the same order, before the panic goes on, as in std's collections.
+    /// Either way, every key and value is dropped once and every page
     /// released once. A second panic while doing so aborts, as any panic
     /// during unwinding does.
     pub(crate) fn destroy(self, alloc: &impl Allocator) {
@@ -32,13 +32,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// Takes apart this node and every node under it, on plain pages, which
-    /// the caller owns, as [`Tree::destroy`] does a tree. A head on the
-    /// leftmost leaf, the value of a separator kept elsewhere, as a split's
-    /// right half has, goes first, its key, where separator keys are heads
-    /// (D49), before it.
+    /// Takes apart this node and every node under it, on plain pages the
+    /// caller owns, as [`Tree::destroy`] does a tree. The leftmost leaf may
+    /// have a head, for a separator kept elsewhere, as a split's right half
+    /// does. That head goes first: its key, with inline keys (D49), then its
+    /// value.
     ///
-    /// The nodes must be well-formed: every leaf right of a separator has a
+    /// The nodes must be well formed: every leaf right of a separator has a
     /// head (D17).
     pub(in crate::tree) fn destroy(self, alloc: &impl Allocator) {
         let leftmost = self.border_leaf::<FirstEdge>();

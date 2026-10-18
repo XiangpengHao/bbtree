@@ -1,14 +1,11 @@
 //! [`BBTreeSet`]: an ordered set with the API and behavior of std's
-//! `BTreeSet` (D1), as a [`BBTreeMap`] whose values are zero-sized, as std's
-//! set is a map of zero-sized values. Each method hands its work to the map's
-//! method of the same job; the iterators wrap the map's (`iter.rs`, on
-//! `map/iter.rs` and `map/into_iter.rs`).
+//! `BTreeSet` (D1). Like std's set, it is a map of zero-sized values, a
+//! [`BBTreeMap`]. Each method hands its work to the map's method of the same
+//! job, and the iterators wrap the map's.
 //!
 //! The operations on two sets are std's algorithms on the set's iterators
-//! and lookups: `difference.rs`, `intersection.rs`, `union.rs` and
-//! `symmetric_difference.rs`, the last two on one merge (`merge.rs`), and
-//! `subset.rs`. Their operators build the resulting set into full nodes
-//! from the ascending elements, as `collect` does once it has sorted them.
+//! and lookups. Their operators build the resulting set into full nodes from
+//! the ascending elements, as `collect` does once it has sorted them.
 //!
 //! The values are `SetValZST`, std's name for its own, so that iterators
 //! that print the map's entries print what std's print.
@@ -112,7 +109,9 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
         self.map.check_invariants();
     }
 
-    /// Checks tree shape, keys and prefixes against individual inserts.
+    /// Panics unless both sets have the same tree, by the map's check
+    /// ([`BBTreeMap::check_same_nodes`]): for fuzzing batch inserts against
+    /// single ones.
     pub fn check_same_nodes(&self, other: &Self) {
         self.map.check_same_nodes(&other.map);
     }
@@ -504,8 +503,8 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// In other words, remove all elements `e` for which `f(&e)` returns
     /// `false`. The elements are visited in ascending order.
     ///
-    /// As the map's [`BBTreeMap::retain`], it rebuilds the tree from the
-    /// elements it keeps.
+    /// As the map's [`BBTreeMap::retain`], it removes the elements in place,
+    /// as it walks the set.
     ///
     /// # Examples
     ///
@@ -655,8 +654,8 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// walking the set alongside them: when the set has at least 16 times
     /// as many elements, std's estimate for its sets. It must be std's: the
     /// choice decides which of two equal elements an intersection hands out
-    /// (the smaller set's, when it looks them up), and what its iterator
-    /// prints and hints. Dividing rather than multiplying can't overflow.
+    /// (the smaller set's, when it looks them up), and the iterators' size
+    /// hints. Dividing rather than multiplying can't overflow.
     fn prefers_lookups(&self, lookups: usize) -> bool {
         lookups <= self.len() / 16
     }

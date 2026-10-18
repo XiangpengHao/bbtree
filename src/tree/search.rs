@@ -2,9 +2,9 @@
 //! and an insert's ordered search ([`Node::search_for_insert`]), and the
 //! values of the keys they find.
 //!
-//! A separator's value is the head of the leftmost leaf right of it (D17),
-//! and with inline keys so is its key (D49): reading or changing what a
-//! search found at a separator goes down its right edge.
+//! A separator's value, and with inline keys its key, is in its head (D17,
+//! D49): reading or changing what a search found at a separator goes down
+//! its right edge to its head.
 
 use core::borrow::Borrow;
 
@@ -16,8 +16,8 @@ use super::node_stack::{FirstEdge, LastEdge};
 use super::root::Tree;
 use crate::inline_key::InlineKeyStrategy;
 
-/// Where a search found a key: in a leaf, beside its value, or a separator
-/// in an internal node, whose value is a head below (D17).
+/// Where a search found a key: in a leaf, beside its value, or as a
+/// separator in an internal node, whose value is its head (D17).
 ///
 /// Invariant: the index is that of a key of the node, below its length, as
 /// only a search makes one.
@@ -52,10 +52,26 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
         }
     }
 
+    /// The key and its value, exclusive, for as long as the caller borrows the
+    /// tree exclusively.
+    pub(in crate::tree) fn key_value_mut<'a>(self) -> (&'a K, &'a mut V) {
+        match self {
+            // SAFETY: the index is below the leaf's length (type invariant),
+            // and the key and the value are apart.
+            Self::InLeaf(leaf, index) => unsafe {
+                (leaf.key(index), leaf.value_mut_unchecked(index))
+            },
+            Self::Separator(internal, index) => (
+                internal.separator_key(index),
+                Self::separator_value_mut(internal, index),
+            ),
+        }
+    }
+
     /// [`Self::key_value`] of separator `index` of `internal`: its key, and
-    /// its value, the head of the leftmost leaf right of it (D17).
+    /// its value from its head (D17).
     ///
-    /// Out of line: a search ends at a separator rarely, and the walk down
+    /// Out of line: a search rarely ends at a separator, and the walk down
     /// to its head would otherwise sit in every descent's loop.
     #[inline(never)]
     fn separator_key_value<'a>(internal: Internal<K, V, S>, index: usize) -> (&'a K, &'a V) {
@@ -71,20 +87,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Found<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// Searches downward from this node for the entry whose key equals `key`,
-    /// retaining only the current node. Updates that need ancestors and range
-    /// endpoints use `NodeStack::search`; an exact-key lookup only needs the
+    /// Searches down from this node for the entry whose key equals `key`,
+    /// keeping only the current node. Updates that need ancestors, and range
+    /// bounds, use `NodeStack::search`; an exact-key lookup needs only the
     /// position where it ends.
     ///
     /// Every node skips its prefix unchecked: `key` must share what every
     /// key of the tree shares (D50), which [`Tree::find`] checks first.
     ///
-    /// It and [`Self::search_for_insert`] each keep their own descent: one
-    /// shared, returning where it stopped as a `ControlFlow`, hid the leaf's
-    /// kind from the value read after it, which then cleared the pointer's
-    /// tag, an instruction more per hit.
-    /// `CallSite` separates scalar and batch lookup compilation without
-    /// changing node layouts; sharing their leaf search outlined scalar get.
+    /// It and [`Self::search_for_insert`] each keep their own descent. A
+    /// shared descent that returns where it stopped would hide the leaf's
+    /// kind from the value read after it, which would then clear the
+    /// pointer's tag, an extra instruction per hit. `CallSite` compiles the
+    /// single-key and batch lookups apart without changing node layouts:
+    /// sharing their leaf search would outline the single-key `get` (D53).
     pub(in crate::tree) fn find<Q, CallSite>(
         self,
         key: &SearchKey<'_, K, S, Q>,
@@ -111,13 +127,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
             .map(|index| Found::InLeaf(leaf, index))
     }
 
-    /// Searches in key order, returning an existing key or the leaf and edge
-    /// where it belongs. Unlike [`Self::find`]'s equality filter, the leaf
-    /// search must establish where an absent key belongs. A fitting
-    /// insertion needs no ancestors; a full leaf can be searched again with
-    /// a node stack for splitting. As for [`Self::find`], `key` must share
-    /// what every key of the tree shares, which [`Tree::insert`] shrinks to
-    /// first.
+    /// Searches for `key` in key order, returning the existing key, or the
+    /// leaf and edge where it belongs. Unlike [`Self::find`]'s equality
+    /// filter, the leaf search must establish where an absent key belongs.
+    /// A fitting insertion needs no ancestors; a full leaf can be searched
+    /// again with a node stack for splitting. As for [`Self::find`], `key`
+    /// must share what every key of the tree shares, which [`Tree::insert`]
+    /// shrinks to first.
     #[inline(always)]
     pub(crate) fn search_for_insert<Q>(self, key: &SearchKey<'_, K, S, Q>) -> InsertSearch<K, V, S>
     where
@@ -252,9 +268,9 @@ mod tests {
             .collect()
     }
 
-    /// Every separator of a tall tree finds its own value through its head;
-    /// a search for its key stops at it and finds the same; and inserting
-    /// its key again replaces the value in the head.
+    /// Every separator of a tall tree finds its own value through its head,
+    /// and a search for its key stops at it and finds the same. Inserting its
+    /// key again replaces the value in the head.
     #[test]
     fn separators_reach_their_values_through_heads() {
         let ledger = DropLedger::new();

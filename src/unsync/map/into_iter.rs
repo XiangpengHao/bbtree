@@ -1,7 +1,7 @@
 //! Iterating over a map by value: [`IntoIter`], [`IntoKeys`] and
 //! [`IntoValues`], which take the entries out in key order.
 //!
-//! The iterator takes the tree apart as it goes (`tree/walk.rs`, D23): each
+//! The iterator takes the tree apart as it goes (`tree/walk.rs`, D23). Each
 //! step moves an entry out of its slot, with nothing shifting and nothing
 //! rebalanced, and each node is freed once both ends are done with it.
 //! Dropping the iterator drops the entries left in ascending order, as

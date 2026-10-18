@@ -66,8 +66,8 @@ node or the root page, with that kind's layout (D21).
   type (`FreshPage<P>`) carries its layout, so a page goes back with the
   layout it came with; that it goes back to the allocator it came from is
   a convention of the tree's code, as in std's btree, not a type. What
-  outlives a borrow of the map, `IntoIter` and the pieces of `extract_if`
-  and `append`, holds a clone; `clone` and `split_off` give the new map one.
+  outlives a borrow of the map, `IntoIter` and the pieces of `append`,
+  holds a clone; `clone` and `split_off` give the new map one.
   `append` moves entries, not pages, so maps with different allocators of
   one type append soundly; the set operators build on the left set's.
 - **Failure:** a failed allocation calls `handle_alloc_error`, as std's
@@ -396,8 +396,8 @@ Design in 04-inline-key.md.
   depth, which merges keep until the root lowers, after them. Clearing
   prefixes before a cut reads the nodes on the node stack, and a bulk build
   fits the nodes a new leaf closed with the node stack that hung it (D25).
-  Only a join, which lines two trees up, counts how deep each one's leaves
-  lie, down the border it walks anyway (`Tree::leaf_depth`). A slot read
+  Only a cut counts how deep each part's leaves lie, to count the shorter
+  part's entries (`Tree::leaf_depth`). A slot read
   checks its depth against the levels on the node stack, at most 24, which
   also keeps it in bounds. Measured against D52 at 10M, one run each, in
   instructions per operation: lookups and inserts unchanged, removal 689 →
@@ -441,14 +441,15 @@ Design in 04-inline-key.md.
 - **`collect` and `from`** sort, keep the last of equal keys (as std), and
   build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
   18.2 bytes per entry.
-- **`append`, `retain` and `extract_if`** drain entries in order by value
-  from the front (D23's owning walk; no `Ord`), and rebuild with the
-  builder, keeping std's
-  observable behavior: what the predicate sees and when, which key and
-  value survive, drop order, and what is left after a panic. Removing
-  while walking, as std's `extract_if` does in place, would need the walk's
-  position tracked through every merge and steal, which std's parent
-  pointers give for free.
+- **`append`** drains entries in order by value from the front (D23's
+  owning walk; no `Ord`), and rebuilds with the builder, keeping std's
+  observable behavior: which key and value survive, drop order, and what
+  is left after a panic.
+- **`retain` and `extract_if`** remove in place, as std's do: the walk is a
+  node stack at the next entry, and each removal tracks where that entry
+  goes through its merges and steals, as the slot it lands in
+  (`NodeStackMut::remove_and_go_to_next`, `tree/remove.rs`), which std's
+  parent pointers give for free.
 - **`split_off` cuts the tree where its search went, as std's does**
   (`tree/cut.rs`): from the leaf up, each node on the node stack keeps what
   lies left of it, and what lies right goes into a new node, after the part
@@ -461,11 +462,10 @@ Design in 04-inline-key.md.
   from counting the shorter tree's entries a node at a time, as std's do.
   1M u64→u64, one cut (µs): at the median 12 000 by popping before → 95
   (std 320); at 1%, 2 400 → 3 (std 5).
-- **Cost:** `append` O(n + m) as std's; `retain` O(n) as std's, but
-  moving the entries it keeps; `extract_if` O(n) wherever its range is,
-  where std's is O(log n) plus the part it touches; `split_off` O(log n),
-  plus the shorter tree's nodes to count. A drained entry costs about a
-  step of a walk.
+- **Cost:** `append` O(n + m) as std's; `retain` O(n) and `extract_if`
+  O(log n) plus the part it touches, as std's; `split_off` O(log n), plus
+  the shorter tree's nodes to count. A drained entry costs about a step of
+  a walk.
 
 **D26. Per-node prefix stripping: a node's inline keys skip what its fences share.** (2026-10-08)
 Design and measurements in 05-fence-key.md.
@@ -1000,8 +1000,8 @@ Design in 05-fence-key.md, "The shared prefix".
   bytes first, and the border nodes with them, by D26's window shift; an
   empty tree starts from its first key's. Removals leave them: the rest
   share at least as much, so the prefix is correct, not exact. A cut gives
-  both trees the bytes; a join shrinks both to what they share with the
-  separator; a build checks each key as it appends; a clone copies them.
+  both trees the bytes; a build checks each key as it appends; a clone
+  copies them.
 - **Why not per-node local prefixes,** which internal nodes of std keys
   kept where fences share too little, checking each query against their
   first key: that read a key on every search of such a node, a walk to a
