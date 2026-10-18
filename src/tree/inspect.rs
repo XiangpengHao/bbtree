@@ -3,7 +3,7 @@
 //!
 //! The views read each node through the same handles the map's own code
 //! uses. They say what the node holds as bbtree stores it: its keys, inline
-//! keys, length tags and prefixes, and where each slot array of its page
+//! keys, hash tags and prefixes, and where each slot array of its page
 //! lies, from the layout the page was allocated with. Nothing here computes
 //! what the node code computes, so whatever draws a view draws the tree as it
 //! is (`doc/10-visualization.md`).
@@ -507,15 +507,15 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
             .map(|inline_keys| inline_keys.inline_key(index)))
     }
 
-    /// Key `index`'s length tag, if the node keeps them (D36).
+    /// Key `index`'s hash tag, if the node keeps them (D36).
     ///
     /// # Panics
     ///
     /// If `index >= len`.
-    pub fn length_tag(&self, index: usize) -> Option<u16> {
+    pub fn hash_tag(&self, index: usize) -> Option<u8> {
         assert!(index < self.len(), "key index out of bounds");
         match self.node {
-            Node::Leaf(leaf) => leaf.length_tags().map(|tags| tags[index]),
+            Node::Leaf(leaf) => leaf.hash_tags().map(|tags| tags[index]),
             Node::Internal(_) => None,
         }
     }
@@ -639,11 +639,11 @@ impl PageMap {
         let len = leaf.len();
         let capacity = layout.keys.capacity;
         let mut arrays = Self::header_and_inline_keys::<K, V, S, Leaf<K, V, S>>(len);
-        if let Some(offset) = layout.length_tags_offset {
+        if let Some(offset) = layout.hash_tags_offset {
             arrays.push(SlotArray::dense(
-                SlotContents::LengthTags,
+                SlotContents::HashTags,
                 offset,
-                size_of::<u16>(),
+                size_of::<u8>(),
                 capacity,
                 len,
             ));
@@ -840,7 +840,7 @@ pub enum SlotContents {
     /// The first bytes of each key's window past the node's prefix (D18).
     InlineKeys,
     /// Each key's length, of byte-string leaves (D36).
-    LengthTags,
+    HashTags,
     Keys,
     /// A leaf's head's key: the key of the separator just left of it, in
     /// maps whose keys have inline keys (D49).
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn string_keys_keep_prefixes_and_length_tags() {
+    fn string_keys_keep_prefixes_and_hash_tags() {
         let mut map = BBTreeMap::new();
         for number in shuffled(20_000, 2) {
             map.insert(format!("https://example.com/users/{number:08}"), number);
@@ -1019,15 +1019,13 @@ mod tests {
             leaf.prefix_len() > 0,
             "a leaf between two fences shares a prefix"
         );
-        let tag = leaf
-            .length_tag(0)
-            .expect("byte-string leaves keep length tags");
+        let tag = leaf.hash_tag(0).expect("byte-string leaves keep hash tags");
         assert_eq!(usize::from(tag), leaf.key(0).len());
         let page = leaf.page_map();
         assert!(
             page.arrays()
                 .iter()
-                .any(|array| array.contents() == SlotContents::LengthTags)
+                .any(|array| array.contents() == SlotContents::HashTags)
         );
     }
 

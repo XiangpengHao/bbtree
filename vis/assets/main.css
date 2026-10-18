@@ -1,6 +1,6 @@
 /* An annotated memory map: cool paper, ink and graphite for structure, the
  * three slot hues that stay apart in every pairing (keys, inline keys, what
- * follows a key), two neutral steps for the header and length tags, and a
+ * follows a key), two neutral steps for the header and hash tags, and a
  * highlighter yellow for everything a lookup reads.
  *
  * Motion explains the lookup and nothing else: the way down plays a search

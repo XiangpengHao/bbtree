@@ -17,7 +17,7 @@ pub(crate) enum Concept {
     SharedPrefix,
     Separator,
     Head,
-    LengthTag,
+    HashTag,
     Child,
     Page,
     Wasm32,
@@ -34,7 +34,7 @@ impl Concept {
             Concept::SharedPrefix => "Shared prefix",
             Concept::Separator => "Separator",
             Concept::Head => "Head",
-            Concept::LengthTag => "Length tags",
+            Concept::HashTag => "Hash tags",
             Concept::Child => "Children",
             Concept::Page => "Page",
             Concept::Wasm32 => "wasm32 layouts",
@@ -63,8 +63,8 @@ impl Concept {
             Concept::Head => {
                 "Every leaf but the leftmost holds one extra value: the value of the separator just left of it. A lookup that finds its key as a separator goes on down to that leaf to read it."
             }
-            Concept::LengthTag => {
-                "String leaves keep each key's length in 2 bytes of spare padding. When several inline keys tie, matching lengths narrow the candidates before any key is read from the heap."
+            Concept::HashTag => {
+                "Leaves keep a byte per key in spare padding, its hash tag: equal keys have equal tags. A string's tag is its length, up to 255. When several inline keys tie, matching tags narrow the candidates before any key is read from the heap."
             }
             Concept::Child => {
                 "An internal node's child pointers. Child i holds the keys between key i − 1 and key i. A pointer to a leaf has its lowest bit set, so a lookup knows a child's kind before reading it."
@@ -73,7 +73,7 @@ impl Concept {
                 "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's shared prefix. Whatever no array covers is padding."
             }
             Concept::Wasm32 => {
-                "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for length tags. Leaves of fixed-size keys and values are the same. Without vector compares, it counts the smaller inline keys by a binary search over them instead, to the same count; the cache lines drawn are those of the x86-64 count."
+                "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for hash tags. Leaves of fixed-size keys and values are the same. Without vector compares, it counts the smaller inline keys by a binary search over them instead, to the same count; the cache lines drawn are those of the x86-64 count."
             }
             Concept::Prefetch => {
                 "Asking memory for a line before it is needed, without waiting for it. Each key prefetches the line its search reads next, and the other keys search while it comes, so their waits for memory overlap instead of adding up. Batches are the only code in bbtree that prefetches."
@@ -90,7 +90,7 @@ impl Concept {
             Concept::FencePrefix => Some("D26"),
             Concept::SharedPrefix => Some("D50"),
             Concept::Separator | Concept::Head => Some("D17"),
-            Concept::LengthTag => Some("D36"),
+            Concept::HashTag => Some("D36"),
             Concept::Page => Some("D15"),
             Concept::Child => Some("D32"),
             Concept::Prefetch => Some("D53"),

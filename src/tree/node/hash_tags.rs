@@ -1,47 +1,43 @@
-//! A leaf's length tags (D36, invariant 5): which of a lookup's candidates
-//! have the key's length, as none, one, two or many. Tags never order keys.
+//! A leaf's hash tags (D36, invariant 5): which of a lookup's candidates
+//! have its hash tag, as none, one, two or many. Tags never order keys.
 
 #![forbid(unsafe_code)]
 
 pub(super) use super::vector_count::SlotMatches;
-use super::vector_count::U16EqualitySearch;
+use super::vector_count::U8EqualitySearch;
 use core::ops::Range;
 
-/// A leaf's length tags, every slot up to its capacity, each live one its
-/// key's byte length saturated at [`LengthTags::SATURATED`] (D36).
-pub(super) struct LengthTags<'a> {
-    slots: &'a [u16],
+/// A leaf's hash tags, every slot up to its capacity, each live one its
+/// key's [`InlineKey::hash_tag`] (D36).
+///
+/// [`InlineKey::hash_tag`]: crate::InlineKey::hash_tag
+pub(super) struct HashTags<'a> {
+    slots: &'a [u8],
 }
 
-impl<'a> LengthTags<'a> {
-    /// The tag of every key of 65,535 bytes or more.
-    const SATURATED: u16 = u16::MAX;
+impl<'a> HashTags<'a> {
+    /// The tag of every std byte string of 255 bytes or more: a byte
+    /// string's tag is its length, saturated (`[u8]`'s `InlineKey` impl).
+    const SATURATED_LENGTH: u8 = u8::MAX;
 
-    pub(super) fn new(slots: &'a [u16]) -> Self {
+    pub(super) fn new(slots: &'a [u8]) -> Self {
         Self { slots }
     }
 
-    /// The tag of a key of `len` bytes: its length, saturated at
-    /// [`Self::SATURATED`], so that only keys of other lengths collide.
+    /// Whether `tag`, a std byte string's, is its exact length, as every
+    /// tag below [`Self::SATURATED_LENGTH`] is: two byte strings with such
+    /// a tag have equal lengths.
     #[inline(always)]
-    pub(super) fn tag_of(len: usize) -> u16 {
-        u16::try_from(len).unwrap_or(Self::SATURATED)
-    }
-
-    /// Whether every key with tag `tag` has the same length, as for every
-    /// tag below [`Self::SATURATED`]: two such keys with equal tags have
-    /// equal lengths.
-    #[inline(always)]
-    pub(super) fn is_exact(tag: u16) -> bool {
-        tag < Self::SATURATED
+    pub(super) fn is_exact_length(tag: u8) -> bool {
+        tag < Self::SATURATED_LENGTH
     }
 
     /// The positions among `candidates`, live keys, whose tag is `target`:
     /// none, one, two, or more. The vector search reads every slot up to
     /// the capacity, a constant trip count, and masks out the rest.
     #[inline(always)]
-    pub(super) fn matching(&self, candidates: Range<usize>, target: u16) -> SlotMatches {
-        if let Some(matches) = U16EqualitySearch::matching(self.slots, candidates.clone(), target) {
+    pub(super) fn matching(&self, candidates: Range<usize>, target: u8) -> SlotMatches {
+        if let Some(matches) = U8EqualitySearch::matching(self.slots, candidates.clone(), target) {
             return matches;
         }
         let mut matches = self.slots[candidates.clone()]
@@ -69,19 +65,20 @@ impl<'a> LengthTags<'a> {
 mod tests {
     use std::vec;
 
-    use super::{LengthTags, SlotMatches};
+    use super::{HashTags, SlotMatches};
+    use crate::inline_key::InlineKey;
 
     #[test]
-    fn tags_are_lengths_saturated_and_exact_below_saturation() {
-        for len in [0, 1, 4, 65_533, 65_534] {
-            let tag = LengthTags::tag_of(len);
+    fn byte_string_tags_are_lengths_exact_below_saturation() {
+        for len in [0, 1, 4, 253, 254] {
+            let tag = vec![b'x'; len].hash_tag();
             assert_eq!(usize::from(tag), len);
-            assert!(LengthTags::is_exact(tag));
+            assert!(HashTags::is_exact_length(tag));
         }
-        for len in [65_535, 65_536, 65_537, 131_072, usize::MAX] {
-            let tag = LengthTags::tag_of(len);
-            assert_eq!(tag, u16::MAX);
-            assert!(!LengthTags::is_exact(tag));
+        for len in [255, 256, 257, 65_536] {
+            let tag = vec![b'x'; len].hash_tag();
+            assert_eq!(tag, u8::MAX);
+            assert!(!HashTags::is_exact_length(tag));
         }
     }
 
@@ -90,17 +87,17 @@ mod tests {
         for capacity in 0..=65 {
             let mut slots = vec![7; capacity];
             for target_index in 0..capacity {
-                slots[target_index] = 65535;
-                let tags = LengthTags::new(&slots);
+                slots[target_index] = 255;
+                let tags = HashTags::new(&slots);
                 assert!(
-                    matches!(tags.matching(0..capacity, 65535), SlotMatches::One(index) if index == target_index)
+                    matches!(tags.matching(0..capacity, 255), SlotMatches::One(index) if index == target_index)
                 );
                 assert!(matches!(
-                    tags.matching(0..target_index, 65535),
+                    tags.matching(0..target_index, 255),
                     SlotMatches::None
                 ));
                 assert!(matches!(
-                    tags.matching(target_index + 1..capacity, 65535),
+                    tags.matching(target_index + 1..capacity, 255),
                     SlotMatches::None
                 ));
                 assert!(matches!(tags.matching(0..0, 7), SlotMatches::None));
@@ -117,25 +114,25 @@ mod tests {
         for capacity in 0..=65 {
             let mut slots = vec![7; capacity];
             assert!(matches!(
-                LengthTags::new(&slots).matching(0..0, 7),
+                HashTags::new(&slots).matching(0..0, 7),
                 SlotMatches::None
             ));
             for lower in 0..capacity {
-                slots[lower] = 65535;
+                slots[lower] = 255;
                 for upper in lower + 1..capacity {
-                    slots[upper] = 65535;
-                    let tags = LengthTags::new(&slots);
+                    slots[upper] = 255;
+                    let tags = HashTags::new(&slots);
                     assert!(matches!(
-                        tags.matching(0..capacity, 65535),
+                        tags.matching(0..capacity, 255),
                         SlotMatches::Two { lower: first, upper: second }
                             if (first, second) == (lower, upper)
                     ));
                     assert!(matches!(
-                        tags.matching(lower..upper, 65535),
+                        tags.matching(lower..upper, 255),
                         SlotMatches::One(index) if index == lower
                     ));
                     assert!(matches!(
-                        tags.matching(lower + 1..upper + 1, 65535),
+                        tags.matching(lower + 1..upper + 1, 255),
                         SlotMatches::One(index) if index == upper
                     ));
                     slots[upper] = 7;
@@ -146,18 +143,18 @@ mod tests {
 
         // The scalar fallback keeps full indexes, even beyond u16::MAX.
         let mut slots = vec![7; 65537];
-        slots[17] = 65535;
-        slots[65536] = 65535;
+        slots[17] = 255;
+        slots[65536] = 255;
         assert!(matches!(
-            LengthTags::new(&slots).matching(0..slots.len(), 65535),
+            HashTags::new(&slots).matching(0..slots.len(), 255),
             SlotMatches::Two {
                 lower: 17,
                 upper: 65536
             }
         ));
-        slots[65535] = 65535;
+        slots[65535] = 255;
         assert!(matches!(
-            LengthTags::new(&slots).matching(0..slots.len(), 65535),
+            HashTags::new(&slots).matching(0..slots.len(), 255),
             SlotMatches::Many
         ));
     }

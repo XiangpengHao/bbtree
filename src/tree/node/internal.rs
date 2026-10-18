@@ -27,7 +27,7 @@ use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// An internal node, by its page.
 pub(crate) struct Internal<K, V, S> {
@@ -54,7 +54,7 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Internal<K, V, S> {
     const IS_LEAF: bool = false;
 
     #[inline(always)]
-    fn has_room_for_length_tags() -> bool {
+    fn has_room_for_hash_tags(_inline_width: InlineWidth) -> bool {
         false
     }
 }
@@ -1041,7 +1041,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
     }
 
     #[cfg(any(test, fuzzing))]
-    fn length_tags<'a>(self) -> Option<&'a [u16]> {
+    fn hash_tags<'a>(self) -> Option<&'a [u8]> {
         None
     }
 

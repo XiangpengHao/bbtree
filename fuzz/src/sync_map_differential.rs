@@ -49,7 +49,7 @@ impl SyncMapInput {
     /// Runs the operations on the map of the input's row and fanout. Wide
     /// maps hold `Copy` values, which lookups copy out of leaves without
     /// their latches: `u128` beside byte strings, whose latched leaves have
-    /// room for length tags (D36) only beside 16-byte-aligned values, and
+    /// room for hash tags (D36) only beside 16-byte-aligned values, and
     /// `u64` beside the other keys.
     pub fn run(&self) {
         match (self.row, self.fanout) {

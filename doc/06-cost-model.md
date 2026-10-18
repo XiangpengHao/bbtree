@@ -176,11 +176,11 @@ suite.
 | Bulk compare of long suffixes | rejected | |
 | Cached range leaf run | accepted | D33 |
 | Aligned leaf pairs | accepted | D34 |
-| String length tags | accepted | D36 |
+| String hash tags | accepted | D36 |
 | Whole-map iterators reuse the leaf run | accepted | D35 |
 | Insert without a node stack | accepted | D37 |
 | One fixed-array candidate: equality only | accepted | D38 |
-| Two length-tag candidates; zero/one handling | accepted | D36, D38 |
+| Two hash-tag candidates; zero/one handling | accepted | D36, D38 |
 | Redistribution before a split | deferred (model) | |
 | 4-byte string leaf summaries | rejected (model) | |
 | Children before keys for fixed arrays | accepted, moot since internal nodes keep no keys | D49 |
@@ -342,7 +342,7 @@ missing.
 operation, but more branch misses: paths 1–2.5% slower, JSON 1–2% slower.
 Rejected.
 
-**String length tags (D36).** On 1M paths, leaf heap reads fall from 1.98
+**String hash tags (D36).** On 1M paths, leaf heap reads fall from 1.98
 to 1.20 per hit and 2.18 to 0.25 per miss. First version: JSON hits 25%
 slower because LLVM outlined a tiny wrapper (lesson 3). Fixed version:
 path hits −10.7%, misses −31.2%, inserts +2.0%; JSON flat. Accepted. A

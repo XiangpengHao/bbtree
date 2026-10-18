@@ -160,13 +160,20 @@ impl FuzzKey for WideKey {
 /// A byte-string key with its own `InlineKey` impl, as a user's newtype
 /// would have: maps with `WithInlineKey` reach its windows through the
 /// trait, at the default width, and a lookup by `[u8]`, a form the nodes
-/// can't encode for it, searches by `Ord` alone (D19).
+/// can't encode for it, searches by `Ord` alone (D19). Its hash tag is its
+/// last byte, not its length, which the keys' numbers vary.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UserKey(Vec<u8>);
 
 impl InlineKey for UserKey {
+    const HAS_HASH_TAG: bool = true;
+
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.0.inline_key_at(offset)
+    }
+
+    fn hash_tag(&self) -> u8 {
+        self.0.last().copied().unwrap_or(0)
     }
 }
 

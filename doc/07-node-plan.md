@@ -7,7 +7,7 @@ Measured in "Verification".
 ## Problem
 
 By D46 the nodes specialized on the key type in four ways: summary width
-(D31, D32, D43), length tags (D36), per-node search prefixes (since
+(D31, D32, D43), hash tags (D36), per-node search prefixes (since
 replaced by the tree's shared prefix, D50) and whole-key equality for one
 candidate (D38). Each was spelled where it was
 used, as a stand-in for type identity:
@@ -32,7 +32,7 @@ whether a value *is* its bytes (`holds_its_bytes`, arrays) or points to them.
 
 **2. Plan: what each node kind stores and how it searches** (`NodePlan`,
 `node_plan.rs`). `NodePlan::of::<S, Kind>()` maps the encoding and the kind
-to named answers: summary width, length tags, whether separator keys are
+to named answers: summary width, hash tags, whether separator keys are
 leaf heads (D49), whether exported windows are read again from keys (D43), the full and tied
 searches (D19), whole-key equality (D38). One constructor per row, each
 documented with its reason:
@@ -41,24 +41,25 @@ documented with its reason:
 |---|---|---|---|
 | without inline keys | none | nothing | as the key type picks (D19) |
 | std integers | the impl's width in both | nothing | as the key type picks (D19) |
-| every key under `WithInlineKey` | the impl's width in both | nothing | as the key type picks (D19) |
+| every key under `WithInlineKey` | the impl's width in both | leaf: hash tags, if the impl has them and they fit (D36) | as the key type picks (D19) |
 | std byte arrays | 2 / 2 (D32) | nothing | binary; one candidate compares whole (D38) |
-| std heap byte strings | 8 / 4 (D43) | leaf: length tags, where they fit (D36) | binary |
+| std heap byte strings | 8 / 4 (D43) | leaf: hash tags, where they fit (D36) | binary |
 
 The rows differ in what a tie costs: a load from the node (arrays), a read
 past the node (heap strings), or user code, which the nodes call only while
-searching (`InlineKey` impls). Layout, slots, searches and prefix upkeep read
+searching (`InlineKey` impls), but for a hash tag, which a leaf computes as
+it writes a key, behind an abort-on-unwind guard (D36, D48). Layout, slots, searches and prefix upkeep read
 the plan; none asks what the key type is.
 
 **3. Columns: arrays that move with the keys** (`KeyColumns`, `KeyCells`,
-`slots.rs`). Inline keys and length tags are both per-key arrays that every
+`slots.rs`). Inline keys and hash tags are both per-key arrays that every
 insert, removal and run move alike. `KeySlots` moves keys and calls the
 columns; it no longer knows which columns exist. A new per-key array is a
 field of `KeyColumns`, a cell of `KeyCells` and a plan field; splits, merges
 and steals don't change.
 
 Layouts are a total function of the plan's answers:
-`NodeLayout::leaf(width, length_tags)` picks one of seven constants, and
+`NodeLayout::leaf(width, hash_tags)` picks one of seven constants, and
 `NodeLayout::internal(width)` one of four, so no row touches `layout.rs`.
 
 ### Zero overhead, and how to keep it
@@ -125,7 +126,7 @@ measured, then removed:
 - 1M lookups of `String`-newtype paths behind a 64-byte shared prefix took
   311 ns with `WithKeyBytes` and 315 ns with `WithInlineKey`, run to run
   noise, and `WithKeyBytes` ran more instructions.
-- What makes std heap strings fast on paths is length tags and 4-byte
+- What makes std heap strings fast on paths is hash tags and 4-byte
   internal summaries. Both read keys while keys move, which user code
   can't do safely. What was left, comparing bytes past a tie
   instead of `memcmp` from the start, saves nothing.

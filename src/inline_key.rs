@@ -80,9 +80,10 @@ impl InlineWidth {
 /// that differ order the keys the same way, and kept bytes that tie say
 /// nothing.
 ///
-/// A key wrapping a byte string can window its bytes. A key ordered by
-/// several fields encodes them one after the other: a `u32` and then a
-/// string as the integer's big-endian bytes followed by the string's.
+/// A key wrapping a byte string can window its bytes, and take its hash
+/// tag. A key ordered by several fields encodes them one after the other: a
+/// `u32` and then a string as the integer's big-endian bytes followed by the
+/// string's.
 ///
 /// Implementing it is not enough for a map to use it: the map also needs the
 /// [`WithInlineKey`] strategy. Std byte strings and the 64- and 128-bit
@@ -105,8 +106,14 @@ impl InlineWidth {
 /// struct UserName(String);
 ///
 /// impl InlineKey for UserName {
+///     const HAS_HASH_TAG: bool = true;
+///
 ///     fn inline_key_at(&self, offset: usize) -> InlineWord {
 ///         self.0.inline_key_at(offset)
+///     }
+///
+///     fn hash_tag(&self) -> u8 {
+///         self.0.hash_tag()
 ///     }
 /// }
 ///
@@ -119,38 +126,87 @@ pub trait InlineKey: Ord {
     /// this impl (see [`InlineWidth`]).
     const WIDTH: InlineWidth = InlineWidth::Eight;
 
+    /// Whether the leaves keep each key's [`Self::hash_tag`], where the map
+    /// uses this impl and a leaf's layout has room for a byte per key:
+    /// `false` unless the impl says so. The std byte strings' impls do.
+    const HAS_HASH_TAG: bool = false;
+
     /// This key's inline key at `offset`: bytes `offset..offset + 8` of its
     /// encoding, big-endian, zero past its end.
     fn inline_key_at(&self, offset: usize) -> InlineWord;
+
+    /// This key's hash tag: a byte that equal keys share, so that keys whose
+    /// tags differ are different. Where an exact-key lookup's inline key
+    /// ties with several keys of a leaf, their tags rule out the keys
+    /// without its tag before any comparison, so that `Ord` reads one or two
+    /// keys instead of several. Called only if [`Self::HAS_HASH_TAG`].
+    ///
+    /// A tag that differs between equal keys, like a wrong `Ord`, gives
+    /// wrong answers but never undefined behavior. The map also calls it
+    /// while it moves keys between nodes, where a panic would leave the move
+    /// half done: a panic there aborts the process.
+    fn hash_tag(&self) -> u8 {
+        0
+    }
 }
 
-/// Its bytes are its encoding: byte strings order like their bytes.
+/// Its bytes are its encoding: byte strings order like their bytes. Its hash
+/// tag is its length, saturated at 255: keys rarely reach it, and below it
+/// equal tags are equal lengths.
 impl InlineKey for [u8] {
+    const HAS_HASH_TAG: bool = true;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         crate::proof::ProvenInlineKey::inline_key_at(self, offset)
+    }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        u8::try_from(self.len()).unwrap_or(u8::MAX)
     }
 }
 
 /// That of its UTF-8 bytes, which order like the string.
 impl InlineKey for str {
+    const HAS_HASH_TAG: bool = true;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.as_bytes().inline_key_at(offset)
+    }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        self.as_bytes().hash_tag()
     }
 }
 
 impl InlineKey for String {
+    const HAS_HASH_TAG: bool = true;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.as_bytes().inline_key_at(offset)
     }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        self.as_bytes().hash_tag()
+    }
 }
 
 impl InlineKey for Vec<u8> {
+    const HAS_HASH_TAG: bool = true;
+
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.as_slice().inline_key_at(offset)
+    }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        self.as_slice().hash_tag()
     }
 }
 
@@ -208,20 +264,32 @@ impl InlineKey for i128 {
 /// The referenced key's: covers `&str` and `&[u8]`.
 impl<T: InlineKey + ?Sized> InlineKey for &T {
     const WIDTH: InlineWidth = T::WIDTH;
+    const HAS_HASH_TAG: bool = T::HAS_HASH_TAG;
 
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         (**self).inline_key_at(offset)
+    }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        (**self).hash_tag()
     }
 }
 
 /// The boxed key's: covers `Box<str>` and `Box<[u8]>`.
 impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
     const WIDTH: InlineWidth = T::WIDTH;
+    const HAS_HASH_TAG: bool = T::HAS_HASH_TAG;
 
     #[inline]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         (**self).inline_key_at(offset)
+    }
+
+    #[inline]
+    fn hash_tag(&self) -> u8 {
+        (**self).hash_tag()
     }
 }
 
@@ -245,7 +313,8 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
 pub struct Auto;
 
 /// The opt-in strategy: every key has the inline key its [`InlineKey`] impl
-/// gives, of which the nodes keep [`InlineKey::WIDTH`] bytes.
+/// gives, of which the nodes keep [`InlineKey::WIDTH`] bytes, and the hash
+/// tag it gives if [`InlineKey::HAS_HASH_TAG`].
 ///
 /// A lookup uses the inline keys when it looks up with the key type itself.
 /// A lookup through another borrowed form of the key (a `Q` other than `K`
@@ -278,10 +347,12 @@ pub(crate) mod sealed {
         /// own [`InlineKey`] impl. Other keys have none ([`Auto`]).
         RecognizedStdTypes,
         /// Every key has the inline keys its [`InlineKey`] impl gives, of
-        /// which the nodes keep `width` bytes ([`WithInlineKey`]).
+        /// which the nodes keep `width` bytes, and its hash tag if the impl
+        /// gives one ([`WithInlineKey`]).
         InlineKeyTrait {
             inline_key_at: fn(&K, usize) -> InlineWord,
             width: InlineWidth,
+            hash_tag: Option<fn(&K) -> u8>,
         },
     }
 
@@ -302,6 +373,11 @@ pub(crate) mod sealed {
         const SOURCE: InlineKeySource<K> = InlineKeySource::InlineKeyTrait {
             inline_key_at: K::inline_key_at,
             width: K::WIDTH,
+            hash_tag: if K::HAS_HASH_TAG {
+                Some(K::hash_tag)
+            } else {
+                None
+            },
         };
     }
 }

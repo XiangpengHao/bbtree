@@ -23,7 +23,7 @@ From the original note:
 - **wasm32 layouts are acceptable.** On wasm32 a pointer is 4 bytes, so an
   edge takes 4 bytes instead of 8 and internal nodes hold more keys than on
   x86-64, and a `String` takes 12 bytes instead of 24, which changes string
-  leaves: in the wasm32 build no length tags fit in them. Leaves of
+  leaves: in the wasm32 build no hash tags fit in them. Leaves of
   fixed-size keys and values match x86-64. The in-node count takes the
   portable path instead of AVX-512, with the same result. The page says
   which target's layouts it shows.
@@ -140,12 +140,12 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
   - id (the page address), depth below the root, `len`, capacity,
     `min_len`;
   - `prefix_len`;
-  - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `length_tag(i)`
+  - `key(i)`, `inline_key(i)` and `inline_key_width` (D18), `hash_tag(i)`
     (D36);
   - for a leaf, `value(i)` and `head()` (D17); for an internal node,
     `child(i)`.
 - **`PageMap`** comes from the page's `LeafLayout` or `InternalLayout`: each
-  slot array (header, inline keys, length tags, keys, head, values, edges)
+  slot array (header, inline keys, hash tags, keys, head, values, edges)
   by offset, stride, slot size, capacity, and how many slots the node uses.
   The root's page adds its root area, after room for a node of either kind
   (D52). Arrays, rather than contiguous regions, because inline-key leaves
@@ -382,7 +382,7 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   - Cool paper, ink and graphite for structure.
   - The three slot hues that validate in every pairing: keys blue, inline
     keys orange, values, heads and children aqua.
-  - Two neutral grays for the header and length tags.
+  - Two neutral grays for the header and hash tags.
   - Highlighter yellow for whatever the lookup read.
   - Type: Martian Mono for titles, IBM Plex Sans for prose, IBM Plex Mono
     for data; nothing below 11 px, and secondary text at 4.5:1 or more.

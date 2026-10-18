@@ -44,7 +44,7 @@ use crate::inline_key::{Auto, InlineWidth, InlineWord};
 ///   pair stays within one cache line. Internal nodes keep no keys, only
 ///   inline keys and edges. Their search reads an edge after the inline
 ///   keys, and a separator's key, a head below, only on a tie (D49).
-/// - A leaf whose plan keeps length tags has a `u16` per key right after its
+/// - A leaf whose plan keeps hash tags has a byte per key right after its
 ///   inline keys, where its layout has room for them (D36).
 /// - Key `i` is at `keys_offset + i * key_stride`, and trailing slot `i` at
 ///   `trailing_offset + i * trailing_stride`, with strides of the slots'
@@ -95,11 +95,11 @@ pub(in crate::tree) struct LeafLayout {
     pub(in crate::tree) head_offset: usize,
     /// Bytes from the head to value 0, and from one value to the next.
     pub(in crate::tree) value_stride: usize,
-    /// Where a dense array of `u16` length tags is, for a leaf whose plan
+    /// Where a dense array of `u8` hash tags is, for a leaf whose plan
     /// keeps them and whose layout has room: in the padding before entry 0,
     /// or past it at the cost of an entry (D36); see
     /// [`NodeLayout::compute_leaf`].
-    pub(in crate::tree) length_tags_offset: Option<usize>,
+    pub(in crate::tree) hash_tags_offset: Option<usize>,
     /// Where the head's key is, in entry 0 before the head, in a leaf with
     /// inline keys: the key of the separator left of the leaf (D49).
     pub(in crate::tree) head_key_offset: Option<usize>,
@@ -210,7 +210,13 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const EIGHT_BYTE_INLINE_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), false, false);
 
-    pub(super) const EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
+    pub(super) const TWO_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Two), true, false);
+
+    pub(super) const FOUR_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Four), true, false);
+
+    pub(super) const EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), true, false);
 
     pub(in crate::tree) const PLAIN_INTERNAL: InternalLayout = Self::compute_internal(None, false);
@@ -236,7 +242,13 @@ impl<K, V> NodeLayout<K, V> {
     pub(super) const LATCHED_EIGHT_BYTE_INLINE_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), false, true);
 
-    pub(super) const LATCHED_EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF: LeafLayout =
+    pub(super) const LATCHED_TWO_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Two), true, true);
+
+    pub(super) const LATCHED_FOUR_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
+        Self::compute_leaf(Some(InlineWidth::Four), true, true);
+
+    pub(super) const LATCHED_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
         Self::compute_leaf(Some(InlineWidth::Eight), true, true);
 
     pub(super) const LATCHED_TWO_BYTE_INLINE_INTERNAL: InternalLayout =
@@ -251,33 +263,36 @@ impl<K, V> NodeLayout<K, V> {
     /// The leaf layout constant for these choices, which the node plan and
     /// the strategy pick after monomorphization:
     /// - without inline keys, or with inline keys of `inline_width`;
-    /// - with room for length tags if `length_tags` and there is room (D36);
+    /// - with room for hash tags if `hash_tags` and there is room (D36);
     /// - with a latch word in its header if `latched`.
     ///
-    /// Only leaves of eight-byte inline keys keep length tags
-    /// (`node_plan.rs`), and only nodes with inline keys are latched.
+    /// Only leaves with inline keys keep hash tags (`node_plan.rs`), and
+    /// only nodes with inline keys are latched.
     #[inline(always)]
     pub(super) fn leaf(
         inline_width: Option<InlineWidth>,
-        length_tags: bool,
+        hash_tags: bool,
         latched: bool,
     ) -> LeafLayout {
-        match (inline_width, length_tags, latched) {
+        match (inline_width, hash_tags, latched) {
             (None, _, false) => Self::PLAIN_LEAF,
             (Some(InlineWidth::Two), false, false) => Self::TWO_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Four), false, false) => Self::FOUR_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Eight), false, false) => Self::EIGHT_BYTE_INLINE_LEAF,
-            (Some(InlineWidth::Eight), true, false) => Self::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF,
+            (Some(InlineWidth::Two), true, false) => Self::TWO_BYTE_INLINE_HASH_TAGGED_LEAF,
+            (Some(InlineWidth::Four), true, false) => Self::FOUR_BYTE_INLINE_HASH_TAGGED_LEAF,
+            (Some(InlineWidth::Eight), true, false) => Self::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF,
             (Some(InlineWidth::Two), false, true) => Self::LATCHED_TWO_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Four), false, true) => Self::LATCHED_FOUR_BYTE_INLINE_LEAF,
             (Some(InlineWidth::Eight), false, true) => Self::LATCHED_EIGHT_BYTE_INLINE_LEAF,
+            (Some(InlineWidth::Two), true, true) => Self::LATCHED_TWO_BYTE_INLINE_HASH_TAGGED_LEAF,
+            (Some(InlineWidth::Four), true, true) => {
+                Self::LATCHED_FOUR_BYTE_INLINE_HASH_TAGGED_LEAF
+            }
             (Some(InlineWidth::Eight), true, true) => {
-                Self::LATCHED_EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF
+                Self::LATCHED_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
             }
             (None, _, true) => unreachable!("a latched tree's keys have inline keys"),
-            (Some(_), true, _) => {
-                unreachable!("only leaves of eight-byte inline keys keep length tags")
-            }
         }
     }
 
@@ -301,7 +316,7 @@ impl<K, V> NodeLayout<K, V> {
 
     /// Leaves are sized by their keys and values, and the head (D17).
     ///
-    /// With `length_tags`, a leaf keeps a tag per key where the tags fit in
+    /// With `hash_tags`, a leaf keeps a tag per key where the tags fit in
     /// the padding before its entries, as in many leaves (D36). Where they
     /// fit only by also taking the head key's place (D49), between the
     /// padding and the head's value, the leaf gives up an entry to keep
@@ -309,32 +324,27 @@ impl<K, V> NodeLayout<K, V> {
     /// Otherwise it keeps none.
     const fn compute_leaf(
         inline_width: Option<InlineWidth>,
-        length_tags: bool,
+        hash_tags: bool,
         latched: bool,
     ) -> LeafLayout {
         let inline_key_size = Self::inline_key_size(inline_width);
         let layout = Self::kind_layout(latched, inline_key_size, 0, Self::VALUE, true);
-        if inline_key_size == 0 || !length_tags {
+        if inline_key_size == 0 || !hash_tags {
             return Self::leaf_of(layout, None);
         }
         let tags_start = Self::columns_end(latched, inline_key_size, layout.keys.capacity);
-        let tags_end = tags_start + layout.keys.capacity * size_of::<u16>();
+        let tags_end = tags_start + layout.keys.capacity * size_of::<u8>();
         if tags_end <= Self::entries_offset(layout) {
             Self::leaf_of(layout, Some(tags_start))
         } else if tags_end <= layout.trailing_offset {
-            let length_tagged = Self::kind_layout(
-                latched,
-                inline_key_size,
-                size_of::<u16>(),
-                Self::VALUE,
-                true,
-            );
+            let hash_tagged =
+                Self::kind_layout(latched, inline_key_size, size_of::<u8>(), Self::VALUE, true);
             Self::leaf_of(
-                length_tagged,
+                hash_tagged,
                 Some(Self::columns_end(
                     latched,
                     inline_key_size,
-                    length_tagged.keys.capacity,
+                    hash_tagged.keys.capacity,
                 )),
             )
         } else {
@@ -342,8 +352,8 @@ impl<K, V> NodeLayout<K, V> {
         }
     }
 
-    /// A leaf of `layout`, with its length tags at `length_tags_offset`.
-    const fn leaf_of(layout: KindLayout, length_tags_offset: Option<usize>) -> LeafLayout {
+    /// A leaf of `layout`, with its hash tags at `hash_tags_offset`.
+    const fn leaf_of(layout: KindLayout, hash_tags_offset: Option<usize>) -> LeafLayout {
         let head_key_offset = if layout.keys.inline_keys_offset.is_some() {
             Some(Self::entries_offset(layout))
         } else {
@@ -354,7 +364,7 @@ impl<K, V> NodeLayout<K, V> {
             keys: layout.keys,
             head_offset: layout.trailing_offset,
             value_stride: layout.trailing_stride,
-            length_tags_offset,
+            hash_tags_offset,
             head_key_offset,
         }
     }
@@ -389,17 +399,17 @@ impl<K, V> NodeLayout<K, V> {
 
     /// The smallest node that holds `MIN_CAPACITY` keys, with as many keys
     /// as fit in it, for a kind whose trailing slot is `trailing`. It has
-    /// inline keys of `inline_key_size` bytes (none if 0), `length_tag_size`
-    /// more bytes of length tags per key beside them, its keys if
+    /// inline keys of `inline_key_size` bytes (none if 0), `hash_tag_size`
+    /// more bytes of hash tags per key beside them, its keys if
     /// `keeps_keys`, and a latch word in its header if `latched`.
     const fn kind_layout(
         latched: bool,
         inline_key_size: usize,
-        length_tag_size: usize,
+        hash_tag_size: usize,
         trailing: TrailingSlot,
         keeps_keys: bool,
     ) -> KindLayout {
-        let column_size = inline_key_size + length_tag_size;
+        let column_size = inline_key_size + hash_tag_size;
         let align = Self::node_align(trailing.align, keeps_keys);
         let size = Self::bytes_needed(
             latched,
@@ -478,7 +488,7 @@ impl<K, V> NodeLayout<K, V> {
     }
 
     /// What every layout needs: whole size steps, a capacity in bounds, the
-    /// header, inline keys and length tags, keys and trailing slots in
+    /// header, inline keys and hash tags, keys and trailing slots in
     /// place, in that order, aligned, in the page and clear of each other.
     const fn assert_invariants(
         layout: KindLayout,
@@ -609,7 +619,7 @@ impl<K, V> NodeLayout<K, V> {
 
     /// Where the keys, or the entries, could start, before rounding up to
     /// their alignment: after the header and the arrays beside the keys, if
-    /// any (the inline keys and length tags, `column_size` bytes per key).
+    /// any (the inline keys and hash tags, `column_size` bytes per key).
     const fn columns_end(latched: bool, column_size: usize, capacity: usize) -> usize {
         if column_size > 0 {
             Self::inline_keys_offset(latched) + capacity * column_size
@@ -1013,32 +1023,48 @@ mod tests {
         check::<32>();
     }
 
-    /// Length tags (D36) fit in the padding before a `String` → `u64`
-    /// leaf's entries only where its head's key is (D49): it gives up an
-    /// entry to keep them, sized with 8 + 2 bytes beside each key:
-    /// `(8 + 10n → 8) + 32(n + 1) ≤ 1024`, n = 23; tags at 8 + 23·8 = 192,
-    /// entries at 238 rounded to 256, the head at 280, key 0 at 288. Leaves
-    /// without room for tags keep none, and give up no entry.
+    /// Hash tags (D36) fit in the padding before a `String` → `u64`
+    /// leaf's entries, at no entry's cost: tags at 8 + 24·8 = 200, up to the
+    /// head's key at 224; the head at 248, key 0 at 256.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn length_tags_give_up_an_entry_for_the_head_key() {
+    fn hash_tags_fit_in_the_padding() {
         let tagged = NodePtr::<String, u64, Auto>::leaf_layout();
         assert_eq!(
             tagged,
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
         );
-        ExpectedNode::one_page(23, 288, 280).assert_leaf(tagged, (32, 32), true);
-        assert_eq!(tagged.length_tags_offset, Some(192));
-        assert_eq!(tagged.head_key_offset, Some(256));
-        for untagged in [
-            NodePtr::<String, String, Auto>::leaf_layout(),
-            NodePtr::<String, (), Auto>::leaf_layout(),
-        ] {
-            assert_eq!(untagged.length_tags_offset, None);
-        }
+        ExpectedNode::one_page(24, 256, 248).assert_leaf(tagged, (32, 32), true);
+        assert_eq!(tagged.hash_tags_offset, Some(200));
+        assert_eq!(tagged.head_key_offset, Some(224));
+        let untagged = NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_LEAF;
+        assert_eq!(untagged.keys.capacity, 24);
+    }
+
+    /// Hash tags fit in the padding before a `String` → `String` leaf's
+    /// entries only where its head's key is (D49): it gives up an entry to
+    /// keep them, 17 → 16, sized with 8 + 1 bytes beside each key:
+    /// `(8 + 9n → 8) + 48(n + 1) ≤ 1024`, n = 16; tags at 8 + 16·8 = 136,
+    /// entries at 152, the head at 176, key 0 at 200. Leaves without room
+    /// for tags keep none, and give up no entry.
+    #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+    fn hash_tags_give_up_an_entry_for_the_head_key() {
+        let tagged = NodePtr::<String, String, Auto>::leaf_layout();
         assert_eq!(
-            NodePtr::<String, String, Auto>::leaf_layout(),
-            NodeLayout::<String, String>::EIGHT_BYTE_INLINE_LEAF
+            tagged,
+            NodeLayout::<String, String>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
+        );
+        ExpectedNode::one_page(16, 200, 176).assert_leaf(tagged, (48, 48), true);
+        assert_eq!(tagged.hash_tags_offset, Some(136));
+        assert_eq!(tagged.head_key_offset, Some(152));
+        let untagged = NodeLayout::<String, String>::EIGHT_BYTE_INLINE_LEAF;
+        assert_eq!(untagged.keys.capacity, 17);
+        let without_room = NodePtr::<String, (), Auto>::leaf_layout();
+        assert_eq!(without_room.hash_tags_offset, None);
+        assert_eq!(
+            without_room,
+            NodeLayout::<String, ()>::EIGHT_BYTE_INLINE_LEAF
         );
     }
 

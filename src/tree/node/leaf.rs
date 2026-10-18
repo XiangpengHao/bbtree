@@ -1,7 +1,7 @@
 //! Leaves: the nodes that hold the entries. A leaf's page holds its keys and
 //! values, each key paired with its value with inline keys (D29). It also
 //! holds the inline keys a search runs over first (D18), and in a leaf of
-//! heap byte strings, the keys' length tags (D36).
+//! heap byte strings, the keys' hash tags (D36).
 //!
 //! A leaf also holds a *head*: the value of the separator just left of the
 //! leaf, and with inline keys, that separator's key too (D17, D49). Every
@@ -21,10 +21,10 @@ use core::ptr::NonNull;
 
 #[cfg(test)]
 use super::Insertion;
+use super::hash_tags::{HashTags, SlotMatches};
 use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
-use super::length_tags::{LengthTags, SlotMatches};
 use super::node_plan::NodePlan;
 use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
@@ -32,7 +32,7 @@ use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
 #[cfg(test)]
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// A leaf, by its page.
 pub(crate) struct Leaf<K, V, S> {
@@ -59,8 +59,8 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Leaf<K, V, S> {
     const IS_LEAF: bool = true;
 
     #[inline(always)]
-    fn has_room_for_length_tags() -> bool {
-        NodePtr::<K, V, S>::leaf_has_room_for_length_tags()
+    fn has_room_for_hash_tags(inline_width: InlineWidth) -> bool {
+        NodePtr::<K, V, S>::leaf_has_room_for_hash_tags(inline_width)
     }
 }
 
@@ -282,7 +282,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.node.key_slots::<Self>() }
     }
 
-    /// The arrays beside the keys: inline keys and length tags.
+    /// The arrays beside the keys: inline keys and hash tags.
     #[inline(always)]
     fn columns(self) -> KeyColumns {
         // SAFETY: the node is an allocated leaf (invariant 1).
@@ -423,11 +423,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         Some(unsafe { NodeInlineKeys::new(slots, Self::capacity(), self.len()) })
     }
 
-    /// The keys' length tags, if the plan and layout keep them (D36): all
+    /// The keys' hash tags, if the plan and layout keep them (D36): all
     /// `capacity` slots, tag `i` key `i`'s for `i < len`.
     #[inline(always)]
-    pub(in crate::tree) fn length_tags<'a>(self) -> Option<&'a [u16]> {
-        let tags = self.columns().length_tags()?;
+    pub(in crate::tree) fn hash_tags<'a>(self) -> Option<&'a [u8]> {
+        let tags = self.columns().hash_tags()?;
         // SAFETY: every tag was initialized when the leaf was made and can
         // be read while nothing changes it (invariant 5 and the handles'
         // contract).
@@ -588,7 +588,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// The index of the key equal to `key`, if the leaf holds one. As an
     /// exact-key lookup, it may reject candidates of other lengths (D36), and
     /// confirm a lone candidate by equality alone (D38). Ordered searches use
-    /// [`Self::search`]: a length tag gives no edge.
+    /// [`Self::search`]: a hash tag gives no edge.
     pub(in crate::tree) fn find<Q, CallSite>(
         self,
         key: &SearchKey<'_, K, S, Q>,
@@ -623,10 +623,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                     key.cmp_tied::<Self>(target, stored) == Ordering::Equal
                 };
                 matches.then_some(candidates.start)
-            } else if let Some(tag) = key.length_tag()
-                && let Some(tags) = self.length_tags()
+            } else if let Some(tag) = key.hash_tag()
+                && let Some(tags) = self.hash_tags()
             {
-                match LengthTags::new(tags).matching(candidates.clone(), tag) {
+                match HashTags::new(tags).matching(candidates.clone(), tag) {
                     SlotMatches::None => None,
                     SlotMatches::One(index) => {
                         // The mask only includes live candidates;
@@ -1220,8 +1220,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     }
 
     #[cfg(any(test, fuzzing))]
-    fn length_tags<'a>(self) -> Option<&'a [u16]> {
-        Leaf::length_tags(self)
+    fn hash_tags<'a>(self) -> Option<&'a [u8]> {
+        Leaf::hash_tags(self)
     }
 
     /// As far as its fences share: nothing below a leaf bounds it.

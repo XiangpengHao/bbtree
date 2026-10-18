@@ -25,6 +25,82 @@ Title: bbtree: fastest ordered map in the world
 
 ### How it works
 
+#### Three easy principles
+
+Every performance optimization should be guided by a cost model.
+
+B-tree optimizations are simple, we just need to remember three principles, in order: 1. number of chained cache lines touched, 2. number of instructions executed, 3. number of cache coherence traffic incurred (esp important for concurrent access).
+
+Before anything, we need a cost model:
+1. a cache miss causes about 100ns.
+2. a instruction causes about 0.5ns.
+3. cache coherence traffic forces a cache miss, and causes a little more than 100ns. But cache coherence traffic only applies to concurrent access.
+
+#### Minimize cache misses
+With this cost model, it's clear that the most important optimization is to minimize the number of cache misses.
+Put it in another way, for each of the cache miss, we want to maximize how much search space we narrowed down.
+
+##### Thought experiment: binary search vs linear search
+
+Consider we have a u64 array sorted. And we want to find a target u64.
+
+With binary search, each cache miss narrows down the search space by half.
+
+With linear search, each cache miss narrows down the search space by `cache_line_size / item_size`, which is 64 / 8 = 8.
+
+So the break even point is about 16 items, when binary search costs the same as linear search (two cache miss to find the target).
+
+But there's a catch: 1. the CPU prefetcher may automatically prefetch next items, giving the linear search more advantage; 2. the linear search is simpler, much less CPU work per item. So the actual break even point is usually higher. 
+
+[a figure here to compare binary search and linear search side by side, with animation]
+
+##### How does that apply to B-tree?
+
+In btree, this impact b-tree's node size. If we control the node size such that each node contains about 16-32 items, we can always do linear search which allows us to do nice things like SIMD (in later sections).
+
+What if the keys are `String`s?
+`String`s are different, because the actual values are stored in the heap, not inlined in the node.
+This changes our equation completely. We no longer get the benefit of one cache miss loading 8 values, instead, each key load is strictly one cache miss. So we almost always want to do binary search over `String`s.
+
+[a small figure to show an array of `String`'s layout: what's in heap, what's in node]
+
+How `bbtree` does it?
+Heap values are very common, so `bbtree` must optimize it well.
+`bbtree` introduce a new concept: `inline_keys`, similar to `StringViews` in arrow (reference my stringview blog post).
+
+By having a fixed size inline keys, we bring back the benefit of one cache miss loading 8 (or more) values.
+And we only load the full key when the comparison ties.
+
+[a figure to show the layout of `inline_keys`]
+
+How about when the keys have long prefixes?
+Many keys, like URLs, pathes, have long prefixes. If we just taking the first 8 bytes as the prefix, we may compare nothing at all.
+`bbtree` address this by introducing `prefix_keys`, a common prefix of all keys in this node.
+The beauty of `prefix_keys` is that it is implicit, and guarded by the separator of the parent node.
+[a figure with parent and child nodes, show two separators in parent, and show the child node's prefix key is the separator's key]
+So each node only need to store the window of keys that are after the prefix key, significantly increase the effectiveness of inline keys.
+
+
+How does this apply to any key type, how does it work with Rust's type system?
+
+It's clear that String and Bytes can easily benefit from this optimization. But integers like u64, u128 can too. just need to be mindful about the endianness.
+
+[a small figure to show a u64 array, decomposed to bytes, show the common prefix, the inline keys (2 bytes), and the rest of keys].
+
+For general key types, like compunding structs, we allow a Inlinekey trait to be implemented, and when implemented, we will use the inline keys when possible.
+
+[show rust code of the trait (simplified)]
+
+The trickiest part is how to deal with Rust's type system. If we require every Key type to implement InlineKey trait, we won't be able to drop-in replace std's `BTreeMap`/`BTreeSet`.
+In rust nightly, we have feature like `specialization` to achieve this.
+In order for the stable rust to work, we manually specialize the common types in rust, like, `u64`, `u128`, `String`, `Bytes`, `[u8; 16]`, `[u8; 32]`, `[u8; 64]`, `[u8; 128]`, `[u8; 256]`.
+So without doing any extra work, the built-in types are optimized; and user can still implement their own traits to maximize the benefits of this optimization.
+
+
+#### Minimize instructions
+
+#### Minimize cache coherence traffic
+
 A lookup walks from the root to a leaf: 5 nodes at 10M entries.
 At each node, it does two things:
 

@@ -73,7 +73,7 @@ impl LeafLines {
         match contents {
             SlotContents::Header | SlotContents::RootArea => "header",
             SlotContents::InlineKeys => "prefix keys",
-            SlotContents::LengthTags => "length tags",
+            SlotContents::HashTags => "hash tags",
             SlotContents::Keys
             | SlotContents::HeadKey
             | SlotContents::Head

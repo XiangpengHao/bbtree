@@ -52,9 +52,9 @@ pub(crate) unsafe trait PageType: Sized {
 pub(in crate::tree) unsafe trait NodeKind: PageType {
     const IS_LEAF: bool;
 
-    /// Whether the layout of nodes of this kind has room for length tags
-    /// beside 8-byte inline keys (D36): only some leaves' does.
-    fn has_room_for_length_tags() -> bool;
+    /// Whether the layout of nodes of this kind has room for hash tags
+    /// beside inline keys of `inline_width` (D36): only some leaves' does.
+    fn has_room_for_hash_tags(inline_width: InlineWidth) -> bool;
 }
 
 /// An allocated page of type `P` ([`Leaf`], [`Internal`] or [`RootPage`]),
@@ -504,12 +504,13 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         NodePlan::of::<S, Leaf<K, V, S>>().inline_width().is_some()
     }
 
-    /// Whether the map's leaves, with 8-byte inline keys, have room for
-    /// length tags (D36): a leaf's plan keeps them only where they fit.
+    /// Whether the map's leaves, with inline keys of `inline_width`, have
+    /// room for hash tags (D36): a leaf's plan keeps them only where they
+    /// fit.
     #[inline(always)]
-    pub(super) fn leaf_has_room_for_length_tags() -> bool {
-        NodeLayout::<K, V>::leaf(Some(InlineWidth::Eight), true, Self::is_latched())
-            .length_tags_offset
+    pub(super) fn leaf_has_room_for_hash_tags(inline_width: InlineWidth) -> bool {
+        NodeLayout::<K, V>::leaf(Some(inline_width), true, Self::is_latched())
+            .hash_tags_offset
             .is_some()
     }
 
@@ -517,7 +518,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         let plan = NodePlan::of::<S, Leaf<K, V, S>>();
         NodeLayout::<K, V>::leaf(
             plan.inline_width(),
-            plan.has_length_tags(),
+            plan.has_hash_tags(),
             Self::is_latched(),
         )
     }
@@ -762,8 +763,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
     /// The arrays a node of kind `Kind` keeps beside its keys
     /// ([`KeyColumns`]): its inline keys, at its plan's width, and its
-    /// length tags (D36), if its plan keeps them and its layout has room for
-    /// them ([`LeafLayout::length_tags_offset`]). Reads nothing from the
+    /// hash tags (D36), if its plan keeps them and its layout has room for
+    /// them ([`LeafLayout::hash_tags_offset`]). Reads nothing from the
     /// page.
     ///
     /// # Safety
@@ -773,14 +774,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     pub(super) unsafe fn key_columns<Kind: NodeKind>(self) -> KeyColumns {
         let plan = NodePlan::of::<S, Kind>();
         let area = Self::key_area::<Kind>();
-        let length_tags_offset = if plan.has_length_tags() {
-            Self::leaf_layout().length_tags_offset
+        let hash_tags_offset = if plan.has_hash_tags() {
+            Self::leaf_layout().hash_tags_offset
         } else {
             None
         };
         // SAFETY: the inline keys' offset is aligned for inline keys of any
         // width, and `capacity` of them from there stay within a page of the
-        // node's kind, `Kind`, clear of its other arrays. So do the length
+        // node's kind, `Kind`, clear of its other arrays. So do the hash
         // tags, which only a leaf's layout has room for (layout invariants).
         // The inline keys are of the width the layout was made for. The
         // page is allocated (caller).
@@ -789,9 +790,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 Option::zip(plan.inline_width(), area.inline_keys_offset).map(|(width, offset)| {
                     InlineKeySlots::new(width, self.page().byte_add(offset), area.capacity)
                 });
-            let length_tags = length_tags_offset
+            let hash_tags = hash_tags_offset
                 .map(|offset| Slots::new(self.page().byte_add(offset).cast(), area.capacity));
-            KeyColumns::new(inline_keys, length_tags, area.capacity)
+            KeyColumns::new(inline_keys, hash_tags, area.capacity)
         }
     }
 
@@ -1156,10 +1157,10 @@ mod tests {
             assert!(
                 internal
                     .key_columns::<Internal<K, V, S>>()
-                    .length_tags()
+                    .hash_tags()
                     .is_none()
             );
-            if let Some(tags) = leaf.key_columns::<Leaf<K, V, S>>().length_tags() {
+            if let Some(tags) = leaf.key_columns::<Leaf<K, V, S>>().hash_tags() {
                 assert!(
                     tags.slice_ptr(leaf_capacity)
                         .as_ref()
@@ -1291,7 +1292,7 @@ mod tests {
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<String, u64, Auto>::leaf_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_LENGTH_TAGGED_LEAF
+            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
         );
         assert_eq!(
             NodePtr::<Vec<u8>, u64, Auto>::internal_layout(),

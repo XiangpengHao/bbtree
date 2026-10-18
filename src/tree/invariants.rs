@@ -1,6 +1,6 @@
 //! Checks that a tree is well formed, through the node API
 //! ([`Tree::check_invariants`]): the whole tree's shape, order and counts,
-//! and on every node, that its inline keys and length tags match its keys.
+//! and on every node, that its inline keys and hash tags match its keys.
 //! A node's prefix length must be what its fences share, or along the
 //! borders, what every key shares (D50).
 //!
@@ -318,9 +318,9 @@ pub(in crate::tree) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>:
     /// order (D18). A node without inline keys must have prefix 0.
     fn assert_inline_keys_match(self) {
         let plan = Self::plan();
-        if let Some(tags) = self.length_tags() {
+        if let Some(tags) = self.hash_tags() {
             for (index, &tag) in tags[..self.len()].iter().enumerate() {
-                assert_eq!(Some(tag), plan.length_tag(self.key(index)));
+                assert_eq!(Some(tag), plan.hash_tag(self.key(index)));
             }
         }
         let prefix_len = self.prefix_len();

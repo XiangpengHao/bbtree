@@ -87,26 +87,26 @@
 //!    inline key, all ones, so a search may count every slot without masking
 //!    them out. A fresh page starts so, and setting a shorter length refills
 //!    the slots it leaves.
-//! 5. **Length tags follow keys.** A leaf whose plan keeps length tags
-//!    (`node_plan.rs`) keeps each live key's byte length, saturated at
-//!    65,535, in the matching tag slot; `KeySlots` maintains them through
+//! 5. **Hash tags follow keys.** A leaf whose plan keeps hash tags
+//!    (`node_plan.rs`) keeps each live key's byte length, saturated at 255,
+//!    in the matching tag slot, a byte; `KeySlots` maintains them through
 //!    every change. All `capacity` tag slots start initialized. A search
 //!    reads only its candidates' tags, and confirms each one it selects
 //!    against the full key. The one exception is an unlatched read of a key
 //!    that ends within its inline key (`optimistic.rs`): it takes an equal
-//!    tag below 65,535 as an equal length, without reading the key.
+//!    tag below 255 as an equal length, without reading the key.
 //!
 //! Inline keys and prefix lengths steer searches only: whatever they hold,
 //! every position a search returns is in bounds. A wrong `InlineKey`, or a
 //! wrong prefix length, gives wrong answers, never undefined behavior.
 
+mod hash_tags;
 pub(in crate::tree) mod inline_key_search;
 pub(crate) mod inline_keys;
 pub(in crate::tree) mod internal;
 pub(crate) mod latch;
 pub(super) mod layout;
 pub(crate) mod leaf;
-mod length_tags;
 pub(super) mod node_plan;
 pub(in crate::tree) mod optimistic;
 pub(crate) mod page;
@@ -479,10 +479,10 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// The plan of the map's nodes of this kind (`node_plan.rs`).
     fn plan() -> NodePlan<K>;
 
-    /// The node's keys' length tags, if its plan keeps them (D36): only a
+    /// The node's keys' hash tags, if its plan keeps them (D36): only a
     /// leaf's may.
     #[cfg(any(test, fuzzing))]
-    fn length_tags<'a>(self) -> Option<&'a [u16]>;
+    fn hash_tags<'a>(self) -> Option<&'a [u8]>;
 
     /// `prefix_len`, or as far as the node's prefix may grow toward it: a
     /// leaf's to what its fences share; an internal node's no further than

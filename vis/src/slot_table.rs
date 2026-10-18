@@ -86,7 +86,7 @@ pub(crate) fn SlotTable(
     let at = detail.at();
     let leaf = detail.is_leaf();
     let has_inline = detail.inline_key_width().is_some();
-    let has_tags = detail.keys().iter().any(|row| row.length_tag.is_some());
+    let has_tags = detail.keys().iter().any(|row| row.hash_tag.is_some());
     let marks = RowMarks::of(step.as_ref());
     let in_view = marks.row_in_view();
     let ids = ElementIds::of_current();
@@ -192,7 +192,7 @@ pub(crate) fn SlotTable(
                                 td { class: "whitespace-nowrap text-graphite", {row.inline_key.clone().unwrap_or_default()} }
                             }
                             if has_tags {
-                                td { class: "text-graphite", {row.length_tag.map(|tag| tag.to_string()).unwrap_or_default()} }
+                                td { class: "text-graphite", {row.hash_tag.map(|tag| tag.to_string()).unwrap_or_default()} }
                             }
                             match &row.value {
                                 Some(value) => rsx! {

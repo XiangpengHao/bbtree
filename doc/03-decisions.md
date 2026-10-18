@@ -244,6 +244,7 @@ Design in 04-inline-key.md.
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
   Windows stay 8 bytes for every key type; nodes keep `WIDTH` of them.
+  It gives a hash tag too, if `HAS_HASH_TAG` (D36).
 - **Why not a plain trait with a default:** "default for every type, override for
   `String`" needs specialization, which is nightly-only and years from stable.
 - **TODO:** when specialization is stable, switch to it, and drop the std-type
@@ -697,31 +698,56 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   4.50 → 3.99 ns/entry (−11%), `hash32` 9.36 → 8.73 (−7%). The native
   10M fold is unchanged (2.21 ns/entry).
 
-**D36. String leaves keep 2-byte length tags in spare padding.** (2026-10-10)
+**D36. Leaves keep 1-byte hash tags in spare padding.** (2026-10-10)
 
-- **What:** for recognized heap byte strings, a leaf stores each key's
-  length, saturated at 65,535, in 2 bytes, only where existing padding
-  holds the whole tag array before the head's key (D49). Where the head's
-  key took the padding's end, as in `String` → `u64`, the leaf gives up an
-  entry to keep them (24 → 23); where tags never fit, as in `String` →
-  `String`, or a latched `String` → `u64` (D54), it has none, and its plan
-  says so. Allocation size doesn't change. `KeySlots` moves tags with their
-  keys.
-- **Search:** tags are read only when the 8-byte summaries leave more than
-  one candidate. No tag matches: absent. One: compare that full key. Two:
+- **What:** a hash tag is a byte per key that equal keys share, so that
+  keys whose tags differ are different. A leaf stores its keys' tags where
+  existing padding holds the whole tag array before the head's key (D49),
+  as in `String` → `u64`. Where the head's key took the padding's end, the
+  leaf gives up an entry to keep them: `String` → `String` and `String` →
+  `u128` 17 → 16, a latched `String` → `u64` (D54) 24 → 23. Where tags
+  never fit, as in `String` → `()` or `&str` → `u64`, it has none, and its
+  plan says so. Allocation size doesn't change. `KeySlots` moves tags with
+  their keys.
+- **Whose tags:** a recognized heap byte string's is its length,
+  saturated at 255 (`[u8]`'s `InlineKey::hash_tag`). Under
+  `WithInlineKey`, a key's impl gives its own, at any width, if it sets
+  `HAS_HASH_TAG`; std byte strings' impls give their lengths, so a newtype
+  can take its string's. Integers and byte arrays have none: their ties
+  are cheap.
+- **User code while keys move:** a leaf computes a key's tag as it writes
+  the key, while it moves keys too (a head rejoining the entries in a
+  merge). An impl's `hash_tag` runs there behind an abort-on-unwind guard
+  (D48). A tag that breaks the contract gives wrong answers, never
+  undefined behavior.
+- **Why a byte:** keys rarely reach 255 bytes, so a byte tells as many
+  lengths apart as two did, and half the array fits where two bytes
+  didn't: with 2-byte tags, `String` → `u64` gave up an entry (24 → 23),
+  and `String` → `String` and a latched `String` → `u64` kept none.
+  Saturating, not wrapping (`len % 256`), keeps every byte string's tag
+  below 255 an exact length, which D57's unlatched copy relies on.
+- **Search:** tags are read only when the inline keys leave more than one
+  candidate. No tag matches: absent. One: compare that full key. Two:
   compare the upper key, then the lower only if the query sorts below it.
-  Three or more: the old binary search, so equal-length keys never cause
-  a linear scan. The search confirms each candidate a tag picks against
+  Three or more: the old binary search, so keys of one tag never cause a
+  linear scan. The search confirms each candidate a tag picks against
   the full key. D57's unlatched copy alone takes an equal tag for an equal
-  length, for a key that ends within its inline key, and only below
-  65,535: a saturated tag tells nothing of length.
+  length, for a key that ends within its inline key, and only below 255:
+  a saturated tag tells nothing of length.
 - **Why:** path keys tie in their 8-byte windows inside leaves. On 1M
   paths, heap key reads per lookup fall from 1.98 to about 1.0 for hits
   and 2.18 to 0.20 for misses.
 - **Cost:** inserts maintain a third array: 10M path insert +2.0%. JSON
   leaves never have ambiguous runs, so JSON pays upkeep and gains nothing
   on lookups; its timings stayed flat.
-- **Measured** at 10M paths: hits −10.7%, misses −31.2%.
+- **Measured** at 10M paths: hits −10.7%, misses −31.2%. From 2-byte to
+  1-byte tags, 10M, ns per lookup, one run: paths → `u64` hits 503 → 497,
+  misses 398 → 378; JSON → `u64` hits 236 → 234, misses 155 → 159; a
+  latched paths → `u64`, now tagged, hits 646 → 524, misses 618 → 446;
+  paths → `String`, now tagged, hits 578 → 524, misses 546 → 415. A
+  key's own tags, 10M paths as `String` under `WithInlineKey`, untagged
+  → tagged: hits 695 → 606, misses 679 → 462; keys without tags run the
+  same instructions as before (`memtable24`: 470.7 per hit).
 - **Pitfall:** the summary-view wrapper is forced inline. Outlined, as
   LLVM did once it had a second caller, its population count grew from 26
   to 244 instructions, and JSON hits got 25% slower.
@@ -900,10 +926,10 @@ Design and measurements in 07-node-plan.md.
 
 - **What:** `NodePlan::of::<S, Kind>()` (`tree/node/node_plan.rs`) decides, per
   key type and node kind, everything the nodes specialize on: summary width,
-  length tags, rehydrated windows, full and tied searches,
+  hash tags, rehydrated windows, full and tied searches,
   whole-key equality, and whether separator keys are heads (D49). One constructor per row of the table,
   each with its reason. Layouts, slots, searches and prefix upkeep read it;
-  none asks what the key type is. Per-key arrays (inline keys, length tags)
+  none asks what the key type is. Per-key arrays (inline keys, hash tags)
   are `KeyColumns`, which every key move moves alike.
 - **Why:** each specialization was spelled where it was used, as a stand-in
   for type identity (`ByteString && width() == Two` for fixed arrays), in 26
@@ -934,7 +960,7 @@ Design and measurements in 07-node-plan.md.
   User code runs between structural changes, not inside one, so unwinding
   never leaves what unchecked code trusts (lengths, node minimums) half
   done (D26, D37). A change that must call it inside one goes behind an
-  abort-on-unwind guard.
+  abort-on-unwind guard, as a key's hash tag does (D36).
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
   (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
@@ -1225,8 +1251,8 @@ Design and measurements in 09-concurrency.md, "Batches".
   subtracted into counters of the slots' width, one `addv` each at the end;
   a capacity that isn't a multiple of the vector ends with an overlapping
   load, its counted lanes masked out. The exact-key equality mask (D41) and
-  the length-tag filter (D36) stay x86-only: the count already tells none
-  from one from many, and length tags only filter ties.
+  the hash-tag filter (D36) stay x86-only: the count already tells none
+  from one from many, and hash tags only filter ties.
 - **Why:** the compiler's own count there widened each compared lane to 64
   bits, one at a time, to add it to a `usize`. A 10M `u64` hit on an M1 Pro
   ran 1,678 instructions, against 228 on Rocket Lake with AVX-512, and
@@ -1252,7 +1278,7 @@ Design and measurements in 09-concurrency.md, "Lookups".
   reads, where the leaf settles the key without following a pointer: a key
   ordered by its own bytes (std integers, byte arrays) is copied and
   compared, and a byte string that ends within its 8-byte inline key is
-  the candidate of the same length, where the leaf's length tags tell it
+  the candidate of the same length, where the leaf's hash tags tell it
   exactly (D36). Otherwise the lookup latches the
   same leaf at the same version and searches it; a leaf that changed sends
   it the latched way, which waits rather than race again.

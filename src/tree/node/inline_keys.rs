@@ -26,9 +26,8 @@
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
-use core::mem::size_of;
+use core::mem::{self, size_of};
 
-use super::length_tags::LengthTags;
 use super::node_plan::NodePlan;
 use super::page::{InlineKeyNodeHeader, NodeKind};
 use super::type_identity::{ByteString, SameType, StdInteger};
@@ -47,19 +46,20 @@ const SHARED_PREFIX_CHUNK_LEN: usize = 4 * WINDOW_LEN;
 /// [`InlineKeySource`], resolved for `K`.
 pub(in crate::tree) enum KeyInliner<K> {
     /// `K` is a std byte string ([`Auto`]): its inline keys are windows of
-    /// its bytes.
+    /// its bytes, and its hash tag that of its bytes.
     ///
     /// [`Auto`]: crate::Auto
     ByteString(ByteString<K>),
     /// `K`'s [`InlineKey`] impl, of whose inline keys the nodes keep
-    /// `width` bytes: any key's under [`WithInlineKey`], and a std
-    /// integer's under [`Auto`].
+    /// `width` bytes, and its hash tag if the impl gives one: any key's under
+    /// [`WithInlineKey`], and a std integer's, without one, under [`Auto`].
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     /// [`Auto`]: crate::Auto
     InlineKeyTrait {
         inline_key_at: fn(&K, usize) -> InlineWord,
         width: InlineWidth,
+        hash_tag: Option<fn(&K) -> u8>,
     },
 }
 
@@ -70,6 +70,17 @@ impl<K> Clone for KeyInliner<K> {
 }
 
 impl<K> Copy for KeyInliner<K> {}
+
+/// Held across a call into user code that runs while keys move: dropped
+/// only by an unwind out of that call, it panics again, and a panic while
+/// unwinding aborts (D48). Forgotten once the call returns.
+struct AbortOnUnwind;
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        panic!("user code panicked while the map moved keys");
+    }
+}
 
 impl<K> KeyInliner<K> {
     /// How keys `K` get inline keys under strategy `S`, or `None` if they
@@ -88,15 +99,18 @@ impl<K> KeyInliner<K> {
                     StdInteger::recognize().map(|integer| Self::InlineKeyTrait {
                         inline_key_at: integer.inline_key_at(),
                         width: integer.width(),
+                        hash_tag: None,
                     })
                 })
             }
             InlineKeySource::InlineKeyTrait {
                 inline_key_at,
                 width,
+                hash_tag,
             } => Some(Self::InlineKeyTrait {
                 inline_key_at,
                 width,
+                hash_tag,
             }),
         }
     }
@@ -125,6 +139,24 @@ impl<K> KeyInliner<K> {
         match self {
             Self::ByteString(byte_string) => byte_string.bytes(key).inline_key_at(offset),
             Self::InlineKeyTrait { inline_key_at, .. } => inline_key_at(key, offset),
+        }
+    }
+
+    /// `key`'s hash tag (D36), or `None` if the keys have none: a std byte
+    /// string's from its bytes, and a key's own impl's otherwise. Leaves
+    /// call it as they write a key, while they move keys too, so a panic in
+    /// an impl's aborts (D48): unwinding would leave the move half done.
+    #[inline(always)]
+    pub(in crate::tree) fn hash_tag(self, key: &K) -> Option<u8> {
+        match self {
+            Self::ByteString(byte_string) => Some(byte_string.bytes(key).hash_tag()),
+            Self::InlineKeyTrait { hash_tag, .. } => {
+                let hash_tag = hash_tag?;
+                let abort_on_unwind = AbortOnUnwind;
+                let tag = hash_tag(key);
+                mem::forget(abort_on_unwind);
+                Some(tag)
+            }
         }
     }
 
@@ -745,11 +777,18 @@ where
         query.bytes.len() <= prefix_len + width.byte_len()
     }
 
-    /// The query's length tag, if it is a recognized byte string (D36).
+    /// The query's hash tag (D36), if the nodes can compare it with theirs:
+    /// a recognized byte string's from its bytes, and with a key's own impl,
+    /// that impl's if `Q` is `K`. Calls `InlineKey` with
+    /// [`WithInlineKey`](crate::WithInlineKey), as searches do.
     #[inline]
-    pub(super) fn length_tag(&self) -> Option<u16> {
-        self.recognized_bytes()
-            .map(|query| LengthTags::tag_of(query.bytes.len()))
+    pub(super) fn hash_tag(&self) -> Option<u8> {
+        match KeyInliner::<K>::resolve::<S>()? {
+            KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.bytes.hash_tag()),
+            KeyInliner::InlineKeyTrait { hash_tag, .. } => {
+                Some(hash_tag?(SameType::<K, Q>::recognize()?.cast(self.key)))
+            }
+        }
     }
 
     /// The first stored byte read by `cmp_tied`, after its entry metadata

@@ -32,15 +32,15 @@ use core::cmp::Ordering;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use super::Node;
+use super::hash_tags::HashTags;
 use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{KeyInliner, SearchKey, Window};
 use super::internal::Internal;
 use super::latch::{NodeLatch, Version};
 use super::leaf::{CandidateLine, Leaf};
-use super::length_tags::LengthTags;
 use super::page::{NodeKind, NodePtr};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -211,7 +211,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// while writers may change it. `index` is a candidate: its inline key,
     /// at the leaf's `prefix_len`, equals `key`'s. `Some` for a byte string
     /// that ends within its inline key: equal lengths then make the keys
-    /// equal, and an exact length tag tells the length (D36). `None` where
+    /// equal, and an exact hash tag tells the length (D36). `None` where
     /// only the keys' bytes can tell. The answer holds only if the leaf's
     /// version is unchanged after.
     ///
@@ -236,14 +236,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if !key.ends_within_window::<Self>(prefix_len) {
             return None;
         }
-        let query_tag = key.length_tag().filter(|&tag| LengthTags::is_exact(tag))?;
+        let query_tag = key
+            .hash_tag()
+            .filter(|&tag| HashTags::is_exact_length(tag))?;
         // SAFETY: the page is a leaf's, allocated while threads share the
-        // tree, and its length tags were initialized with it (invariant 5).
-        // Tag `index`, below the capacity, is in the page, aligned for a
-        // `u16`, and read as an atomic.
+        // tree, and its hash tags were initialized with it (invariant 5).
+        // Tag `index`, below the capacity, is a byte in the page, read as an
+        // atomic.
         let tag = unsafe {
-            let tags = self.node_ptr().key_columns::<Self>().length_tags()?;
-            AtomicU16::from_ptr(tags.slot(index).as_ptr()).load(AtomicOrdering::Relaxed)
+            let tags = self.node_ptr().key_columns::<Self>().hash_tags()?;
+            AtomicU8::from_ptr(tags.slot(index).as_ptr()).load(AtomicOrdering::Relaxed)
         };
         Some(tag == query_tag)
     }

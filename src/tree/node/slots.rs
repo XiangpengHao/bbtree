@@ -707,7 +707,7 @@ impl InlineKeySlots {
 /// which every move moves alike. With inline keys, an internal node keeps
 /// them in place of keys (D49). They are the node's inline keys (D18) and,
 /// in a leaf whose plan keeps them and whose layout has room, its keys'
-/// length tags (D36). Adding another such array takes a field here and a
+/// hash tags (D36). Adding another such array takes a field here and a
 /// cell of [`KeyCells`]; the code that moves keys ([`KeySlots`]) doesn't
 /// change.
 ///
@@ -718,7 +718,7 @@ impl InlineKeySlots {
 #[derive(Clone, Copy)]
 pub(super) struct KeyColumns {
     inline_keys: Option<InlineKeySlots>,
-    length_tags: Option<Slots<u16>>,
+    hash_tags: Option<Slots<u8>>,
 }
 
 /// What the [`KeyColumns`] of a node hold for one key.
@@ -726,8 +726,8 @@ pub(super) struct KeyColumns {
 pub(super) struct KeyCells {
     /// The first bytes of the key's window, which the inline keys keep.
     inline_key: InlineWord,
-    /// The key's length tag, which a node that keeps them stores.
-    length_tag: u16,
+    /// The key's hash tag, which a node that keeps them stores.
+    hash_tag: u8,
 }
 
 /// Every method is `#[inline(always)]`. Which arrays a node keeps, and at
@@ -742,14 +742,14 @@ impl KeyColumns {
     #[inline(always)]
     pub(super) unsafe fn new(
         inline_keys: Option<InlineKeySlots>,
-        length_tags: Option<Slots<u16>>,
+        hash_tags: Option<Slots<u8>>,
         capacity: usize,
     ) -> Self {
         debug_assert!(inline_keys.is_none_or(|inline_keys| inline_keys.capacity() == capacity));
-        debug_assert!(length_tags.is_none_or(|tags| tags.capacity == capacity));
+        debug_assert!(hash_tags.is_none_or(|tags| tags.capacity == capacity));
         Self {
             inline_keys,
-            length_tags,
+            hash_tags,
         }
     }
 
@@ -759,13 +759,13 @@ impl KeyColumns {
     }
 
     #[inline(always)]
-    pub(super) fn length_tags(self) -> Option<Slots<u16>> {
-        self.length_tags
+    pub(super) fn hash_tags(self) -> Option<Slots<u8>> {
+        self.hash_tags
     }
 
     /// Fills every slot of a node that holds no keys yet. Each inline key
     /// gets the greatest, all ones, as slots past the length hold (invariant
-    /// 4 in `tree/node/mod.rs`); each length tag gets 0.
+    /// 4 in `tree/node/mod.rs`); each hash tag gets 0.
     ///
     /// # Safety
     ///
@@ -778,14 +778,14 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.fill_with_greatest();
             }
-            if let Some(tags) = self.length_tags {
+            if let Some(tags) = self.hash_tags {
                 tags.fill_bytes(0);
             }
         }
     }
 
     /// Gives slots `vacated`, which a node no longer holds keys in, the
-    /// greatest inline key again (invariant 4). Their length tags stay
+    /// greatest inline key again (invariant 4). Their hash tags stay
     /// stale: a search reads them, but masks out every slot outside its
     /// candidates (invariant 5).
     ///
@@ -816,8 +816,8 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.write(index, cells.inline_key);
             }
-            if let Some(tags) = self.length_tags {
-                tags.slot(index).write(cells.length_tag);
+            if let Some(tags) = self.hash_tags {
+                tags.slot(index).write(cells.hash_tag);
             }
         }
     }
@@ -835,8 +835,8 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.insert(index, len, cells.inline_key);
             }
-            if let Some(tags) = self.length_tags {
-                tags.insert(index, len, cells.length_tag);
+            if let Some(tags) = self.hash_tags {
+                tags.insert(index, len, cells.hash_tag);
             }
         }
     }
@@ -855,7 +855,7 @@ impl KeyColumns {
             if let Some(inline_keys) = self.inline_keys {
                 inline_keys.remove(index, len);
             }
-            if let Some(tags) = self.length_tags {
+            if let Some(tags) = self.hash_tags {
                 tags.remove(index, len);
             }
         }
@@ -875,7 +875,7 @@ impl KeyColumns {
             if let (Some(source), Some(destination)) = (self.inline_keys, dest.inline_keys) {
                 source.move_run_to(start, count, destination, dest_start);
             }
-            if let (Some(source), Some(destination)) = (self.length_tags, dest.length_tags) {
+            if let (Some(source), Some(destination)) = (self.hash_tags, dest.hash_tags) {
                 source.move_run_to(start, count, destination, dest_start);
             }
         }
@@ -894,8 +894,8 @@ impl KeyColumns {
 /// node without inline keys comes with [`Window::NONE`].
 ///
 /// Invariant: the columns have the keys' capacity, and are those of the
-/// plan and layout of `Kind` (`node_plan.rs`, `layout.rs`). A live length
-/// tag is its key's length, saturated at 65,535; tags never order keys and
+/// plan and layout of `Kind` (`node_plan.rs`, `layout.rs`). A live hash
+/// tag is its key's (`KeyInliner::hash_tag`); tags never order keys and
 /// need no prefix adjustment.
 pub(super) struct KeySlots<K, S, Kind> {
     keys: Slots<K>,
@@ -962,13 +962,13 @@ impl<K, S: InlineKeyStrategy<K>, Kind: NodeKind> KeySlots<K, S, Kind> {
             window.prefix_len(),
             self.prefix_len
         );
-        let length_tag = match self.columns.length_tags() {
-            Some(_) => NodePlan::<K>::of::<S, Kind>().length_tag(&key).unwrap_or(0),
+        let hash_tag = match self.columns.hash_tags() {
+            Some(_) => NodePlan::<K>::of::<S, Kind>().hash_tag(&key).unwrap_or(0),
             None => 0,
         };
         let cells = KeyCells {
             inline_key: window.inline_key(),
-            length_tag,
+            hash_tag,
         };
         (key, cells)
     }
@@ -1202,7 +1202,7 @@ impl<K, V, S: InlineKeyStrategy<K>> SeparatorSlots<K, V, S> {
         );
         KeyCells {
             inline_key: window.inline_key(),
-            length_tag: 0,
+            hash_tag: 0,
         }
     }
 

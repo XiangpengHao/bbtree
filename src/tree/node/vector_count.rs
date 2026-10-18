@@ -24,15 +24,15 @@
 //!
 //! Two equality searches live here too. An exact-key lookup over 8-byte
 //! slots takes an AVX-512 equality mask ([`U64EqualityMask`], D41). A
-//! leaf's length tags, which are unsorted, are filtered in SSE2 vectors
-//! ([`U16EqualitySearch`], D36).
+//! leaf's hash tags, which are unsorted, are filtered in SSE2 vectors
+//! ([`U8EqualitySearch`], D36).
 
 use core::num::NonZeroU64;
 use core::ops::Range;
 
 use super::slots::Slots;
 
-/// Which of a lookup's candidates have its length tag: none, one, two (at
+/// Which of a lookup's candidates have its hash tag: none, one, two (at
 /// these positions), or more.
 pub(super) enum SlotMatches {
     None,
@@ -41,59 +41,58 @@ pub(super) enum SlotMatches {
     Many,
 }
 
-/// The length tags (D36) equal to a target among a lookup's candidates, in
-/// SSE2 vectors whose byte masks fit in one word. Tags are unsorted, so this
-/// finds matches, not a range.
-pub(super) struct U16EqualitySearch;
+/// The hash tags (D36) equal to a target among a lookup's candidates, in
+/// SSE2 vectors whose byte masks, a bit per tag, fit in one word. Tags are
+/// unsorted, so this finds matches, not a range.
+pub(super) struct U8EqualitySearch;
 
-impl U16EqualitySearch {
+impl U8EqualitySearch {
     #[inline(always)]
     pub(super) fn matching(
-        slots: &[u16],
+        slots: &[u8],
         candidates: Range<usize>,
-        target: u16,
+        target: u8,
     ) -> Option<SlotMatches> {
         #[cfg(target_arch = "x86_64")]
         {
             use core::arch::x86_64::{
-                _mm_cmpeq_epi16, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi16,
+                _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
             };
-            const LANES: usize = 8;
-            if !(LANES..=32).contains(&slots.len()) {
+            const LANES: usize = 16;
+            if !(LANES..=64).contains(&slots.len()) {
                 return None;
             }
             let mut bits = 0_u64;
             // SAFETY: SSE2 is part of every x86-64 target. Each load starts
-            // at most `slots.len() - LANES`, so all eight initialized slots
+            // at most `slots.len() - LANES`, so all sixteen initialized slots
             // fit.
             // The last partial chunk overlaps the preceding one; equal
             // positions produce the same bits and can be combined with OR.
             unsafe {
-                let target = _mm_set1_epi16(target as i16);
+                let target = _mm_set1_epi8(target as i8);
                 for offset in (0..slots.len()).step_by(LANES) {
                     let start = offset.min(slots.len() - LANES);
                     let chunk = _mm_loadu_si128(slots.as_ptr().add(start).cast());
-                    let equal = _mm_movemask_epi8(_mm_cmpeq_epi16(chunk, target)) as u64;
-                    bits |= equal << (2 * start);
+                    let equal = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, target)) as u64;
+                    bits |= equal << start;
                 }
             }
-            // Retain one of each slot's two byte bits, then only the
-            // live candidates. Clamping also bounds every shift below.
-            let start = 2 * candidates.start.min(slots.len());
-            let end = 2 * candidates.end.min(slots.len());
-            bits &= 0x5555_5555_5555_5555
-                & u64::MAX.checked_shl(start as u32).unwrap_or(0)
+            // Retain only the live candidates. Clamping also bounds every
+            // shift below.
+            let start = candidates.start.min(slots.len());
+            let end = candidates.end.min(slots.len());
+            bits &= u64::MAX.checked_shl(start as u32).unwrap_or(0)
                 & u64::MAX.checked_shr((64 - end) as u32).unwrap_or(0);
             if bits == 0 {
                 return Some(SlotMatches::None);
             }
             let remaining = bits & (bits - 1);
             Some(if remaining == 0 {
-                SlotMatches::One(bits.trailing_zeros() as usize / 2)
+                SlotMatches::One(bits.trailing_zeros() as usize)
             } else if remaining.is_power_of_two() {
                 SlotMatches::Two {
-                    lower: bits.trailing_zeros() as usize / 2,
-                    upper: remaining.trailing_zeros() as usize / 2,
+                    lower: bits.trailing_zeros() as usize,
+                    upper: remaining.trailing_zeros() as usize,
                 }
             } else {
                 SlotMatches::Many

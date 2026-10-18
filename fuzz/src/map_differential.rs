@@ -6,7 +6,7 @@
 //! Every map operation reaches the same node code: slots, splits, merges,
 //! moves between siblings, cuts, joins, bulk builds and walks. What sets key
 //! types apart is the node plan (`src/node/node_plan.rs`): which inline
-//! keys and length tags nodes keep, and how they search. So
+//! keys and hash tags nodes keep, and how they search. So
 //! there is one target per row of the plan's table ([`MapTarget`]), each on
 //! two maps: one with nodes as wide as the key type gives, and one with
 //! narrow nodes, whose trees grow tall from short inputs ([`Fanout`]).
@@ -30,7 +30,7 @@ use crate::position_mask::PositionMask;
 pub enum MapTarget {
     /// Std heap byte strings (`Vec<u8>`): 8-byte inline keys in leaves and
     /// 4-byte ones in internal nodes, read again from keys when handed out
-    /// (D43), and length tags in leaves (D36). The most code of any row.
+    /// (D43), and hash tags in leaves (D36). The most code of any row.
     HeapByteStrings,
     /// Std integers (`u64`): 2-byte inline keys past the bytes a node's keys
     /// share (D31); the most common keys with inline keys.
