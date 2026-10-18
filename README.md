@@ -5,9 +5,9 @@
 [![test](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/ci.yml?branch=main&label=test)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
 [![miri](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/miri.yml?branch=main&label=miri)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
 [![sanitizer](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/sanitizer.yml?branch=main&label=sanitizer)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
-[![shuttle](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=shuttle)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
+[![DST](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=DST)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
 [![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
-[![verus](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/verus.yml?branch=main&label=verus)](https://github.com/XiangpengHao/bbtree/actions/workflows/verus.yml?query=branch%3Amain)
+[![verification](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/verus.yml?branch=main&label=verification)](https://github.com/XiangpengHao/bbtree/actions/workflows/verus.yml?query=branch%3Amain)
 
 > B-trees are by far the most important access path structure in database and file systems.
 > — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
@@ -18,11 +18,11 @@ bbtree is by far the fastest btree (ordered map):
 2. 30% lower memory usage, 5x lower p99 latency.
 3. Zero dependencies, `no_std` compatible.
 4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.
-5. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
+5. Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing.
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
 
-![bbtree vs other concurrent maps, get throughput at 96 threads](doc/assets/readme-race.svg)
+![bbtree vs other concurrent maps, get throughput at 96 threads](https://github.com/XiangpengHao/bbtree/raw/main/doc/assets/readme-race.svg)
 
 Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
 

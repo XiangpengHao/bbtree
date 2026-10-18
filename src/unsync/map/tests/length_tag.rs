@@ -99,7 +99,8 @@ fn length_tag_cases_match_std() {
 /// The cases built to put two keys of each absent key's tag among its
 /// candidates do, by length or saturated: its lookup takes the two-candidate
 /// path, and answers as std's map does. Miri runs this one
-/// (`.config/nextest.toml`): `length_tag_cases_match_std` is too slow for it.
+/// (`.github/miri-nextest.toml`): `length_tag_cases_match_std` is too slow
+/// for it.
 #[test]
 fn absent_keys_have_two_candidates_of_their_tag() {
     for case in LengthTagCase::two_candidates_per_absent_key() {

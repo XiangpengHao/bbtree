@@ -3210,7 +3210,9 @@
     stroke-width: 1.5;
   }
   /* std's hash map: a different kind of map, set apart by a dashed rule,
-   * a dashed, pale bar and a note under its name. */
+   * a dashed, pale bar and a note under its name. On the memory card,
+   * DashMap is set apart by the rule and the note alone: its bars keep
+   * what they hold solid and its peak lighter, as every map's. */
   .chart-bar.unordered {
     fill-opacity: 0.18;
     stroke-width: 1.5;

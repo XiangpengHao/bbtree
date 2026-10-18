@@ -343,10 +343,26 @@ author's.
     c8a.metal-24xl,c8a.24xlarge aws-c8a tab2 <keys>`), about $0.90 on
     spot. 10M entries still measure memory there: no map fits the 32 MiB
     L3 of an 8-core group, as on the 9900X.
-  - Memory: a bar a map, the heap once built, its keys' allocations
-    included, and lighter on to the peak while it was built. In these
-    insert-only builds the peak is the end for every map; a churn
-    workload would show a peak above it.
+  - Memory: a bar a map, what its entries cost the machine, its keys'
+    allocations included: the growth of the resident set once built, and
+    lighter on to its peak while it was built, what a machine must have
+    to build it; DashMap, a hash map, last, set apart by a dashed rule and
+    an "unordered, hashtable" note, as std's hash map is on the one-thread
+    card. The resident set, not the bytes asked for, because the
+    allocator's size classes hide unequal costs: mimalloc gives std's
+    192 B `u64` leaf a 224 B block (+21% resident), bbtree's 1 KiB node
+    exactly 1 KiB. bbtree-eval's `blog/runs.sh memory` runs one process a
+    map, holding nothing else: its keys are fed to the map as it is built
+    (integers made from their indexes, strings streamed from a dump a
+    child process makes), so no key set or dataset load shares the
+    resident set. The peak is `VmHWM`'s growth, mimalloc and THP as the
+    machine has them; once built is `VmRSS`'s growth after `mi_collect`
+    hands the free pages back. An empty build grows it by 0.7 MB. DashMap
+    peaks 30–70% above what it keeps (old shard tables freed but still
+    resident); every map built on 24 threads peaks about 5 bytes an entry
+    above on string keys, about 2 MiB a worker that only THP adds (off,
+    the gap is gone; not the stacks), which std's one-thread build
+    doesn't pay.
   - End to End: one bar chart (`baseline_bars.rs`, `BarScale::Relative`), a group a system (the
     note names the maps they ship), a cluster a workload, one bar each:
     the time as shipped, dark, as 100%, and inside it bbtree's, bright,
@@ -438,9 +454,13 @@ author's.
     (bbtree 109, 74 batched), 43 an insert (155).
   - Not in the post: artmap (ART) tied or beat the first round's single
     lookups and inserts of fixed-size keys at 1.2–2× the memory.
-  - Memory, heap bytes per entry: bbtree 26.9 / 39.7 / 80.9 / 68.5 (`u64`,
-    UUID, titles, JSON), std 27.1 / 38.9 / 71.6 / 59.1: even on
-    fixed-size keys, 13–16% more on strings (inline keys and length tags).
+  - Memory, resident bytes per entry once built (2026-10-18, the 9900X's
+    `reruns/memory-<keys>-<map>`): bbtree 27.1 / 39.9 / 88.9 / 72.2
+    (`u64`, UUID, titles, JSON), std 31.5 / 43.8 / 81.0 / 65.2, DashMap
+    31.3 / 45.4 / 89.1 / 72.6; peaks bbtree 27.2 / 40.0 / 93.9 / 77.1, std
+    31.5 / 43.9 / 81.2 / 65.5, DashMap 52.7 / 73.1 / 115.2 / 101.6.
+    bbtree is the least of every map on `u64` and UUID, 10–11% above std on
+    strings once built (asked for: 13–16%).
 - **Integrations**, single thread only (with more, each system is bound by
   its own locks): bbtree-eval's `integrations/{fjall,slatedb,turso,tonbo,lance}`,
   the shipped skiplist against bbtree, re-run on 2026-10-17 with the

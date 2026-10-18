@@ -47,14 +47,16 @@ impl MeasuredMap {
         Self::DashMap,
     ];
 
-    /// The maps whose memory the post shows: a `RwLock` adds nothing to
-    /// std's.
-    pub(crate) const MEMORY: [Self; 5] = [
+    /// The maps whose memory the post shows, in the order the chart draws
+    /// them: the ordered ones (a `RwLock` adds nothing to std's), then
+    /// DashMap apart.
+    pub(crate) const MEMORY: [Self; 6] = [
         Self::BBTree,
         Self::StdBTree,
         Self::SkipMap,
         Self::SccTreeIndex,
         Self::ConcurrentMap,
+        Self::DashMap,
     ];
 
     /// The map the bench names `name`.
@@ -244,8 +246,10 @@ struct ThroughputRow {
     mops: f64,
 }
 
-/// What a map held of the heap for its entries, its keys' own allocations
-/// included: once built, and at the most while it was built.
+/// What a map's entries cost the machine, its keys' own allocations
+/// included: how much the resident set of a process that held nothing else
+/// grew, once built (the allocator's free pages handed back), and at its
+/// peak while it was built.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct MapMemory {
     pub(crate) built_bytes: f64,
@@ -371,8 +375,8 @@ impl Measurements {
                     map: MeasuredMap::from_bench_name(fields[0])?,
                     keys: MeasuredKeys::from_bench_name(fields[1])?,
                     memory: MapMemory {
-                        built_bytes: fields[3].parse().ok()?,
-                        peak_bytes: fields.get(7)?.parse().ok()?,
+                        built_bytes: fields.get(5)?.parse().ok()?,
+                        peak_bytes: fields.get(6)?.parse().ok()?,
                     },
                 })
             }),

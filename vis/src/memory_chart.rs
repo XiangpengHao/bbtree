@@ -1,7 +1,10 @@
-//! The post's memory card: the heap each map holds for 10M entries, its
-//! keys' own allocations included, counted by the allocator: a bar a map,
-//! solid to what it holds once built, lighter on to the most it held at
-//! once while the entries went in. A kind of key at a time.
+//! The post's memory card: what each map's 10M entries cost the machine,
+//! its keys' own allocations included, as the resident set of a process
+//! that holds nothing else (bbtree-eval's memory runs): a bar a map, solid
+//! to what it keeps once built, lighter on to the most it needed at once
+//! while the entries went in, what a machine must have to build it. A kind
+//! of key at a time. DashMap, a hash map, comes last, set apart, as std's
+//! hash map is on the one-thread card.
 
 use std::rc::Rc;
 
@@ -64,11 +67,11 @@ pub(crate) fn MemoryChart(measurements: Rc<Measurements>, spotlight: Spotlight) 
             }
         }
         p { class: "chart-note",
-            "Heap held for 10M entries, keys' own allocations included; lower is better. Counted by the allocator, the bytes asked for. "
+            "Resident memory for 10M entries, keys' own allocations included, in a process that holds nothing else; lower is better. "
             if peaked {
-                "The lighter bar: the most held at once while the entries went in. "
+                "The lighter bar: the most resident at once while the entries went in, what the machine must have. "
             } else {
-                "While the entries went in, no map held more than it holds once built. "
+                "While the entries went in, no map needed more than it keeps once built. "
             }
             "{machine.name}."
             RepositoryLinks {
@@ -95,10 +98,28 @@ fn MemoryBars(
     const TOP: f64 = 4.0;
     const AXIS: f64 = 24.0;
     let height = TOP + ROW * bars.len() as f64 + AXIS;
+    // About how wide a value's characters are, at the chart's 11.5px.
+    const VALUE_CHAR_WIDTH: f64 = 6.4;
     let greatest = (bars.iter())
         .map(|(_, memory)| memory.peak_bytes.max(memory.built_bytes))
         .fold(0.0, f64::max);
-    let x = LinearScale::fitting(greatest, (label, width - if narrow { 72.0 } else { 160.0 }));
+    // The bars end where every one, its value after it, fits the width:
+    // a long bar with a peak to tell needs the most room. Never past the
+    // margin the last tick needs, or the wide layout's.
+    let fraction = LinearScale::fitting(greatest, (0.0, 1.0));
+    let end = (bars.iter())
+        .map(|(_, memory)| {
+            let peak = memory.peak_bytes.max(memory.built_bytes);
+            let value = if memory.peaked() {
+                format!("{} peak {}", Megabytes(memory.built_bytes), Megabytes(peak))
+            } else {
+                Megabytes(memory.built_bytes).to_string()
+            };
+            let room = width - label - 10.0 - value.len() as f64 * VALUE_CHAR_WIDTH;
+            label + room / fraction.at(peak)
+        })
+        .fold(width - if narrow { 24.0 } else { 160.0 }, f64::min);
+    let x = LinearScale::fitting(greatest, (label, end));
     let mut spotlight = spotlight;
     rsx! {
         figure { class: "chart-panel wide",
@@ -124,17 +145,32 @@ fn MemoryBars(
                     }
                     for (index, (map, memory)) in bars.iter().copied().enumerate() {
                         {
-                            let y = TOP + ROW * index as f64 + (ROW - BAR) / 2.0;
+                            let row_top = TOP + ROW * index as f64;
+                            let ordered = map.is_ordered();
+                            // A hash map's bar rises to make room for its note.
+                            let y = row_top + (ROW - BAR) / 2.0 - if ordered { 0.0 } else { 6.0 };
                             let peak = memory.peak_bytes.max(memory.built_bytes);
                             let title = format!("{} · {}", Megabytes(memory.built_bytes), map.label());
-                            let body = format!(
-                                "{} once built; {} at the most while the entries went in",
+                            let held = format!(
+                                "{} resident once built; {} at the most while the entries went in",
                                 Megabytes(memory.built_bytes),
                                 Megabytes(peak)
                             );
+                            let body = if ordered {
+                                held
+                            } else {
+                                format!("a hash table: it keeps no order, so it can't scan a range or find the next key; {held}")
+                            };
                             rsx! {
+                                if !ordered {
+                                    line { class: "unordered-rule", x1: 0, x2: width - 8.0, y1: row_top, y2: row_top }
+                                }
                                 g {
-                                    class: if map.is_ours() { "chart-row ours" } else { "chart-row" },
+                                    class: match (map.is_ours(), ordered) {
+                                        (true, _) => "chart-row ours",
+                                        (false, true) => "chart-row",
+                                        (false, false) => "chart-row unordered",
+                                    },
                                     onmouseenter: move |evt| {
                                         let point = evt.client_coordinates();
                                         spotlight.show_hint(Hint::new((point.x, point.y), title.clone(), body.clone()));
@@ -147,12 +183,17 @@ fn MemoryBars(
                                     rect {
                                         class: "chart-hit",
                                         x: 0,
-                                        y: y - (ROW - BAR) / 2.0,
+                                        y: row_top,
                                         width: width,
                                         height: ROW,
                                     }
                                     text { class: "chart-row-label", x: label - 12.0, y: y + BAR - 4.0, text_anchor: "end",
                                         {map.label()}
+                                    }
+                                    if !ordered {
+                                        text { class: "chart-row-note", x: label + 4.0, y: y + BAR + 11.0,
+                                            "unordered, hashtable"
+                                        }
                                     }
                                     path { class: "peak-bar grow-x", style: "fill:{map.fill_color()};--grow:{x.growth_ms(peak)}ms", d: x.bar_path(peak, y, BAR) }
                                     path { class: "chart-bar grow-x", style: "fill:{map.fill_color()};--grow:{x.growth_ms(memory.built_bytes)}ms", d: x.bar_path(memory.built_bytes, y, BAR) }
