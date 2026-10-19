@@ -43,3 +43,7 @@ Phase 1 built (D51, D52).
 - [ ] entry should also go through the right most leaf fast path.
 
 - [ ] We are better than radix tree: 1. support prefix search, 2. better memory usage, 3. faster scan.
+
+- [ ] We need to support a file mode. allowing bbtree to be written to a file, and read from a file. This requires key to implement FromBytes and ToBytes.
+
+- [ ] We need to add a user case of DataFusion index provider for Parquet. and show it in ClickBench.
