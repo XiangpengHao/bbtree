@@ -1,0 +1,17 @@
+[package]
+name = "bbtree-figures"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Writes the post's figures as SVG files, from bbtree's own trees and the measurements in vis/data."
+
+[dependencies]
+bbtree = { path = "../..", features = ["inspect"] }
+
+# A workspace of its own, as the site's: a native program beside the
+# wasm32 one, sharing none of its dependencies.
+[workspace]
+members = ["."]
+
+[profile.release]
+opt-level = 3

@@ -2,8 +2,7 @@
 
 Status (2026-10-16): the `inspect` feature with lookup and batch traces
 (`tree/inspect.rs`, `tree/batch.rs`, `unsync/map/mod.rs`), and the visualizer in
-`vis/`, one key or a batch at a time; beside it, the post's page, with
-one figure so far. Inserts and removals are still to come.
+`vis/`, one key or a batch at a time; beside it, the post's page. Inserts and removals are still to come.
 
 ## Goals
 
@@ -94,20 +93,25 @@ From the original note:
   one look. The explorer stays as it is, at `/`, for readers who want to
   look around; the post is a page of its own, at `/post/`, with tabs
   between them. The post is prose with figures, each one idea and nothing
-  else (2026-10-17): a mechanism (prefix keys, the count, version checks)
-  drawn plain, from fixed example keys and numbers, which claim no tree's
-  state; what a lookup did (the leaf's lines it read, a batch's searches
-  and prefetches) drawn from a real tree's views, as the explorer reads
-  them. Each figure plays once seen and the reader can change it (another
-  key set, target or key; replay, step): its time is one number, written
-  to the figure as `--t` by the loop the batch view plays with
-  (`timeline.rs`), every mark derived from it in CSS. Rejected: the explorer's own panels as figures (the first post's:
+  else (2026-10-17): a mechanism (the count, version checks, a node of
+  strings) drawn plain, from fixed example keys and numbers, which claim
+  no tree's state; what bbtree does (a leaf's bytes, a batch's searches
+  and prefetches) drawn from a real tree's views. The figures are SVG
+  files (2026-10-18), so that the post can be published elsewhere too
+  (the author's Quarto blog) from the same files: see "The post".
+  Rejected: interactive figures (sliders, replay and step, links into
+  the explorer; the 2026-10-17 post's), which no other page can show;
+  the explorer's own panels as figures (the first post's:
   each panel showed far more than its paragraph needed), the explorer
   pinned beside scrolling prose (at half width it loses its inspector,
   scroll fights its playback, and phones need figures anyway), and the
   explorer with a story panel (the fourth pass's guide, removed in the
   fifth).
-- **Light theme only.**
+- **The explorer is light; the post has a dark theme too (2026-10-18).**
+  The post follows the reader's system, or the theme they pick in its
+  header (`theme.rs`), which the browser keeps and `index.html` sets before
+  the first paint. Every color is a `light-dark()` token in `main.css`,
+  which the page's `color-scheme` picks; the explorer keeps `light`.
 
 ## The rule: bbtree describes itself, the viewer reads and draws
 
@@ -420,33 +424,33 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   explorer alone writes the address and the history (`shared_link.rs`); a
   router beside it would fight it for both. A static host serves the post
   from a copy of `index.html` at `post/`; `dx serve` serves it as is.
-- **A figure is an explorer link drawn in place** (`figure.rs`). The link
-  the explorer keeps in its address (`ExplorerLink`: the workload, the key
-  and the level to inspect, or a batch's keys, and the tab) is what a
-  figure starts from, and the figure links to the explorer with it, which
-  opens on the same tree and lookup. A figure owns what its panels share in
-  the explorer: the tracer, the batcher, the spotlight and the
-  inspector's tab, so clicking in one figure changes it alone. Each figure
-  is a component of its own that picks its panels; there is no generic
-  list of panels to configure until a pattern repeats.
-- **The panels are unchanged.** They took their state as explicit props
-  and handles already; what was page-wide was the DOM and the CSS. Ids the
-  browser looks elements up by (the batch's board, the inspector's tabs,
-  the slot table's box) are unique to the component that draws them
-  (`element_ids.rs`). The page's one hint is split from each view's
-  spotlight (`PointerHint`), since `NodeAt` names no tree and two figures
-  would light each other's nodes. The explorer's one-screen layout is
-  scoped to it, so the post scrolls.
-- **Trees are shared and built as the reader nears** (`TreeStore`).
-  Figures of one workload share one tree, built when the reader comes
-  within a screen of the first of them, in slices of about 12 ms between
-  yields to the browser (`Workload::SLICE_MS`), so that a slow phone
-  isn't blocked in 50-80 ms runs. A figure starts its lookup when it
-  comes into view, so the way down plays where it is read. Until then its
-  frame keeps room as tall as its panels draw, on a desk and on a phone
-  (`FigureFrame`'s `room`), and the panels replace it while only the
-  figure's top edge shows, pushing down what is still below the screen:
-  the page doesn't move under the reader.
+- **A figure is an SVG file** (`vis/figures/`, 2026-10-18). A native
+  program writes every figure of "How it works" into
+  `vis/assets/figures/`: the mechanisms from fixed keys, what bbtree does
+  from trees it builds (10M random `u64`s) and reads through bbtree's
+  inspect views, the charts from `vis/data/`. The post embeds each as an
+  image (`SvgFigure`), with its caption in HTML; any other page can take
+  the same file. A figure that plays carries its own CSS animation: steps,
+  a hold on the last frame, then again (`Motion`), its marks' own styles
+  being that last frame, which is what reduced motion shows; charts play
+  once. Images load lazily, so a figure starts as the reader nears it. Its
+  text is monospace where it lines up with marks, stretched to its columns
+  (`textLength`), since an image gets no web fonts.
+- **The post reads like the author's blog** (2026-10-18): the text in
+  one column of about 72 characters a line, its citations floated beside
+  their lines in the right margin (`.sidenote`, as Tufte CSS does; the
+  sections flow as plain blocks so that a note's float leaves its
+  paragraph), and an outline of its headings in the left margin, held in
+  view, lighting the section the reader is in (`outline.rs`, which the
+  headings themselves read, so the two never disagree). Narrower, the
+  citations go to a list of notes at the end, then the outline becomes a
+  list of contents. A looping figure has a pause, which, like the theme,
+  reaches its image through its address (`figure.svg#dark-still`): an
+  image hears nothing else from the page.
+- **Ids are unique to the component that draws them** (`element_ids.rs`):
+  the batch's board, the inspector's tabs, the slot table's box. The
+  page's one hint is split from each view's spotlight (`PointerHint`).
+  The explorer's one-screen layout is scoped to it, so the post scrolls.
 - **The batch's playback runs only while it plays and shows.** Its frame
   loop (`batch_view.rs`) asks for frames only while playing, writes the
   time (`--t`) only when it changes, and holds while the board is off
@@ -460,7 +464,7 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   screen in the app's own classes (its bar, the explorer's waiting state;
   white for the post) until the app draws, so nothing moves when it does.
 - **Shortcuts and the address are the explorer's.** On the post, Space and
-  the arrows scroll; the figures' buttons play and step them.
+  the arrows scroll.
 - **Charts beside the figures** (`performance_cards.rs`): five cards the
   reader picks, nothing turning by itself: single thread, concurrent, end
   to end, memory and architectures, each a chart of its own
@@ -471,8 +475,6 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   grow at one speed and lines draw left to right, once the cards are in
   view. Their data is compiled in from `vis/data/<machine>/`
   (`measurements.rs`); doc 14 says what each shows and how it is made.
-- **So far:** three figures (the way down, the leaf in the inspector, a
-  batch); the prose is a draft of doc 14's plan.
 
 ## Not done
 

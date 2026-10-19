@@ -16,7 +16,6 @@ use crate::batch_run::BatchKeys;
 use crate::batch_view::Batcher;
 use crate::inspected_tree::LoadedTree;
 use crate::node_inspector::InspectorTab;
-use crate::site::SitePage;
 use crate::trace::Tracer;
 use crate::workload::{Builder, InsertOrder, KeyKind, Workload};
 
@@ -50,58 +49,6 @@ pub(crate) struct ExplorerLink {
 }
 
 impl ExplorerLink {
-    /// The link to the lookup of `key` in the tree of `workload`, inspecting
-    /// its node at `level` (0 for the leaf), or else its first.
-    pub(crate) fn lookup(workload: Workload, key: impl Into<String>, level: Option<usize>) -> Self {
-        Self {
-            workload,
-            lookup: Some(LinkedLookup {
-                key: key.into(),
-                level,
-            }),
-            batch: None,
-            tab: InspectorTab::Page,
-        }
-    }
-
-    /// The link to a batch lookup of `keys` in the tree of `workload`.
-    pub(crate) fn batch(workload: Workload, keys: [&str; BatchKeys::LANES]) -> Self {
-        Self {
-            workload,
-            lookup: None,
-            batch: Some(BatchKeys::new(keys.map(String::from).to_vec())),
-            tab: InspectorTab::Page,
-        }
-    }
-
-    pub(crate) fn workload(&self) -> Workload {
-        self.workload
-    }
-
-    /// The explorer's address that opens on what the link says.
-    pub(crate) fn href(&self) -> String {
-        let query: Vec<String> = self
-            .pairs()
-            .iter()
-            .map(|(name, value)| format!("{name}={}", Self::encode(value)))
-            .collect();
-        format!("{}?{}", SitePage::Explorer.href(), query.join("&"))
-    }
-
-    /// `value` as a query string holds it: every byte but letters, digits
-    /// and `-._~` as `%` and its hex.
-    fn encode(value: &str) -> String {
-        value
-            .bytes()
-            .map(|byte| match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                    char::from(byte).to_string()
-                }
-                _ => format!("%{byte:02X}"),
-            })
-            .collect()
-    }
-
     /// The link a query string's `pairs` make: what they leave out or
     /// misname is as the page starts without a link.
     fn from_pairs(pairs: &[(String, String)]) -> Self {
@@ -380,15 +327,6 @@ mod tests {
             ..link
         };
         assert_eq!(ExplorerLink::from_pairs(&pairs(&batch)), batch);
-    }
-
-    #[test]
-    fn query_values_escape_what_a_query_string_reads() {
-        assert_eq!(
-            ExplorerLink::encode("https://a.b/c?d=e&f+g h%"),
-            "https%3A%2F%2Fa.b%2Fc%3Fd%3De%26f%2Bg%20h%25"
-        );
-        assert_eq!(ExplorerLink::encode("851191"), "851191");
     }
 
     #[test]

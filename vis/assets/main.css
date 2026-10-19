@@ -13,27 +13,31 @@
 @layer theme, base, components, utilities;
 
 :root {
+  /* Light, and the post's dark (`theme.rs`): each color is
+   * `light-dark(light, dark)`, which the page's color-scheme picks. The
+   * explorer stays light; the post follows the reader's system, or the
+   * theme they picked. */
   color-scheme: light;
-  --paper: #f6f7f9;
-  --panel: #ffffff;
-  --ink: #15171c;
-  --graphite: #5a606b;
-  --muted: #636974;
-  --rule: #e2e5ea;
-  --rule-strong: #c6ccd5;
-  --well: #eef0f3;
-  --link: #2266c8;
-  --error: #b42318;
-  --error-soft: #fdf0ee;
+  --paper: light-dark(#f6f7f9, #1b1e24);
+  --panel: light-dark(#ffffff, #131519);
+  --ink: light-dark(#15171c, #e6e8ec);
+  --graphite: light-dark(#5a606b, #b4bac3);
+  --muted: light-dark(#636974, #9aa1ab);
+  --rule: light-dark(#e2e5ea, #2a2e35);
+  --rule-strong: light-dark(#c6ccd5, #3d434c);
+  --well: light-dark(#eef0f3, #23262c);
+  --link: light-dark(#2266c8, #8cb4ff);
+  --error: light-dark(#b42318, #ff8a80);
+  --error-soft: light-dark(#fdf0ee, #3b1f1d);
   /* A check that passed, as text: 5.5:1 on panel. */
-  --ok: #11795a;
+  --ok: light-dark(#11795a, #4cc38a);
 
   --marker: #ffe24a;
-  --marker-strong: #a67c00;
-  --marker-soft: #fff4b8;
+  --marker-strong: light-dark(#a67c00, #e0b628);
+  --marker-soft: light-dark(#fff4b8, #4a3f14);
   /* The highlighter's ink, for text: 6.4:1 on panel. */
-  --marker-ink: #7a5a00;
-  --marker-wash: #fffbe3;
+  --marker-ink: light-dark(#7a5a00, #f3d55b);
+  --marker-wash: light-dark(#fffbe3, #2a2512);
 
   --slot-keys: #2a78d6;
   --slot-inline: #eb6834;
@@ -41,27 +45,40 @@
   --slot-header: #8b919b;
   --slot-tags: #4a505a;
   /* A held key in a ruler, 3:1 against an empty slot. */
-  --slot-filled: #7f8999;
+  --slot-filled: light-dark(#7f8999, #6b7482);
   /* A ruler's keys after the compare: smaller than the searched key's
    * inline key, dark; larger, pale. */
-  --slot-smaller: #4c5462;
-  --slot-larger: #bcc3cd;
+  --slot-smaller: light-dark(#4c5462, #c9cfd8);
+  --slot-larger: light-dark(#bcc3cd, #3d434c);
   /* The inline keys' hue, softened: a ruler's flash as they are compared. */
-  --compare: #f7a47f;
+  --compare: light-dark(#f7a47f, #f7a47f);
   /* An inline key's bytes in the fence strip. */
-  --compare-soft: #fde3d6;
+  --compare-soft: light-dark(#fde3d6, #4a2a1e);
 
   /* The post's charts: bbtree's maps in the site's highlighter, its marks
    * rimmed and its lines drawn in the highlighter's dark gold, 3.8:1 on
    * panel; every other map a dark, desaturated slate, apart by lightness;
    * their names ride the marks, so color is never the only way to tell
    * them apart. */
+  /* Text on the highlighter, dark in both themes. */
+  --on-marker: #15171c;
+
+  /* The post's Rust (`rust_code.rs`): GitHub's palettes, every color
+   * 4.5:1 or more on the code block's paper. */
+  --code-comment: var(--muted);
+  --code-keyword: light-dark(#cf222e, #ff7b72);
+  --code-string: light-dark(#0a3069, #a5d6ff);
+  --code-number: light-dark(#0550ae, #79c0ff);
+  --code-attribute: light-dark(#116329, #7ee787);
+  --code-function: light-dark(#8250df, #d2a8ff);
+  --code-type: light-dark(#953800, #ffa657);
+
   --ours: var(--marker);
   --ours-line: var(--marker-strong);
-  --theirs-1: #353b47;
-  --theirs-2: #59616e;
-  --theirs-3: #6e7682;
-  --theirs-4: #878e99;
+  --theirs-1: light-dark(#353b47, #d3d7de);
+  --theirs-2: light-dark(#59616e, #aeb4be);
+  --theirs-3: light-dark(#6e7682, #8e959f);
+  --theirs-4: light-dark(#878e99, #717884);
 
   --font-display: "Martian Mono", ui-monospace, monospace;
   --font-ui: "IBM Plex Sans", system-ui, sans-serif;
@@ -70,6 +87,18 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
 }
+/* The post takes the reader's system's theme, or the one they picked
+ * (`theme.rs`); beside :root, as these must outrank its light. */
+html[data-page="post"] {
+  color-scheme: light dark;
+}
+html[data-page="post"][data-theme="light"] {
+  color-scheme: light;
+}
+html[data-page="post"][data-theme="dark"] {
+  color-scheme: dark;
+}
+
 
 @layer components {
   html,
@@ -2342,13 +2371,6 @@
       border-left: 1px solid var(--rule);
       overflow-y: auto;
     }
-    /* A batch in the post's figure: the explorer's grid, the tree given
-     * room of its own, since the figure's height follows its content. */
-    .figure .batch-board {
-      grid-template-columns: minmax(0, 1fr) minmax(460px, 40%);
-      grid-template-rows: auto auto minmax(420px, 1fr);
-      grid-template-areas: "head code" "keys code" "tree code";
-    }
   }
   @media (max-width: 640px) {
     .batch-headline,
@@ -2376,662 +2398,125 @@
     }
   }
 
-  /* The post: a column of prose on white, and figures wider than it, each
-   * the explorer's panels on the explorer's paper. */
+  /* The post: a column of prose, with an outline of its sections on the
+   * left and its citations beside their lines on the right, as on the
+   * author's blog. Narrower, the citations go to the end first, then the
+   * outline becomes a list of contents above the sections. */
   .post-page {
     display: flex;
     flex-direction: column;
     min-height: 100dvh;
     background: var(--panel);
   }
+  .post-main {
+    flex: 1;
+  }
   .post {
+    --measure: 640px;
+    --rail: 208px;
+    --rail-gap: 48px;
+    --notes: 224px;
+    --notes-gap: 40px;
     flex: 1;
     display: grid;
     align-content: start;
     grid-template-columns:
       [wide-start] minmax(16px, 1fr)
-      [text-start] minmax(0, 720px)
-      [text-end] minmax(16px, 1fr)
-      [wide-end];
-    padding: 56px 0 72px;
-    font-size: 17px;
+      calc(var(--rail) + var(--rail-gap))
+      [text-start] minmax(0, var(--measure)) [text-end]
+      calc(var(--notes) + var(--notes-gap))
+      minmax(16px, 1fr) [wide-end];
+    padding: 56px 0 104px;
+    font-size: 17.5px;
     line-height: 1.7;
+  }
+  @media (max-width: 1279px) {
+    .post {
+      --rail: 0px;
+      --rail-gap: 0px;
+    }
+  }
+  @media (max-width: 1023px) {
+    .post {
+      --notes: 0px;
+      --notes-gap: 0px;
+    }
+  }
+  @media (max-width: 640px) {
+    .post {
+      padding-top: 36px;
+      font-size: 17px;
+    }
   }
   .post > * {
     grid-column: text;
   }
-  .post > p {
-    margin: 0 0 20px;
+  /* The sections flow as plain blocks, not grid items, so that a note's
+   * float leaves its paragraph and stacks under the note before it. */
+  .post > .post-body {
+    position: relative;
+    grid-column: text;
   }
-  .post > ol {
-    margin: 0 0 24px;
+  .post > .post-intro {
+    grid-column: text;
+  }
+  :is(.post-intro, .post-body) > p {
+    margin: 0 0 22px;
+  }
+  :is(.post-intro, .post-body) > ol {
+    margin: 0 0 26px;
     padding-left: 1.5em;
     list-style: decimal;
   }
-  .post > ol > li + li {
-    margin-top: 4px;
+  :is(.post-intro, .post-body) > ol > li + li {
+    margin-top: 6px;
   }
-  .post > p a,
-  .post > ol a,
-  .post-quote a {
+  :is(.post-intro, .post-body) > :is(p, ol) a,
+  .post-quote a,
+  .sidenote a,
+  .post-notes a {
     color: var(--link);
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
     text-underline-offset: 3px;
   }
-  .post > p a:hover,
-  .post > ol a:hover,
-  .post-quote a:hover {
+  :is(.post-intro, .post-body) > :is(p, ol) a:hover,
+  .post-quote a:hover,
+  .sidenote a:hover,
+  .post-notes a:hover {
     text-decoration-color: var(--link);
   }
-  .post > p code,
-  .post > ol code,
-  .figure-text code {
+  /* Code in a sentence: set in the code face alone, no chip, so that a
+   * paragraph naming bbtree, u64 or String reads as one line of text. */
+  :is(.post-intro, .post-body) > :is(p, ol) code,
+  .figure-text code,
+  .sidenote code,
+  .post-notes code {
     font: 0.9em var(--font-data);
-    background: var(--well);
-    border-radius: 4px;
-    padding: 1px 5px;
+    white-space: nowrap;
   }
+  .run-in {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  /* The title on one line: sized to the column, which it fills at about
+   * 19.9 em in the display face, 32 px at most. */
   .post-head {
     margin-bottom: 28px;
+    container-type: inline-size;
   }
   .post-title {
     margin: 0;
     font-family: var(--font-display);
     font-stretch: 112.5%;
     font-weight: 600;
-    font-size: clamp(26px, 4.2vw, 38px);
+    font-size: min(32px, 100cqi / 20.5);
     line-height: 1.15;
     letter-spacing: -0.015em;
-  }
-  .post-page > .credit {
-    padding: 16px;
-    text-align: center;
-    border-top: 1px solid var(--rule);
-  }
-
-  /* A figure shows one idea, a little wider than the text. */
-  .post > .figure {
-    grid-column: wide;
-    justify-self: center;
-    width: min(920px, calc(100% - 32px));
-    margin: 12px 0 28px;
-  }
-  .figure {
-    display: flex;
-    flex-direction: column;
-    background: var(--paper);
-    border: 1px solid var(--rule);
-    border-radius: 12px;
-    overflow: hidden;
-  }
-  /* Room for the panels until the lookup starts, as tall as they draw
-   * (`--room`, the figure's own), so the page holds still. */
-  .figure-view.waiting {
-    min-height: var(--room, 360px);
-    display: grid;
-    place-items: center;
-  }
-  @media (max-width: 640px) {
-    .figure-view.waiting {
-      min-height: var(--room-narrow, 360px);
-    }
-  }
-  .figure-wait {
-    margin: 0;
-    font-size: 14px;
-    color: var(--graphite);
-  }
-  .figure .path-tree {
-    height: var(--wanted);
-  }
-  .figure-caption {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 6px 20px;
-    padding: 12px 18px 14px;
-    background: var(--panel);
-    border-top: 1px solid var(--rule);
-    font-size: 13.5px;
-    line-height: 1.55;
-    color: var(--graphite);
-  }
-  .figure-text {
-    flex: 1 1 320px;
-    max-width: 72ch;
-  }
-  .figure-explore {
-    flex: none;
-    font: 500 13px var(--font-ui);
-    color: var(--link);
-    text-decoration: none;
-  }
-  .figure-explore::after {
-    content: " \2197";
-  }
-  .figure-explore:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-
-  /* The post's code: a command, a call, the citation. */
-  .post > pre {
-    margin: 0 0 20px;
-    padding: 12px 16px;
-    overflow-x: auto;
-    background: var(--paper);
-    border: 1px solid var(--rule);
-    border-radius: 8px;
-    font: 14px/1.6 var(--font-data);
-  }
-  .note-ref {
-    font-size: 0.72em;
-    line-height: 0;
-  }
-  .note-ref a {
-    margin-left: 1px;
-    color: var(--link);
-    text-decoration: none;
-  }
-  .post-notes {
-    margin: 40px 0 0;
-    padding: 16px 0 0 1.5em;
-    border-top: 1px solid var(--rule);
-    list-style: decimal;
-    font-size: 14px;
-    line-height: 1.6;
-    color: var(--graphite);
-  }
-  .post-notes li + li {
-    margin-top: 6px;
-  }
-  .post-notes a {
-    color: var(--link);
-    text-underline-offset: 3px;
-  }
-  .post-notes li:target {
-    background: var(--marker-wash);
-  }
-
-  /* The figures of how it works: each one idea, in the explorer's hues;
-   * what a lookup reads in the highlighter. A figure that plays has a
-   * timeline (timeline.rs): its loop writes the time to `--t`, and every
-   * mark derives from it in CSS, from its own start `--s` and length `--d`,
-   * so nothing redraws while it plays. */
-  .diagram {
-    padding: 18px 20px 16px;
-    background: var(--panel);
-    font-size: 13px;
-  }
-  .timeline {
-    --t: -1;
-  }
-  .figure-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px 16px;
-    margin-bottom: 16px;
-  }
-  .figure-readout {
-    margin: 0;
-    color: var(--graphite);
-  }
-  .figure-readout .data {
-    color: var(--ink);
-    font-weight: 500;
-  }
-  .figure-toolbar .button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  /* A timeline's controls: play, and the bar of its time. */
-  .timeline-controls {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-top: 16px;
-  }
-  .timeline-controls .icon-button {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    padding: 0;
-  }
-  .timeline-bar {
-    position: relative;
-    flex: 1;
-    height: 20px;
-    cursor: pointer;
-    border-radius: 4px;
-  }
-  .timeline-bar::before {
-    content: "";
-    position: absolute;
-    inset: 8px 0;
-    border-radius: 2px;
-    background: var(--well);
-  }
-  .timeline-fill {
-    position: absolute;
-    inset: 8px auto 8px 0;
-    width: 100%;
-    border-radius: 2px;
-    background: var(--ink);
-    transform-origin: left center;
-    transform: scaleX(clamp(0, calc(var(--t) / var(--total)), 1));
-  }
-  .timeline-bar:focus-visible {
-    outline: 2px solid var(--link);
-    outline-offset: 2px;
-  }
-
-  /* Prefix keys: the window slides past the shared bytes (`--t` 1 to 2),
-   * and what it holds, and what that decides, turn over halfway. */
-  .window-slide {
-    --slid: clamp(0, calc(var(--t) - 1), 1);
-    --turned: clamp(0, calc((var(--t) - 1.5) * 5), 1);
-  }
-  .window-keys {
-    display: grid;
-    grid-template-columns: max-content auto;
-    justify-content: start;
-    align-items: center;
-    gap: 9px 28px;
-    padding: 3px 2px;
-  }
-  .window-row {
-    display: contents;
-  }
-  .window-key {
-    position: relative;
-    isolation: isolate;
-    white-space: pre;
-    font-size: 13.5px;
-  }
-  @media (max-width: 640px) {
-    .window-keys {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 4px;
-    }
-    .window-key {
-      font-size: 11.5px;
-    }
-    .window-bytes {
-      justify-self: start;
-      margin-bottom: 8px;
-    }
-  }
-  .window-shared {
-    color: color-mix(in srgb, var(--muted) calc(var(--slid) * 100%), var(--ink));
-  }
-  .window-frame {
-    position: absolute;
-    top: -3px;
-    bottom: -3px;
-    left: -2px;
-    z-index: -1;
-    width: calc(8ch + 4px);
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--compare) 22%, transparent);
-    box-shadow: inset 0 0 0 1.5px var(--compare);
-    transform: translateX(calc(var(--slid) * var(--shared) * 1ch));
-    transition: transform 420ms var(--ease-out);
-  }
-  .window-bytes {
-    display: grid;
-    flex: none;
-  }
-  .window-bytes > * {
-    grid-area: 1 / 1;
-  }
-  .byte-chip {
-    padding: 3px 7px;
-    border-radius: 4px;
-    white-space: pre;
-    letter-spacing: 0.04em;
-    transition: opacity 240ms var(--ease-out);
-  }
-  .byte-chip.tied {
-    background: var(--well);
-    color: var(--graphite);
-    opacity: calc(1 - var(--turned));
-  }
-  .byte-chip.apart {
-    background: var(--compare-soft);
-    box-shadow: inset 0 0 0 1px var(--compare);
-    opacity: var(--turned);
-  }
-  .window-verdict {
-    display: grid;
-    margin: 14px 0 0;
-    font: 600 13.5px var(--font-ui);
-  }
-  .window-verdict > * {
-    grid-area: 1 / 1;
-    transition: opacity 240ms var(--ease-out);
-  }
-  .verdict.tied {
-    color: var(--graphite);
-    opacity: calc(1 - var(--turned));
-  }
-  .verdict.apart {
-    color: var(--ink);
-    opacity: var(--turned);
-  }
-
-  /* The count and binary search: the count's marks land together in step
-   * one; each probe lands in its own step. */
-  .count-target {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
-    font: 500 13px var(--font-ui);
-    color: var(--graphite);
-  }
-  .count-target input {
-    flex: 1;
-    max-width: 280px;
-    accent-color: var(--ink);
-  }
-  .count-target output {
-    min-width: 2ch;
-    color: var(--ink);
-    font-size: 15px;
-  }
-  .key-count {
-    display: grid;
-    grid-template-columns: auto repeat(8, minmax(0, 46px)) minmax(0, 1fr);
-    align-items: center;
-    gap: 6px;
-    text-align: center;
-  }
-  .key-count-label {
-    grid-column: 1;
-    padding-right: 8px;
-    text-align: left;
-    font: 12px var(--font-ui);
-    color: var(--muted);
     white-space: nowrap;
-  }
-  .key-count-cell {
-    padding: 6px 0;
-    border-radius: 4px;
-    background: var(--compare-soft);
-  }
-  .key-count-cell.empty {
-    background: var(--panel);
-    box-shadow: inset 0 0 0 1px var(--rule-strong);
-    color: var(--muted);
-  }
-  .key-count-cell.smaller {
-    background: var(--slot-smaller);
-    color: var(--panel);
-  }
-  .key-count-cell.larger {
-    background: var(--slot-larger);
-  }
-  .key-count-cell.unprobed {
-    background: none;
-  }
-  .key-count-cell.mask {
-    opacity: clamp(0, calc((var(--t) + 0.02) * 4), 1);
-    transform: scale(calc(0.6 + 0.4 * clamp(0, calc((var(--t) + 0.02) * 4), 1)));
-  }
-  .key-count-cell.probe {
-    opacity: clamp(0, calc((var(--t) - var(--s) + 0.02) * 4), 1);
-    transform: scale(calc(0.6 + 0.4 * clamp(0, calc((var(--t) - var(--s) + 0.02) * 4), 1)));
-    font-weight: 600;
-  }
-  .key-count-result {
-    padding-left: 10px;
-    text-align: left;
-    font: 600 13px var(--font-ui);
-    white-space: nowrap;
-  }
-  .count-done {
-    opacity: clamp(0, calc((var(--t) - 0.9) * 10), 1);
-  }
-  .binary-done {
-    opacity: clamp(0, calc((var(--t) - var(--steps) + 0.1) * 10), 1);
-  }
-  @media (max-width: 640px) {
-    .key-count {
-      grid-template-columns: auto repeat(8, minmax(0, 1fr));
-      gap: 4px;
-    }
-    .key-count-result {
-      grid-column: 2 / -1;
-      padding: 0 0 6px;
-    }
-    .key-count-cell {
-      font-size: 12px;
-    }
-  }
-
-  /* A leaf's lines: each line the lookup read lights in its step. */
-  .cache-lines-name {
-    margin: 0 0 8px;
-    min-height: 1.6em;
-    color: var(--graphite);
-  }
-  .cache-lines-grid {
-    display: grid;
-    grid-template-columns: repeat(var(--lines), minmax(0, 1fr));
-    column-gap: 3px;
-    row-gap: 6px;
-    max-width: 700px;
-  }
-  .cache-line {
-    position: relative;
-    grid-row: 1;
-    height: 34px;
-    padding: 0;
-    border: 0;
-    border-radius: 3px;
-    background: var(--well);
-    box-shadow: inset 0 0 0 1px var(--rule);
-    cursor: pointer;
-  }
-  .cache-line.read::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 3px;
-    background: var(--marker);
-    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
-    opacity: clamp(0, calc((var(--t) - var(--s)) * 5), 1);
-  }
-  .cache-line:hover,
-  .cache-line:focus-visible {
-    outline: 2px solid var(--ink);
-    outline-offset: 1px;
-    z-index: 1;
-  }
-  .cache-lines-span {
-    grid-row: 2;
-    min-width: 0;
-    padding-top: 4px;
-    border-top: 1.5px solid var(--rule-strong);
-    font-size: 12px;
-    color: var(--muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .cache-lines-span:empty {
-    border-top-color: transparent;
-  }
-
-  /* A batch's rows: searches land as they run, each line fills on its
-   * way, and the playhead walks the searches. */
-  .batch-lanes-flight {
-    margin: 0 0 12px;
-    font: 500 13px var(--font-ui);
-    color: var(--graphite);
-  }
-  .flight-count {
-    display: inline-block;
-    min-width: 1.4em;
-    padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--marker);
-    color: var(--ink);
-    text-align: center;
-  }
-  .batch-lanes-rows {
-    position: relative;
-    display: grid;
-    gap: 6px;
-  }
-  .batch-lanes-row {
-    display: grid;
-    grid-template-columns: 64px minmax(0, 1fr);
-    align-items: center;
-    gap: 14px;
-    transition: opacity 160ms var(--ease-out);
-  }
-  .batch-lanes.pointing .batch-lanes-row:not(.lit) {
-    opacity: 0.35;
-  }
-  .batch-lanes-plot {
-    width: 100%;
-    height: 22px;
-  }
-  .batch-lanes-search {
-    fill: var(--ink);
-    opacity: clamp(0.1, calc((var(--t) - var(--s)) * 40 + 0.1), 1);
-  }
-  .batch-lanes-track {
-    fill: var(--marker);
-    opacity: 0.18;
-  }
-  .batch-lanes-way {
-    fill: var(--marker);
-    transform-box: fill-box;
-    transform-origin: left center;
-    transform: scaleX(clamp(0, calc((var(--t) - var(--s)) / var(--d)), 1));
-  }
-  .batch-lanes-playhead {
-    position: absolute;
-    top: -4px;
-    bottom: -4px;
-    left: calc(78px + (100% - 78px) * clamp(0, var(--t), var(--total)) / var(--total));
-    width: 1.5px;
-    background: var(--link);
-    opacity: clamp(0, calc((var(--t) + 1) * 4), 1);
-    pointer-events: none;
-  }
-  .batch-lanes-legend {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 8px;
-    margin: 12px 0 0;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .batch-lanes-legend .legend-mark + * {
-    margin-right: 8px;
-  }
-
-  /* The node's version over time: each act reveals as the playhead
-   * passes it, top to bottom. */
-  .versions {
-    position: relative;
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    grid-template-rows: 20px repeat(var(--moments), 32px);
-    gap: 4px 8px;
-    max-width: 600px;
-    margin: 0 auto;
-  }
-  .versions-lifeline {
-    grid-row: 2 / -1;
-    justify-self: center;
-    width: 0;
-    border-left: 1px dashed var(--rule-strong);
-  }
-  .versions-head {
-    grid-row: 1;
-    align-self: end;
-    text-align: center;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .act {
-    --shown: clamp(0, calc((var(--t) - var(--s)) / var(--d)), 1);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 0 4px;
-    border: 1px solid var(--rule-strong);
-    border-radius: 4px;
-    background: var(--panel);
-    font: 12px var(--font-data);
-    text-align: center;
-    line-height: 1.15;
-    clip-path: inset(0 0 calc((1 - var(--shown)) * 100%) 0 round 4px);
-  }
-  .act .icon {
-    width: 13px;
-    height: 13px;
-    flex: none;
-  }
-  .act.version {
-    border-color: transparent;
-    background: var(--well);
-  }
-  .act.version.new {
-    background: var(--marker-soft);
-  }
-  .act.write {
-    border-color: var(--marker-strong);
-    background: var(--marker-soft);
-  }
-  .act.kept {
-    color: var(--ok);
-    font-weight: 600;
-  }
-  .act.retried {
-    border-color: var(--error);
-    background: var(--error-soft);
-    color: var(--error);
-    font-weight: 600;
-  }
-  .versions-playhead {
-    position: absolute;
-    left: -6px;
-    right: -6px;
-    top: calc(24px + clamp(0, var(--t), var(--moments)) * 36px - 2px);
-    height: 1.5px;
-    background: var(--link);
-    opacity: clamp(0, calc((var(--t) + 1) * 4), 1);
-    pointer-events: none;
-  }
-
-  .post-section {
-    margin: 48px 0 12px;
-    font-family: var(--font-display);
-    font-stretch: 112.5%;
-    font-weight: 600;
-    font-size: 24px;
-    letter-spacing: -0.01em;
-  }
-  .post-subsection {
-    margin: 32px 0 8px;
-    font-size: 19px;
-    font-weight: 600;
   }
   .post-quote {
-    margin: 4px 0 24px;
+    margin: 4px 0 28px;
     padding: 4px 0 4px 20px;
     border-left: 3px solid var(--marker);
     color: var(--graphite);
@@ -3044,6 +2529,399 @@
     margin-top: 6px;
     font-style: normal;
     font-size: 15px;
+  }
+  .post-page > .credit {
+    padding: 16px;
+    text-align: center;
+    border-top: 1px solid var(--rule);
+  }
+
+  /* Headings: the post's two parts in the display face over a rule, as
+   * the author's blog sets them; the three principles numbered in the
+   * highlighter, since the post ranks them; then sections, then their
+   * parts. More room above each than below. */
+  .post-section {
+    margin: 96px 0 28px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--font-display);
+    font-stretch: 112.5%;
+    font-weight: 600;
+    font-size: 28px;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    scroll-margin-top: 24px;
+  }
+  .post-body > .post-section:first-of-type {
+    margin-top: 72px;
+  }
+  .post-subsection {
+    margin: 64px 0 16px;
+    font-size: 23px;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.005em;
+    text-wrap: balance;
+    scroll-margin-top: 24px;
+  }
+  .post-section + .post-subsection {
+    margin-top: 0;
+  }
+  .principle-number {
+    display: inline-grid;
+    place-items: center;
+    width: 1.45em;
+    height: 1.45em;
+    margin-right: 12px;
+    border-radius: 7px;
+    background: var(--marker);
+    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
+    color: var(--on-marker);
+    font: 600 0.72em var(--font-data);
+    vertical-align: 0.12em;
+  }
+  .post-minor {
+    margin: 44px 0 10px;
+    font-size: 18.5px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-wrap: balance;
+    scroll-margin-top: 24px;
+  }
+  .post-subsection + .post-minor {
+    margin-top: 20px;
+  }
+  .post-detail {
+    margin: 36px 0 8px;
+    font-size: 17px;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--graphite);
+    text-wrap: balance;
+    scroll-margin-top: 24px;
+  }
+  .post-detail code {
+    font: 0.88em var(--font-data);
+  }
+  .post-minor a,
+  .post-subsection a {
+    color: var(--link);
+    text-underline-offset: 3px;
+  }
+  :is(.post-section, .post-subsection, .post-minor) code {
+    font: 0.88em var(--font-data);
+  }
+  @media (max-width: 640px) {
+    .post-section {
+      margin-top: 72px;
+      font-size: 23px;
+    }
+    .post-subsection {
+      margin-top: 52px;
+      font-size: 20.5px;
+    }
+    .post-minor {
+      font-size: 17.5px;
+    }
+  }
+
+  /* The outline, in the left margin, held in view as the sections pass;
+   * the reader's section lit in the highlighter, with its parts. */
+  .post-outline {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: calc(100% + var(--rail-gap));
+    width: var(--rail);
+  }
+  .post-outline-nav {
+    position: sticky;
+    top: 28px;
+    max-height: calc(100dvh - 56px);
+    overflow-y: auto;
+    font-size: 13.5px;
+    line-height: 1.4;
+  }
+  .post-outline-title {
+    margin: 0 0 10px 8px;
+    font: 600 12.5px var(--font-ui);
+    color: var(--muted);
+  }
+  .post-outline ol,
+  .post-contents ol {
+    display: grid;
+    gap: 1px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .post-outline a {
+    display: block;
+    padding: 5px 8px;
+    border-radius: 6px;
+    color: var(--graphite);
+    text-decoration: none;
+    transition: color 120ms, background-color 120ms;
+  }
+  .post-outline a:hover {
+    color: var(--ink);
+    background: var(--well);
+  }
+  .post-outline a[aria-current="location"] {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--marker-wash);
+    box-shadow: inset 0 -2px 0 var(--marker);
+  }
+  .post-outline .outline-level-2 a {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .post-outline .outline-level-2:not(:first-child) {
+    margin-top: 14px;
+  }
+  .post-outline .outline-level-4 a {
+    padding-left: 30px;
+    font-size: 13px;
+  }
+  .post-outline .outline-level-5 a {
+    padding-left: 44px;
+    font-size: 13px;
+  }
+  .outline-number {
+    display: inline-block;
+    min-width: 1.5em;
+    color: var(--marker-ink);
+    font: 600 12px var(--font-data);
+  }
+  .post-contents {
+    display: none;
+  }
+  @media (max-width: 1279px) {
+    .post-outline {
+      display: none;
+    }
+    .post-contents {
+      display: block;
+      margin: 8px 0 0;
+      padding: 12px 18px;
+      border: 1px solid var(--rule);
+      border-radius: 10px;
+      background: var(--paper);
+      font-size: 15px;
+    }
+    .post-contents summary {
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .post-contents ol {
+      margin-top: 10px;
+    }
+    .post-contents a {
+      display: block;
+      padding: 5px 0;
+      color: var(--link);
+      text-decoration: none;
+    }
+    .post-contents .outline-level-2 a {
+      font-weight: 600;
+      color: var(--ink);
+    }
+    .post-contents .outline-level-3 a {
+      padding-left: 16px;
+    }
+  }
+
+  /* A figure shows one idea, as wide as the text: an SVG file
+   * (`vis/figures/`), in the page's theme, which plays its own CSS
+   * animation. */
+  .post-body > .figure {
+    margin: 20px 0 32px;
+  }
+  .figure {
+    display: flex;
+    flex-direction: column;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .figure-svg {
+    display: block;
+    width: 100%;
+    max-width: 720px;
+    height: auto;
+    margin: 0 auto;
+    background: var(--panel);
+  }
+  .figure-caption {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px 20px;
+    padding: 12px 16px 14px 18px;
+    background: var(--panel);
+    border-top: 1px solid var(--rule);
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--graphite);
+  }
+  .figure-text {
+    flex: 1;
+    max-width: 58ch;
+  }
+  /* A looping figure's pause, which rests it on its last frame. */
+  .figure-motion {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 10px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 7px;
+    background: var(--panel);
+    color: var(--graphite);
+    font: 500 12.5px var(--font-ui);
+    cursor: pointer;
+    transition: color 120ms, border-color 120ms;
+  }
+  .figure-motion:hover {
+    color: var(--ink);
+    border-color: var(--graphite);
+  }
+  .figure-motion .icon {
+    width: 13px;
+    height: 13px;
+  }
+  /* On a phone, a figure keeps its text legible and scrolls sideways. */
+  @media (max-width: 640px) {
+    .figure-view {
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+    }
+    .figure-svg {
+      width: 600px;
+      max-width: none;
+    }
+    .figure-caption {
+      flex-direction: column;
+    }
+  }
+
+  /* The post's code. */
+  .post-body > pre {
+    margin: 4px 0 26px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    font: 14px/1.6 var(--font-data);
+    tab-size: 4;
+  }
+  .rust-comment {
+    color: var(--code-comment);
+    font-style: italic;
+  }
+  .rust-keyword {
+    color: var(--code-keyword);
+  }
+  .rust-string {
+    color: var(--code-string);
+  }
+  .rust-number {
+    color: var(--code-number);
+  }
+  .rust-attribute,
+  .rust-macro {
+    color: var(--code-attribute);
+  }
+  .rust-function {
+    color: var(--code-function);
+  }
+  .rust-type {
+    color: var(--code-type);
+  }
+
+  /* Citations: a number in the text, and the work beside the line in the
+   * right margin; on a narrow screen, the number links to the list of
+   * works at the end instead. */
+  .note-ref {
+    font-size: 0.72em;
+    line-height: 0;
+  }
+  .note-ref a {
+    margin-left: 1px;
+    color: var(--link);
+    text-decoration: none;
+  }
+  .sidenote {
+    position: relative;
+    float: right;
+    clear: right;
+    width: var(--notes);
+    margin: 0.35em calc(-1 * (var(--notes) + var(--notes-gap))) 14px 0;
+    font: normal 400 13px/1.55 var(--font-ui);
+    color: var(--graphite);
+    text-align: left;
+  }
+  .sidenote-number {
+    margin-right: 4px;
+    font: 600 11px var(--font-data);
+    color: var(--muted);
+    vertical-align: 0.3em;
+  }
+  .post-notes {
+    margin: 72px 0 0;
+    padding-top: 8px;
+    border-top: 1px solid var(--rule);
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--graphite);
+  }
+  .post-notes-title {
+    margin: 16px 0 12px;
+    font: 600 17px var(--font-ui);
+    color: var(--ink);
+  }
+  .post-notes ol {
+    margin: 0;
+    padding-left: 1.5em;
+    list-style: decimal;
+  }
+  .post-notes li + li {
+    margin-top: 6px;
+  }
+  .post-notes li:target {
+    background: var(--marker-wash);
+  }
+  @media (min-width: 1024px) {
+    .post-notes {
+      display: none;
+    }
+    .note-ref a {
+      pointer-events: none;
+    }
+  }
+  @media (max-width: 1023px) {
+    .sidenote {
+      display: none;
+    }
+  }
+
+  /* The header's switch between the post's themes, before the
+   * repository's mark. */
+  .theme-switch {
+    margin-left: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+  .theme-switch + .toolbar-end {
+    margin-left: 0;
   }
 
   /* The performance cards: tabs over a card, wider than the text. */
@@ -3064,6 +2942,18 @@
     overflow-x: auto;
     border-bottom: 1px solid var(--rule);
     background: var(--paper);
+  }
+  /* On a phone, every card's tab in view: two rows, not a strip whose
+   * last tabs hide past the edge. */
+  @media (max-width: 640px) {
+    .card-tabs {
+      flex-wrap: wrap;
+      overflow-x: visible;
+    }
+    .card-tab {
+      flex: 1 0 30%;
+      padding: 11px 10px 10px;
+    }
   }
   .card-tab {
     position: relative;
@@ -3484,7 +3374,7 @@
     text-decoration-color: var(--link);
   }
   .chart-note {
-    max-width: 75ch;
+    max-width: 62ch;
     margin: 10px 0 0;
     font-size: 12.5px;
     line-height: 1.55;

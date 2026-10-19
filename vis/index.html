@@ -12,8 +12,15 @@
     <link rel="stylesheet" media="print" onload="this.media = 'all'" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Martian+Mono:wdth,wght@112.5,500;112.5,600&display=swap" />
     <script>
       // Which page loads, for the screen shown until the app draws it: the
-      // post at post/ (src/site.rs).
-      if (/\/post\/?$/.test(location.pathname)) document.documentElement.dataset.page = "post";
+      // post at post/ (src/site.rs); and the post's theme, if the reader
+      // picked one (src/theme.rs), before the first paint.
+      if (/\/post\/?$/.test(location.pathname)) {
+        document.documentElement.dataset.page = "post";
+        try {
+          const theme = localStorage.getItem("bbtree-theme");
+          if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        } catch (_) {}
+      }
     </script>
   </head>
   <body>

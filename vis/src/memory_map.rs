@@ -89,20 +89,6 @@ impl PageMarks {
         )
     }
 
-    /// When, in its search's order of reads, the lookup surely read each
-    /// of `page`'s cache lines: a rank, earlier reads lower, equal for
-    /// lines read together; `None` for a line it didn't surely read.
-    pub(crate) fn line_read_order(&self, page: &PageMap) -> Vec<Option<usize>> {
-        MapDrawing::of(page, self)
-            .lines
-            .iter()
-            .map(|line| {
-                line.filter(|line| line.certainty == Certainty::Certain)
-                    .map(|line| line.phase as usize)
-            })
-            .collect()
-    }
-
     /// Whether slot `slot` of an array of `contents` is where the lookup
     /// ended.
     fn is_result(&self, contents: SlotContents, slot: usize) -> bool {
