@@ -310,8 +310,6 @@ fn emptied_pages_serve_new_nodes() {
 /// next try, and every page goes back to the allocator when the map drops.
 #[test]
 fn refused_pages_leave_the_map_unchanged() {
-    /// About 20 entries per leaf, so that a thousand entries make a root
-    /// that splits as an internal node.
     type Key = [u8; 32];
     let key = |number: u64| {
         let mut key = [0; 32];
@@ -320,12 +318,17 @@ fn refused_pages_leave_the_map_unchanged() {
     };
     let pages = TestPages::<Key, u64>::new();
     let rng = TestRng::new(113);
-    let numbers = random_numbers(&rng, 1000, 1 << 40);
-    let mut most_pages = 0;
     {
         let mut map = BBTreeMap::<Key, u64, Auto, &TestPages<Key, u64>>::new_in(&pages);
         let mut std_map = BTreeMap::new();
-        for &number in &numbers {
+        // Until a full internal root splits: a page for the leaf's right
+        // half, one for the root's, and one for the root node, which moves
+        // out of the root page as the tree grows. Internal nodes hold more
+        // edges where pointers are narrower.
+        let mut most_pages = 0;
+        while most_pages < 3 {
+            assert!(std_map.len() < 100_000, "no internal root split");
+            let number = rng.below_u64(1 << 40);
             let in_use = pages.in_use_count();
             let mut entry = (key(number), number);
             // A try that a budget of `budget` pages refuses leaves the pages
@@ -351,10 +354,6 @@ fn refused_pages_leave_the_map_unchanged() {
             assert_eq!(map.get_copied(key), Some(value));
         }
     }
-    // A full internal root splits: a page for the leaf's right half, one for
-    // the root's, and one for the root node, which moves out of the root
-    // page as the tree grows.
-    assert!(most_pages >= 3, "{most_pages}");
     pages.assert_all_released();
 }
 
