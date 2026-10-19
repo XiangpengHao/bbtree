@@ -132,8 +132,9 @@ impl InlineWidth {
 /// }
 ///
 /// let names = BBTreeMap::with_strategy(WithInlineKey);
-/// names.insert(UserName("ferris".to_string()), 7);
+/// names.insert(UserName("ferris".to_string()), 7)?;
 /// assert_eq!(names.get_copied(&UserName("ferris".to_string())), Some(7));
+/// # Ok::<(), bbtree::AllocError>(())
 /// ```
 pub trait InlineKey: Ord {
     /// How many bytes of each inline key the nodes keep, where the map uses

@@ -32,10 +32,10 @@ use core::borrow::Borrow;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
+use super::node::page::PageAllocator;
 use super::node::{Child, Node};
 use super::node_stack::{FirstEdge, MAX_DEPTH, NodeStackMut};
 use super::root::Tree;
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
@@ -51,7 +51,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     pub(crate) fn remove_entry<Q>(
         &mut self,
         key: &Q,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> Option<(K, V)>
     where
@@ -74,7 +74,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_first(
         &mut self,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> Option<(K, V)> {
         if !self.has_root() {
@@ -93,7 +93,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// frees pages as [`Self::remove_entry`] does.
     pub(crate) fn pop_last(
         &mut self,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> Option<(K, V)> {
         if !self.has_root() {
@@ -117,7 +117,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// # Panics
     ///
     /// If the node stack ends at no key.
-    pub(crate) fn remove(&mut self, alloc: &impl Allocator, length: &mut usize) -> (K, V) {
+    pub(crate) fn remove(&mut self, alloc: &impl PageAllocator, length: &mut usize) -> (K, V) {
         let (entry, changed) = self.take_out(alloc, length);
         self.refit_changed_fences(&changed);
         self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
@@ -129,7 +129,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// the tree's last entry.
     pub(crate) fn remove_and_go_to_next(
         &mut self,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> (K, V) {
         let (entry, changed) = self.take_out(alloc, length);
@@ -156,7 +156,11 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// Takes out the entry the node stack ends at, counting it out of `length`,
     /// and fixes the nodes up the node stack; returns it, and where the fixing
     /// changed fences, for [`Self::remove`] to refit.
-    fn take_out(&mut self, alloc: &impl Allocator, length: &mut usize) -> ((K, V), ChangedFences) {
+    fn take_out(
+        &mut self,
+        alloc: &impl PageAllocator,
+        length: &mut usize,
+    ) -> ((K, V), ChangedFences) {
         let entry_depth = self.depth();
         let entry_index = self.index();
         let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
@@ -209,7 +213,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         &mut self,
         next_slot: usize,
         must_reach: Option<usize>,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
         let mut changed = ChangedFences::new(self.depth(), next_slot, must_reach);
@@ -378,7 +382,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     fn fix_underfull_child<C: Child<K, V, S>>(
         self,
         index: usize,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> ChildFix {
         if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;

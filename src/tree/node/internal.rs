@@ -22,11 +22,10 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{SearchKey, Separator, Window, WindowedKey};
 use super::leaf::Leaf;
 use super::node_plan::NodePlan;
-use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
+use super::page::{FreshPage, NodeKind, NodePtr, PageAllocator, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
-use crate::allocator::Allocator;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// An internal node, by its page.
@@ -770,7 +769,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         index: usize,
         separator: Separator<K, S>,
         right_child: Node<K, V, S>,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> Insertion<K, S, Self> {
         if self.len() < Self::capacity() {
             self.insert_fit(index, separator, right_child);

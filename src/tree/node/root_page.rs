@@ -21,9 +21,8 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::leaf::Leaf;
-use super::page::{FreshPage, NodePtr, PageByType, PageType};
+use super::page::{FreshPage, NodePtr, PageAllocator, PageByType, PageType};
 use super::{Child, Node};
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
@@ -204,7 +203,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// returns it there, as a tree's top node on a plain page. The root page
     /// holds nothing afterwards: the caller makes it a node again, or frees
     /// it.
-    fn move_node_out(self, alloc: &impl Allocator) -> Node<K, V, S> {
+    fn move_node_out(self, alloc: &impl PageAllocator) -> Node<K, V, S> {
         let moved = match self.node() {
             Node::Leaf(_) => {
                 let page = FreshPage::<Leaf<K, V, S>>::allocate(alloc).into_raw();
@@ -226,7 +225,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// node as its only child. The new root, on both borders, is at the
     /// tree's shared prefix length (D50), as the old one was. Returns the
     /// page's new handle.
-    pub(in crate::tree) fn raise(self, alloc: &impl Allocator) -> Self {
+    pub(in crate::tree) fn raise(self, alloc: &impl PageAllocator) -> Self {
         let child = self.move_node_out(alloc);
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents

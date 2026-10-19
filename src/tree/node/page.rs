@@ -18,7 +18,7 @@ use super::leaf::Leaf;
 use super::node_plan::NodePlan;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
-use crate::allocator::Allocator;
+use crate::allocator::{AllocError, Allocator};
 use crate::inline_key::sealed::Sealed;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
@@ -117,6 +117,47 @@ impl<P> FreshPage<P> {
     }
 }
 
+/// Where the tree's operations take pages from and give them back to: the
+/// map's [`Allocator`], or, in a latched tree, the pages of one operation
+/// (`tree/latched/pages.rs`), which hands out pages it took beforehand. An
+/// operation has nothing to do about a failed allocation: the map's
+/// allocator ends the program, as std's collections do, and an operation
+/// of a latched tree that might fail takes its pages before it changes
+/// anything. The operations a latched tree runs take it; teardown, copies
+/// and bulk builds, which only the map's own allocator serves, take that.
+///
+/// # Safety
+///
+/// A page `allocate_page` returns is valid for reads and writes of
+/// `layout.size()` bytes, aligned to `layout.align()`, and in no other use
+/// until it is given back to `deallocate_page`. Neither method unwinds.
+pub(crate) unsafe trait PageAllocator {
+    /// A page for `layout`, of a non-zero size, with any contents.
+    fn allocate_page(&self, layout: Layout) -> NonNull<u8>;
+
+    /// Takes back the page at `page`.
+    ///
+    /// # Safety
+    ///
+    /// `page` was handed out by `allocate_page` of this allocator for
+    /// `layout`, and not given back since.
+    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout);
+}
+
+// SAFETY: the allocator's blocks are valid and apart until given back, and
+// it doesn't unwind (its contract); a failed allocation doesn't return.
+unsafe impl<A: Allocator + ?Sized> PageAllocator for A {
+    fn allocate_page(&self, layout: Layout) -> NonNull<u8> {
+        self.allocate_zeroed(layout)
+            .unwrap_or_else(|AllocError| handle_alloc_error(layout))
+    }
+
+    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout) {
+        // SAFETY: the caller's contract, which is the allocator's.
+        unsafe { self.deallocate(page, layout) }
+    }
+}
+
 /// The allocation boundary (D8): one allocator call per page, for the
 /// page's layout. A node's page is a multiple of 1 KiB, or of 512 bytes for
 /// internal nodes that keep no keys (D49). It is aligned to that step
@@ -124,28 +165,32 @@ impl<P> FreshPage<P> {
 /// node pointer is free for its kind's tag ([`NodePtr`]). A root page is
 /// aligned as the larger of the two kinds' (`root_page.rs`).
 impl<P: PageType> FreshPage<P> {
-    /// A page from `alloc`, the map's allocator.
-    ///
-    /// Calls [`handle_alloc_error`] if the allocation fails.
-    pub(crate) fn allocate(alloc: &impl Allocator) -> Self {
-        let layout = P::page_layout();
-        // `layout` has a non-zero size: nodes are at least 512 B.
-        let Ok(page) = alloc.allocate(layout) else {
-            handle_alloc_error(layout)
-        };
+    /// A page from `alloc`.
+    pub(crate) fn allocate(alloc: &impl PageAllocator) -> Self {
+        // The layout has a non-zero size: nodes are at least 512 B.
+        let page = alloc.allocate_page(P::page_layout());
         // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
         unsafe { Self::from_raw(page) }
     }
 
-    /// Gives the page back to `alloc`, the map's allocator.
-    pub(in crate::tree) fn deallocate(self, alloc: &impl Allocator) {
+    /// A page from `alloc`, the map's allocator; or, if it has none to
+    /// give, the layout it was asked for.
+    pub(crate) fn try_allocate(alloc: &impl Allocator) -> Result<Self, Layout> {
+        let layout = P::page_layout();
+        let page = alloc.allocate_zeroed(layout).map_err(|AllocError| layout)?;
+        // SAFETY: as in `allocate`.
+        Ok(unsafe { Self::from_raw(page) })
+    }
+
+    /// Gives the page back to `alloc`, which it came from.
+    pub(in crate::tree) fn deallocate(self, alloc: &impl PageAllocator) {
         let page = self.into_raw();
         // SAFETY: the page came from the map's allocator, `alloc`, for
         // `P::page_layout()`, the same every time for this type, and is used
         // by nothing else (type invariant); consuming `self` gives up the last
         // use of it.
-        unsafe { alloc.deallocate(page, P::page_layout()) }
+        unsafe { alloc.deallocate_page(page, P::page_layout()) }
     }
 }
 
@@ -158,7 +203,7 @@ impl<P> fmt::Debug for FreshPage<P> {
 impl<K, V, S: InlineKeyStrategy<K>> PageByType<K, V, S> {
     /// Gives the page back to `alloc`, the map's allocator, with its kind's
     /// layout.
-    pub(in crate::tree) fn deallocate(self, alloc: &impl Allocator) {
+    pub(in crate::tree) fn deallocate(self, alloc: &impl PageAllocator) {
         match self {
             Self::Leaf(page) => page.deallocate(alloc),
             Self::Internal(page) => page.deallocate(alloc),
@@ -224,31 +269,14 @@ pub(in crate::tree) struct LatchedNodeHeader {
 }
 
 impl LatchedNodeHeader {
-    /// Initializes the latch word of the latched tree's page at `page`, a
-    /// fresh page, unheld at the first version.
-    ///
-    /// # Safety
-    ///
-    /// `page` is a latched tree's page, allocated, which no other thread
-    /// reaches yet.
-    #[inline(always)]
-    pub(in crate::tree) unsafe fn initialize_latch(page: NonNull<u8>) {
-        // SAFETY: the latch word lies in the allocated page, aligned
-        // (caller); nothing else accesses it yet.
-        unsafe {
-            page.byte_add(offset_of!(Self, latch))
-                .cast::<u64>()
-                .write(0);
-        }
-    }
-
     /// The latch word of the latched tree's page at `page`, a node's of
     /// either kind or the root's, for as long as the caller picks.
     ///
     /// # Safety
     ///
     /// `page` is a latched tree's page, allocated while the caller uses the
-    /// latch, its latch word initialized (`tree/latched/pages.rs`).
+    /// latch, its latch word initialized: zeroed by the allocator, unheld at
+    /// the first version, or kept since (`tree/latched/pages.rs`).
     #[inline(always)]
     pub(in crate::tree) unsafe fn latch_of<'a>(page: NonNull<u8>) -> &'a NodeLatch {
         // SAFETY: a latched page's header is a `LatchedNodeHeader`, aligned,
@@ -886,7 +914,7 @@ pub(crate) use test_pages::TestPages;
 #[cfg(test)]
 mod test_pages {
     use core::alloc::Layout;
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
     use core::marker::PhantomData;
     use core::ptr::NonNull;
     use std::vec::Vec;
@@ -900,7 +928,7 @@ mod test_pages {
     /// An allocator for tests, of pages for a map with keys `K`, values `V`
     /// and strategy `S`, whose types the helpers that hand out typed pages
     /// take: it takes blocks from the global allocator, takes them back for
-    /// reuse, scribbled over, and frees them when dropped.
+    /// reuse, scribbled over until zeroed again, and frees them when dropped.
     ///
     /// It keeps each block's layout: a block given back is handed out again
     /// only for the same layout, and giving one back with another layout
@@ -910,11 +938,16 @@ mod test_pages {
     /// Blocks still out when it is dropped (owned by a leaked node) are
     /// never freed, so nothing can dangle; tests check
     /// [`TestPages::assert_all_released`] to catch such leaks.
+    ///
+    /// A test may give it a budget ([`TestPages::set_budget`]), past which
+    /// it has no block to give.
     pub(crate) struct TestPages<K, V, S = Auto> {
         /// Every block this pool allocated, with its layout.
         allocated: RefCell<Vec<(NonNull<u8>, Layout)>>,
         /// Blocks given back, with their layouts, ready for reuse.
         released: RefCell<Vec<(NonNull<u8>, Layout)>>,
+        /// How many more blocks it hands out; `None` for as many as asked.
+        budget: Cell<Option<usize>>,
         _marker: PhantomData<fn() -> (K, V)>,
         _strategy: PhantomData<fn() -> S>,
     }
@@ -924,9 +957,16 @@ mod test_pages {
             Self {
                 allocated: RefCell::new(Vec::new()),
                 released: RefCell::new(Vec::new()),
+                budget: Cell::new(None),
                 _marker: PhantomData,
                 _strategy: PhantomData,
             }
+        }
+
+        /// Makes it hand out `budget` more blocks, and then refuse every
+        /// one; with `None`, as many as asked, as when new.
+        pub(crate) fn set_budget(&self, budget: Option<usize>) {
+            self.budget.set(budget);
         }
 
         /// A page of type `P`, reusing the block given back last for that
@@ -970,17 +1010,27 @@ mod test_pages {
     }
 
     // SAFETY: every block comes from the global allocator, for its layout,
-    // and is handed out until given back, and then again only once taken
-    // off the released list; it is freed only when the pool is dropped, and
-    // only if given back by then. The pool has no clones.
+    // and is handed out zeroed until given back, and then again only once
+    // taken off the released list; it is freed only when the pool is
+    // dropped, and only if given back by then. The pool has no clones, and
+    // panics only on a block given back wrongly, which a map never does.
     unsafe impl<K, V, S> Allocator for TestPages<K, V, S> {
-        fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+        fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            match self.budget.get() {
+                Some(0) => return Err(AllocError),
+                Some(left) => self.budget.set(Some(left - 1)),
+                None => {}
+            }
             let mut released = self.released.borrow_mut();
             let reusable = (released.iter()).rposition(|&(_, page_layout)| page_layout == layout);
             if let Some(index) = reusable {
-                return Ok(released.remove(index).0);
+                let block = released.remove(index).0;
+                // SAFETY: the block was allocated by this pool for `layout`,
+                // and nothing uses it since it was given back.
+                unsafe { block.write_bytes(0, layout.size()) };
+                return Ok(block);
             }
-            let block = Global.allocate(layout)?;
+            let block = Global.allocate_zeroed(layout)?;
             self.allocated.borrow_mut().push((block, layout));
             Ok(block)
         }

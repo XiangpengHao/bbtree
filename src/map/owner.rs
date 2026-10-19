@@ -88,9 +88,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// ```
     /// use bbtree::BBTreeMap;
     /// let mut map = BBTreeMap::<u64, u64>::new();
-    /// map.insert(1, 10);
+    /// map.insert(1, 10)?;
     /// *map.get_mut(&1).unwrap() += 1;
     /// assert_eq!(map.get_copied(&1), Some(11));
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
@@ -156,10 +157,15 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> IntoIterator for BBTre
 }
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> Extend<(K, V)> for BBTreeMap<K, V, S, A> {
-    /// Inserts each entry, as [`BBTreeMap::insert`] does.
+    /// Inserts each entry, as [`BBTreeMap::insert`] does. If the allocator
+    /// has no page to give, calls
+    /// [`handle_alloc_error`](alloc::alloc::handle_alloc_error), as std's
+    /// collections do.
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, entries: T) {
         for (key, value) in entries {
-            self.insert(key, value);
+            if let Err(error) = self.insert(key, value) {
+                error.handle_alloc_error();
+            }
         }
     }
 }

@@ -54,12 +54,11 @@ use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::NodePtr;
+use super::node::page::{NodePtr, PageAllocator};
 use super::prefix::PrefixedKey;
 use super::root::Tree;
 use super::search::Found;
 use super::shared_prefix::SharedPrefix;
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// The deepest a leaf can be below the root. A non-root internal node has
@@ -687,7 +686,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     pub(in crate::tree) fn shrink_shared_prefix_for(
         &mut self,
         key: K,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> PrefixedKey<K> {
         self.tree.shrink_shared_prefix_for(key, alloc)
     }
@@ -855,7 +854,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     /// ([`Tree::raise`]): the root node moves to a page of its kind from
     /// `alloc`, under the root, which is now internal with no keys. The node
     /// stack then ends at the root, at its only edge.
-    pub(in crate::tree) fn ascend_raising(&mut self, alloc: &impl Allocator) -> Internal<K, V, S> {
+    pub(in crate::tree) fn ascend_raising(
+        &mut self,
+        alloc: &impl PageAllocator,
+    ) -> Internal<K, V, S> {
         if !self.stack.is_at_root() {
             return self.stack.ascend();
         }
@@ -952,7 +954,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     pub(in crate::tree) fn detach_lowering_an_emptied_root(
         &mut self,
         fixed_root: bool,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> bool {
         self.detach();
         let lowers =

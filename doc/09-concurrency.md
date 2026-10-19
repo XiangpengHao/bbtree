@@ -291,9 +291,10 @@ it holds. Any node held by another thread, or changed, lets go of all and
 starts over. Then it runs the unsync tree's operation along a node stack from the
 topmost node it holds, as if that were the root, on the tree as it is
 (`LatchedTree::change_held`), and lets go once all is done: a reader that
-read a node meanwhile fails its check. Pages it allocates come latched and
-stay so until then (`pages.rs`), and a change of the root's kind retags the
-tree's root pointer before the root is let go.
+read a node meanwhile fails its check. Pages it allocates it takes before
+it changes anything, and they come latched and stay so until then
+(`pages.rs`); a change of the root's kind retags the tree's root pointer
+before the root is let go.
 
 What each takes, so that the unsync tree's operation changes nothing and reads no
 separator it doesn't hold:
@@ -434,9 +435,15 @@ The root page alone changes kind, in place, when the tree grows from a
 leaf or lowers to one; readers check a node's version before following an
 edge they read from it.
 
-Fresh internal and root pages come zeroed, so that every edge a reader may
-read before its check is initialized; a fresh leaf gets its latch word
-alone, as a leaf is read past what its node writes only under its latch.
+Fresh pages come zeroed from the map's allocator (D8): a latch word
+unheld at the first version, and every edge a reader may read before its
+check initialized.
+
+A split takes every page it allocates before it changes anything, once it
+holds the nodes it changes, which tell how far it goes: free pages of
+their kind first, then fresh ones. An allocator with no page to give fails
+the insert whole, and the entry goes back to the caller; the pages taken
+by then go on the free lists.
 
 ## Owners
 

@@ -18,7 +18,7 @@ use core::borrow::Borrow;
 use core::fmt;
 use core::ops::{Bound, ControlFlow, RangeBounds};
 
-use crate::allocator::{Allocator, Global};
+use crate::allocator::{Allocator, Global, InsertError};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::latched::{LatchedTree, ReadOrInsert, Replace};
 
@@ -128,8 +128,9 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, u64>::new();
     /// assert!(map.is_empty());
-    /// map.insert(1, 10);
+    /// map.insert(1, 10)?;
     /// assert!(!map.is_empty());
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     pub fn is_empty(&self) -> bool
     where
@@ -154,9 +155,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// ```
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, u64>::new();
-    /// map.insert(1, 10);
+    /// map.insert(1, 10)?;
     /// assert_eq!(map.get_copied(&1), Some(10));
     /// assert_eq!(map.get_copied(&2), None);
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     #[inline]
     pub fn get_copied<Q>(&self, key: &Q) -> Option<V>
@@ -289,8 +291,21 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// Inserts `key` and `value`, and returns `None`; or, if the map holds
     /// an equal key, keeps that key, drops `key`, and returns the value it
     /// replaces, as std's `BTreeMap::insert` does.
+    ///
+    /// # Errors
+    ///
+    /// If the allocator has no page for a node the insert makes, the map is
+    /// unchanged, and the entry comes back ([`InsertError`]).
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    /// let map = BBTreeMap::<u64, &str>::new();
+    /// assert_eq!(map.insert(1, "one")?, None);
+    /// assert_eq!(map.insert(1, "again")?, Some("one"));
+    /// # Ok::<(), bbtree::AllocError>(())
+    /// ```
     #[inline]
-    pub fn insert(&self, key: K, value: V) -> Option<V>
+    pub fn insert(&self, key: K, value: V) -> Result<Option<V>, InsertError<K, V>>
     where
         K: Ord,
     {
@@ -302,8 +317,17 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// `f` sees the entry as the map stores it; if the map held one already,
     /// it drops `key` and `value`. `f` runs while no other thread reads or
     /// changes the entry; on a new one, just before it goes in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::insert`]'s; `f` doesn't run then.
     #[inline]
-    pub fn get_or_insert<R>(&self, key: K, value: V, f: impl FnOnce(&K, &V) -> R) -> R
+    pub fn get_or_insert<R>(
+        &self,
+        key: K,
+        value: V,
+        f: impl FnOnce(&K, &V) -> R,
+    ) -> Result<R, InsertError<K, V>>
     where
         K: Ord,
     {

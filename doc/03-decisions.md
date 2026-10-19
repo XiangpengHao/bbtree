@@ -49,11 +49,17 @@ alone, and the tree makes each block a node of its kind, a leaf, an internal
 node or the root page, with that kind's layout (D21).
 
 - **Trait:** `Allocator` (`allocator.rs`), public: the part of std's unstable
-  `core::alloc::Allocator` a map needs, `allocate(&self, Layout)` and
+  `core::alloc::Allocator` a map needs, `allocate_zeroed(&self, Layout)` and
   `unsafe deallocate(&self, ptr, Layout)`, with std's names and contract (an
   `unsafe trait`; a clone is the same allocator), so it works on stable.
   `Global`, the global allocator, is the default; `&A` is an allocator too,
   to share one between maps.
+- **Zeroed pages:** every page comes zeroed, the allocator's job, which
+  some do for free (fresh memory from the OS). The latched tree needs it,
+  for latch words and the edges optimistic readers read (09-concurrency.md).
+- **Never unwinds:** part of the trait's safety contract, as for
+  `GlobalAlloc`. The tree calls the allocator in the middle of splits, and
+  promises nothing about an unwind there.
 - **In types:** `unsync::BBTreeMap<K, V, S = Auto, A: Allocator + Clone =
   Global>`, and the same for the set (the shared `BBTreeMap` takes any
   `A: Allocator`): the strategy before the allocator, so opting
@@ -62,7 +68,10 @@ node or the root page, with that kind's layout (D21).
   `with_strategy`, `Default`, `FromIterator` and `From` stay `Global`-only,
   as std's do.
 - **Ownership:** the map holds the allocator and passes `&A` to every tree
-  operation that allocates or frees a page; the tree stores none. A page's
+  operation that allocates or frees a page; the tree stores none. The
+  operations a latched tree runs take a crate-private `PageAllocator`
+  instead, which hands out pages, of any contents, and doesn't fail: the
+  map's allocator, or a latched operation's pages taken beforehand. A page's
   type (`FreshPage<P>`) carries its layout, so a page goes back with the
   layout it came with; that it goes back to the allocator it came from is
   a convention of the tree's code, as in std's btree, not a type. What
@@ -70,8 +79,16 @@ node or the root page, with that kind's layout (D21).
   holds a clone; `clone` and `split_off` give the new map one.
   `append` moves entries, not pages, so maps with different allocators of
   one type append soundly; the set operators build on the left set's.
-- **Failure:** a failed allocation calls `handle_alloc_error`, as std's
-  collections do.
+- **Failure:** `allocate_zeroed` returns `AllocError`. The unsync map calls
+  `handle_alloc_error`, as std's collections do, wherever the page is
+  asked for, the middle of a split included. The shared `BBTreeMap` hands
+  it to the caller: `insert`, `get_or_insert` and each entry of
+  `insert_many` return `InsertError`, with the entry, and leave the map
+  unchanged. A split counts the pages it takes from the nodes it holds (a
+  leaf's, one per internal node below the one with room, and one for a
+  root that moves out of the root page), and takes them, free pages first,
+  before it changes anything. `Extend` and `FromIterator` call
+  `handle_alloc_error`.
 - **Cost of the parameter:** with `Global`, instructions per operation at 1M
   entries (fat-LTO probe, mimalloc): get hit and miss, remove and
   `pop_first` unchanged; insert +0.5 (`u64`) and +1.5 (`String`).
@@ -977,7 +994,8 @@ Design and measurements in 07-node-plan.md.
   never leaves what unchecked code trusts (lengths, node minimums) half
   done (D26, D37). A change that must call it inside one goes behind an
   abort-on-unwind guard, as a key's hash tag (D36), and the window an
-  internal node reads again from its key (D43), do.
+  internal node reads again from its key (D43), do. The allocator, called
+  inside splits, must not unwind at all (D8).
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
   (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
@@ -1388,10 +1406,6 @@ contracts, access, positions and room, the code that holds it keeps by hand
 
 ## Proposed, not decided
 
-- **Exact allocation count before mutating:** insert counts the full nodes on
-  its node stack from the leaf upward, allocates that many first, and so can
-  fail without changing the tree. Name of the fallible insert (`try_insert` is
-  taken in std).
 - **Default allocator:** carve pages from large chunks (≥ 256 KB). Open:
   chunks per map or per allocator instance; when chunks go back to the OS.
 - **Stable-first:** the library builds on stable; nightly only for fuzzing and

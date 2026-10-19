@@ -34,5 +34,6 @@ pub mod inspect {
 /// [`BBTreeMap`], an ordered map that threads share, and the types that go
 /// with it.
 pub mod bbtree_map {
+    pub use crate::allocator::InsertError;
     pub use crate::map::{BBTreeMap, IntoIter, IterMut, RangeCloned};
 }

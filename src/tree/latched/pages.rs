@@ -10,21 +10,25 @@
 //! reaches it reads a node of the kind its pointer says, and its version
 //! check fails. The pages go back to the allocator when the map is dropped.
 //!
-//! An operation allocates and frees through [`NodePages`]. It hands out a
-//! free page of the kind first, and holds every node page it hands out
-//! until the operation is done. It keeps the pages the operation frees
-//! until then too, after the operation lets go of its nodes: a page is free
-//! only once its latch word says it changed.
+//! An operation allocates and frees through [`NodePages`]. It takes the
+//! pages an operation will allocate before the operation changes anything,
+//! free pages of their kind first, so that an allocator with none to give
+//! fails the operation whole. It holds every node page it hands out until
+//! the operation is done. It keeps the pages the operation frees until then
+//! too, after the operation lets go of its nodes: a page is free only once
+//! its latch word says it changed.
 
+use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
 use core::cell::RefCell;
+use core::iter;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use super::super::interleaving::Interleaving;
 use super::super::node::latch::Version;
-use super::super::node::page::LatchedNodeHeader;
+use super::super::node::page::{LatchedNodeHeader, PageAllocator};
 use super::super::node_stack::MAX_DEPTH;
 use crate::allocator::{AllocError, Allocator};
 
@@ -115,6 +119,15 @@ impl FreeLists {
         }
     }
 
+    /// The free list of leaves' pages if `is_leaf`, else of internal nodes'.
+    fn list(&self, is_leaf: bool) -> &FreeList {
+        if is_leaf {
+            &self.leaves
+        } else {
+            &self.internals
+        }
+    }
+
     /// Gives every free page back to `alloc`, leaves for `leaf` and internal
     /// nodes for `internal`, once no other thread reaches the tree.
     pub(super) fn deallocate_all(
@@ -134,20 +147,22 @@ impl FreeLists {
 }
 
 /// The pages one operation on a latched tree allocates and frees: an
-/// allocator over the map's, `alloc`, which the node code takes as any.
+/// allocator of node pages over the map's, `alloc`, which the node code
+/// takes as any.
 ///
-/// - Allocating a leaf's or an internal node's page takes one off the free
-///   list of its kind if there is one, as it was; otherwise a fresh page
-///   from `alloc` ([`Self::allocate_fresh`]). Either way, the page comes
-///   latched exclusively, and stays so until this is dropped: once the
-///   operation links it into the tree, other threads find it held until
-///   the operation is done with it.
+/// - The operation first takes the pages it will allocate
+///   ([`Self::reserve`]): each off the free list of its kind if there is
+///   one, as it was; otherwise fresh from `alloc`, zeroed. Allocating a
+///   leaf's or an internal node's page then hands out one of those, latched
+///   exclusively, and it stays so until this is dropped: once the operation
+///   links it into the tree, other threads find it held until the operation
+///   is done with it.
 /// - Freeing a node page keeps it until this is dropped, then puts it on
 ///   the free list of its kind. The operation drops this last, after it
 ///   lets go of its nodes, which tells readers the page changed; only then
 ///   may another thread take the page.
-/// - Any other page, the root's, comes fresh and unlatched, and goes back
-///   to `alloc` at once: the tree keeps its root page for life.
+///
+/// It deals in node pages only: the tree keeps its root page for life.
 pub(super) struct NodePages<'t, A> {
     free: &'t FreeLists,
     alloc: &'t A,
@@ -157,15 +172,31 @@ pub(super) struct NodePages<'t, A> {
 }
 
 /// The node pages an operation took:
+/// - those it reserved and hasn't allocated yet, each with whether it is a
+///   leaf's;
 /// - those it allocated, each latched at a version: a page per level split,
 ///   and one for a raised root's node;
 /// - those it freed, each with whether it is a leaf's: a page per level
 ///   merged, and the root's child when the root lowers.
 struct TakenPages {
+    reserved: [Option<(NonNull<u8>, bool)>; MAX_DEPTH + 2],
+    reserved_len: usize,
     allocated: [Option<(NonNull<u8>, Version)>; MAX_DEPTH + 2],
     allocated_len: usize,
     freed: [Option<(NonNull<u8>, bool)>; MAX_DEPTH + 2],
     freed_len: usize,
+}
+
+impl TakenPages {
+    /// A reserved page, a leaf's if `is_leaf`, taken off the reserved ones.
+    fn take_reserved(&mut self, is_leaf: bool) -> Option<NonNull<u8>> {
+        let index = (self.reserved[..self.reserved_len].iter())
+            .position(|page| page.is_some_and(|(_, leaf)| leaf == is_leaf))?;
+        let last = self.reserved_len - 1;
+        self.reserved.swap(index, last);
+        self.reserved_len = last;
+        self.reserved[last].take().map(|(page, _)| page)
+    }
 }
 
 impl<'t, A: Allocator> NodePages<'t, A> {
@@ -179,6 +210,8 @@ impl<'t, A: Allocator> NodePages<'t, A> {
             leaf,
             internal,
             taken: RefCell::new(TakenPages {
+                reserved: [None; MAX_DEPTH + 2],
+                reserved_len: 0,
                 allocated: [None; MAX_DEPTH + 2],
                 allocated_len: 0,
                 freed: [None; MAX_DEPTH + 2],
@@ -187,34 +220,41 @@ impl<'t, A: Allocator> NodePages<'t, A> {
         }
     }
 
-    /// The free list for pages of `layout`, if they are a node kind's.
-    fn list(&self, layout: Layout) -> Option<&'t FreeList> {
-        if layout == self.leaf {
-            Some(&self.free.leaves)
-        } else if layout == self.internal {
-            Some(&self.free.internals)
-        } else {
-            None
+    /// A page for a new node, a leaf if `is_leaf`: one off the free list of
+    /// its kind, as it was; otherwise fresh from `alloc`, zeroed, so that
+    /// its latch word is unheld at the first version, and every edge an
+    /// optimistic reader may read before its check is initialized.
+    fn take(&self, is_leaf: bool) -> Result<NonNull<u8>, AllocError> {
+        match self.free.list(is_leaf).pop() {
+            Some(page) => Ok(page),
+            None => self.alloc.allocate_zeroed(self.layout(is_leaf)),
         }
     }
 
-    /// A page fresh from `alloc` for `layout`, its latch word unheld. A
-    /// leaf's page is read past what its node writes only under its latch.
-    /// Any other page, an internal node's or the root's (which may hold
-    /// one), is zeroed, so that every edge an optimistic reader may read
-    /// before its check is initialized.
-    fn allocate_fresh(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        let page = self.alloc.allocate(layout)?;
-        // SAFETY: the block was just allocated for `layout`, a latched tree's
-        // page, which no other thread reaches yet.
-        unsafe {
-            if layout == self.leaf {
-                LatchedNodeHeader::initialize_latch(page);
-            } else {
-                page.write_bytes(0, layout.size());
-            }
+    /// Takes `leaves` leaf pages and `internals` internal node pages, every
+    /// page the operation will allocate, before it changes anything; or, if
+    /// `alloc` has none to give, takes none, and returns the layout it was
+    /// asked for.
+    pub(super) fn reserve(&self, leaves: usize, internals: usize) -> Result<(), Layout> {
+        let mut taken = self.taken.borrow_mut();
+        debug_assert_eq!(
+            taken.reserved_len, 0,
+            "an operation reserves its pages once"
+        );
+        let kinds = iter::repeat_n(true, leaves).chain(iter::repeat_n(false, internals));
+        for is_leaf in kinds {
+            let Ok(page) = self.take(is_leaf) else {
+                for (page, is_leaf) in taken.reserved.iter_mut().filter_map(Option::take) {
+                    self.free.list(is_leaf).push(page);
+                }
+                taken.reserved_len = 0;
+                return Err(self.layout(is_leaf));
+            };
+            let len = taken.reserved_len;
+            taken.reserved[len] = Some((page, is_leaf));
+            taken.reserved_len += 1;
         }
-        Ok(page)
+        Ok(())
     }
 
     /// Whether the operation freed the node page at `page`.
@@ -227,59 +267,74 @@ impl<'t, A: Allocator> NodePages<'t, A> {
     }
 }
 
-// SAFETY: every block is `alloc`'s, for its layout: one taken off a free
-// list was allocated for the same layout, and is in no node any more. A
-// freed block goes back to `alloc` only through `FreeLists::deallocate_all`,
-// or at once for a page that is no node's, whose layout it came with.
-unsafe impl<A: Allocator> Allocator for NodePages<'_, A> {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        let Some(list) = self.list(layout) else {
-            return self.allocate_fresh(layout);
-        };
-        let page = match list.pop() {
-            Some(page) => page,
-            None => self.allocate_fresh(layout)?,
-        };
-        // SAFETY: the page is a node page of the tree's, allocated, its latch
-        // word initialized fresh or kept since. A thread that reached a free
-        // page through a stale pointer may hold it a moment, and waits for
-        // nothing meanwhile.
-        let version = unsafe { LatchedNodeHeader::latch_of(page) }.lock_exclusive();
+// SAFETY: every page is `alloc`'s, for its kind's layout: one taken off a
+// free list was allocated for the same layout, and is in no node any more.
+// A freed page goes back to `alloc` only through
+// `FreeLists::deallocate_all`. Nothing here unwinds but the debug
+// assertions on the operation's own count.
+unsafe impl<A: Allocator> PageAllocator for NodePages<'_, A> {
+    fn allocate_page(&self, layout: Layout) -> NonNull<u8> {
+        let is_leaf = self.is_leaf(layout);
         let mut taken = self.taken.borrow_mut();
+        let reserved = taken.take_reserved(is_leaf);
+        debug_assert!(
+            reserved.is_some(),
+            "an operation allocates only pages it reserved"
+        );
+        let page = reserved.unwrap_or_else(|| {
+            self.take(is_leaf)
+                .unwrap_or_else(|AllocError| handle_alloc_error(layout))
+        });
+        // SAFETY: the page is a node page of the tree's, allocated, its latch
+        // word zeroed fresh or kept since. A thread that reached a free page
+        // through a stale pointer may hold it a moment, and waits for nothing
+        // meanwhile.
+        let version = unsafe { LatchedNodeHeader::latch_of(page) }.lock_exclusive();
         let len = taken.allocated_len;
         taken.allocated[len] = Some((page, version));
         taken.allocated_len += 1;
-        Ok(page)
+        page
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        match self.list(layout) {
-            Some(_) => {
-                let mut taken = self.taken.borrow_mut();
-                let len = taken.freed_len;
-                taken.freed[len] = Some((ptr, layout == self.leaf));
-                taken.freed_len += 1;
-            }
-            // SAFETY: forwarded.
-            None => unsafe { self.alloc.deallocate(ptr, layout) },
-        }
+    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout) {
+        let is_leaf = self.is_leaf(layout);
+        let mut taken = self.taken.borrow_mut();
+        let len = taken.freed_len;
+        taken.freed[len] = Some((page, is_leaf));
+        taken.freed_len += 1;
+    }
+}
+
+impl<A> NodePages<'_, A> {
+    /// Whether pages of `layout`, a node kind's, are leaves'.
+    fn is_leaf(&self, layout: Layout) -> bool {
+        debug_assert!(
+            layout == self.leaf || layout == self.internal,
+            "a latched tree's operations deal in node pages only"
+        );
+        layout == self.leaf
+    }
+
+    /// The layout of leaves' pages if `is_leaf`, else of internal nodes'.
+    fn layout(&self, is_leaf: bool) -> Layout {
+        if is_leaf { self.leaf } else { self.internal }
     }
 }
 
 impl<A> Drop for NodePages<'_, A> {
     fn drop(&mut self) {
         let taken = self.taken.get_mut();
+        debug_assert_eq!(
+            taken.reserved_len, 0,
+            "an operation allocates every page it reserved"
+        );
         for (page, version) in taken.allocated[..taken.allocated_len].iter().flatten() {
             // SAFETY: the page is a node page the operation allocated and
             // latched, still allocated: on a free list at most.
             unsafe { LatchedNodeHeader::latch_of(*page) }.unlock_exclusive(*version);
         }
         for &(page, is_leaf) in taken.freed[..taken.freed_len].iter().flatten() {
-            if is_leaf {
-                self.free.leaves.push(page);
-            } else {
-                self.free.internals.push(page);
-            }
+            self.free.list(is_leaf).push(page);
         }
     }
 }

@@ -39,11 +39,12 @@ use super::super::node::Node;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::{Latched, Version};
 use super::super::node::leaf::{CandidateLine, Leaf};
+use super::super::node::page::PageAllocator;
 use super::LatchedTree;
 use super::descent::{HeldLeaf, RootRead};
 use super::insert::Replace;
 use super::lookup::{RacingRead, Unsettled};
-use crate::allocator::Allocator;
+use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
 
 /// The leaf changed after the lane read it, or the separator its key
@@ -264,14 +265,14 @@ struct LeafLane<'t, 'q, K, V, S, Q: ?Sized> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// Inserts `entries` in input order, and returns each replaced value, as
-    /// separate [`Self::insert`]s with [`Replace`] do; pages come from
-    /// `alloc`.
+    /// Inserts `entries` in input order, and returns each replaced value, or
+    /// the entry back if `alloc` had no page for it, as separate
+    /// [`Self::insert`]s with [`Replace`] do; pages come from `alloc`.
     pub(crate) fn insert_many<const N: usize>(
         &self,
         entries: [(K, V); N],
         alloc: &impl Allocator,
-    ) -> [Option<V>; N]
+    ) -> [Result<Option<V>, InsertError<K, V>>; N]
     where
         K: Ord,
     {
@@ -286,7 +287,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 // single-key insert does without a descent.
                 let mut first = Some(first);
                 return core::array::from_fn(|_| match first.take() {
-                    Some(first) => first,
+                    Some(first) => Ok(first),
                     None => {
                         let (key, value) = entries.next().expect("one entry per key");
                         self.insert(key, value, Replace, alloc)
@@ -314,7 +315,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         &self,
         entries: [(K, V); N],
         alloc: &impl Allocator,
-    ) -> [Option<V>; N]
+    ) -> [Result<Option<V>, InsertError<K, V>>; N]
     where
         K: Ord,
     {
@@ -345,7 +346,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                             later.version = version.next();
                         }
                     }
-                    return previous;
+                    return Ok(previous);
                 }
                 Err(fallback) => fallback,
             };
@@ -376,7 +377,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         destination: Destination<K, V, S>,
         key: K,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> Result<Option<V>, Fallback<K, V>>
     where
         K: Ord,

@@ -19,9 +19,13 @@
 //!   - the path from that node up to the nearest nodes holding its fences,
 //!     which the halves' prefixes are fit to (`tree/prefix.rs`).
 //!
-//!   Then it runs [`NodeStackMut::insert_prefixed`] along them. The pages
-//!   it allocates come latched, and stay so until it is done (`pages.rs`).
-//!   A split of the last leaf points appends at the new last leaf.
+//!   Then it takes every page the split allocates, and runs
+//!   [`NodeStackMut::insert_prefixed`] along them. The pages come latched,
+//!   and stay so until it is done (`pages.rs`). A split of the last leaf
+//!   points appends at the new last leaf.
+//! - **A failed allocation** fails the insert before it changes anything,
+//!   and gives the entry back ([`InsertError`]): the root page of a new
+//!   tree, or a page a split takes.
 //!
 //! [`NodeStackMut::insert_prefixed`]: super::super::node_stack::NodeStackMut::insert_prefixed
 
@@ -33,12 +37,14 @@ use super::super::node::inline_keys::SearchKey;
 use super::super::node::internal::Internal;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
+use super::super::node::page::PageAllocator;
 use super::super::node_stack::LastEdge;
 use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf, TreePath};
 use super::held::HeldNodes;
-use crate::allocator::Allocator;
+use super::pages::NodePages;
+use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
 
 /// What an insert does where the tree holds a key equal to its own, and
@@ -97,7 +103,8 @@ impl<K, V, R, F: FnOnce(&K, &V) -> R> InsertPolicy<K, V> for ReadOrInsert<F> {
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Inserts `key` and `value`, or, if an equal key is there, keeps it and
     /// does what `policy` does; returns what `policy` returns. Pages come
-    /// from `alloc`.
+    /// from `alloc`; if it has none to give, the tree is unchanged, and the
+    /// entry comes back.
     #[inline]
     pub(crate) fn insert<P: InsertPolicy<K, V>>(
         &self,
@@ -105,15 +112,17 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         value: V,
         policy: P,
         alloc: &impl Allocator,
-    ) -> P::Output
+    ) -> Result<P::Output, InsertError<K, V>>
     where
         K: Ord,
     {
-        if self.root_page().is_none() {
-            self.start_tree(&self.pages(alloc));
+        if self.root_page().is_none()
+            && let Err(layout) = self.start_tree(alloc)
+        {
+            return Err(InsertError::new(key, value, layout));
         }
         let (mut key, value, policy) = match self.append(key, value, policy) {
-            Ok(output) => return output,
+            Ok(output) => return Ok(output),
             Err(entry) => entry,
         };
         loop {
@@ -124,7 +133,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 continue;
             };
             return match self.insert_into(&held, at_separator, key, value, policy, alloc) {
-                Ok(output) => output,
+                Ok(output) => Ok(output),
                 Err((key, value, policy, _)) => {
                     drop(held);
                     self.insert_splitting(key, value, policy, alloc)
@@ -144,7 +153,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         key: K,
         value: V,
         policy: P,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> Result<P::Output, (K, V, P, usize)>
     where
         K: Ord,
@@ -179,7 +188,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         &self,
         key: K,
         leaf: Leaf<K, V, Latched<S>>,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> PrefixedKey<K> {
         if self.is_root(leaf) {
             self.change_held(|tree| tree.shrink_shared_prefix_for(key, alloc))
@@ -189,7 +198,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// [`Self::insert`] where the leaf was full: searches again, keeping
-    /// the internal nodes it goes through, and splits, until it inserts.
+    /// the internal nodes it goes through, and splits, until it inserts or
+    /// `alloc` has no page for the split.
     #[inline(never)]
     pub(super) fn insert_splitting<P: InsertPolicy<K, V>>(
         &self,
@@ -197,7 +207,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         mut value: V,
         mut policy: P,
         alloc: &impl Allocator,
-    ) -> P::Output
+    ) -> Result<P::Output, InsertError<K, V>>
     where
         K: Ord,
     {
@@ -215,11 +225,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             let edge;
             (key, value, policy, edge) =
                 match self.insert_into(&held, at_separator, key, value, policy, alloc) {
-                    Ok(output) => return output,
+                    Ok(output) => return Ok(output),
                     Err(full) => full,
                 };
             match self.split(&path, &held, edge, key, value, policy, &pages) {
-                Ok(output) => return output,
+                Ok(inserted) => return inserted,
                 Err(entry) => (key, value, policy) = entry,
             }
             // Another thread holds a node the split needs.
@@ -228,14 +238,19 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Splits `held`, the full leaf `path` leads to, and inserts `key` and
-    /// `value` at its `edge`, with `NodeStackMut::insert_prefixed`. The
-    /// split goes up as far as it must, and the halves' prefixes are fit to
-    /// their fences. If a node it takes is held by another thread or changed
-    /// since the descent read it, it changes nothing and gives all back.
-    /// Pages come from `pages`.
+    /// `value` at its `edge`, with `NodeStackMut::insert_prefixed`; or, if
+    /// `pages` has none for the split, changes nothing and gives the entry
+    /// back. The split goes up as far as it must, and the halves' prefixes
+    /// are fit to their fences. If a node it takes is held by another
+    /// thread or changed since the descent read it, it changes nothing and
+    /// gives all back, to try again.
     #[expect(
         clippy::too_many_arguments,
         reason = "a refused split gives the entry and its policy back"
+    )]
+    #[expect(
+        clippy::type_complexity,
+        reason = "the insert's outcome, or all back to try again"
     )]
     fn split<P: InsertPolicy<K, V>>(
         &self,
@@ -245,8 +260,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         key: K,
         value: V,
         policy: P,
-        pages: &impl Allocator,
-    ) -> Result<P::Output, (K, V, P)>
+        pages: &NodePages<'_, impl Allocator>,
+    ) -> Result<Result<P::Output, InsertError<K, V>>, (K, V, P)>
     where
         K: Ord,
     {
@@ -259,6 +274,20 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let mut held_nodes = HeldNodes::new();
         if !held_nodes.take_path(path, top) {
             return Err((key, value, policy));
+        }
+        // The pages the split allocates (`tree/insert.rs`), which the nodes
+        // it holds tell: one for the leaf's right half, and one for each
+        // internal node below the one with room, which splits too. A root
+        // that splits also moves out of the root page, to a page of its kind,
+        // as the tree grows.
+        let splits = path.depth() - room.map_or(0, |level| level + 1);
+        let (leaves, internals) = match (room, path.depth()) {
+            (None, 0) => (2, 0),
+            (None, _) => (1, splits + 1),
+            (Some(_), _) => (1, splits),
+        };
+        if let Err(layout) = pages.reserve(leaves, internals) {
+            return Ok(Err(InsertError::new(key, value, layout)));
         }
         let leaf = held.leaf();
         let was_last_leaf = self.is_rightmost_leaf(leaf);
@@ -281,6 +310,6 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             self.point_appends_to(took_separator.border_leaf::<LastEdge>());
         }
         drop(held_nodes);
-        Ok(output)
+        Ok(Ok(output))
     }
 }

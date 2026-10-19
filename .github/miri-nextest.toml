@@ -43,4 +43,5 @@ default-filter = """
   | test(=unsync::map::tests::batch::empty_single_and_repeated_keys)
   | test(=unsync::map::tests::batch::replaced_and_stored_values_drop_once)
   | test(=map::tests::a_small_map_matches_std)
+  | test(=map::tests::refused_pages_fail_their_own_entries)
 """

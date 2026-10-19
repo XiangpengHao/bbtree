@@ -25,12 +25,11 @@ use core::mem;
 
 use super::node::inline_keys::SearchKey;
 use super::node::leaf::Leaf;
-use super::node::page::FreshPage;
+use super::node::page::{FreshPage, PageAllocator};
 use super::node::{Insertion, Node};
 use super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::prefix::PrefixedKey;
 use super::root::Tree;
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
@@ -56,15 +55,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///   (`prefix.rs`), which calls `InlineKey` again once the entry is in
     ///   and counted. A panic then leaves a valid tree that has the entry.
     /// - `alloc` is called on the way back up, possibly after the leaf has
-    ///   changed. A failed allocation calls `handle_alloc_error`, which
-    ///   aborts by default; an allocator that panics leaves a memory-safe
-    ///   tree that is missing entries.
+    ///   changed; it doesn't unwind (D8).
     #[inline(always)]
     pub(crate) fn insert(
         &mut self,
         key: K,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> Option<V>
     where
@@ -112,7 +109,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         &mut self,
         key: PrefixedKey<K>,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> Option<V>
     where
@@ -136,7 +133,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     /// Makes a new tree in `tree`, which has none, from `alloc`, and returns
     /// a node stack at the only edge of its root, an empty leaf. A vacant
     /// entry of a map without a tree inserts there ([`Self::insert`]).
-    pub(crate) fn at_new_root(tree: &'a mut Tree<K, V, S>, alloc: &impl Allocator) -> Self {
+    pub(crate) fn at_new_root(tree: &'a mut Tree<K, V, S>, alloc: &impl PageAllocator) -> Self {
         debug_assert!(!tree.has_root(), "a new tree in place of one");
         *tree = Tree::new(alloc);
         let mut stack = Self::new(tree);
@@ -155,7 +152,13 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
     ///
     /// If the node stack ends at no leaf edge.
     #[inline]
-    pub(crate) fn insert(&mut self, key: K, value: V, alloc: &impl Allocator, length: &mut usize) {
+    pub(crate) fn insert(
+        &mut self,
+        key: K,
+        value: V,
+        alloc: &impl PageAllocator,
+        length: &mut usize,
+    ) {
         let key = self.shrink_shared_prefix_for(key, alloc);
         self.insert_prefixed(key, value, alloc, length);
     }
@@ -169,7 +172,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         &mut self,
         key: PrefixedKey<K>,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) {
         let index = self.index();
@@ -193,7 +196,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         &mut self,
         key: PrefixedKey<K>,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
         length: &mut usize,
     ) {
         let index = self.index();

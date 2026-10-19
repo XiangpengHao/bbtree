@@ -425,7 +425,8 @@ impl<K: BenchKey, V: BenchValue, S: InlineKeyStrategy<K> + Default> MapUnderTest
     }
 
     fn insert(&mut self, key: K, value: V) {
-        if self.map.insert(key, value).is_none() {
+        let replaced = (self.map.insert(key, value)).expect("the global allocator has memory");
+        if replaced.is_none() {
             self.entries += 1;
         }
     }
