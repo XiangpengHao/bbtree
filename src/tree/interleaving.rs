@@ -33,13 +33,23 @@ impl Interleaving {
     }
 
     /// One round of waiting for another thread, `spins` spin hints long.
-    /// Under Shuttle it is a single yield instead, which tells the scheduler
-    /// to run another thread: no spinning frees what this one waits for.
+    /// Under Shuttle it yields instead, which tells the scheduler to run
+    /// another thread: no spinning frees what this one waits for. It yields
+    /// a random number of times, from once to once more than the round's
+    /// doublings, as real waits vary in length. Threads that wait exactly
+    /// alike retry in step: removals of neighboring keys, each holding its
+    /// leaf and trying its neighbor's, can collide in every round of a
+    /// deterministic schedule, which Shuttle reports as a livelock.
     #[inline(always)]
     pub(in crate::tree) fn wait(spins: u32) {
         #[cfg(all(test, shuttle))]
         if shuttle::current::try_get_current_task().is_some() {
-            shuttle::hint::spin_loop();
+            use shuttle::rand::Rng;
+            let doublings = spins.max(1).ilog2();
+            let yields = 1 + shuttle::rand::thread_rng().gen_range(0..=doublings + 1);
+            for _ in 0..yields {
+                shuttle::hint::spin_loop();
+            }
             return;
         }
         for _ in 0..spins {
