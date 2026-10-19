@@ -34,13 +34,10 @@ use super::type_identity::{ByteString, SameType, StdInteger};
 use super::vector_count::VectorCount;
 use crate::inline_key::sealed::InlineKeySource;
 use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
+use crate::proof::SearchBytes;
 
 /// The bytes of a window, whatever a node keeps of it.
 const WINDOW_LEN: usize = size_of::<InlineWord>();
-
-/// How many bytes a search's check against what every key shares tests for
-/// equality at once ([`SearchBytes::cmp_shared`]).
-const SHARED_PREFIX_CHUNK_LEN: usize = 4 * WINDOW_LEN;
 
 /// How keys `K` get their inline keys under a map's strategy: the strategy's
 /// [`InlineKeySource`], resolved for `K`.
@@ -426,142 +423,6 @@ impl Window {
     }
 }
 
-/// The bytes of a std byte string being searched for. Windows read these
-/// bytes directly: a search visits only a few prefix lengths, so preparing
-/// every possible window would copy mostly bytes that it never reads. Std
-/// byte strings' `InlineKey::cmp_from` compares them too.
-#[derive(Clone, Copy)]
-pub(crate) struct SearchBytes<'q> {
-    bytes: &'q [u8],
-}
-
-impl<'q> SearchBytes<'q> {
-    #[inline]
-    pub(crate) fn new(bytes: &'q [u8]) -> Self {
-        Self { bytes }
-    }
-
-    /// The query's inline key at `offset`. It checks the key's length before
-    /// the window's fit: short queries need the padded word at every level,
-    /// and testing for a full window first would add a branch on each node's
-    /// prefix. Long queries keep their direct load. Fixed arrays use their
-    /// constant-length path.
-    #[inline(always)]
-    fn inline_key_at(&self, offset: usize) -> InlineWord {
-        let Some(last) = self.bytes.last_chunk::<WINDOW_LEN>() else {
-            return self.bytes.inline_key_at(offset);
-        };
-        let last_start = self.bytes.len() - WINDOW_LEN;
-        if offset <= last_start {
-            // The whole window fits, including when it ends at the last byte.
-            return InlineWord::from_be_bytes(
-                *self.bytes[offset..]
-                    .first_chunk::<WINDOW_LEN>()
-                    .expect("a whole word fits"),
-            );
-        }
-        let shift = (offset - last_start).min(WINDOW_LEN);
-        InlineWord::from_be_bytes(*last)
-            .checked_shl((8 * shift) as u32)
-            .unwrap_or(0)
-    }
-
-    /// The chunk of `bytes` at `offset`, if they have all of it.
-    #[inline(always)]
-    fn chunk_at(bytes: &[u8], offset: usize) -> Option<&[u8; SHARED_PREFIX_CHUNK_LEN]> {
-        bytes.get(offset..)?.first_chunk()
-    }
-
-    /// How the key's bytes, padded with zeros, order against `prefix` in its
-    /// first `prefix.len()` bytes: `Equal` if the key has them, or ends
-    /// inside them with only zeros after it there. Std byte strings'
-    /// `InlineKey::cmp_prefix` (D50).
-    ///
-    /// The bytes are almost always equal, and may be many (file-path keys
-    /// can share 64). So whole 32-byte chunks first test equality without
-    /// ordering them, and the rest compares a zero-padded window at a time.
-    /// Windows are read from the whole keys, where most are a single load.
-    /// Always inlined, with no call: a call anywhere in the search loop
-    /// makes every search keep its state in stack slots (D41).
-    #[inline(always)]
-    pub(crate) fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
-        let query = self.bytes;
-        let end = prefix.len();
-        let mut offset = 0;
-        while end - offset >= SHARED_PREFIX_CHUNK_LEN
-            && let Some(query_chunk) = Self::chunk_at(query, offset)
-            && Self::chunk_at(prefix, offset) == Some(query_chunk)
-        {
-            offset += SHARED_PREFIX_CHUNK_LEN;
-        }
-        while offset < end {
-            let remaining = end - offset;
-            let dropped_bits = 8 * WINDOW_LEN.saturating_sub(remaining) as u32;
-            let query_window = query.inline_key_at(offset) >> dropped_bits;
-            let prefix_window = prefix.inline_key_at(offset) >> dropped_bits;
-            if query_window != prefix_window {
-                return query_window.cmp(&prefix_window);
-            }
-            offset += WINDOW_LEN;
-        }
-        Ordering::Equal
-    }
-
-    /// How the key orders against `shared`, the bytes every key of the tree
-    /// starts with (D50), as `<[u8]>::cmp` orders the key's first
-    /// `shared.len()` bytes against them: as [`Self::cmp_prefix`] does, but
-    /// a key ending inside them goes first, as every std byte string of the
-    /// tree is at least as long.
-    #[inline(always)]
-    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
-        self.cmp_prefix(shared).then_with(|| {
-            if self.bytes.len() < shared.len() {
-                Ordering::Less
-            } else {
-                Ordering::Equal
-            }
-        })
-    }
-
-    /// Orders the key against `stored`, a std byte string, as `<[u8]>::cmp`
-    /// does, given that their first `equal_len` bytes are equal when padded
-    /// with zeros. It compares 8 bytes at a time from there, as big-endian
-    /// words, then by length. Every load is of a fixed size, so there is no
-    /// call to `memcmp`, and a string that ends within the equal bytes isn't
-    /// read at all.
-    ///
-    /// The last word ends where the shorter string does and may start before
-    /// the bytes left to compare: the bytes it repeats are equal.
-    #[inline]
-    pub(crate) fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
-        let query = self.bytes;
-        let both_len = query.len().min(stored.len());
-        if equal_len < both_len && both_len < WINDOW_LEN {
-            // The word loop needs 8 bytes in both; shorter strings compare
-            // by their zero-padded first window, then by length, which
-            // breaks ties of only zeros.
-            return query
-                .inline_key_at(0)
-                .cmp(&stored.inline_key_at(0))
-                .then_with(|| query.len().cmp(&stored.len()));
-        }
-        let mut compared = equal_len;
-        while compared < both_len {
-            let word_end = (compared + WINDOW_LEN).min(both_len);
-            let word = |bytes: &[u8]| {
-                bytes[..word_end]
-                    .last_chunk::<WINDOW_LEN>()
-                    .map_or(0, |word| InlineWord::from_be_bytes(*word))
-            };
-            match word(query).cmp(&word(stored)) {
-                Ordering::Equal => compared = word_end,
-                unequal => return unequal,
-            }
-        }
-        query.len().cmp(&stored.len())
-    }
-}
-
 /// A key outside the nodes, with its window for the node it goes into
 /// (D18), for a map with strategy `S`. In a map whose keys have no inline
 /// keys, the window is [`Window::NONE`], and no node stores it.
@@ -723,7 +584,7 @@ where
             KeyInliner::ByteString(_) => {
                 let query = self.recognized_bytes()?;
                 if Self::query_byte_string()?.holds_its_bytes() {
-                    query.bytes.inline_key_at(prefix_len)
+                    query.bytes().inline_key_at(prefix_len)
                 } else {
                     query.inline_key_at(prefix_len)
                 }
@@ -792,14 +653,14 @@ where
         let KeyInliner::ByteString(byte_string) = KeyInliner::<K>::resolve::<S>()? else {
             return None;
         };
-        Some(self.recognized_bytes()?.bytes == byte_string.bytes(stored))
+        Some(self.recognized_bytes()?.bytes() == byte_string.bytes(stored))
     }
 
     /// The first line read to form the next search window. Short tails use
     /// the last whole word, as `inline_key_at` does; an empty tail reads none.
     #[inline(always)]
     pub(in crate::tree) fn window_line(&self, prefix_len: usize) -> Option<*const u8> {
-        let bytes = self.recognized_bytes()?.bytes;
+        let bytes = self.recognized_bytes()?.bytes();
         if prefix_len >= bytes.len() {
             return None;
         }
@@ -820,7 +681,7 @@ where
         else {
             return false;
         };
-        query.bytes.len() <= prefix_len + width.byte_len()
+        query.bytes().len() <= prefix_len + width.byte_len()
     }
 
     /// The query's hash tag (D36), if the nodes can compare it with theirs:
@@ -830,7 +691,7 @@ where
     #[inline]
     pub(super) fn hash_tag(&self) -> Option<u8> {
         match KeyInliner::<K>::resolve::<S>()? {
-            KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.bytes.hash_tag()),
+            KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.bytes().hash_tag()),
             KeyInliner::InlineKeyTrait { hash_tag, .. } => {
                 Some(hash_tag?(SameType::<K, Q>::recognize()?.cast(self.key)))
             }
@@ -851,11 +712,11 @@ where
         };
         let query = self.recognized_bytes()?;
         let equal_len = prefix_len + plan.inline_width()?.byte_len();
-        if query.bytes.len() <= equal_len {
+        if query.bytes().len() <= equal_len {
             return None;
         }
         let stored = byte_string.bytes(stored);
-        let both_len = query.bytes.len().min(stored.len());
+        let both_len = query.bytes().len().min(stored.len());
         if equal_len >= both_len {
             return None;
         }

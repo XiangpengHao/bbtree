@@ -5,8 +5,13 @@
 //!
 //! - [`ProvenInlineKey`]: the std key types' inline keys, which their
 //!   `InlineKey` impls return.
+//! - [`SearchBytes`]: a std byte string searched for, whose inline keys
+//!   and comparisons the searches and std byte strings' `InlineKey` impls
+//!   use.
 //! - `std_specs.rs`: what the std functions that the code calls do, trusted.
 mod inline_key;
+mod search_bytes;
 mod std_specs;
 
 pub(crate) use inline_key::ProvenInlineKey;
+pub(crate) use search_bytes::SearchBytes;

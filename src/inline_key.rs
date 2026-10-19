@@ -18,7 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use crate::tree::node::inline_keys::SearchBytes;
+use crate::proof::SearchBytes;
 
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
 /// compare like the bytes they come from (see [`InlineKey`]).

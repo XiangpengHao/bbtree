@@ -107,15 +107,30 @@ unbounded and a bug gives wrong answers that no sanitizer sees.
   before `offset` and their inline keys there differ, the keys order like
   the inline keys (`lemma_inline_keys_order_keys`). The statements are in
   `inline_key.rs`, the proofs in `inline_key/lemmas.rs`.
+- **Searches for std byte strings** (`src/proof/search_bytes.rs`).
+  `SearchBytes`, the bytes a lookup of a std byte string key searches for,
+  which std byte strings' `InlineKey::cmp_from` and `InlineKey::cmp_prefix`
+  also call, is proven to compare like std: its inline keys are those
+  above, at every offset; `cmp_from` orders it against a stored key as
+  `<[u8]>::cmp` does, given that their first `equal_len` bytes agree when
+  padded with zeros (the short strings' path and the overlapping last word
+  included); `cmp_prefix` orders its first `prefix.len()` bytes, padded,
+  against `prefix`, and `cmp_shared` its first `shared.len()` bytes against
+  what every key shares (D50), each as `<[u8]>::cmp` does (the 32-byte
+  chunks and the shifted last window included). The statements are in
+  `search_bytes.rs`, the proofs in `search_bytes/lemmas.rs`.
 - **Trusted, not proven** (`src/proof/std_specs.rs`): what `first_chunk`,
-  `last_chunk`, `checked_shl` and `from_be_bytes` do, which vstd has no
-  specs for, and that std orders byte strings and integers as
+  `last_chunk`, `checked_shl`, `from_be_bytes` and `==` on byte arrays do,
+  which vstd has no specs for; that a slice holds at most `isize::MAX`
+  bytes; and that std orders byte strings and integers as
   `lexicographically_before` and `<` say. Writing the loads as byte indexing
   instead, which Verus knows, made LLVM gather the bytes in vectors rather
   than load them with one `movbe`.
 - **Not proven:** that the nodes keep only the first 2 or 4 bytes of an
   inline key (`InlineWidth`), and every search and node change built on
-  inline keys. Fuzzing and `check_invariants` cover those.
+  inline keys, among them that a stored key and a search tied in a node
+  agree in the bytes `cmp_from` skips; and `InlineKey::cmp_prefix`'s
+  default, which integers use. Fuzzing and `check_invariants` cover those.
 
 Locally: `cargo verus verify` (about two seconds once vstd is verified;
 Verus comes from `flake.nix`), and `verusfmt` formats `src/proof/`. CI: `.github/workflows/verus.yml`.

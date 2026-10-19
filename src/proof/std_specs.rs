@@ -1,7 +1,7 @@
-//! What the std functions that the code Verus proves calls do, as std
-//! documents it: trusted, not proven, and erased by a normal build like
-//! every spec (`doc/08-fuzzing-verification.md`). vstd has no specs for
-//! these.
+//! What the std functions that the code Verus proves calls do, and how
+//! long a slice can be, as std documents them: trusted, not proven, and
+//! erased by a normal build like every spec
+//! (`doc/08-fuzzing-verification.md`). vstd has no specs for these.
 use vstd::prelude::*;
 
 verus! {
@@ -30,6 +30,28 @@ pub assume_specification[ u64::checked_shl ](word: u64, shift: u32) -> (shifted:
         shifted.is_some() <==> shift < 64,
         shifted.is_some() ==> shifted.unwrap() == word << shift,
 ;
+
+/// A slice of bytes has at most `isize::MAX` of them, as every Rust
+/// allocation does.
+pub(super) axiom fn axiom_byte_slice_fits_isize(bytes: &[u8])
+    ensures
+        bytes@.len() <= isize::MAX,
+;
+
+/// `==` on arrays of bytes, whose impl, generic over the arrays' elements,
+/// Verus can't give a spec.
+pub(super) struct ByteArrays;
+
+impl ByteArrays {
+    #[verifier::external_body]
+    #[inline(always)]
+    pub(super) fn equal<const N: usize>(left: &[u8; N], right: &[u8; N]) -> (equal: bool)
+        ensures
+            equal == (left@ == right@),
+    {
+        left == right
+    }
+}
 
 /// `from_be_bytes`, whose signatures, sized by `size_of::<Self>()`, Verus
 /// can't match to give them specs.

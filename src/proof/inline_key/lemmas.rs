@@ -49,7 +49,7 @@ proof fn lemma_bytes_of_word(word: u64, b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, 
 
 /// A word whose bytes are those of `encoding` from `offset` is its inline
 /// key there.
-proof fn lemma_inline_key_of_bytes(word: u64, encoding: Seq<u8>, offset: int)
+pub(in crate::proof) proof fn lemma_inline_key_of_bytes(word: u64, encoding: Seq<u8>, offset: int)
     requires
         forall|index: int|
             0 <= index < 8 ==> #[trigger] byte_of(word, index) == padded_byte(
@@ -64,7 +64,7 @@ proof fn lemma_inline_key_of_bytes(word: u64, encoding: Seq<u8>, offset: int)
 
 /// The bytes of the inline key at `offset` are those of `encoding` from
 /// `offset`.
-proof fn lemma_bytes_of_inline_key(encoding: Seq<u8>, offset: int)
+pub(in crate::proof) proof fn lemma_bytes_of_inline_key(encoding: Seq<u8>, offset: int)
     ensures
         forall|index: int|
             0 <= index < 8 ==> #[trigger] byte_of(inline_key_at(encoding, offset), index)
@@ -99,7 +99,7 @@ proof fn lemma_byte_of_shifted(word: u64, shift: u64, index: u64)
 
 /// An encoding with no bytes past `start + 8` has its inline key at
 /// `start + shift` in that at `start`, shifted up `shift` bytes.
-pub(super) proof fn lemma_shifted_inline_key(encoding: Seq<u8>, start: int, shift: u64)
+pub(in crate::proof) proof fn lemma_shifted_inline_key(encoding: Seq<u8>, start: int, shift: u64)
     requires
         encoding.len() <= start + 8,
         shift < 8,
@@ -125,7 +125,7 @@ pub(super) proof fn lemma_shifted_inline_key(encoding: Seq<u8>, start: int, shif
 
 /// Past its end, an encoding's inline keys are zero.
 #[verusfmt::skip]
-pub(super) proof fn lemma_inline_key_past_end(encoding: Seq<u8>, offset: int)
+pub(in crate::proof) proof fn lemma_inline_key_past_end(encoding: Seq<u8>, offset: int)
     requires
         encoding.len() <= offset,
     ensures
@@ -139,7 +139,7 @@ pub(super) proof fn lemma_inline_key_past_end(encoding: Seq<u8>, offset: int)
 // Byte strings' inline keys.
 /// Eight bytes of `encoding` from `offset`, big-endian, are its inline key
 /// there.
-pub(super) proof fn lemma_eight_bytes(encoding: Seq<u8>, offset: int)
+pub(in crate::proof) proof fn lemma_eight_bytes(encoding: Seq<u8>, offset: int)
     requires
         0 <= offset,
         offset + 8 <= encoding.len(),
@@ -377,7 +377,11 @@ proof fn lemma_sorts_before_at(left: Seq<u8>, right: Seq<u8>, offset: int, shift
 
 /// Where two encodings agree before `offset` and their inline keys there
 /// differ, the encodings sort like the inline keys.
-pub(super) proof fn lemma_inline_keys_order_encodings(left: Seq<u8>, right: Seq<u8>, offset: int)
+pub(in crate::proof) proof fn lemma_inline_keys_order_encodings(
+    left: Seq<u8>,
+    right: Seq<u8>,
+    offset: int,
+)
     requires
         0 <= offset,
         agree_before(left, right, offset),
@@ -428,7 +432,7 @@ proof fn lemma_encodings_order_inline_keys(left: Seq<u8>, right: Seq<u8>, offset
 
 /// Byte strings that sort before others, both padded with zeros, come
 /// before them in std's order.
-pub(super) proof fn lemma_byte_strings_order_like_bytes(left: Seq<u8>, right: Seq<u8>)
+pub(in crate::proof) proof fn lemma_byte_strings_order_like_bytes(left: Seq<u8>, right: Seq<u8>)
     requires
         sorts_before(left, right),
     ensures

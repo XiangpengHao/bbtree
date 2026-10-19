@@ -14,7 +14,7 @@ use vstd::prelude::*;
 use super::std_specs::BigEndian;
 
 #[cfg(verus_only)]
-mod lemmas;
+pub(super) mod lemmas;
 
 #[cfg(verus_only)]
 use lemmas::*;
