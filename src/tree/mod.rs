@@ -34,6 +34,8 @@ mod batch;
 pub(crate) mod build;
 mod clone;
 mod cut;
+#[cfg(feature = "file")]
+pub(crate) mod file;
 mod insert;
 #[cfg(any(test, feature = "inspect"))]
 pub(crate) mod inspect;

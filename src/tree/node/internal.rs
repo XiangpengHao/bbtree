@@ -212,7 +212,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         unsafe { self.edge_unchecked(0).is_leaf() }
     }
 
-    /// Edge `index`: the child's tagged pointer.
+    /// Edge `index`: the child's tagged pointer. In a file map, the edge is
+    /// the child's offset from this node's page (`tree/file.rs`), which
+    /// this adds to it.
     ///
     /// # Safety
     ///
@@ -220,9 +222,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) unsafe fn edge_unchecked(self, index: usize) -> NodePtr<K, V, S> {
         debug_assert!(index <= self.len());
-        // SAFETY: `index <= len` (caller), so edge `index` is initialized
-        // (invariant 1).
-        unsafe { self.edge_slots().slot(index).read() }
+        if NodePtr::<K, V, S>::is_in_file() {
+            // SAFETY: `index <= len` (caller), so edge `index` is the
+            // tagged offset of a child in the same file map (invariant 1 and
+            // the file map's invariant).
+            unsafe {
+                let offset = self.node.file_edge_slots().slot(index).read();
+                NodePtr::at_offset(self.node.page(), offset)
+            }
+        } else {
+            // SAFETY: `index <= len` (caller), so edge `index` is initialized
+            // (invariant 1).
+            unsafe { self.edge_slots().slot(index).read() }
+        }
     }
 
     /// # Panics

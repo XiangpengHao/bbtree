@@ -7,6 +7,8 @@ use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::offset_of;
+#[cfg(feature = "file")]
+use core::ops::Range;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
@@ -254,6 +256,18 @@ pub(in crate::tree) struct InlineKeyNodeHeader {
     prefix_len: u16,
 }
 
+#[cfg(feature = "file")]
+impl NodeHeader {
+    /// Where `len` is in a page: a `u16` at its start.
+    pub(in crate::tree) const LEN_OFFSET: usize = offset_of!(Self, len);
+
+    /// Where `has_head` is in a page: a byte, 0 or 1.
+    pub(in crate::tree) const HAS_HEAD_OFFSET: usize = offset_of!(Self, has_head);
+
+    /// The header's padding, which no write initializes.
+    const PADDING: Range<usize> = Self::HAS_HEAD_OFFSET + size_of::<bool>()..size_of::<Self>();
+}
+
 impl InlineKeyNodeHeader {
     /// The longest prefix a node records: what `prefix_len` holds.
     pub(super) const MAX_PREFIX_LEN: usize = u16::MAX as usize;
@@ -322,8 +336,9 @@ impl<K, V, S> Clone for NodePtr<K, V, S> {
 impl<K, V, S> Copy for NodePtr<K, V, S> {}
 
 impl<K, V, S> NodePtr<K, V, S> {
-    /// The bit that marks a leaf's pointer.
-    const LEAF_TAG: usize = 1;
+    /// The bit that marks a leaf's pointer, and a leaf's offset in a file map
+    /// (`tree/file.rs`).
+    pub(in crate::tree) const LEAF_TAG: usize = 1;
 
     /// The node of kind `Kind` in the page at `page`, tagged with its kind.
     #[inline(always)]
@@ -458,6 +473,13 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) fn is_latched() -> bool {
         <S as Sealed<K>>::LATCHED
+    }
+
+    /// Whether the map's nodes lie in a file map, whose edges are offsets
+    /// from their node's page (`tree/file.rs`).
+    #[inline(always)]
+    pub(in crate::tree) fn is_in_file() -> bool {
+        <S as Sealed<K>>::IN_FILE
     }
 
     /// The node's latch word, in a latched tree, for as long as the caller
@@ -664,6 +686,34 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
             }
         }
         Self::tagged_as::<Kind>(dest)
+    }
+
+    /// Copies the first `size` bytes of the node's page to `dest`, as an
+    /// file map keeps them (`tree/file.rs`): byte for byte, but for the
+    /// header's padding, which no write initializes, as zeros.
+    ///
+    /// # Safety
+    ///
+    /// The page is allocated with at least `size` bytes, a node's header
+    /// and more, and every byte of them but the header's padding is
+    /// initialized: the page was zeroed when allocated, and its keys and
+    /// values have no padding of their own. Nothing writes the page
+    /// meanwhile.
+    #[cfg(feature = "file")]
+    pub(in crate::tree) unsafe fn copy_page_to(self, dest: &mut [u8], size: usize) {
+        let padding = NodeHeader::PADDING;
+        assert!(dest.len() >= size && size >= padding.end);
+        let source = self.page().as_ptr();
+        // SAFETY: both ranges lie within the first `size` bytes of the page
+        // and of `dest`, which don't overlap, and are initialized (caller);
+        // the padding between them is not read.
+        unsafe {
+            source.copy_to_nonoverlapping(dest.as_mut_ptr(), padding.start);
+            source
+                .add(padding.end)
+                .copy_to_nonoverlapping(dest.as_mut_ptr().add(padding.end), size - padding.end);
+        }
+        dest[padding].fill(0);
     }
 
     /// The `prefix_len` of a node with inline keys (05-fence-key.md); 0 for
@@ -905,6 +955,42 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 layout.edge_stride,
             )
         }
+    }
+
+    /// The edge slots of an internal node in a file map (`tree/file.rs`),
+    /// [`Self::edge_slots`] read as what a file map keeps there: each child's
+    /// offset from this node's page, tagged with its kind as a pointer to it
+    /// would be.
+    ///
+    /// # Safety
+    ///
+    /// The node is an internal node in a file map.
+    #[inline(always)]
+    pub(super) unsafe fn file_edge_slots(self) -> Slots<usize> {
+        debug_assert!(Self::is_in_file());
+        let layout = Self::internal_layout();
+        // SAFETY: as for `edge_slots`: an offset has an edge's size and
+        // alignment, a pointer's (`layout.rs`).
+        unsafe {
+            Slots::with_stride(
+                self.page().byte_add(layout.edges_offset).cast(),
+                layout.keys.capacity + 1,
+                layout.edge_stride,
+            )
+        }
+    }
+
+    /// The node whose tagged offset from this node's page is `offset`: an
+    /// edge of a node in a file map, or the file map's root from its start.
+    ///
+    /// # Safety
+    ///
+    /// `offset` is the tagged offset of a node of this map type, in the
+    /// same file map as this page, from this page.
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn at_offset(page: NonNull<u8>, offset: usize) -> Self {
+        // SAFETY: the node lies in the file map, as the page does (caller).
+        unsafe { Self::from_tagged(page.byte_add(offset)) }
     }
 }
 

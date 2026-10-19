@@ -504,6 +504,11 @@ pub(crate) mod sealed {
         /// that threads share (`tree/node/latch.rs`): only the strategy a
         /// shared `BBTreeMap` wraps its own in, never a public one.
         const LATCHED: bool = false;
+
+        /// Whether the tree lies in a file map, whose edges are offsets from
+        /// their node's page rather than pointers (`tree/file.rs`): only
+        /// the strategy a `FileMap` wraps its own in, never a public one.
+        const IN_FILE: bool = false;
     }
 
     impl<K> Sealed<K> for Auto {

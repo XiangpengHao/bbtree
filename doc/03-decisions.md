@@ -1340,6 +1340,49 @@ Design and measurements in 09-concurrency.md, "Lookups".
   M/s, batched 121.5 → 145.9; one thread within 4%. A hit no longer writes its leaf's
   latch word, a line every reader of the leaf took in turn.
 
+**D58. File maps: a map's pages, compacted and laid end to end, edges as offsets from their node, read where they lie.** (2026-10-19)
+Design and measurements in 15-index-file.md.
+
+- **What:** `FileWriter` builds a full-node tree from a map's entries
+  (D25) and writes its pages byte for byte, in level order, after a header
+  that fingerprints the layout. Each edge holds its child's offset from
+  the edge's own node, tagged as a pointer is (D52). `FileMap` reads the
+  file map in place, a tree of strategy `InFile<S>`, which only sets
+  `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
+  address. Keys and values are `PlainBytes`, kept in their slots, or
+  `VarBytes`, of any length, kept in each leaf's tail, the slot holding a
+  span, `{len, offset}` from the slot itself. bbtree-disk maps file maps'
+  files and reads and writes typed maps of any length (`IndexFile`);
+  bbtree-datafusion-parquet embeds a column's index in a Parquet file, one
+  entry per distinct value.
+- **Why the tree's own pages:** lookups run the map's code, so they take
+  its time: at 10M `u64`, 125.9 ns a hit read into memory, 126.4 ns mapped
+  in huge pages, against the map's 125.4. A format of its own would search
+  slower, or repeat the search.
+- **Why offsets from the node, not from the file map's start:** the
+  descent holds the node's address already; a base would travel with every
+  node handle. A file map is position-independent: any aligned offset of a
+  file, mapped anywhere, unchanged, nothing written to it.
+- **Zero cost to maps:** `IN_FILE` is a constant of the strategy, as
+  `LATCHED` is. Every probed map operation compiles to the same machine
+  code as before. The header's padding byte, which no write initializes,
+  is zeroed in the copy, not made a field: a field cost the insert split
+  its inlining.
+- **Two ways to open:** `open` checks every page for what keeps reads in
+  bounds, so that any bytes give answers, wrong or not, or a panic, never
+  undefined behavior; `open_unchecked`, for a trusted file, checks the
+  header alone and reads nothing else.
+- **Span offsets from the slot, not the node:** bbtree hands a key's `Ord`
+  and `InlineKey` only `&K`; from the slot, that is all a span needs. The
+  writer builds over `ArenaBytes`, 8-byte pointers of the span's layout,
+  and rewrites them into spans as it copies each leaf.
+- **Fixed-size keys stay plain:** var-length, a 10M `u64` hit took 216 ns
+  against 127, the file map 49 bytes an entry against 18.5.
+- **Names:** "file map" for the format; "file" alone for the operating
+  system's; "tail", "span" and "var-length" for the bytes of any length,
+  as "heap" already means the allocator's and "handle" a node's; "OS
+  pages" for the operating system's, as "page" means a node's.
+
 ## Navigation
 
 **D11. No parent pointers; iterators use a node stack.** (2026-10-07)
@@ -1383,8 +1426,9 @@ contracts, access, positions and room, the code that holds it keeps by hand
 - **Enforced:** `#![forbid(unsafe_code)]` in every module except the node
   modules that touch pages (`node/mod.rs`, `page.rs`, `slots.rs`,
   `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
-  `inline_key_search.rs`, `vector_count.rs`), and the tree's `root.rs`, `node_stack.rs`, `search.rs` and
-  `walk.rs`.
+  `inline_key_search.rs`, `vector_count.rs`), the tree's `root.rs`, `node_stack.rs`, `search.rs` and
+  `walk.rs`, and file maps' `tree/file.rs`, `file.rs` and
+  `file/var_bytes.rs` (D58).
 - **Was:** after std's `node.rs`, one handle generic over access and kind,
   positions and room as proof types, and edges as owned subtrees; it froze
   the structure the proofs were about, and pushed leaves and internal nodes

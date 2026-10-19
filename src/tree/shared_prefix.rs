@@ -38,7 +38,7 @@ impl SharedPrefix {
 
     /// The most bytes a tree keeps. A search compares a query with all of
     /// them; keys that share more share at least these, which suffice.
-    const MAX_LEN: usize = 64;
+    pub(in crate::tree) const MAX_LEN: usize = 64;
 
     /// Nothing shared: what an empty tree, or a part of one, starts with.
     pub(in crate::tree) const fn none() -> Self {

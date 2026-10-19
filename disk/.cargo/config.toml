@@ -1,0 +1,4 @@
+# Builds for the CPU it runs on, AVX-512 included where it has it: the
+# examples time lookups, whose node searches use its vector extensions.
+[build]
+rustflags = ["-C", "target-cpu=native"]

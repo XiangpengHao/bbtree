@@ -33,6 +33,35 @@ site loads it lazily, so it starts as the reader nears it.
 
 [Charts: Single thread, Concurrent, End to End, Memory, Architectures]
 
+## What it can do? 
+
+### Case 1: replace skiplist in LSM-trees
+
+All LSM-trees uses a ordered map to store in memory data. In Rust, this ordered map is usually a skiplist, specifically `crossbeam-skiplist`.
+
+`bbtree` can easily replace it and is much faster.
+
+`bbtree` has a simpler interface than `crossbeam-skiplist`, you don't need to worry about when to pin or re-enter an epoch. 
+
+`bbtree` has more advanced memory management, it allows you to plugin your own memory allocator, and it allows you to handle allocation error when memory is full.
+
+...
+
+[show the end to end chart here again]
+
+### Case 2: external index for Parquet files
+
+Parquet uses stats like min/max/null and sometimes bloom filters to prune the data to scan.
+
+`bbtree` can serve as an external index for Parquet files, which allows it to pin-point the data to read, zero data is wasted.
+
+...
+
+### Case 3: fast disk cache for object store
+
+`t4` is a super fast disk cache for object store, built on top of `bbtree`.
+
+
 ## How it works
 
 ### Three easy pieces [^ostp]

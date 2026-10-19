@@ -128,7 +128,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
 
     /// Where the root area starts: past room for a node of either kind.
     #[inline(always)]
-    fn area_offset() -> usize {
+    pub(in crate::tree) fn area_offset() -> usize {
         let (leaf, internal) = (
             Leaf::<K, V, S>::page_layout(),
             Internal::<K, V, S>::page_layout(),

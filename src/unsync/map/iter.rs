@@ -15,6 +15,7 @@ use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::node::leaf::KeyRun;
 use crate::tree::node_stack::Immut;
+use crate::tree::root::Tree;
 use crate::tree::walk::{BorrowedWalk, RangeWalk};
 
 /// An iterator over the entries of a `BBTreeMap`, in key order.
@@ -421,9 +422,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// assert_eq!((*first_key, *first_value), (1, "a"));
     /// ```
     pub fn iter(&self) -> Iter<'_, K, V, S> {
-        Iter {
-            walk: BorrowedWalk::new(self.tree.root_page(), self.length),
-        }
+        Iter::of_tree(&self.tree, self.length)
     }
 
     /// Gets an iterator over the keys of the map, in sorted order.
@@ -496,10 +495,37 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root_page) = self.tree.root_page() else {
-            return Range::default();
+        Range::of_tree(&self.tree, range)
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> Iter<'a, K, V, S> {
+    /// An iterator over `tree`, which holds `length` entries: a map's, or an
+    /// file map's (`crate::file`).
+    pub(crate) fn of_tree(tree: &'a Tree<K, V, S>, length: usize) -> Self {
+        Self {
+            walk: BorrowedWalk::new(tree.root_page(), length),
+        }
+    }
+}
+
+impl<'a, K, V, S: InlineKeyStrategy<K>> Range<'a, K, V, S> {
+    /// An iterator over the entries of `tree` in `range`: a map's, or an
+    /// file map's (`crate::file`).
+    ///
+    /// # Panics
+    ///
+    /// As [`BBTreeMap::range`] does.
+    pub(crate) fn of_tree<T, R>(tree: &'a Tree<K, V, S>, range: R) -> Self
+    where
+        T: Ord + ?Sized,
+        K: Borrow<T> + Ord,
+        R: RangeBounds<T>,
+    {
+        let Some(root_page) = tree.root_page() else {
+            return Self::default();
         };
-        Range {
+        Self {
             walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
         }
     }

@@ -115,6 +115,85 @@ jobs:
           BBTREE_BENCH_DATA: ${{ runner.temp }}/no-bench-data
         run: cargo run --release --bin bbtree-bench -- realkeys tiny --quick --map bbtree-unsync
 
+  disk:
+    name: disk (fmt + clippy + test + quick run)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: disk
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rustfmt, clippy
+
+      # Built for the runner's CPU (disk/.cargo/config.toml), as the bench
+      # is: each instruction set gets its own cache.
+      - name: Identify the CPU's instruction set
+        id: cpu
+        run: echo "flags=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: disk
+          key: cpu-${{ steps.cpu.outputs.flags }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      # Keeps the lookups example running as the library changes; timings
+      # on a shared runner mean nothing.
+      - name: Quick run
+        run: |
+          cargo run --release --example lookups -- 100000 "$RUNNER_TEMP"
+          cargo run --release --example var_bytes_lookups -- 100000
+
+  datafusion-parquet:
+    name: datafusion-parquet (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: datafusion-parquet
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rustfmt, clippy
+
+      # Built for the runner's CPU (datafusion-parquet/.cargo/config.toml),
+      # as the bench is: each instruction set gets its own cache.
+      - name: Identify the CPU's instruction set
+        id: cpu
+        run: echo "flags=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: datafusion-parquet
+          key: cpu-${{ steps.cpu.outputs.flags }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test
+
   fuzz:
     name: fuzz harness (fmt + clippy + test)
     runs-on: ubuntu-latest

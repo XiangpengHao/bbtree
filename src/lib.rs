@@ -10,6 +10,8 @@ extern crate alloc;
 extern crate std;
 
 mod allocator;
+#[cfg(feature = "file")]
+pub mod file;
 mod inline_key;
 mod map;
 mod proof;
