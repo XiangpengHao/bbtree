@@ -8,6 +8,8 @@ mod batch;
 mod owner;
 mod range;
 #[cfg(all(test, shuttle))]
+mod shuttle_review_tests;
+#[cfg(all(test, shuttle))]
 mod shuttle_tests;
 #[cfg(test)]
 mod tests;

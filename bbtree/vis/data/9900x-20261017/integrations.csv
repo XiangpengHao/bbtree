@@ -14,7 +14,7 @@ SlateDB,Write batch,write batches of 10 rows (slatedb-bencher; per row),1,crossb
 Tonbo,Insert,16K-row write batches at 10M rows,1,crossbeam SkipMap,8054,bbtree,1179
 Tonbo,Transaction,conflict-checked write transaction at 10M rows,1,crossbeam SkipMap,14515,bbtree,3537
 Tonbo,Write-heavy,Tonbo's write_heavy_no_sst_sweep with 16K-row batches,1,crossbeam SkipMap,162600000,bbtree,76600000
-Lance,Lookup,point lookup of a primary key at 10M rows,1,arena skiplist,2519,bbtree,1104
-Lance,Multi-get,lookup_many of 100 keys (per key),1,arena skiplist,2048,bbtree,508
-Lance,Insert,put of 1000-row batches (per row),1,arena skiplist,1194,bbtree,303
-Lance,Update,put of existing keys (per row),1,arena skiplist,1666,bbtree,506
+Lance,Lookup,point lookup of a primary key at 10M rows,1,arena skiplist,2432,bbtree,1113
+Lance,Multi-get,lookup_many of 100 keys (per key),1,arena skiplist,1988,bbtree,504
+Lance,Insert,put of 1000-row batches (per row),1,arena skiplist,1171,bbtree,278
+Lance,Update,put of existing keys (per row),1,arena skiplist,1654,bbtree,486

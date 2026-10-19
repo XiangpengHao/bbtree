@@ -67,7 +67,7 @@ pub(crate) fn EndToEndChart(measurements: Rc<Measurements>, spotlight: Spotlight
             spotlight,
         }
         p { class: "chart-note",
-            "Each system's own benchmark, one thread, wall time per operation: the dark bar as shipped (100%), the bright one inside it with bbtree. Only the map changed, and where a system writes a batch, the call that hands it to the map whole (insert_many): crossbeam's SkipMap, or Lance's own arena skip list. More threads hit the systems' own locks first. Not shown, slower or unchanged: SlateDB's memtable_seek, 0.91–0.99× (its iterators read three rows ahead of a seek, which the adapter clones out); Tonbo's Transaction::get, 0.86× (it copies every row per call); Lance's lookups of absent keys, 1.00–1.02× (they plan a DataFusion query). {machine.name}."
+            "Each system's own benchmark, one thread, wall time per operation: the dark bar as shipped (100%), the bright one inside it with bbtree. Only the map changed, and where a system writes a batch, the call that hands it to the map whole (insert_many; Lance's, update_or_insert_many): crossbeam's SkipMap, or Lance's own arena skip list. More threads hit the systems' own locks first. Not shown, slower or unchanged: SlateDB's memtable_seek, 0.91–0.99× (its iterators read three rows ahead of a seek, which the adapter clones out); Tonbo's Transaction::get, 0.86× (it copies every row per call); Lance's lookups of absent keys, 1.00–1.04× (they plan a DataFusion query). {machine.name}."
             RepositoryLinks { links }
         }
     }

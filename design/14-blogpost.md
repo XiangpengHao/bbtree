@@ -628,10 +628,11 @@ author's.
 - **Integrations**, single thread only (with more, each system is bound by
   its own locks): bbtree-eval's `integrations/{fjall,slatedb,turso,tonbo,lance}`,
   the shipped skiplist against bbtree, re-run on 2026-10-17 with the
-  renamed library, each with its RESULTS.md. Only the map changed, and
-  where a system writes a batch, the call that hands it to the map whole
-  (`insert_many`: fjall's `WriteBatch::commit`, SlateDB's
-  `write_entries_to_memtable`, Lance's put batches). Turso keeps two of
+  renamed library (Lance on 2026-10-19, below), each with its RESULTS.md.
+  Only the map changed, and where a system writes a batch, the call that
+  hands it to the map whole (`insert_many`: fjall's `WriteBatch::commit`,
+  SlateDB's `write_entries_to_memtable`; `update_or_insert_many`: Lance's
+  put batches). Turso keeps two of
   PR #9267's call-site changes the map needs.
   - fjall: gets 2.47×, mix 2.44×, inserts 1.61×, write batches 3.00×
     (1.5× over single inserts); fjall and Turso at 1M rows.
@@ -656,11 +657,15 @@ author's.
     by its integration and fixed in `scan.rs` (09-concurrency.md, Scans);
     `Transaction::get` 0.86× (it copies every row per call).
   - Lance (MemWAL index, its own arena skiplist, PR #7011; Rust 1.98): at
-    10M rows, point lookups through its API 2.28×, `lookup_many` 4.03×,
-    batched puts 3.94×, updates 3.29×, with its `newest` index a plain
-    `u64` word now, read by `get_copied`, and put batches through
-    `insert_many`. Lance's own small benches and lookups of absent keys
-    (they plan a DataFusion query) are unchanged, 0.97–1.06×.
+    10M rows, point lookups through its API 2.19×, `lookup_many` 3.94×,
+    batched puts 4.22×, updates 3.40×, with its `newest` index a plain
+    `u64` word, read by `get_copied`, and each put one `update_or_insert`,
+    batches `update_or_insert_many`, which no longer look the values up
+    first. Re-run alone on 2026-10-19 (bbtree `f404337`), not the
+    library the other systems ran: puts 3.94× and updates 3.29× on
+    2026-10-17, lookups 2.28× and 4.03×. Lance's own small benches
+    (2026-10-17) and lookups of absent keys (they plan a DataFusion query)
+    are unchanged, 0.97–1.06×.
   - **Toolchain.** Before Rust 1.89 the AVX-512 target features are
     unstable and bbtree's search falls back to a scalar count. Systems
     pinned below 1.89 (Turso, Neon: 1.88) run 1.89 with
