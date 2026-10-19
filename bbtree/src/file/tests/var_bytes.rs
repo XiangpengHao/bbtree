@@ -259,30 +259,105 @@ fn query_buffers_hold_any_bytes() {
     assert!(VarBytesBuf::new(b"ab").cmp(&VarBytesBuf::new(b"b")).is_lt());
 }
 
-/// Without inline keys, internal nodes would keep keys, which no tail
-/// backs: writers refuse to write such a file map, and readers to read one.
+/// A file map of var-length keys is searched with inline keys, `Auto`'s or
+/// `WithInlineKey`'s, which encode keys alike but are told apart: a reader
+/// refuses a file map of the other strategy, and of plain keys of a span's
+/// size and inline keys.
 #[test]
-#[cfg_attr(panic = "abort", ignore = "needs unwinding")]
-fn var_bytes_keys_need_inline_keys() {
-    let writer = std::panic::catch_unwind(|| {
-        FileWriter::<VarBytes, u64, Auto>::from_ascending([(b"key".as_slice().into(), 1)])
-            .unwrap()
-            .to_buf()
-    });
-    assert!(writer.is_err());
-    let file_bytes =
-        FileWriter::<VarBytes, u64, WithInlineKey>::from_ascending([(b"key".as_slice().into(), 1)])
-            .unwrap()
-            .to_buf();
+fn each_strategy_reads_its_own_var_bytes_file_maps() {
+    let entry = || [(b"key".as_slice().into(), 1)];
+    let auto = FileWriter::<VarBytes, u64, Auto>::from_ascending(entry())
+        .unwrap()
+        .to_buf();
+    let with_inline_key = FileWriter::<VarBytes, u64, WithInlineKey>::from_ascending(entry())
+        .unwrap()
+        .to_buf();
     assert_eq!(
-        FileMap::<VarBytes, u64, Auto>::open(&file_bytes).err(),
+        FileMap::<VarBytes, u64, Auto>::open(&auto)
+            .unwrap()
+            .get(b"key".as_slice()),
+        Some(&1)
+    );
+    assert_eq!(
+        FileMap::<VarBytes, u64, Auto>::open(&with_inline_key).err(),
         Some(FileError::LayoutMismatch)
     );
     assert_eq!(
-        FileMap::<Bytes8, u64, WithInlineKey>::open(&file_bytes).err(),
+        FileMap::<VarBytes, u64, WithInlineKey>::open(&auto).err(),
+        Some(FileError::LayoutMismatch)
+    );
+    assert_eq!(
+        FileMap::<Bytes8, u64, WithInlineKey>::open(&with_inline_key).err(),
         Some(FileError::LayoutMismatch),
         "plain keys of a span's size and inline keys are told apart from var-length keys"
     );
+}
+
+/// Writes the file map of `count` random entries under `Auto`, which takes
+/// `VarBytes` for a byte string, and checks that `&[u8]` queries find
+/// them, compared in place: every key, absent ones, batches, through lanes
+/// at any size, and ranges; and that a `VarBytesBuf` still does.
+fn byte_queries_round_trip(count: usize, seed: u64) {
+    let rng = TestRng::new(seed);
+    let entries = random_entries(&rng, count);
+    let writer = FileWriter::<VarBytes, VarBytes, Auto>::from_ascending(
+        (entries.iter()).map(|(key, value)| (key.as_slice().into(), value.as_slice().into())),
+    )
+    .unwrap();
+    let buffer = writer.to_buf();
+    drop(writer);
+    let file_map = FileMap::<VarBytes, VarBytes, Auto>::open(&buffer).unwrap();
+    assert_eq!(file_map.len(), count);
+    for (key, value) in &entries {
+        let found = file_map.get(key.as_slice()).map(VarBytes::bytes);
+        assert_eq!(found, Some(value.as_slice()), "{key:?}");
+        let found = file_map.get(&*VarBytesBuf::new(key)).map(VarBytes::bytes);
+        assert_eq!(found, Some(value.as_slice()), "{key:?}");
+    }
+    let probes: Vec<Vec<u8>> = (entries.keys())
+        .flat_map(|key| [key.clone(), random_bytes(&rng, 26)])
+        .collect();
+    for chunk in probes.chunks(8) {
+        let batch: [&[u8]; 8] = core::array::from_fn(|lane| chunk[lane % chunk.len()].as_slice());
+        let expected = batch.map(|key| entries.get(key).map(Vec::as_slice));
+        let found = file_map
+            .get_many(batch)
+            .map(|value| value.map(VarBytes::bytes));
+        assert_eq!(found, expected);
+        let found =
+            (file_map.tree.find_many(batch, usize::MAX)).map(|value| value.map(VarBytes::bytes));
+        assert_eq!(found, expected);
+    }
+    for _ in 0..40 {
+        let (start, end) = random_bounds(&rng);
+        let bounds = (
+            start.as_ref().map(Vec::as_slice),
+            end.as_ref().map(Vec::as_slice),
+        );
+        let found: Vec<_> = (file_map.range::<[u8], _>(bounds))
+            .map(|(key, value)| (key.bytes(), value.bytes()))
+            .collect();
+        let wanted: Vec<_> = (entries.range::<[u8], _>(bounds))
+            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+            .collect();
+        assert_eq!(found, wanted, "{start:?}..{end:?}");
+    }
+}
+
+#[test]
+fn byte_queries_find_var_bytes_keys_under_auto() {
+    for (seed, count) in [0, 1, 13, 1000, 20_000].into_iter().enumerate() {
+        byte_queries_round_trip(count, seed as u64 + 200);
+    }
+}
+
+/// A small tree for Miri: it reaches `Auto`'s reads of spans' and writer
+/// records' bytes.
+#[test]
+fn a_small_auto_var_bytes_file_map_round_trips() {
+    for (seed, count) in [1, 300].into_iter().enumerate() {
+        byte_queries_round_trip(count, seed as u64 + 300);
+    }
 }
 
 /// A plain key of a span's size and alignment, with a span's inline

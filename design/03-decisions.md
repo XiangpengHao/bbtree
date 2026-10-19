@@ -242,9 +242,9 @@ Design in 04-inline-key.md.
   - a public `InlineKey` trait anyone can implement, newtypes included (option
     (b));
   - a default strategy that gives std byte-string keys (`String`, `str`,
-    `Vec<u8>`, `Box<str>`, byte arrays, …) and the 64- and 128-bit integers
-    (D31) inline keys automatically, by compile-time type identity (option
-    (d)).
+    `Vec<u8>`, `Box<str>`, byte arrays, …), a file map's `VarBytes` (D58)
+    and the 64- and 128-bit integers (D31) inline keys automatically, by
+    compile-time type identity (option (d)).
 - **In types:** `BBTreeMap<K, V, S = Auto, A = Global>`, the strategy
   before the allocator (D8). Existing code is unchanged and gets inline
   keys for std string and integer keys. Other key types opt in with a
@@ -1349,9 +1349,11 @@ Design and measurements in 15-index-file.md.
   the edge's own node, tagged as a pointer is (D52). `FileMap` reads the
   file map in place, a tree of strategy `InFile<S>`, which only sets
   `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
-  address, for `get` and the batch lanes (D53) alike. Keys and values are `PlainBytes`, kept in their slots, or
-  `VarBytes`, of any length, kept in each leaf's tail, the slot holding a
-  span, `{len, offset}` from the slot itself. bbtree-disk writes, maps
+  address, for `get` and the batch lanes (D53) alike. Keys and values are
+  `PlainBytes`, kept in their slots, or `VarBytes`, of any length, kept in
+  each leaf's tail, the slot holding a span, `{len, offset}` from the slot
+  itself. `Auto` takes `VarBytes` for a byte string, as it does `String`:
+  a `&[u8]` looks a key up, compared in place. bbtree-disk writes, maps
   and reads typed maps in files (`BBTreeMapFile`), each key and value type
   picking plain or `VarBytes` storage (`DiskType`);
   bbtree-datafusion-parquet embeds a column's index in a Parquet file, one

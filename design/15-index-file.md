@@ -158,15 +158,18 @@ leaf      | …
   each key and value slot, the head's included, into a span, as it
   rewrites edges, writing the bytes into the leaf's tail. Slots past a
   leaf's entries become zeros, not stale pointers.
-- **Strategy: `WithInlineKey`.** The span's `InlineKey` reads its bytes as
-  `String`'s does: 8-byte windows, its length as its hash tag,
-  comparisons from where keys differ and against a prefix. Var-length keys
-  need inline keys: without them internal nodes would keep keys, which no
-  tail backs. A writer refuses to write such a file map, and a reader to
-  read one; the fingerprint keeps plain and var-length slots of one size
-  apart.
-- **Queries are spans too** (`VarBytesBuf`): with `WithInlineKey`, a
-  lookup uses inline keys only when it looks up with `K` itself. A query
+- **Strategy: `Auto`**, which takes `VarBytes` for a byte string, as it
+  takes `String`, by its type (D18): its inline keys are windows of its
+  bytes, its hash tag its length, as a heap string's, and a `&[u8]` looks
+  it up, compared in place, as a `&str` does `String` keys. Its writer's
+  `ArenaBytes` is recognized alike, so the writer's pages have the
+  reader's inline keys. `WithInlineKey` works too, through `VarBytes`'s
+  `InlineKey` impl, which reads its bytes as `String`'s does. Var-length
+  keys need inline keys: without them internal nodes would keep keys,
+  which no tail backs. Both strategies give them, and the fingerprint
+  tells their file maps apart, and plain from var-length slots of one size.
+- **Queries under `WithInlineKey` are spans** (`VarBytesBuf`): a lookup
+  uses inline keys only when it looks up with `K` itself. A query
   buffer holds a span and the bytes after it, keys of up to 64 bytes in
   place. Written right before the lookup, it must not move: a moved
   buffer is read back by wide loads that can't take their data from the
@@ -196,16 +199,15 @@ leaf      | …
   `VarBytes`; its keys' strategy; and its view. Integers, floats and byte
   arrays are plain, in their slots, under `Auto`, so a `u64` map in a file
   is the plain file map, at a map's speed. `String` and `Vec<u8>` are
-  `VarBytes`, under `WithInlineKey`, and come back as `&str` and `&[u8]`.
+  `VarBytes`, under `Auto` too, and come back as `&str` and `&[u8]`.
   `plain_disk_type!` makes a caller's `PlainBytes` type one, under `Auto`
   or, with its own `InlineKey` impl, `WithInlineKey`. Rust's coherence rules
   forbid a blanket impl over `PlainBytes` beside `String`'s, so each plain
   type opts in.
 - **Why not one layout of bytes for every type:** integers as `VarBytes`
   read the tail on every hit and take 2.6 times the bytes (Measurements).
-- **Queries** (`DiskQuery`) are the key itself for a plain type, with no
-  copy; for bytes, a `VarBytesBuf`, written in place, one per key of a
-  batch.
+- **Queries** (`DiskQuery`) are the key itself for a plain type, and its
+  bytes for text and bytes, `&[u8]`: neither is copied.
 - **Inputs** (`DiskInput`): what the writer takes, owned or borrowed:
   `&map` of a map, `&mut map` of the shared map, by its owner,
   `range_cloned(..)` of one threads still change, and `Cow` bytes, which
@@ -258,16 +260,20 @@ and `huge_pages.rs` for the mapped rows, mapped from disk; the file map
 **Lookups of var-length keys and values at 10M entries**
 (`bbtree-disk/examples/var_bytes_lookups.rs`; read into memory; queries
 written in place). One run, pinned, while the machine ran about 1.6 times
-slower than for the table above (its map took 208 ns a hit, against
+slower than for the table above (its map took 204 ns a hit, against
 125.4): compare rows within this table only.
 
 | | get hit | get miss | bytes an entry |
 |---|--:|--:|--:|
-| `u64`: map | 208.4 ns | 138.7 ns | |
-| `u64`: `BBTreeMapFile<u64, u64>`, in slots | 206.5 ns | 141.1 ns | 18.5 |
-| `u64`: file map, var-length, one query buffer | 338.5 ns | 204.7 ns | 49.1 |
-| text, 13 to 45 bytes: map of `String` | 355.8 ns | 349.4 ns | |
-| text: `BBTreeMapFile<String, u64>` | 333.8 ns | 331.8 ns | 73.4 |
+| `u64`: map | 203.9 ns | 138.7 ns | |
+| `u64`: `BBTreeMapFile<u64, u64>`, in slots | 204.9 ns | 139.9 ns | 18.5 |
+| `u64`: file map, var-length, `&[u8]` queries | 326.9 ns | 225.1 ns | 49.1 |
+| text, 13 to 45 bytes: map of `String` | 352.6 ns | 347.2 ns | |
+| text: `BBTreeMapFile<String, u64>` | 320.7 ns | 317.2 ns | 73.4 |
+
+Text keys under `Auto`, compared in place, took 316.9 ns a hit against
+333.8 ns copied into a `VarBytesBuf` under `WithInlineKey`, in two runs of
+that day.
 
 The text map's `u64` values in their slots take no fewer bytes than in
 the tail did: each leaf's tail still rounds up to the same 1 KiB step. At
@@ -298,12 +304,6 @@ rows in 111 µs, against 40 ms to read the column.
 
 - **Read only.** Changing a file map would need its pages to go back to an
   allocator that doesn't own them; an index of new data is a new file map.
-- **Queries are copied.** A lookup of var-length keys writes its key into
-  a query buffer first, where a map of `String`s searches the caller's
-  `&str` in place. bbtree could
-  search a `&[u8]` against `VarBytes` keys, as it does a `&str` against
-  `String` keys, if it took `VarBytes` for a byte string, as `Auto` takes
-  `String`; that is `Auto`'s recognition, which this design avoided.
 - **Not in DataFusion yet**, as pq-vector is: the index finds row groups
   and rows; a `TableProvider` or physical optimizer rule in
   bbtree-datafusion-parquet would turn a query's predicate into them.

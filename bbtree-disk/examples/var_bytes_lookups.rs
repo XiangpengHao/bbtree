@@ -6,8 +6,8 @@
 //!
 //! - random `u64` keys and values: a map, a `BBTreeMapFile<u64, u64>`, which
 //!   keeps them in their slots, and a file map of their 8 big-endian bytes,
-//!   var-length, in the leaves' tails (a query buffer reused, as a loop of
-//!   lookups would): what the tail costs;
+//!   var-length, in the leaves' tails, looked up by those bytes: what the
+//!   tail costs;
 //! - random text keys of 8 to 40 bytes, after a shared 5-byte prefix, with
 //!   `u64` values: a map of `String`s and a `BBTreeMapFile<String, u64>`.
 //!
@@ -15,8 +15,8 @@
 
 mod timed_lookups;
 
-use bbtree::WithInlineKey;
-use bbtree::file::{FileMap, FileWriter, VarBytes, VarBytesBuf};
+use bbtree::Auto;
+use bbtree::file::{FileMap, FileWriter, VarBytes};
 use bbtree::unsync::BBTreeMap;
 use bbtree_disk::BBTreeMapFile;
 use timed_lookups::{Numbers, TimedLookups};
@@ -47,18 +47,17 @@ fn main() {
 /// their slots, and a file map of var-length ones.
 fn u64_lookups(count: usize, numbers: &mut Numbers) {
     let (map, lookups) = TimedLookups::of_u64_map(count, numbers);
-    let var_writer = FileWriter::<VarBytes, VarBytes, WithInlineKey>::from_ascending(
-        map.iter().map(|(key, value)| {
+    let var_writer =
+        FileWriter::<VarBytes, VarBytes, Auto>::from_ascending(map.iter().map(|(key, value)| {
             (
                 key.to_be_bytes().to_vec().into(),
                 value.to_be_bytes().to_vec().into(),
             )
-        }),
-    )
-    .unwrap();
+        }))
+        .unwrap();
     let var_bytes = var_writer.to_buf();
     drop(var_writer);
-    let var_map = FileMap::<VarBytes, VarBytes, WithInlineKey>::open(&var_bytes).unwrap();
+    let var_map = FileMap::<VarBytes, VarBytes, Auto>::open(&var_bytes).unwrap();
     let path =
         std::env::temp_dir().join(format!("bbtree-var-bytes-lookups-{}", std::process::id()));
     BBTreeMapFile::<u64, u64>::create(&path, &map).unwrap();
@@ -72,10 +71,8 @@ fn u64_lookups(count: usize, numbers: &mut Numbers) {
     );
     lookups.report("u64: map", |key| map.get(key).copied());
     lookups.report("u64: BBTreeMapFile<u64, u64>", |key| disk.get(key).copied());
-    let mut query = VarBytesBuf::new(b"");
     lookups.report("u64: file map, var-length", |key| {
-        query.set(&key.to_be_bytes());
-        let value = var_map.get(&*query)?;
+        let value = var_map.get(key.to_be_bytes().as_slice())?;
         Some(u64::from_be_bytes(value.bytes().try_into().unwrap()))
     });
 }

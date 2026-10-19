@@ -14,16 +14,18 @@
 
 use std::borrow::Cow;
 
-use bbtree::file::{InWriter, Input, Storable, VarBytes, VarBytesBuf};
-use bbtree::{Auto, InlineKeyStrategy, WithInlineKey};
+use bbtree::file::{InWriter, Input, Storable, VarBytes};
+use bbtree::{Auto, InlineKeyStrategy};
 
 /// A type a [`BBTreeMapFile`](crate::BBTreeMapFile)'s keys or values are:
 /// the integers, `f32` and `f64`, byte arrays, `String`, `Vec<u8>`, and
 /// plain types of the caller's ([`plain_disk_type!`](crate::plain_disk_type)).
 pub trait DiskType: DiskQuery {
     /// How keys of this type are searched, as a map's strategy: [`Auto`]
-    /// for the integers, [`WithInlineKey`] for text and byte strings, which
-    /// need inline keys. Values don't use it.
+    /// for the integers, byte arrays and `VarBytes`, which it takes for byte
+    /// strings; [`WithInlineKey`](bbtree::WithInlineKey) for a caller's type
+    /// with its own [`InlineKey`](bbtree::InlineKey) impl. Values don't use
+    /// it.
     type Strategy: InlineKeyStrategy<Self::Stored> + InlineKeyStrategy<InWriter<Self::Stored>>;
 
     /// What lookups hand back, borrowing the file: a reference to a plain
@@ -44,13 +46,14 @@ pub trait DiskQuery {
     /// [`VarBytes`], in the leaf's tail, for text and bytes.
     type Stored: Storable;
 
-    /// Where a lookup writes the key as the file keeps it: nothing for a
-    /// plain type, which is that already; a [`VarBytesBuf`] for bytes.
-    type Query: Default;
+    /// What a lookup compares with the file's keys, which borrow as it: the
+    /// key itself, for a plain type; its bytes, `[u8]`, for text and bytes,
+    /// which the search compares in place, as a map's does a `&str` with its
+    /// `String`s.
+    type Query: ?Sized;
 
-    /// The key as the file keeps it, written into `query` where it must
-    /// be: in place, as `VarBytesBuf::new` says why.
-    fn query<'q>(&'q self, query: &'q mut Self::Query) -> &'q Self::Stored;
+    /// The key as a lookup compares it.
+    fn query(&self) -> &Self::Query;
 
     /// What the file's writer takes for this, borrowing it: the value, or
     /// its bytes.
@@ -135,9 +138,9 @@ macro_rules! plain_disk_type {
     ($plain:ty, $strategy:ty) => {
         impl $crate::DiskQuery for $plain {
             type Stored = $plain;
-            type Query = ();
+            type Query = $plain;
 
-            fn query<'q>(&'q self, _: &'q mut ()) -> &'q $plain {
+            fn query(&self) -> &$plain {
                 self
             }
 
@@ -183,9 +186,9 @@ plain_disk_type!(f64);
 /// keys under [`Auto`]; others compare whole.
 impl<const N: usize> DiskQuery for [u8; N] {
     type Stored = [u8; N];
-    type Query = ();
+    type Query = [u8; N];
 
-    fn query<'q>(&'q self, _: &'q mut ()) -> &'q [u8; N] {
+    fn query(&self) -> &[u8; N] {
         self
     }
 
@@ -219,11 +222,10 @@ macro_rules! byte_string_disk_type {
     ($owned:ty, $borrowed:ty, $bytes:ident) => {
         impl DiskQuery for $borrowed {
             type Stored = VarBytes;
-            type Query = VarBytesBuf;
+            type Query = [u8];
 
-            fn query<'q>(&'q self, query: &'q mut VarBytesBuf) -> &'q VarBytes {
-                query.set(self.$bytes());
-                query
+            fn query(&self) -> &[u8] {
+                self.$bytes()
             }
 
             fn input(&self) -> Cow<'_, [u8]> {
@@ -233,11 +235,10 @@ macro_rules! byte_string_disk_type {
 
         impl DiskQuery for $owned {
             type Stored = VarBytes;
-            type Query = VarBytesBuf;
+            type Query = [u8];
 
-            fn query<'q>(&'q self, query: &'q mut VarBytesBuf) -> &'q VarBytes {
-                query.set(self.$bytes());
-                query
+            fn query(&self) -> &[u8] {
+                self.$bytes()
             }
 
             fn input(&self) -> Cow<'_, [u8]> {
@@ -273,7 +274,7 @@ byte_string_disk_type!(Vec<u8>, [u8], as_ref);
 
 /// Text, whose bytes are its UTF-8.
 impl DiskType for String {
-    type Strategy = WithInlineKey;
+    type Strategy = Auto;
     type View<'a> = &'a str;
 
     /// # Panics
@@ -285,7 +286,7 @@ impl DiskType for String {
 }
 
 impl DiskType for Vec<u8> {
-    type Strategy = WithInlineKey;
+    type Strategy = Auto;
     type View<'a> = &'a [u8];
 
     fn view(stored: &VarBytes) -> &[u8] {

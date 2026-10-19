@@ -5,9 +5,12 @@
 //! - [`VarBytes`] is the span: `{len, offset}`, its bytes `offset` bytes
 //!   past the span itself. It compares as its bytes do, and has their
 //!   inline keys, so that bbtree's search, which hands a key's impls only
-//!   `&K`, reads them without knowing where the node is.
+//!   `&K`, reads them without knowing where the node is. [`Auto`](crate::Auto)
+//!   takes it for a byte string, as it does `String`: a `&[u8]` looks it
+//!   up, compared in place.
 //! - [`VarBytesBuf`] holds a span and its bytes side by side: a key to look
-//!   a file map up with, which compares as the file map's own keys do.
+//!   a file map up with, which compares as the file map's own keys do, for
+//!   a file map searched with [`WithInlineKey`](crate::WithInlineKey).
 //! - [`ArenaBytes`] is what a writer's tree holds instead while it builds:
 //!   a pointer to the bytes, length first, in a [`ByteArena`]. It has the
 //!   span's size, alignment and inline keys, so the tree's pages are a file
@@ -18,6 +21,7 @@ use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::fmt;
 use core::ops::Deref;
@@ -33,8 +37,11 @@ use crate::inline_key::{InlineKey, InlineWord};
 /// [`VarBytesBuf`], which holds them itself.
 ///
 /// It compares and orders as its bytes do, and has their inline keys, as a
-/// `[u8]` has them: with [`WithInlineKey`](crate::WithInlineKey), a file map
-/// of `VarBytes` keys searches as a map of byte strings does.
+/// `[u8]` has them: a file map of `VarBytes` keys searches as a map of byte
+/// strings does. With [`Auto`](crate::Auto), which takes it for a byte
+/// string, it borrows as `[u8]`, and a `&[u8]` looks it up, compared in
+/// place; with [`WithInlineKey`](crate::WithInlineKey), a [`VarBytesBuf`]
+/// does.
 #[repr(C, align(8))]
 pub struct VarBytes {
     len: u32,
@@ -113,6 +120,13 @@ impl fmt::Debug for VarBytes {
     }
 }
 
+/// Its bytes, which order and compare as it does.
+impl Borrow<[u8]> for VarBytes {
+    fn borrow(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
 /// Its bytes': 8-byte windows, its length as its hash tag, comparisons from
 /// where keys differ and against a prefix, as `[u8]`'s.
 impl InlineKey for VarBytes {
@@ -161,7 +175,9 @@ unsafe impl Storage for VarBytes {
 
 /// A span with its bytes, side by side: the key to look a file map's
 /// [`VarBytes`] keys up with (`map.get(&*query)`), which compares as they
-/// do and has their inline keys. Keys of up to 64 bytes are held in place,
+/// do and has their inline keys, for a file map searched with
+/// [`WithInlineKey`](crate::WithInlineKey); with [`Auto`](crate::Auto), a
+/// `&[u8]` does, with no copy. Keys of up to 64 bytes are held in place,
 /// longer ones in an allocation.
 ///
 /// # Examples
@@ -316,8 +332,10 @@ unsafe impl Send for ArenaBytes {}
 unsafe impl Sync for ArenaBytes {}
 
 impl ArenaBytes {
+    /// The bytes it points to: what `Auto`'s inline keys and comparisons
+    /// read, as a span's.
     #[inline]
-    fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         // SAFETY: the record is a length and that many bytes after it, in a
         // chunk of the arena, which outlives every `ArenaBytes` it handed
         // out (`ByteArena::push`) and never changes them.

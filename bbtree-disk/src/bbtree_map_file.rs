@@ -133,10 +133,10 @@ where
     pub fn get<Q>(&self, key: &Q) -> Option<V::View<'_>>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored> + ?Sized,
+        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
+        K::Stored: Borrow<Q::Query>,
     {
-        let mut query = Q::Query::default();
-        let value = self.file.map().get(key.query(&mut query))?;
+        let value = self.file.map().get::<Q::Query>(key.query())?;
         Some(V::view(value))
     }
 
@@ -144,10 +144,10 @@ where
     pub fn get_key_value<Q>(&self, key: &Q) -> Option<(K::View<'_>, V::View<'_>)>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored> + ?Sized,
+        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
+        K::Stored: Borrow<Q::Query>,
     {
-        let mut query = Q::Query::default();
-        let (key, value) = self.file.map().get_key_value(key.query(&mut query))?;
+        let (key, value) = self.file.map().get_key_value::<Q::Query>(key.query())?;
         Some((K::view(key), V::view(value)))
     }
 
@@ -157,12 +157,11 @@ where
     pub fn get_many<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V::View<'_>>; N]
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored> + ?Sized,
+        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
+        K::Stored: Borrow<Q::Query>,
     {
-        let mut queries: [Q::Query; N] = std::array::from_fn(|_| Q::Query::default());
-        let mut queries = queries.iter_mut();
-        let keys = keys.map(|key| key.query(queries.next().expect("one query per key")));
-        (self.file.map().get_many(keys)).map(|value| value.map(V::view))
+        let keys = keys.map(|key| key.query());
+        (self.file.map().get_many::<Q::Query, N>(keys)).map(|value| value.map(V::view))
     }
 
     /// The entries, in key order.
@@ -181,15 +180,15 @@ where
     ) -> impl DoubleEndedIterator<Item = (K::View<'_>, V::View<'_>)>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored> + ?Sized,
+        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
+        K::Stored: Borrow<Q::Query>,
         R: RangeBounds<Q>,
     {
-        let (mut start, mut end) = (Q::Query::default(), Q::Query::default());
         let bounds = (
-            range.start_bound().map(|key| key.query(&mut start)),
-            range.end_bound().map(|key| key.query(&mut end)),
+            range.start_bound().map(|key| key.query()),
+            range.end_bound().map(|key| key.query()),
         );
-        (self.file.map().range::<K::Stored, _>(bounds))
+        (self.file.map().range::<Q::Query, _>(bounds))
             .map(|(key, value)| (K::view(key), V::view(value)))
     }
 }

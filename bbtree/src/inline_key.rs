@@ -434,8 +434,9 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
 ///
 /// The key types recognized are the byte strings `String`, `str`,
 /// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,
-/// `[u8; 20]` and `[u8; 32]`, and the integers `u64`, `i64`, `u128` and
-/// `i128`. Their inline keys are those their [`InlineKey`] impls give. They
+/// `[u8; 20]` and `[u8; 32]`, with the `file` feature a file map's
+/// `VarBytes`, and the integers `u64`, `i64`, `u128` and `i128`. Their
+/// inline keys are those their [`InlineKey`] impls give. They
 /// are recognized by their type alone: a newtype around one of them is
 /// another type, and needs [`WithInlineKey`]. A lookup uses the inline keys
 /// when the type it looks up with is recognized too, as `&str` is for
@@ -480,9 +481,10 @@ pub(crate) mod sealed {
     /// resolves it for a key type (`tree/node/inline_keys.rs`), and page
     /// layouts depend on the answer.
     pub enum InlineKeySource<K> {
-        /// Std byte strings and integers, recognized by their type, have
-        /// inline keys: windows of a byte string's bytes, and an integer's
-        /// own [`InlineKey`] impl. Other keys have none ([`Auto`]).
+        /// Std byte strings and integers, and a file map's `VarBytes`,
+        /// recognized by their type, have inline keys: windows of a byte
+        /// string's bytes, and an integer's own [`InlineKey`] impl. Other
+        /// keys have none ([`Auto`]).
         RecognizedStdTypes,
         /// Every key has the inline keys its [`InlineKey`] impl gives, of
         /// which the nodes keep `width` bytes, and its hash tag and
