@@ -40,6 +40,16 @@ fn text_maps_round_trip() {
         }
         assert_eq!(index.get("key-"), None);
         assert_eq!(index.get("key-fffff"), None);
+        let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        for chunk in keys.chunks(4) {
+            let batch: [&str; 6] = std::array::from_fn(|lane| match lane {
+                4 => "key-",
+                5 => "key-fffff",
+                _ => chunk[lane % chunk.len()],
+            });
+            let expected = batch.map(|key| map.get(key).map(String::as_str));
+            assert_eq!(index.get_many(batch), expected);
+        }
         assert!(
             index.iter().eq(map
                 .iter()

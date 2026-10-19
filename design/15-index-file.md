@@ -115,6 +115,11 @@ offset 0      header: magic, version, layout fingerprint, entries, root
   through the mapping, mapped whole: a hot file map looks up at a map's speed,
   but each cold page costs 2 MiB of reading. Pages already in the page
   cache, as those of a file just written, keep their size.
+- **Batches.** `FileMap::get_many` runs the map's lanes (D53), above the
+  map's threshold: a lane follows an edge through `edge_unchecked`, as
+  `get` does. Lanes overlap waits for memory, not for the disk: a
+  prefetch of a page not yet mapped does nothing, and the lane's read of
+  it faults, as `get`'s does.
 
 ## Keys and values of any length
 
@@ -188,7 +193,8 @@ leaf      | …
   integer.
 - **`IndexFile<K, V>`** is a map of var-length keys and values in a file:
   written from a map's entries, in their order; mapped or read; looked up
-  with a borrowed form of the key, as a map is.
+  with a borrowed form of the key, as a map is, one key or a batch
+  (`get_many`), each query written in place in a buffer of its own.
 
 ## The Parquet index (bbtree-datafusion-parquet)
 
@@ -277,7 +283,6 @@ rows in 111 µs, against 40 ms to read the column.
   search a `&[u8]` against `VarBytes` keys, as it does a `&str` against
   `String` keys, if it took `VarBytes` for a byte string, as `Auto` takes
   `String`; that is `Auto`'s recognition, which this design avoided.
-- **No batches.** `FileMap` has no `get_many` (D53) yet.
 - **Not in DataFusion yet**, as pq-vector is: the index finds row groups
   and rows; a `TableProvider` or physical optimizer rule in
   bbtree-datafusion-parquet would turn a query's predicate into them.

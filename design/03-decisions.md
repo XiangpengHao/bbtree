@@ -1349,7 +1349,7 @@ Design and measurements in 15-index-file.md.
   the edge's own node, tagged as a pointer is (D52). `FileMap` reads the
   file map in place, a tree of strategy `InFile<S>`, which only sets
   `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
-  address. Keys and values are `PlainBytes`, kept in their slots, or
+  address, for `get` and the batch lanes (D53) alike. Keys and values are `PlainBytes`, kept in their slots, or
   `VarBytes`, of any length, kept in each leaf's tail, the slot holding a
   span, `{len, offset}` from the slot itself. bbtree-disk maps file maps'
   files and reads and writes typed maps of any length (`IndexFile`);

@@ -122,6 +122,24 @@ impl<K: ToBytes + FromBytes, V: ToBytes + FromBytes> IndexFile<K, V> {
         Some((K::from_bytes(key.bytes()), V::from_bytes(value.bytes())))
     }
 
+    /// Each key's value, in input order, as separate calls to [`Self::get`]
+    /// would; see [`FileMap::get_many`](bbtree::file::FileMap::get_many).
+    pub fn get_many<Q: ToBytes + ?Sized, const N: usize>(
+        &self,
+        keys: [&Q; N],
+    ) -> [Option<V::View<'_>>; N]
+    where
+        K: Borrow<Q>,
+    {
+        // Each written in place, not moved: see `VarBytesBuf::new`.
+        let mut queries: [VarBytesBuf; N] = std::array::from_fn(|_| VarBytesBuf::empty());
+        for (query, key) in queries.iter_mut().zip(keys) {
+            query.set(key.to_bytes().as_ref());
+        }
+        let values = (self.file.map()).get_many(queries.each_ref().map(|query| &**query));
+        values.map(|value| value.map(|value| V::from_bytes(value.bytes())))
+    }
+
     /// The entries, in key order.
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (K::View<'_>, V::View<'_>)> {
         (self.file.map().iter())

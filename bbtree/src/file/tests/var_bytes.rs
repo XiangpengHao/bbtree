@@ -90,6 +90,26 @@ fn round_trip(count: usize, seed: u64) {
         let found = file_map.get(&*query).map(VarBytes::bytes);
         assert_eq!(found, entries.get(&key).map(Vec::as_slice), "{key:?}");
     }
+    // Every key and as many random ones in batches, also through lanes at
+    // any size: `usize::MAX` passes the batch threshold.
+    let probes: Vec<Vec<u8>> = (entries.keys())
+        .flat_map(|key| [key.clone(), random_bytes(&rng, 26)])
+        .collect();
+    let mut queries: [VarBytesBuf; 8] = core::array::from_fn(|_| VarBytesBuf::empty());
+    for chunk in probes.chunks(8) {
+        for (lane, query) in queries.iter_mut().enumerate() {
+            query.set(&chunk[lane % chunk.len()]);
+        }
+        let batch = queries.each_ref().map(|query| &**query);
+        let expected = batch.map(|key| entries.get(key.bytes()).map(Vec::as_slice));
+        let found = file_map
+            .get_many(batch)
+            .map(|value| value.map(VarBytes::bytes));
+        assert_eq!(found, expected);
+        let found =
+            (file_map.tree.find_many(batch, usize::MAX)).map(|value| value.map(VarBytes::bytes));
+        assert_eq!(found, expected);
+    }
     let as_bytes =
         |(key, value): (&VarBytes, &VarBytes)| (key.bytes().to_vec(), value.bytes().to_vec());
     let expected = |(key, value): (&Vec<u8>, &Vec<u8>)| (key.clone(), value.clone());

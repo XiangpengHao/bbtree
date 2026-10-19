@@ -504,6 +504,18 @@ impl<'a, K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileMap<'a, K, V, S>
         self.get_key_value(key).is_some()
     }
 
+    /// Each key's value, in input order, as separate calls to `get` would.
+    /// Keys may repeat, and an empty batch returns an empty array. A batch
+    /// overlaps its keys' waits for memory, not for the disk: the first read
+    /// of a page of a mapped file faults, as it does for `get`.
+    pub fn get_many<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<&V>; N]
+    where
+        K: Borrow<Q> + Ord,
+        Q: Ord + ?Sized,
+    {
+        self.tree.find_many(keys, self.length)
+    }
+
     /// The entry of the least key, if any.
     #[must_use]
     pub fn first_key_value(&self) -> Option<(&K, &V)> {

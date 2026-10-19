@@ -8,7 +8,9 @@ and `bbtree/src/unsync/set/mod.rs`; batched `extend` in
 D46's exception. The shared `BBTreeMap`'s batches, `read_many`,
 `get_many_copied`, `insert_many` and `update_or_insert_many`, run lanes of
 their own on this executor and `Prefetcher`
-(`bbtree/src/tree/latched/batch.rs`, doc 09, D55).
+(`bbtree/src/tree/latched/batch.rs`, doc 09, D55). File maps' `get_many`
+(`bbtree/src/file.rs`, doc 15, D58) runs the unsync lanes on the file's
+pages.
 
 ## Problem
 

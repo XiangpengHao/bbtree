@@ -138,6 +138,15 @@ fn round_trip<K: NumberedKey, S: crate::InlineKeyStrategy<K>>(
         );
         assert_eq!(file_map.contains_key(&key), map.contains_key(&key));
     }
+    // Every key in batches, also through lanes at any size: `usize::MAX`
+    // passes the batch threshold.
+    let keys: Vec<K> = (0..space).map(K::of).collect();
+    for chunk in keys.chunks(8) {
+        let batch: [&K; 8] = core::array::from_fn(|lane| &chunk[lane % chunk.len()]);
+        let expected = batch.map(|key| map.get(key));
+        assert_eq!(file_map.get_many(batch), expected);
+        assert_eq!(file_map.tree.find_many(batch, usize::MAX), expected);
+    }
     assert!(file_map.iter().eq(map.iter()));
     assert!(file_map.iter().rev().eq(map.iter().rev()));
     assert_eq!(file_map.iter().len(), map.len());
