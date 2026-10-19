@@ -2,9 +2,10 @@
 //! default strategy, looked up by every borrowed form; keys behind a long
 //! shared prefix (D50), whose inline keys tie where the tree keeps none, and
 //! keys that their inline keys hold whole; integers, and strings, whose nodes
-//! keep 2 or 4 bytes of their inline keys; inline keys that break their
-//! contract, which may give wrong answers but never break memory safety; and
-//! an `InlineKey` that panics, which leaves the map memory-safe (D48). The
+//! keep 2 or 4 bytes of their inline keys and a hash tag of their own;
+//! inline keys and hash tags that break their contract, which may give wrong
+//! answers but never break memory safety; and an `InlineKey` that panics,
+//! which leaves the map memory-safe (D48). The
 //! fuzz targets run `Vec<u8>`, `u64` and `[u8; 16]` keys, and a newtype that
 //! opts in, against std's map (`fuzz/src/map_differential.rs`).
 
@@ -25,7 +26,7 @@ use std::vec::Vec;
 use super::differential::{MirroredMaps, Workload};
 use super::prefix::shared_prefix_key;
 use crate::inline_key::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
-use crate::tree::test_support::{DropLedger, FromNumber, TestRng, Tracked};
+use crate::tree::test_support::{DropLedger, FromNumber, HashTagCase, TestRng, Tracked};
 use crate::unsync::map::BBTreeMap;
 
 /// A built-in stored key can be borrowed through an unknown query type.
@@ -150,7 +151,9 @@ impl FromNumber for i128 {
 }
 
 /// Ten digits, of whose inline keys the nodes keep `BYTES`, 2 or 4: past a
-/// node's prefix, keys tie on them often, and the strings decide.
+/// node's prefix, keys tie on them often, and the strings decide. All have
+/// one length, so their hash tag is their last digit instead. Ties compare
+/// as the strings' do, from where keys differ.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct NarrowName<const BYTES: usize>(String);
 
@@ -160,9 +163,19 @@ impl<const BYTES: usize> InlineKey for NarrowName<BYTES> {
     } else {
         InlineWidth::Four
     };
+    const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
 
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.0.inline_key_at(offset)
+    }
+
+    fn hash_tag(&self) -> u8 {
+        self.0.bytes().last().unwrap_or(0)
+    }
+
+    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
+        self.0.cmp_from(&other.0, equal_len)
     }
 }
 
@@ -170,6 +183,52 @@ impl<const BYTES: usize> FromNumber for NarrowName<BYTES> {
     fn from_number(number: usize) -> Self {
         Self(String::from_number(number))
     }
+}
+
+/// A newtype that takes every hook of its string's impl: leaves keep 8
+/// bytes of its inline keys and its hash tags, internal nodes 4 bytes, which
+/// they read again from its keys as they move them (D43), ties compare from
+/// where keys differ, and the check against what every key shares compares
+/// 32 bytes at a time (D50), as for `Auto`'s strings.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PathName(String);
+
+impl InlineKey for PathName {
+    const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
+
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        self.0.inline_key_at(offset)
+    }
+
+    fn hash_tag(&self) -> u8 {
+        self.0.hash_tag()
+    }
+
+    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
+        self.0.cmp_from(&other.0, equal_len)
+    }
+
+    fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
+        self.0.cmp_prefix(prefix)
+    }
+}
+
+/// Behind a long shared head ([`shared_prefix_key`]), as paths are.
+impl FromNumber for PathName {
+    fn from_number(number: usize) -> Self {
+        Self(shared_prefix_key(number))
+    }
+}
+
+/// A newtype with every hook matches std through inserts that split, and
+/// removals that merge and move entries between nodes: the moves read
+/// internal windows again from its keys.
+#[test]
+fn keys_with_every_hook_match_std() {
+    let workload = Workload::new(10_000, 1 << 13);
+    workload.run::<PathName, u64, WithInlineKey>(82);
+    workload.run::<PathName, String, WithInlineKey>(83);
 }
 
 /// Keys behind a long shared head, which the tree keeps as its shared prefix
@@ -306,16 +365,52 @@ fn fixed_array_exact_key_lookups_match_std() {
 }
 
 /// Strings whose nodes keep 2 or 4 bytes of their inline keys: runs of
-/// tied inline keys are long, and the full keys decide within them.
+/// tied inline keys are long, their hash tags narrow them, and the full keys
+/// decide within what is left. The leaves keep the hash tags on 64-bit
+/// targets.
 #[test]
 fn narrow_inline_keys_match_std() {
+    let two_bytes_keep_tags = HashTagCase::leaves_keep_tags::<NarrowName<2>, String, WithInlineKey>;
+    let four_bytes_keep_tags = HashTagCase::leaves_keep_tags::<NarrowName<4>, u64, WithInlineKey>;
+    if cfg!(target_pointer_width = "64") {
+        assert!(two_bytes_keep_tags() && four_bytes_keep_tags());
+    }
     let workload = Workload::new(10_000, 1 << 13);
-    workload.run::<NarrowName<2>, u64, WithInlineKey>(80);
-    workload.run::<NarrowName<4>, String, WithInlineKey>(81);
+    workload.run::<NarrowName<2>, String, WithInlineKey>(80);
+    workload.run::<NarrowName<4>, u64, WithInlineKey>(81);
+}
+
+/// A key's own hash tags narrow an exact-key lookup's candidates, as a std
+/// string's lengths do: ten keys of one length tie on their 2-byte inline
+/// keys in the one leaf, and only one has the query's last digit. An
+/// outside key leaves the tree no shared prefix (D50).
+#[test]
+#[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+fn a_keys_own_hash_tags_narrow_its_candidates() {
+    let name = |text: &str| NarrowName::<2>(String::from(text));
+    let mut map = BBTreeMap::with_strategy(WithInlineKey);
+    for digit in 0..10 {
+        map.insert(name(&format!("k0-{digit}")), String::new());
+    }
+    map.insert(name("z"), String::new());
+    assert_eq!(map.leaf_depth(), 0);
+    let trace = map.inspect().trace(&name("k0-5"));
+    let leaf = trace.last().expect("the lookup reads a leaf");
+    let tied = leaf.tied().expect("the leaf has inline keys");
+    assert_eq!(tied.len(), 10);
+    let tags = tied.map(|index| leaf.node().hash_tag(index));
+    assert_eq!(tags.filter(|&tag| tag == Some(b'5')).count(), 1);
+    for digit in 0..10 {
+        assert!(map.contains_key(&name(&format!("k0-{digit}"))));
+    }
+    assert!(!map.contains_key(&name("k0-x")));
+    assert!(!map.contains_key(&name("k0-55")));
 }
 
 /// A key with a consistent `Ord` and an `InlineKey` that breaks its
-/// contract in one of the ways of [`Lie`].
+/// contract in one of the ways of [`Lie`], in its inline keys, its hash tags
+/// and its comparison from where keys differ. Its internal nodes keep 4
+/// bytes, and read lying windows again as they move keys.
 struct LyingKey<'r> {
     number: u32,
     lie: Lie,
@@ -324,12 +419,13 @@ struct LyingKey<'r> {
 
 #[derive(Clone, Copy)]
 enum Lie {
-    /// The same inline key for every key: consistent after all, as ties
-    /// decide nothing, so answers stay right.
+    /// The same inline key and hash tag for every key, and ties compared
+    /// by `Ord`: consistent after all, as ties decide nothing, so answers
+    /// stay right.
     Constant,
-    /// Inline keys ordered against the keys.
+    /// Inline keys, and ties, ordered against the keys.
     Reversed,
-    /// A random inline key on every call.
+    /// A random inline key, hash tag and order of ties on every call.
     Random,
 }
 
@@ -354,11 +450,30 @@ impl Ord for LyingKey<'_> {
 }
 
 impl InlineKey for LyingKey<'_> {
+    const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
+
     fn inline_key_at(&self, _offset: usize) -> InlineWord {
         match self.lie {
             Lie::Constant => 7,
             Lie::Reversed => InlineWord::from(u32::MAX - self.number),
             Lie::Random => self.rng.below(4) as InlineWord,
+        }
+    }
+
+    fn hash_tag(&self) -> u8 {
+        match self.lie {
+            Lie::Constant => 7,
+            Lie::Reversed => self.number as u8,
+            Lie::Random => self.rng.below(4) as u8,
+        }
+    }
+
+    fn cmp_from(&self, other: &Self, _equal_len: usize) -> Ordering {
+        match self.lie {
+            Lie::Constant => self.cmp(other),
+            Lie::Reversed => other.cmp(self),
+            Lie::Random => [Ordering::Less, Ordering::Equal, Ordering::Greater][self.rng.below(3)],
         }
     }
 }
@@ -441,8 +556,11 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
 }
 
 /// Inline keys that tie everywhere: right answers, and a well-formed tree.
+/// The leaves keep the keys' hash tags on 64-bit targets.
 #[test]
 fn inline_keys_that_tie_everywhere_give_right_answers() {
+    let keep_tags = HashTagCase::leaves_keep_tags::<LyingKey<'_>, Tracked<'_>, WithInlineKey>;
+    assert_eq!(keep_tags(), cfg!(target_pointer_width = "64"));
     assert!(run_with_lying_keys(Lie::Constant, 72));
 }
 
@@ -541,15 +659,14 @@ fn a_panicking_inline_key_leaves_a_sound_map() {
     assert_eq!(map.len(), map.iter().rev().count());
 }
 
-/// An `InlineKey` that panics while `retain`, `extract_if` or `append` builds
-/// a tree of the entries it keeps loses at most the entries it was placing:
-/// the map counts only those it holds, every value is dropped once, none
-/// leaked, and the tree's borders keep its shared prefix (D50), so that a key
-/// past the last goes in last. The panic lands on every call in turn:
-/// computing an entry's inline key, fitting the prefix of a node a new leaf
-/// closes, fitting the border when the walk or the merge finishes, joining
-/// back the entries past a bounded range, and putting back what a dropped
-/// `extract_if` did not visit.
+/// An `InlineKey` that panics while `retain` or `extract_if` removes entries,
+/// or while `append` builds a tree of the entries it keeps, loses at most the
+/// entries it was moving: the map counts only those it holds, every value is
+/// dropped once, none leaked, and the tree's borders keep its shared prefix
+/// (D50), so that a key past the last goes in last. The panic lands on every
+/// call in turn: computing an entry's inline key, fitting the prefix of a node
+/// a new leaf closes or a removal changed, and fitting the border when the
+/// merge finishes.
 #[test]
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn a_panicking_inline_key_in_a_bulk_change_leaves_a_valid_map() {

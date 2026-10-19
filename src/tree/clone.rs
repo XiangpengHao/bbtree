@@ -1,7 +1,7 @@
 //! Copying an owned tree: [`Tree::clone_in`], node by node, so that the
 //! copy has the same shape, as std's `BTreeMap::clone` does. It calls no
-//! `Ord` and no `InlineKey`: every inline key is copied (D18), every node's
-//! prefix length (05-fence-key.md), and what every key shares (D50).
+//! `Ord` and no `InlineKey`: it copies every inline key (D18), every node's
+//! prefix length (`prefix.rs`), and what every key shares (D50).
 
 #![forbid(unsafe_code)]
 
@@ -17,10 +17,9 @@ use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// A copy of the tree, with every key and value cloned in key order,
-    /// each separator's value right after its key (D17), its head's own
-    /// where separator keys are heads (D49), on pages from `alloc`, the
-    /// copy's allocator.
+    /// A copy of the tree on pages from `alloc`, the copy's allocator. Every
+    /// key and value is cloned in key order: each separator's value right
+    /// after its key (D17), which with inline keys is its head's key (D49).
     ///
     /// If a `clone` panics, what was copied so far is dropped, and its pages
     /// given back, before the panic goes on: nothing leaks, and the tree is
@@ -38,9 +37,9 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 }
 
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// A copy of this node and every node under it, on pages from `alloc`,
-    /// which nothing owns until the caller hangs it under an edge or makes
-    /// it a tree's root.
+    /// A copy of this node and every node under it, on pages from `alloc`.
+    /// Nothing owns it until the caller puts it under an edge or makes it a
+    /// tree's root.
     fn clone_nodes(self, alloc: &impl Allocator) -> Self {
         match self {
             Node::Leaf(leaf) => {
@@ -50,8 +49,8 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                     alloc,
                 };
                 if leaf.has_head() {
-                    let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
-                        .then(|| leaf.head_key().clone());
+                    let key =
+                        NodePtr::<K, V, S>::has_inline_keys().then(|| leaf.head_key().clone());
                     copy.put_head(key, leaf.head_value().clone());
                 }
                 for index in 0..leaf.len() {
@@ -75,9 +74,9 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Node<K, V, S> {
                 let guard = guard.with_top(Node::Internal(copy));
                 for index in 0..internal.len() {
                     let window = internal.window(index);
-                    // Where separator keys are heads (D49), the leaf copies
-                    // them, as it copies its head.
-                    let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                    // With inline keys, the separator keys are in the
+                    // heads, which the leaves copy (D49).
+                    let separator = if NodePtr::<K, V, S>::has_inline_keys() {
                         Separator::without_key(window)
                     } else {
                         let key = internal.separator_key(index).clone();

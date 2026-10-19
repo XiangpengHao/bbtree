@@ -2,27 +2,28 @@
 //! in every node's header ([`NodeLatch`]), and the strategy that puts it
 //! there ([`Latched`]).
 //!
-//! One word serves both ways the tree is latched, so that the root page,
-//! which holds a leaf until the tree grows and an internal node after, keeps
-//! one word through the change:
+//! One word serves both ways the tree is latched. So the root page, which
+//! holds a leaf until the tree grows and an internal node after, keeps one
+//! word through the change:
 //!
 //! - **Internal nodes, optimistically.** A reader reads the version, reads
 //!   the node, and checks that the version is unchanged
-//!   ([`NodeLatch::read_version`], [`NodeLatch::is_unchanged`]); a writer
+//!   ([`NodeLatch::read_version`], [`NodeLatch::is_unchanged`]). A writer
 //!   takes the node exclusively from the version it read
 //!   ([`NodeLatch::try_lock_at`]), never waiting, and bumps the version as
-//!   it lets go. The writer changes the node in place; the reader reads it
-//!   through raw pointers, in bounds whatever it reads (`optimistic.rs`),
-//!   and a writer changing it meanwhile is a failed check: optimistic lock
+//!   it lets go. The writer changes the node in place. The reader reads it
+//!   through raw pointers, in bounds whatever it reads (`optimistic.rs`); a
+//!   writer changing it meanwhile fails the check. This is optimistic lock
 //!   coupling.
 //! - **Leaves, pessimistically.** Shared for reads, exclusive for changes,
 //!   spinning with backoff while the other mode holds it
 //!   ([`NodeLatch::lock_shared`], [`NodeLatch::lock_exclusive`]). Letting
-//!   go of it exclusively bumps the version too.
+//!   go of it exclusively bumps the version too, so a lookup can also read
+//!   a leaf optimistically (D57).
 //!
 //! The word, from the low bit: the exclusive bit, a count of shared holders,
 //! and the version. A version is the word without its count, read while the
-//! exclusive bit is clear: shared holders don't change what a reader reads,
+//! exclusive bit is clear. Shared holders don't change what a reader reads,
 //! so an optimistic check ignores them.
 
 use core::marker::PhantomData;
@@ -79,8 +80,8 @@ pub(in crate::tree) struct NodeLatch(AtomicU64);
 pub(in crate::tree) struct Version(u64);
 
 impl Version {
-    /// The version a node held exclusively since this one is at once let go
-    /// ([`NodeLatch::unlock_exclusive`]).
+    /// The version a node moves to when let go after being held exclusively
+    /// since this one ([`NodeLatch::unlock_exclusive`]).
     #[inline(always)]
     pub(in crate::tree) fn next(self) -> Self {
         Self(self.0 + NodeLatch::VERSION_UNIT)
@@ -124,7 +125,8 @@ impl NodeLatch {
 
     /// Whether the node is still at `version`: nothing took it exclusively
     /// since, so what the caller read of it since reading `version` is what
-    /// the node held. Checks after the reads, which a fence keeps before it.
+    /// the node held. Call it after the reads; a fence keeps them before the
+    /// check.
     #[inline(always)]
     pub(in crate::tree) fn is_unchanged(&self, version: Version) -> bool {
         fence(Ordering::Acquire);
@@ -264,7 +266,7 @@ impl NodeLatch {
 
 /// Spinning while another thread holds a latch: twice as long each round,
 /// up to a cap. The crate has no `std`, so there is no scheduler to yield
-/// to, but for Shuttle's in its tests (`tree/interleaving.rs`).
+/// to, except Shuttle's in tests (`tree/interleaving.rs`).
 struct Backoff {
     round: u32,
 }

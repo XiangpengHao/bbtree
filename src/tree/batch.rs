@@ -1,22 +1,18 @@
-//! Batched lookups and inserts (doc 12). Each key descends in its own lane,
-//! an async block that reads like the single-key search: before it reads a
-//! line it may not have, it prefetches that line and yields. A private
-//! executor polls the lanes round-robin, so that one lane's wait for memory
-//! overlaps the other lanes' searches. No future leaves this module: the
-//! batch methods of the map and the set take and return plain arrays.
+//! Batched lookups and inserts (D53, doc 12). Each key descends in its own
+//! lane: an async block that reads like the single-key search. Before it
+//! reads a line it may not have, it prefetches that line and yields. A
+//! private executor polls the lanes round-robin, so one lane's wait for
+//! memory overlaps the other lanes' searches. No future leaves this module:
+//! the map's and the set's batch methods take and return plain arrays.
 //!
-//! Only this module prefetches (D46), and only lines a lane reads next: a
-//! node's header, the chosen edge, the query's window, a unique leaf
-//! candidate's entry and the first key bytes its comparison reads, and the
-//! slot an insertion shifts. Never unchosen edges or whole keys.
+//! Only this module prefetches (D46), and only the line a lane reads next.
+//! That is a node's header, the chosen edge, the query's window, the entry
+//! of a leaf's only candidate and the first key bytes its comparison reads,
+//! or the slot an insertion shifts. Never unchosen edges or whole keys.
 //!
-//! Level-by-level lanes, which search every lane at one depth before any
-//! follows its edge, are the measured ceiling: at 10M these lanes take
-//! 12–30% longer (doc 12).
-//!
-//! Each fetch names what it is for ([`LaneFetch`]) to the lane's watch,
-//! which the map's batches leave empty, `()`, and the visualizer's trace
-//! fills (`tree/inspect.rs`).
+//! Each fetch tells the lane's watch what it is for ([`LaneFetch`]). The
+//! map's batches use the empty watch, `()`; the visualizer's trace records
+//! the fetches (`tree/inspect.rs`).
 
 use core::borrow::Borrow;
 use core::future::Future;
@@ -35,9 +31,9 @@ use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-/// Separates the batch's leaf searches from the single-key `get`'s in
-/// compilation, without changing node layouts: sharing one search
-/// outlined the single-key one.
+/// A call-site marker that compiles the batch's leaf searches apart from
+/// the single-key `get`'s, without changing node layouts: sharing one
+/// search would outline the single-key one (D53).
 pub(in crate::tree) struct BatchSearch;
 
 /// What a lane fetches: the line it reads next, which it may not have, so
@@ -59,13 +55,14 @@ pub enum LaneFetch {
     CandidateBytes,
 }
 
-/// What hears a lane's fetches and its end: nothing for the map's batches,
-/// `()`, which compiles to nothing; the visualizer's trace behind `inspect`.
+/// What hears a lane's fetches and its end: `()` for the map's batches,
+/// which compiles to nothing; the visualizer's trace behind `inspect`.
 pub(in crate::tree) trait LaneWatch: Copy {
     /// The lane prefetches `line`, for `fetch`, and yields.
     fn fetching(self, fetch: LaneFetch, line: *const u8);
 
     /// The lane has written its result.
+    #[cfg(any(test, feature = "inspect"))]
     fn finished(self);
 }
 
@@ -73,19 +70,19 @@ impl LaneWatch for () {
     #[inline(always)]
     fn fetching(self, _: LaneFetch, _: *const u8) {}
 
-    #[inline(always)]
+    #[cfg(any(test, feature = "inspect"))]
     fn finished(self) {}
 }
 
-/// One key's descent. With the index a lane keeps between stages, its
-/// fields are all a suspended lane holds, so successive stages reuse them:
-/// one node for the internal levels and the leaf, and one prefix length,
-/// the root's for the query window and then the leaf's. Node lengths and
+/// One key's descent. Its fields, and the index a lane keeps between
+/// stages, are all a suspended lane holds, so successive stages reuse them.
+/// One node serves the internal levels and the leaf; one prefix length holds
+/// first the root's, for the query window, then the leaf's. Node lengths and
 /// prefixes fit in `u16`.
 ///
 /// Each lane is one flat async block, the internal levels' loop included:
-/// awaiting a nested future for them added a second dispatch to every
-/// resume, 124 instructions and 13 ns per 10M `u64` hit.
+/// awaiting a nested future for them would add a second dispatch to every
+/// resume.
 struct Lane<'q, K, V, S, Q: ?Sized, W> {
     key: SearchKey<'q, K, S, Q>,
     node: NodePtr<K, V, S>,
@@ -261,8 +258,9 @@ where
             if let Err(edge) = found
                 && edge < leaf.len()
             {
-                // The insertion shifts the keys from here. Reading ahead
-                // through all it shifts increased fills from memory.
+                // The insertion shifts the keys from here. Prefetch only the
+                // first line: reading ahead through all it shifts adds fills
+                // from memory.
                 Prefetcher::hint(leaf.entry_line(edge));
             }
             *output = Destination::Leaf(leaf, leaf.len(), found);
@@ -594,10 +592,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 #[cfg(any(test, feature = "inspect"))]
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Runs [`Self::find_many`]'s lanes and executor for `keys`, whatever
-    /// the tree's size, each lane told to its watch, and each watch told
-    /// when its lane ends: the watches hear every poll in the executor's
-    /// order. `None` for a tree without an internal root, where batches run
-    /// no lanes.
+    /// the tree's size, each lane with its watch. Each watch hears its lane's
+    /// fetches and its end, so together they hear every poll in the
+    /// executor's order. `None` for a tree without an internal root, where
+    /// batches run no lanes.
     pub(in crate::tree) fn find_many_watched<Q, W: LaneWatch, const N: usize>(
         &self,
         keys: [&Q; N],

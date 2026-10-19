@@ -7,6 +7,7 @@
 //! already in the map, and consecutive numbers make ascending keys.
 
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::fmt::Debug;
 
 use bbtree::{InlineKey, InlineWord};
@@ -160,13 +161,32 @@ impl FuzzKey for WideKey {
 /// A byte-string key with its own `InlineKey` impl, as a user's newtype
 /// would have: maps with `WithInlineKey` reach its windows through the
 /// trait, at the default width, and a lookup by `[u8]`, a form the nodes
-/// can't encode for it, searches by `Ord` alone (D19).
+/// can't encode for it, searches by `Ord` alone (D19). Its hash tag is its
+/// last byte, not its length, which the keys' numbers vary. Its ties compare
+/// as its bytes' do, from where keys differ, so its internal nodes keep 4
+/// bytes of its inline keys and read the rest again as they move keys (D43).
+/// Its check against what every key shares is its bytes' too (D50).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UserKey(Vec<u8>);
 
 impl InlineKey for UserKey {
+    const HAS_HASH_TAG: bool = true;
+    const HAS_CMP_FROM: bool = true;
+
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         self.0.inline_key_at(offset)
+    }
+
+    fn hash_tag(&self) -> u8 {
+        self.0.last().copied().unwrap_or(0)
+    }
+
+    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
+        self.0.cmp_from(&other.0, equal_len)
+    }
+
+    fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
+        self.0.cmp_prefix(prefix)
     }
 }
 

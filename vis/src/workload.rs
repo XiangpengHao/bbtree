@@ -19,7 +19,7 @@ pub(crate) enum KeyKind {
     /// every key shares (D50).
     Integers,
     /// `String` URLs sharing long prefixes: fence prefixes, a shared prefix
-    /// and length tags (D26, D50, D36).
+    /// and hash tags (D26, D50, D36).
     Urls,
     /// `[u8; 16]` ids: 2-byte summaries, keyless internal nodes and a
     /// shared prefix (D32, D49, D50).

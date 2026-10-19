@@ -1,11 +1,12 @@
-# Under Miri (`cargo miri nextest run`, which picks the `default-miri`
-# profile), only the tests named here run: Miri interprets each test
-# thousands of times slower than native code, so it runs the few that reach
-# each piece of unsafe code (pages, slots, node splits and merges, inline
-# keys, walks, drops and panics, allocators, batch lanes, the latched tree)
-# in about a minute each. Other tests don't run under Miri; to add one, name
-# it here. The threads tests stay out: optimistic lock coupling reads nodes
-# writers are changing, which Miri reports as data races.
+# Under Miri (miri.yml passes this file to `cargo miri nextest` with
+# `--config-file`, and nextest picks its `default-miri` profile), only the
+# tests named here run: Miri interprets each test thousands of times slower
+# than native code, so it runs the few that reach each piece of unsafe code
+# (pages, slots, node splits and merges, inline keys, walks, drops and
+# panics, allocators, batch lanes, the latched tree) in about a minute each.
+# Other tests don't run under Miri; to add one, name it here. The threads
+# tests stay out: optimistic lock coupling reads nodes writers are changing,
+# which Miri reports as data races.
 [profile.default-miri]
 default-filter = """
     test(=tree::teardown::tests::released_pages_build_the_next_tree)
@@ -27,7 +28,7 @@ default-filter = """
   | test(=tree::batch::tests::lookups_match_single_key_finds_at_every_depth)
   | test(=tree::batch::tests::executor_keeps_lanes_pinned_and_drops_each_once)
   | test(=tree::batch::tests::executor_drops_each_lane_once_after_a_lane_panics)
-  | test(=unsync::map::tests::length_tag::absent_keys_have_two_candidates_of_their_tag)
+  | test(=unsync::map::tests::hash_tag::absent_keys_have_two_candidates_of_their_tag)
   | test(=unsync::map::tests::differential::mutable_walks_of_a_small_tree_match_std)
   | test(=unsync::map::tests::insert::clones_forget_and_moves_keep_the_rightmost_leaf)
   | test(=unsync::map::tests::insert::cached_append_clears_before_callbacks_and_preserves_drop_order)
@@ -35,6 +36,7 @@ default-filter = """
   | test(=unsync::map::tests::drops::a_panicking_new_key_leaves_both_maps_unchanged)
   | test(=unsync::map::tests::drops::a_panicking_drop_while_clearing_matches_std)
   | test(=unsync::map::tests::drops::owning_iterators_drop_like_std)
+  | test(=unsync::map::tests::drops::retain_and_extract_if_drop_like_std)
   | test(=unsync::map::tests::allocator::append_keeps_each_page_with_its_own_allocator)
   | test(=unsync::map::tests::inline_key::wrong_inline_keys_stay_memory_safe)
   | test(=unsync::map::tests::prefix::integer_keys_get_prefixes)

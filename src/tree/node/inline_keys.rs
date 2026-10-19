@@ -1,11 +1,12 @@
 //! Inline keys inside the nodes (D18): which keys have them, what a node
 //! stores beside each key, and what a search looks for.
 //!
-//! A node stores each key's inline key at the node's prefix length: the
-//! first bytes of the 8 of the key's encoding past the bytes that the node's
-//! fences share, and so every key in it (05-fence-key.md), as many as the
-//! node kind's [`InlineWidth`]. Windows are always 8 bytes; only a node narrows
-//! them, as it stores them, and as it compares a search's with them.
+//! A node's prefix is the bytes its fences share, and so every key in it
+//! (05-fence-key.md). A key's inline key at that prefix length is the 8
+//! bytes of its encoding past the prefix. The node stores the first of
+//! them, as many as the node kind's [`InlineWidth`]. Windows are always 8
+//! bytes; only a node narrows them, when it stores them and when it compares
+//! a search's with them.
 //!
 //! - [`KeyInliner`] resolves a map's strategy for its key type, once and for
 //!   all at compile time: how its keys get inline keys, or that they have
@@ -17,17 +18,16 @@
 //! - [`WindowedKey`] is a key outside the nodes with its window, for the node
 //!   it goes into.
 //! - [`SearchKey`] is what a search looks for: a key, and how to take its
-//!   inline key at each node's prefix, if the nodes can compare it, and how
-//!   it orders against what every key of the tree shares (D50).
+//!   inline key at each node's prefix if the nodes can compare it. It also
+//!   orders the key against what every key of the tree shares (D50).
 
 #![forbid(unsafe_code)]
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
-use core::mem::size_of;
+use core::mem::{self, size_of};
 
-use super::length_tags::LengthTags;
 use super::node_plan::NodePlan;
 use super::page::{InlineKeyNodeHeader, NodeKind};
 use super::type_identity::{ByteString, SameType, StdInteger};
@@ -46,19 +46,23 @@ const SHARED_PREFIX_CHUNK_LEN: usize = 4 * WINDOW_LEN;
 /// [`InlineKeySource`], resolved for `K`.
 pub(in crate::tree) enum KeyInliner<K> {
     /// `K` is a std byte string ([`Auto`]): its inline keys are windows of
-    /// its bytes.
+    /// its bytes, and its hash tag that of its bytes.
     ///
     /// [`Auto`]: crate::Auto
     ByteString(ByteString<K>),
     /// `K`'s [`InlineKey`] impl, of whose inline keys the nodes keep
-    /// `width` bytes: any key's under [`WithInlineKey`], and a std
-    /// integer's under [`Auto`].
+    /// `width` bytes, and its hash tag and comparison from where keys differ
+    /// if the impl gives them: any key's under [`WithInlineKey`], and a std
+    /// integer's, without them, under [`Auto`].
     ///
     /// [`WithInlineKey`]: crate::WithInlineKey
     /// [`Auto`]: crate::Auto
     InlineKeyTrait {
         inline_key_at: fn(&K, usize) -> InlineWord,
         width: InlineWidth,
+        hash_tag: Option<fn(&K) -> u8>,
+        cmp_from: Option<fn(&K, &K, usize) -> Ordering>,
+        cmp_prefix: fn(&K, &[u8]) -> Ordering,
     },
 }
 
@@ -70,14 +74,37 @@ impl<K> Clone for KeyInliner<K> {
 
 impl<K> Copy for KeyInliner<K> {}
 
+/// Held across a call into user code that runs while keys move: dropped
+/// only by an unwind out of that call, it panics again, and a panic while
+/// unwinding aborts (D48). Forgotten once the call returns.
+struct AbortOnUnwind;
+
+impl AbortOnUnwind {
+    /// `user_code`'s result, or an abort if it panics.
+    #[inline(always)]
+    fn call<R>(user_code: impl FnOnce() -> R) -> R {
+        let guard = Self;
+        let result = user_code();
+        mem::forget(guard);
+        result
+    }
+}
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        panic!("user code panicked while the map moved keys");
+    }
+}
+
 impl<K> KeyInliner<K> {
     /// How keys `K` get inline keys under strategy `S`, or `None` if they
     /// have none.
     ///
-    /// A pure function of `K` and `S`, the strategy's constant source and
-    /// `K`'s type identity, which folds to a constant after
-    /// monomorphization: every node plan of a map follows from it, and so
-    /// does every page's layout, which must (`node_plan.rs`).
+    /// A pure function of `K` and `S` (the strategy's constant source and
+    /// `K`'s type identity), so it folds to a constant after
+    /// monomorphization. Every node plan of a map follows from it, and so
+    /// does every page's layout, which every access must match
+    /// (`node_plan.rs`).
     #[inline(always)]
     pub(in crate::tree) fn resolve<S: InlineKeyStrategy<K>>() -> Option<Self> {
         match S::SOURCE {
@@ -86,15 +113,24 @@ impl<K> KeyInliner<K> {
                     StdInteger::recognize().map(|integer| Self::InlineKeyTrait {
                         inline_key_at: integer.inline_key_at(),
                         width: integer.width(),
+                        hash_tag: None,
+                        cmp_from: None,
+                        cmp_prefix: integer.cmp_prefix(),
                     })
                 })
             }
             InlineKeySource::InlineKeyTrait {
                 inline_key_at,
                 width,
+                hash_tag,
+                cmp_from,
+                cmp_prefix,
             } => Some(Self::InlineKeyTrait {
                 inline_key_at,
                 width,
+                hash_tag,
+                cmp_from,
+                cmp_prefix,
             }),
         }
     }
@@ -102,8 +138,8 @@ impl<K> KeyInliner<K> {
     /// Whether `K`, under strategy `S`, is ordered by its own bytes alone,
     /// and every bit pattern of them is a `K`: the std integers and byte
     /// arrays [`Auto`] recognizes. A copy of such a key, read while a writer
-    /// changes it, compares without reading anything else, which a latched
-    /// tree's optimistic reader relies on (`optimistic.rs`); any other key's
+    /// changes it, compares without reading anything else. A latched tree's
+    /// optimistic reader relies on that (`optimistic.rs`); any other key's
     /// order may follow pointers it holds.
     ///
     /// [`Auto`]: crate::Auto
@@ -115,9 +151,9 @@ impl<K> KeyInliner<K> {
     }
 
     /// `key`'s inline key at `offset`: what a node whose keys share their
-    /// first `offset` bytes stores beside it. Always inlined, as the
-    /// dispatch it is: called from enough places, LLVM outlined it, and
-    /// searches called it.
+    /// first `offset` bytes stores beside it. Always inlined: it is only a
+    /// dispatch, and once it has enough callers LLVM outlines it, putting a
+    /// call in the searches.
     #[inline(always)]
     pub(in crate::tree) fn inline_key_at(self, key: &K, offset: usize) -> InlineWord {
         match self {
@@ -126,16 +162,49 @@ impl<K> KeyInliner<K> {
         }
     }
 
-    /// How many leading bytes the encodings of `a` and `b` share, both
-    /// padded with zeros, compared a window at a time, under strategy `S`;
-    /// 0 for keys without inline keys: a node bounded by `a` and `b` may
-    /// skip that many bytes of its keys (05-fence-key.md).
+    /// `key`'s inline key at `offset`, read while keys move: by an internal
+    /// node that keeps fewer bytes of it than a leaf, for a window it hands
+    /// out (D43). A key's own impl runs behind an abort-on-unwind guard
+    /// (D48), as unwinding would leave the move half done.
+    #[inline(always)]
+    pub(in crate::tree) fn inline_key_at_while_keys_move(
+        self,
+        key: &K,
+        offset: usize,
+    ) -> InlineWord {
+        match self {
+            Self::ByteString(_) => self.inline_key_at(key, offset),
+            Self::InlineKeyTrait { inline_key_at, .. } => {
+                AbortOnUnwind::call(|| inline_key_at(key, offset))
+            }
+        }
+    }
+
+    /// `key`'s hash tag (D36), or `None` if the keys have none: a std byte
+    /// string's from its bytes, and a key's own impl's otherwise. Leaves
+    /// call it as they write a key, while they move keys too, so a panic in
+    /// an impl's aborts (D48): unwinding would leave the move half done.
+    #[inline(always)]
+    pub(in crate::tree) fn hash_tag(self, key: &K) -> Option<u8> {
+        match self {
+            Self::ByteString(byte_string) => Some(byte_string.bytes(key).hash_tag()),
+            Self::InlineKeyTrait { hash_tag, .. } => {
+                let hash_tag = hash_tag?;
+                Some(AbortOnUnwind::call(|| hash_tag(key)))
+            }
+        }
+    }
+
+    /// How many leading bytes the zero-padded encodings of `a` and `b` share
+    /// under strategy `S`, compared a window at a time; 0 for keys without
+    /// inline keys. A node bounded by `a` and `b` may skip that many bytes
+    /// of its keys (05-fence-key.md).
     ///
-    /// At most the longest prefix a node records: two different keys can
+    /// At most the longest prefix a node records. Two different keys can
     /// have equal padded encodings (`"ab"` and `"ab\0"`, or a lossy
-    /// [`InlineKey`] impl), and stopping short is always safe, as a shorter
-    /// prefix is. Byte strings stop comparing past the longer one's end,
-    /// where every window is zeros.
+    /// [`InlineKey`] impl), and stopping short is always safe, as any
+    /// shorter prefix is. Byte strings stop comparing past the longer one's
+    /// end, where every window is zeros.
     pub(in crate::tree) fn common_prefix_len<S: InlineKeyStrategy<K>>(a: &K, b: &K) -> usize {
         const MAX_LEN: usize = InlineKeyNodeHeader::MAX_PREFIX_LEN;
         let difference = match Self::resolve::<S>() {
@@ -158,8 +227,8 @@ impl<K> KeyInliner<K> {
     }
 
     /// The prefix length of a node whose fences are `low` and `high`, under
-    /// strategy `S`: what they share, or if either is missing, along the
-    /// tree's borders, `shared_len`, what every key of the tree shares
+    /// strategy `S`: what they share. If either is missing, along the
+    /// tree's borders, it is `shared_len`, what every key of the tree shares
     /// (D50).
     pub(in crate::tree) fn fence_prefix_len<S: InlineKeyStrategy<K>>(
         low: Option<&K>,
@@ -172,10 +241,10 @@ impl<K> KeyInliner<K> {
         }
     }
 
-    /// How many leading bytes `key`'s encoding shares with `shared`, at
-    /// most `shared.len()`, under strategy `S`; 0 for keys without inline
-    /// keys: for a byte string, by its bytes, so that a key is at least as
-    /// long as what it shares; otherwise by windows, padded with zeros.
+    /// How many leading bytes `key`'s encoding shares with `shared` under
+    /// strategy `S`, at most `shared.len()`; 0 for keys without inline keys.
+    /// A byte string compares by its bytes, so that a key is at least as
+    /// long as what it shares. Other keys compare by zero-padded windows.
     pub(in crate::tree) fn common_prefix_len_with_bytes<S: InlineKeyStrategy<K>>(
         key: &K,
         shared: &[u8],
@@ -215,10 +284,12 @@ impl<K> KeyInliner<K> {
     }
 
     /// Writes the first bytes of `key`'s encoding under strategy `S` into
-    /// `bytes`, at most as many as it holds, and returns how many: of a byte
-    /// string, as many as it has; of a std integer, its size; of a key with
-    /// its own impl, all of `bytes`, padded with zeros past its encoding; of
-    /// a key without inline keys, none.
+    /// `bytes`, at most as many as it holds, and returns how many:
+    /// - of a byte string, as many as it has;
+    /// - of a std integer, its size;
+    /// - of a key with its own impl, all of `bytes`, zero-padded past its
+    ///   encoding;
+    /// - of a key without inline keys, none.
     pub(in crate::tree) fn write_leading_bytes<S: InlineKeyStrategy<K>>(
         key: &K,
         bytes: &mut [u8],
@@ -287,14 +358,15 @@ impl InlineSlot for u64 {
 
 /// An inline key with the prefix length it is taken at: bytes
 /// `prefix_len..prefix_len + 8` of a key's encoding, of which a node with
-/// that prefix length stores the first (05-fence-key.md).
+/// that prefix length stores the first (05-fence-key.md). A search's query
+/// takes one at each node it visits ([`SearchKey::inline_target`]).
 ///
-/// Raw inline slots yield their kept bytes, zeros after them. A window an
-/// internal node of heap byte strings hands out, for a separator or a fence,
-/// is read from its key again, all eight bytes (D43), so that it can fill a
-/// leaf's. Other encodings keep the same width in both node kinds. Moving to
-/// a shorter prefix preserves that many correct bytes (`moved_back_to`); a
-/// node whose prefix grows reads its keys.
+/// A window read out of a node's slots holds the bytes the node keeps,
+/// zeros after them. A window that an internal node of heap byte strings
+/// hands out, for a separator or a fence, is read again from its key, all
+/// eight bytes (D43), so that it can fill a leaf's. Other encodings keep the
+/// same width in both node kinds. Moving to a shorter prefix keeps that many
+/// correct bytes (`moved_back_to`); a node whose prefix grows reads its keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tree) struct Window {
     prefix_len: usize,
@@ -320,20 +392,20 @@ impl Window {
         self.inline_key
     }
 
-    /// The same key's window at `fill`'s shorter prefix length, given
-    /// `fill`, the window there of a key whose encoding shares this key's
-    /// bytes up to this window's prefix length: the bytes that move in come
-    /// from `fill`, so no key is read. This is how a node's prefix shrinks,
-    /// and how a key moves into a node with a shorter one.
+    /// The same key's window at `fill`'s shorter prefix length. `fill` is
+    /// the window there of a key whose encoding shares this key's bytes up
+    /// to this window's prefix length. The bytes that move in come from
+    /// `fill`, so no key is read. This is how a node's prefix shrinks, and
+    /// how a key moves into a node with a shorter one.
     ///
     /// If only the first `n` bytes of this window and of `fill` are right,
-    /// as for raw windows read out of slots that keep `n`, at least the first
-    /// `n` of the result are: the `shift` bytes that move in are `fill`'s
-    /// first, and this window's `n` follow them, or, for a shift past `n`,
-    /// all are `fill`'s.
+    /// as for windows read out of slots that keep `n`, then at least the
+    /// first `n` of the result are. The `shift` bytes that move in are
+    /// `fill`'s first, and this window's `n` follow them; for a shift past
+    /// `n`, all are `fill`'s.
     ///
-    /// A `fill` at a longer prefix length is a caller's bug, which gives
-    /// wrong inline keys, and so wrong answers, but nothing worse.
+    /// A `fill` at a longer prefix length is a caller's bug. It gives wrong
+    /// inline keys, and so wrong answers, but nothing worse.
     #[inline]
     pub(super) fn moved_back_to(self, fill: Self) -> Self {
         debug_assert!(
@@ -356,22 +428,24 @@ impl Window {
 
 /// The bytes of a std byte string being searched for. Windows read these
 /// bytes directly: a search visits only a few prefix lengths, so preparing
-/// every possible window would copy mostly bytes that it never reads.
+/// every possible window would copy mostly bytes that it never reads. Std
+/// byte strings' `InlineKey::cmp_from` compares them too.
 #[derive(Clone, Copy)]
-struct SearchBytes<'q> {
+pub(crate) struct SearchBytes<'q> {
     bytes: &'q [u8],
 }
 
 impl<'q> SearchBytes<'q> {
     #[inline]
-    fn new(bytes: &'q [u8]) -> Self {
+    pub(crate) fn new(bytes: &'q [u8]) -> Self {
         Self { bytes }
     }
 
-    /// A query window, checking the key's length before the window's fit.
-    /// Short queries need the padded word at every level; testing for a full
-    /// window first adds a branch on each node's prefix. Long queries keep
-    /// their direct load. Fixed arrays use their constant-length path.
+    /// The query's inline key at `offset`. It checks the key's length before
+    /// the window's fit: short queries need the padded word at every level,
+    /// and testing for a full window first would add a branch on each node's
+    /// prefix. Long queries keep their direct load. Fixed arrays use their
+    /// constant-length path.
     #[inline(always)]
     fn inline_key_at(&self, offset: usize) -> InlineWord {
         let Some(last) = self.bytes.last_chunk::<WINDOW_LEN>() else {
@@ -398,27 +472,25 @@ impl<'q> SearchBytes<'q> {
         bytes.get(offset..)?.first_chunk()
     }
 
-    /// How the key orders against `shared`, the bytes every key of the tree
-    /// starts with (D50), as `<[u8]>::cmp` orders the key's first
-    /// `shared.len()` bytes against them: a key ending inside them goes
-    /// first.
+    /// How the key's bytes, padded with zeros, order against `prefix` in its
+    /// first `prefix.len()` bytes: `Equal` if the key has them, or ends
+    /// inside them with only zeros after it there. Std byte strings'
+    /// `InlineKey::cmp_prefix` (D50).
     ///
     /// The bytes are almost always equal, and may be many (file-path keys
-    /// can share 64):
-    /// whole 32-byte chunks test equality without ordering them, then the
-    /// rest compares a zero-padded window at a time; a window at a time
-    /// throughout, 64 bytes took 300 more instructions a search. Windows
-    /// are read from the whole keys, where most are a single load. Inline,
-    /// with no call: a call anywhere in the search loop made every search
-    /// keep its state in stack slots.
+    /// can share 64). So whole 32-byte chunks first test equality without
+    /// ordering them, and the rest compares a zero-padded window at a time.
+    /// Windows are read from the whole keys, where most are a single load.
+    /// Always inlined, with no call: a call anywhere in the search loop
+    /// makes every search keep its state in stack slots (D41).
     #[inline(always)]
-    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
+    pub(crate) fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
         let query = self.bytes;
-        let end = shared.len();
+        let end = prefix.len();
         let mut offset = 0;
         while end - offset >= SHARED_PREFIX_CHUNK_LEN
             && let Some(query_chunk) = Self::chunk_at(query, offset)
-            && Self::chunk_at(shared, offset) == Some(query_chunk)
+            && Self::chunk_at(prefix, offset) == Some(query_chunk)
         {
             offset += SHARED_PREFIX_CHUNK_LEN;
         }
@@ -426,24 +498,34 @@ impl<'q> SearchBytes<'q> {
             let remaining = end - offset;
             let dropped_bits = 8 * WINDOW_LEN.saturating_sub(remaining) as u32;
             let query_window = query.inline_key_at(offset) >> dropped_bits;
-            let shared_window = shared.inline_key_at(offset) >> dropped_bits;
-            if query_window != shared_window {
-                return query_window.cmp(&shared_window);
+            let prefix_window = prefix.inline_key_at(offset) >> dropped_bits;
+            if query_window != prefix_window {
+                return query_window.cmp(&prefix_window);
             }
             offset += WINDOW_LEN;
         }
-        // Every window equal: the key has the bytes, or ends inside them
-        // with only zeros after it in `shared`.
-        if query.len() < end {
-            Ordering::Less
-        } else {
-            Ordering::Equal
-        }
+        Ordering::Equal
+    }
+
+    /// How the key orders against `shared`, the bytes every key of the tree
+    /// starts with (D50), as `<[u8]>::cmp` orders the key's first
+    /// `shared.len()` bytes against them: as [`Self::cmp_prefix`] does, but
+    /// a key ending inside them goes first, as every std byte string of the
+    /// tree is at least as long.
+    #[inline(always)]
+    fn cmp_shared(&self, shared: &[u8]) -> Ordering {
+        self.cmp_prefix(shared).then_with(|| {
+            if self.bytes.len() < shared.len() {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        })
     }
 
     /// Orders the key against `stored`, a std byte string, as `<[u8]>::cmp`
-    /// does, given that their first `equal_len` bytes are equal
-    /// when padded with zeros: 8 bytes at a time from there, as big-endian
+    /// does, given that their first `equal_len` bytes are equal when padded
+    /// with zeros. It compares 8 bytes at a time from there, as big-endian
     /// words, then by length. Every load is of a fixed size, so there is no
     /// call to `memcmp`, and a string that ends within the equal bytes isn't
     /// read at all.
@@ -451,7 +533,7 @@ impl<'q> SearchBytes<'q> {
     /// The last word ends where the shorter string does and may start before
     /// the bytes left to compare: the bytes it repeats are equal.
     #[inline]
-    fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
+    pub(crate) fn cmp_from(&self, stored: &[u8], equal_len: usize) -> Ordering {
         let query = self.bytes;
         let both_len = query.len().min(stored.len());
         if equal_len < both_len && both_len < WINDOW_LEN {
@@ -477,23 +559,6 @@ impl<'q> SearchBytes<'q> {
             }
         }
         query.len().cmp(&stored.len())
-    }
-}
-
-/// The inline key of a key being searched for, at one node's prefix, all 8
-/// bytes of it, which the node narrows to the ones it keeps as it compares:
-/// two words, which stay in registers on the way down.
-#[derive(Clone, Copy, Debug)]
-pub(in crate::tree) struct InlineTarget {
-    inline_key: InlineWord,
-    /// The prefix length of the node it is for.
-    prefix_len: usize,
-}
-
-impl InlineTarget {
-    #[inline]
-    pub(in crate::tree) fn inline_key(self) -> InlineWord {
-        self.inline_key
     }
 }
 
@@ -546,11 +611,11 @@ impl<K, S> WindowedKey<K, S> {
 }
 
 /// A separator outside its internal node (D17): on its way up from a split,
-/// or between internal nodes, or into a merged leaf. Where internal nodes
-/// keep their separator keys, a map without inline keys, it is the key; where
-/// each separator key is the head of the leftmost leaf right of it (D49), it
-/// is the key's window alone, at the prefix length of the node it is for,
-/// and the key moves only with leaf entries.
+/// between internal nodes, or into a merged leaf. Without inline keys,
+/// internal nodes keep their separator keys, and a separator is its key.
+/// With inline keys (D49), it is the key's window alone, at the prefix
+/// length of the node it is for; the key stays a leaf head and moves only
+/// with leaf entries.
 pub(in crate::tree) struct Separator<K, S> {
     key: Option<K>,
     window: Window,
@@ -558,7 +623,7 @@ pub(in crate::tree) struct Separator<K, S> {
 }
 
 impl<K, S> Separator<K, S> {
-    /// A separator that is `key`: in a map whose internal nodes keep keys.
+    /// A separator that is `key`: in a map without inline keys.
     pub(in crate::tree) fn with_key(key: WindowedKey<K, S>) -> Self {
         let (key, window) = key.into_parts();
         Self {
@@ -568,7 +633,7 @@ impl<K, S> Separator<K, S> {
         }
     }
 
-    /// A separator whose key is a head below (D49): `window` alone.
+    /// A separator whose key is a leaf head below (D49): `window` alone.
     pub(in crate::tree) fn without_key(window: Window) -> Self {
         Self {
             key: None,
@@ -590,8 +655,8 @@ impl<K, S> Separator<K, S> {
         }
     }
 
-    /// The key, with its window, if the separator is one: in a map whose
-    /// internal nodes keep keys.
+    /// The key, with its window, if the separator is one: in a map without
+    /// inline keys.
     pub(in crate::tree) fn into_windowed_key(self) -> Option<WindowedKey<K, S>> {
         let window = self.window;
         self.key.map(|key| WindowedKey::from_parts(key, window))
@@ -604,15 +669,16 @@ impl<K, S> Separator<K, S> {
     }
 }
 
-/// What a search looks for: `key`, of a type `Q` that keys `K` borrow as,
-/// whose inline key at each node's prefix the nodes of a map with strategy
-/// `S` compare with theirs, if they can (D18, 05-fence-key.md): for std
-/// byte-string keys, if `Q` is a std byte string too, ordered by its bytes
-/// like them; for keys with their own impl, if `Q` is `K` itself. Otherwise
-/// the search compares full keys.
+/// What a search looks for: `key`, of a type `Q` that keys `K` borrow as, in
+/// a map with strategy `S`. Where they can, the nodes compare its window at
+/// each node's prefix with their inline keys (D18, 05-fence-key.md):
+/// - for std byte-string keys, if `Q` is a std byte string too, ordered by
+///   its bytes like them;
+/// - for keys with their own impl, if `Q` is `K` itself.
 ///
-/// Every choice between the two goes by the strategy, resolved for `K` where
-/// it is made, a constant: the nodes of a map run only its own way.
+/// Otherwise the search compares full keys. Every choice between the two
+/// goes by the strategy, resolved for `K` where it is made, a constant: the
+/// nodes of a map run only its own way.
 pub(crate) struct SearchKey<'q, K, S, Q: ?Sized> {
     key: &'q Q,
     /// The query's bytes when both types use the built-in byte encoding;
@@ -629,7 +695,6 @@ where
     S: InlineKeyStrategy<K>,
     Q: ?Sized,
 {
-    /// Looks for `key`.
     #[inline]
     pub(crate) fn new(key: &'q Q) -> Self {
         let bytes = Self::query_byte_string()
@@ -642,16 +707,18 @@ where
         }
     }
 
-    /// The key's inline key at a node's `prefix_len`, if the nodes can
-    /// compare it with theirs. Calls `InlineKey` with
+    /// The key's window at a node's `prefix_len`, if the nodes can compare
+    /// it with theirs. It holds all 8 bytes; the node narrows them to the
+    /// ones it keeps as it compares. A window is two words, which stay in
+    /// registers on the way down. Calls `InlineKey` with
     /// [`WithInlineKey`](crate::WithInlineKey), as searches do.
     ///
     /// Always inlined: whether there is one depends on the types alone, and
     /// a search must see that to drop its search over full keys. Outlined,
-    /// the `String` lookup kept that search, `memcmp` calls and all, in its
-    /// loop, and spilled the loop's state to the stack.
+    /// it leaves that search, `memcmp` calls and all, in a `String` lookup's
+    /// loop, and spills the loop's state to the stack.
     #[inline(always)]
-    pub(super) fn inline_target(&self, prefix_len: usize) -> Option<InlineTarget> {
+    pub(super) fn inline_target(&self, prefix_len: usize) -> Option<Window> {
         let inline_key = match KeyInliner::<K>::resolve::<S>()? {
             KeyInliner::ByteString(_) => {
                 let query = self.recognized_bytes()?;
@@ -666,10 +733,7 @@ where
                 inliner.inline_key_at(key, prefix_len)
             }
         };
-        Some(InlineTarget {
-            inline_key,
-            prefix_len,
-        })
+        Some(Window::new(prefix_len, inline_key))
     }
 
     /// The proof that `Q` is a std byte string, where `K` is one the
@@ -684,8 +748,10 @@ where
         ByteString::<Q>::recognize()
     }
 
-    /// Keep fixed-array lengths visible even in an outlined search. Heap
-    /// strings keep their cached slice, avoiding another metadata load.
+    /// The query's bytes, if the nodes compare it by them. A query that
+    /// holds its bytes is read again from the key, so that a fixed array's
+    /// length stays a constant even in an outlined search. Heap strings use
+    /// the cached slice, avoiding another metadata load.
     #[inline]
     fn recognized_bytes(&self) -> Option<SearchBytes<'q>> {
         let byte_string = Self::query_byte_string()?;
@@ -717,8 +783,8 @@ where
     }
 
     /// Whether the key equals `stored`, comparing their bytes all at once,
-    /// for std byte string keys and a recognized byte query; `None` for any
-    /// other: keys with their own `InlineKey` impl keep their `Ord`. An
+    /// for std byte string keys and a recognized byte query. `None` for any
+    /// other, as keys with their own `InlineKey` impl keep their `Ord`. An
     /// exact-key lookup compares its one candidate this way, a fixed byte
     /// array's in a length the compiler knows (D38).
     #[inline(always)]
@@ -742,10 +808,10 @@ where
     }
 
     /// Whether the key, a recognized byte string, ends within the inline key
-    /// a node of kind `Kind`, a node of std byte strings, keeps at
-    /// `prefix_len`: a stored key that shares those first `prefix_len` bytes
-    /// and has an equal inline key is this key if their lengths are equal.
-    /// `false` for any other key.
+    /// that a node of kind `Kind`, of std byte strings, keeps at
+    /// `prefix_len`; `false` for any other key. If it does, a stored key that
+    /// shares those first `prefix_len` bytes and has an equal inline key is
+    /// this key if their lengths are equal.
     #[inline(always)]
     pub(super) fn ends_within_window<Kind: NodeKind>(&self, prefix_len: usize) -> bool {
         let plan = NodePlan::<K>::of::<S, Kind>();
@@ -757,11 +823,18 @@ where
         query.bytes.len() <= prefix_len + width.byte_len()
     }
 
-    /// The query's length tag, if it is a recognized byte string (D36).
+    /// The query's hash tag (D36), if the nodes can compare it with theirs:
+    /// a recognized byte string's from its bytes, and with a key's own impl,
+    /// that impl's if `Q` is `K`. Calls `InlineKey` with
+    /// [`WithInlineKey`](crate::WithInlineKey), as searches do.
     #[inline]
-    pub(super) fn length_tag(&self) -> Option<u16> {
-        self.recognized_bytes()
-            .map(|query| LengthTags::tag_of(query.bytes.len()))
+    pub(super) fn hash_tag(&self) -> Option<u8> {
+        match KeyInliner::<K>::resolve::<S>()? {
+            KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.bytes.hash_tag()),
+            KeyInliner::InlineKeyTrait { hash_tag, .. } => {
+                Some(hash_tag?(SameType::<K, Q>::recognize()?.cast(self.key)))
+            }
+        }
     }
 
     /// The first stored byte read by `cmp_tied`, after its entry metadata
@@ -794,52 +867,52 @@ where
         stored.get(offset).map(core::ptr::from_ref)
     }
 
-    /// How this key orders against every key of a tree, all of whose
-    /// encodings start with `shared` (D50): before or after them all if it
-    /// differs in those bytes, or, a byte string, ends inside them; `Equal`
-    /// if it has them. `None` if the key has no encoding the nodes compare,
-    /// as a key with its own impl looked up by another type: its searches
-    /// compare full keys, and need no check.
+    /// How this key orders against every key of a tree whose encodings all
+    /// start with `shared` (D50). It is before or after them all if it
+    /// differs in those bytes, or, as a byte string, ends inside them;
+    /// `Equal` if it has them. `None` if the key has no encoding the nodes
+    /// compare, as for a key with its own impl looked up by another type: its
+    /// searches compare full keys and need no check.
     #[inline]
     pub(in crate::tree) fn cmp_shared_prefix(&self, shared: &[u8]) -> Option<Ordering> {
         match KeyInliner::<K>::resolve::<S>()? {
             KeyInliner::ByteString(_) => Some(self.recognized_bytes()?.cmp_shared(shared)),
-            inliner @ KeyInliner::InlineKeyTrait { .. } => {
-                let query = SameType::<K, Q>::recognize()?.cast(self.key);
-                let mut offset = 0;
-                while offset < shared.len() {
-                    let dropped_bits = 8 * WINDOW_LEN.saturating_sub(shared.len() - offset) as u32;
-                    let query_window = inliner.inline_key_at(query, offset) >> dropped_bits;
-                    let shared_window = shared.inline_key_at(offset) >> dropped_bits;
-                    if query_window != shared_window {
-                        return Some(query_window.cmp(&shared_window));
-                    }
-                    offset += WINDOW_LEN;
-                }
-                Some(Ordering::Equal)
-            }
+            KeyInliner::InlineKeyTrait { cmp_prefix, .. } => Some(cmp_prefix(
+                SameType::<K, Q>::recognize()?.cast(self.key),
+                shared,
+            )),
         }
     }
 
     /// How this key orders against `stored`, a key of a node of kind `Kind`
     /// that `target` is for, whose inline key equals this key's in the bytes
-    /// the node keeps. For std byte strings, from past the bytes known
-    /// equal, the node's prefix and the bytes of each inline key its plan
-    /// stores ([`SearchBytes::cmp_from`]): the search key shares the prefix,
-    /// lying between the node's fences, as every key in it does. Otherwise
-    /// by `Q`'s `Ord`.
+    /// the node keeps. Std byte strings compare from past the bytes known
+    /// equal ([`SearchBytes::cmp_from`]): the node's prefix, and the bytes of
+    /// each inline key its plan stores. So do keys whose impl has
+    /// `InlineKey::cmp_from`, looked up by their own type. The search key
+    /// shares the prefix because it lies between the node's fences, as every
+    /// key in the node does. Other keys compare by `Q`'s `Ord`.
     #[inline]
-    pub(super) fn cmp_tied<Kind: NodeKind>(&self, target: InlineTarget, stored: &K) -> Ordering
+    pub(super) fn cmp_tied<Kind: NodeKind>(&self, target: Window, stored: &K) -> Ordering
     where
         Q: Ord,
     {
         let plan = NodePlan::<K>::of::<S, Kind>();
-        if let Some(KeyInliner::ByteString(byte_string)) = plan.inliner()
-            && let Some(width) = plan.inline_width()
-            && let Some(query) = self.recognized_bytes()
-        {
+        if let Some(width) = plan.inline_width() {
             let equal_len = target.prefix_len + width.byte_len();
-            return query.cmp_from(byte_string.bytes(stored), equal_len);
+            if let Some(KeyInliner::ByteString(byte_string)) = plan.inliner()
+                && let Some(query) = self.recognized_bytes()
+            {
+                return query.cmp_from(byte_string.bytes(stored), equal_len);
+            }
+            if let Some(KeyInliner::InlineKeyTrait {
+                cmp_from: Some(cmp_from),
+                ..
+            }) = plan.inliner()
+                && let Some(same_type) = SameType::<K, Q>::recognize()
+            {
+                return cmp_from(same_type.cast(self.key), stored, equal_len);
+            }
         }
         self.key.cmp(stored.borrow())
     }

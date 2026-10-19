@@ -3,15 +3,15 @@
 //! over a map that threads change meanwhile.
 //!
 //! Each end copies a few entries at a time during a scan
-//! (`tree/latched/scan.rs`), each with its leaf's stamp, and hands one out
-//! while the stamps of its leaf and of the last one's are current: the
-//! leaves hold them still, and nothing between them. Otherwise it scans
-//! again from the last key it handed out. So it hands out what other threads
-//! insert ahead of it, and nothing they removed before it got there, as a
-//! scan does.
+//! (`tree/latched/scan.rs`), each with its leaf's stamp. It hands a copy out
+//! only while the stamps of its leaf and of the last entry handed out are
+//! current: then those leaves still hold both entries, and nothing lies
+//! between them. Otherwise it scans again from the last key it handed out.
+//! So, as a scan does, it hands out what other threads insert ahead of it,
+//! and nothing they removed before it got there.
 //!
-//! The next copy goes on where the last one's scan stopped, along the path
-//! that scan kept, without a descent, while that leaf is unchanged
+//! While that leaf is unchanged, the next copy goes on where the last one's
+//! scan stopped, along the path that scan kept, without a descent
 //! ([`ScanResume`]). An end copies one entry first, then four times as many
 //! each time, up to [`RangeEnd::MAX_COPY_LEN`], so that a caller that takes
 //! a few entries clones a few.
@@ -149,10 +149,11 @@ where
         }
     }
 
-    /// Copies entries for the front if `ascending`, else for the back, from
-    /// where the last copy's scan stopped, if its leaf is unchanged, else
-    /// from past this end's last key, or from its bound of the range, to the
-    /// other end's last key, or the other bound; and returns the first.
+    /// Copies entries for the front if `ascending`, else for the back, and
+    /// returns the first. The copy starts where the last copy's scan
+    /// stopped, if its leaf is unchanged; else past this end's last key, or
+    /// at this end's bound of the range. It stops at the other end's last
+    /// key, or the other bound.
     fn copy(&mut self, ascending: bool) -> Option<Copied<'m, K, V>> {
         let Self {
             map,
@@ -192,10 +193,9 @@ where
             }
         };
         if ascending {
-            map.tree.scan_resumable(from, to, &mut end.resume, visit);
+            map.tree.scan(from, to, Some(&mut end.resume), visit);
         } else {
-            map.tree
-                .scan_rev_resumable(to, from, &mut end.resume, visit);
+            map.tree.scan_rev(to, from, Some(&mut end.resume), visit);
         }
         end.copied.reverse();
         end.copied.pop()

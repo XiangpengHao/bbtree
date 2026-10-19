@@ -1,16 +1,19 @@
-//! Appending to a latched tree's last leaf, as bbtree appends to its own
-//! (D45, `tree/root.rs`): an insert whose key goes after every key, into a
-//! last leaf with room, latches that leaf and inserts there, without a
-//! descent.
+//! Appending to a latched tree's last leaf, as the unsync tree appends to
+//! its own (D45, `tree/root.rs`). An insert whose key goes after every key,
+//! into a last leaf with room, latches that leaf and inserts there without
+//! a descent.
 //!
 //! The tree points at its last leaf, and only a thread holding that leaf
-//! exclusively changes the pointer: a split of it points it at the leaf
-//! last after the split (`insert.rs`), and a merge that frees it, or a
-//! lowering that moves it into the root page, at the leaf that took its
-//! entries (`remove.rs`). An insert that latches the leaf the pointer names,
-//! and finds the pointer naming it still, has the last leaf, which stays
-//! last while the insert holds it. Being on the tree's border, it holds what
-//! every key shares still too (`shared_prefix.rs`).
+//! exclusively changes the pointer:
+//! - a split of it points it at the leaf that is last after the split
+//!   (`insert.rs`);
+//! - a merge that frees it, or a lowering that moves it into the root page,
+//!   points it at the leaf that took its entries (`remove.rs`).
+//!
+//! An insert that latches the leaf the pointer names, and then finds the
+//! pointer still naming it, has the last leaf. The leaf stays last while the
+//! insert holds it. As the leaf is on the tree's border, holding it also
+//! holds what every key shares still (`shared_prefix.rs`).
 
 use core::cmp::Ordering as KeyOrdering;
 use core::ptr::NonNull;
@@ -28,10 +31,10 @@ use super::insert::InsertPolicy;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// Appends `key` and `value` to the last leaf, if it has room, and `key`
-    /// is greater than its last key, and shares what every key shares, and
-    /// returns what `policy` returns of a new entry; or gives all back, for
-    /// the ordinary insert.
+    /// Appends `key` and `value` to the last leaf, and returns what `policy`
+    /// returns of a new entry. That takes a leaf with room, `key` greater
+    /// than its last key, and `key` sharing what every key shares. Otherwise
+    /// gives all back, for the ordinary insert.
     #[inline(always)]
     pub(super) fn append<P: InsertPolicy<K, V>>(
         &self,

@@ -34,8 +34,9 @@ impl<K: Ord, V> BBTreeMap<K, V> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
-    /// Keeps chunking and lane state out of callers of `extend`. A partial
-    /// chunk is consumed before stopping, including non-fused iterators.
+    /// Inserts `entries` 16 at a time, and the last, partial batch one by
+    /// one. Out of line, to keep the batch and lane state out of `extend`'s
+    /// callers. It stops at the iterator's first `None`, fused or not.
     #[inline(never)]
     fn extend_batches(&mut self, entries: impl Iterator<Item = (K, V)>)
     where

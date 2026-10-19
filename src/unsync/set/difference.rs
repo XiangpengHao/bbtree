@@ -14,7 +14,7 @@ use core::iter::FusedIterator;
 use core::ops::Sub;
 
 use super::lookups::LookupsAhead;
-use super::merge::{MergeSides, MergeStep, SetCursor};
+use super::merge::{MergeSides, MergeStep};
 use super::{BBTreeSet, Iter};
 use crate::allocator::{Allocator, Global};
 use crate::inline_key::{Auto, InlineKeyStrategy};
@@ -39,12 +39,7 @@ pub struct Difference<'a, T: 'a, S: InlineKeyStrategy<T> = Auto, A: Allocator + 
 enum DifferenceStrategy<'a, T, S: InlineKeyStrategy<T>, A: Allocator + Clone> {
     /// Walks all of `self` and some of `other`, side by side, a leaf's run
     /// of each at a time (`merge.rs`).
-    Stitch {
-        sides: MergeSides<'a, T, S>,
-        /// Whether std's, which peeks at `other`'s next element through a
-        /// `Peekable`, holds it peeked: for printing as std's does.
-        other_peeked: bool,
-    },
+    Stitch(MergeSides<'a, T, S>),
     /// Walks `self` and looks each element up in `other`, a batch ahead.
     Search {
         self_iter: Iter<'a, T, S>,
@@ -66,13 +61,9 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
         match &mut self.strategy {
             // std's steps: `self`'s next element taken out, then `other`'s
             // peeked at, and passed over while not greater.
-            DifferenceStrategy::Stitch {
-                sides: MergeSides { left, right },
-                other_peeked,
-            } => {
+            DifferenceStrategy::Stitch(MergeSides { left, right }) => {
                 let mut self_next = left.next()?;
                 loop {
-                    *other_peeked = true;
                     let order = right
                         .peek()
                         .map_or(Ordering::Less, |other_next| self_next.cmp(other_next));
@@ -81,12 +72,8 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
                         Ordering::Equal => {
                             self_next = left.next()?;
                             right.advance();
-                            *other_peeked = false;
                         }
-                        Ordering::Greater => {
-                            right.advance();
-                            *other_peeked = false;
-                        }
+                        Ordering::Greater => right.advance(),
                     }
                 }
             }
@@ -105,7 +92,7 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (self_len, other_len) = match &self.strategy {
-            DifferenceStrategy::Stitch { sides, .. } => sides.lens(),
+            DifferenceStrategy::Stitch(sides) => sides.lens(),
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
@@ -121,7 +108,7 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> Iterator
         F: FnMut(B, Self::Item) -> B,
     {
         match self.strategy {
-            DifferenceStrategy::Stitch { sides, .. } => {
+            DifferenceStrategy::Stitch(sides) => {
                 sides.fold_steps::<B, true, false>(accumulator, |accumulator, step| match step {
                     MergeStep::Left(element) => fold(accumulator, element),
                     MergeStep::Right(_) | MergeStep::Both(_) => accumulator,
@@ -157,13 +144,7 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> FusedIterator
 impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Difference<'_, T, S, A> {
     fn clone(&self) -> Self {
         let strategy = match &self.strategy {
-            DifferenceStrategy::Stitch {
-                sides,
-                other_peeked,
-            } => DifferenceStrategy::Stitch {
-                sides: sides.clone(),
-                other_peeked: *other_peeked,
-            },
+            DifferenceStrategy::Stitch(sides) => DifferenceStrategy::Stitch(sides.clone()),
             DifferenceStrategy::Search {
                 self_iter,
                 other_set,
@@ -179,7 +160,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Difference<'_, 
     }
 }
 
-/// Prints as std's does, the strategy's name and field names included.
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
     for Difference<'_, T, S, A>
 {
@@ -193,21 +173,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stitch {
-                sides,
-                other_peeked,
-            } => f
-                .debug_struct("Stitch")
-                .field("self_iter", &sides.left.printed_as_iter(false))
-                .field(
-                    "other_iter",
-                    &PrintedAsPeekable {
-                        other: &sides.right,
-                        peeked: *other_peeked,
-                    },
-                )
-                .finish(),
-            // std's names the set `other_iter` here too.
+            Self::Stitch(sides) => f.debug_tuple("Stitch").field(sides).finish(),
             Self::Search {
                 self_iter,
                 other_set,
@@ -215,28 +181,10 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
             } => f
                 .debug_struct("Search")
                 .field("self_iter", self_iter)
-                .field("other_iter", other_set)
+                .field("other_set", other_set)
                 .finish(),
             Self::Iterate(iter) => f.debug_tuple("Iterate").field(iter).finish(),
         }
-    }
-}
-
-/// `other`'s side of a difference, printed as std's `Peekable` over it is,
-/// with its next element, or the end, peeked or not.
-struct PrintedAsPeekable<'d, 'a, T, S> {
-    other: &'d SetCursor<'a, T, S>,
-    peeked: bool,
-}
-
-impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for PrintedAsPeekable<'_, '_, T, S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let other = self.other;
-        let peeked = self.peeked.then(|| other.first_remaining());
-        f.debug_struct("Peekable")
-            .field("iter", &other.printed_as_iter(self.peeked))
-            .field("peeked", &peeked)
-            .finish()
     }
 }
 
@@ -288,10 +236,7 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
                     other_set: other,
                     lookups: LookupsAhead::default(),
                 },
-                _ => DifferenceStrategy::Stitch {
-                    sides: MergeSides::new(self.iter(), other.iter()),
-                    other_peeked: false,
-                },
+                _ => DifferenceStrategy::Stitch(MergeSides::new(self.iter(), other.iter())),
             }
         } else {
             DifferenceStrategy::Iterate(self.iter())

@@ -1,10 +1,12 @@
-//! Checks of what a well-formed tree satisfies, through the node API, in
-//! tests and in fuzzing builds (`--cfg fuzzing`, which `cargo fuzz` sets),
-//! where the fuzz targets (`fuzz/`) call them through the map's
-//! `check_invariants`: the whole tree's shape, order and counts
-//! ([`Tree::check_invariants`]), and on every node, that its inline
-//! keys and length tags match its keys, and its prefix length is what its
-//! fences share, or along the borders, what every key shares (D50).
+//! Checks that a tree is well formed, through the node API
+//! ([`Tree::check_invariants`]): the whole tree's shape, order and counts,
+//! and on every node, that its inline keys and hash tags match its keys.
+//! A node's prefix length must be what its fences share, or along the
+//! borders, what every key shares (D50).
+//!
+//! Compiled in tests and in fuzzing builds (`--cfg fuzzing`, which
+//! `cargo fuzz` sets), where the fuzz targets call them through the map's
+//! `check_invariants`.
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
@@ -47,18 +49,17 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///   splits and removals keep (D22);
     /// - the root of a non-empty tree holds a key, and so does an internal
     ///   root;
-    /// - every leaf but the leftmost has a head, the value of the separator
-    ///   just left of it, and the leftmost has none: a tree of `L` leaves
-    ///   has `L - 1` separators and as many heads; where separator keys are
-    ///   heads (D49), a separator's key is that head's, which is what the
-    ///   walk reads as the separator's;
+    /// - every leaf but the leftmost has a head, and the leftmost has none:
+    ///   a tree of `L` leaves has `L - 1` separators and as many heads. With
+    ///   inline keys (D49), a separator's key is its head's, which the walk
+    ///   reads as the separator's;
     /// - `length` is the number of entries, each counted once: leaf entries
     ///   and separators, whose values are the heads;
     /// - if the strategy gives the keys inline keys, every node holds its
-    ///   keys' windows at its prefix length, in order (D18), which is what
-    ///   its fences share (05-fence-key.md), and along the tree's borders,
-    ///   what every key shares, whose encoding starts with the tree's
-    ///   shared prefix (D50); otherwise none, and prefix 0.
+    ///   keys' windows at its prefix length, in order (D18). The prefix is
+    ///   what its fences share, or along the tree's borders, what every key
+    ///   shares; every key's encoding starts with the tree's shared prefix
+    ///   (D50). Otherwise there are no inline keys, and every prefix is 0.
     ///
     /// Without a tree, `length` is 0.
     ///
@@ -96,12 +97,12 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Panics unless no node's prefix length is shorter than its parent's
-    /// (D44), and every node along the tree's left and right borders, which
-    /// lacks a fence, has the tree's shared prefix (D50): a search for a key
-    /// that shares it but sorts past the first or last key goes down a
-    /// border, and reads its windows there. Calls neither `Ord` nor any
-    /// encoding: it holds even for keys that panic or break their
-    /// contracts, whose maps give wrong answers.
+    /// (D44), and every node along the tree's left and right borders has the
+    /// tree's shared prefix (D50). A search for a key that shares it but
+    /// sorts past the first or last key goes down a border and reads its
+    /// windows there. Calls neither `Ord` nor any encoding, so it holds even
+    /// for keys that panic or break their contracts, whose maps give wrong
+    /// answers.
     pub(crate) fn check_prefix_lens(&self) {
         let Some(root_page) = self.root_page() else {
             return;
@@ -143,8 +144,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 
 #[cfg(test)]
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Every node's prefix length (05-fence-key.md), from the root down, each
-    /// node before its children.
+    /// Every node's prefix length, from the root down, each node before its
+    /// children.
     pub(crate) fn node_prefix_lens(&self) -> Vec<usize> {
         let mut prefix_lens = Vec::new();
         Self::collect_prefix_lens(self.root(), &mut prefix_lens);
@@ -160,8 +161,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
-    /// The separator keys, in order: each one's value is a leaf's head
-    /// (D17), and where separator keys are heads, so is the key (D49).
+    /// The separator keys, in order. Each one's value is in its head (D17),
+    /// and with inline keys so is the key (D49).
     pub(crate) fn separator_keys(&self) -> Vec<&K> {
         let mut keys = Vec::new();
         Self::collect_separator_keys(self.root(), &mut keys);
@@ -311,15 +312,15 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
 pub(in crate::tree) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>:
     Child<K, V, S>
 {
-    /// Panics unless the node has inline keys exactly if its map's strategy
-    /// gives its keys some, and then has the first bytes of its keys'
-    /// windows at its prefix length, as many as this kind keeps, in order
-    /// (D18, 05-fence-key.md); a node without has prefix 0.
+    /// Panics unless the node has inline keys exactly when its map's
+    /// strategy gives its keys some. They must be the first bytes of its
+    /// keys' windows at its prefix length, as many as this kind keeps, in
+    /// order (D18). A node without inline keys must have prefix 0.
     fn assert_inline_keys_match(self) {
         let plan = Self::plan();
-        if let Some(tags) = self.length_tags() {
+        if let Some(tags) = self.hash_tags() {
             for (index, &tag) in tags[..self.len()].iter().enumerate() {
-                assert_eq!(Some(tag), plan.length_tag(self.key(index)));
+                assert_eq!(Some(tag), plan.hash_tag(self.key(index)));
             }
         }
         let prefix_len = self.prefix_len();
@@ -353,8 +354,8 @@ pub(in crate::tree) trait NodeChecks<K, V, S: InlineKeyStrategy<K>>:
     }
 
     /// Panics unless the node's prefix length is what its fences, `lower`
-    /// and `upper`, share (05-fence-key.md), or `shared_len`, what every key
-    /// shares, if either is missing (D50).
+    /// and `upper`, share, or `shared_len`, what every key shares, if either
+    /// is missing (D50).
     fn assert_prefix_fits_fences(self, lower: Option<&K>, upper: Option<&K>, shared_len: usize) {
         let fence_prefix_len = if NodePtr::<K, V, S>::has_inline_keys() {
             KeyInliner::fence_prefix_len::<S>(lower, upper, shared_len)
@@ -378,7 +379,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
         match (self, other) {
             (Node::Leaf(left), Node::Leaf(right)) => {
                 assert_eq!(left.has_head(), right.has_head());
-                if left.has_head() && NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+                if left.has_head() && NodePtr::<K, V, S>::has_inline_keys() {
                     assert!(left.head_key() == right.head_key());
                 }
                 for index in 0..left.len() {

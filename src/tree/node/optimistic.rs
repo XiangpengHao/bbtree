@@ -1,45 +1,46 @@
-//! Internal nodes of a latched tree, which threads read while others write
-//! them: optimistic lock coupling (`latch.rs`, `doc/09-concurrency.md`).
+//! Reads of a latched tree's nodes while other threads write them: internal
+//! nodes always, by optimistic lock coupling, and leaves for lookups and
+//! hints (D57; `latch.rs`, `doc/09-concurrency.md`).
 //!
-//! A reader takes no latch on an internal node: it reads the node's version,
-//! reads the node in place, and checks the version after. A writer holding
-//! the node changes it in place, with the node code as it is. What a reader
-//! reads meanwhile may be half of one change and half of another, which the
-//! check then throws away. So a read here:
+//! A racing reader takes no latch. It reads the node's version, reads the
+//! node in place, and checks the version after. A writer holding the node
+//! changes it in place, with the ordinary node code. The reader may
+//! meanwhile read half of one change and half of another, which the check
+//! then throws away. So a read here:
 //!
 //! - goes through raw pointers and forms no reference into the node
 //!   ([`NodeInlineKeys`] over its slots, edges read from their slots);
-//! - reads the node's length once, and clamps it to the capacity, so that
-//!   whatever it read, the search stays in bounds (D14);
-//! - follows no edge it read before the node's version vouches for it, and
-//!   then reaches a page of the kind the edge's tag says: every page but
-//!   the root's keeps its kind while threads share the tree, and a node
-//!   moved or freed keeps its page's latch word, whose version only grows
+//! - reads the node's length once and clamps it to the capacity, so the
+//!   search stays in bounds whatever it read (D14);
+//! - follows no edge before the node's version vouches for it. The edge then
+//!   reaches a page of the kind its tag says. Every page but the root's
+//!   keeps its kind while threads share the tree. A node moved or freed
+//!   keeps its page's latch word, whose version only grows
 //!   (`tree/latched/pages.rs`);
-//! - runs no user code on what it read: where inline keys tie, it compares
-//!   a separator's key, a leaf's head (D49), once the node's version vouches
-//!   for the edge it walked down, with that leaf latched shared. A head key
+//! - runs no user code on what it read. Where inline keys tie, it compares a
+//!   separator's key, a leaf's head (D49), with that leaf latched shared,
+//!   once the node's version vouches for the edge it walked down. A head key
 //!   changes only while its leaf is latched exclusively, and the key a
-//!   removal takes out may be dropped, its memory freed, at once after.
-//!   Keys ordered by their own bytes alone, std integers and byte arrays,
-//!   it compares as a copy instead, unlatched, and checks the node's
-//!   version after: a head changes only while the node holding its
-//!   separator is held.
+//!   removal takes out may be dropped, and its memory freed, right after.
+//!   Keys ordered by their own bytes alone (std integers and byte arrays) it
+//!   compares as an unlatched copy instead, and checks the node's version
+//!   after: a head changes only while the node holding its separator is
+//!   held.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering as AtomicOrdering};
+use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use super::Node;
+use super::hash_tags::HashTags;
 use super::inline_key_search::NodeInlineKeys;
-use super::inline_keys::{InlineTarget, KeyInliner, SearchKey};
+use super::inline_keys::{KeyInliner, SearchKey, Window};
 use super::internal::Internal;
 use super::latch::{NodeLatch, Version};
 use super::leaf::{CandidateLine, Leaf};
-use super::length_tags::LengthTags;
 use super::page::{NodeKind, NodePtr};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -51,13 +52,13 @@ enum RacingRoute {
     Tied(Tie),
 }
 
-/// Separators of an internal node, read optimistically, whose inline keys
-/// tie with a key's: `candidates`, among the node's `len` as read; or all
-/// of them, without an inline key to compare (`target`).
+/// Separators of an internal node, read optimistically, that tie with a key:
+/// `candidates`, among the node's `len` as read. Without an inline key to
+/// compare (`target` is `None`), all of them tie.
 struct Tie {
     candidates: Range<usize>,
     len: usize,
-    target: Option<InlineTarget>,
+    target: Option<Window>,
 }
 
 impl Tie {
@@ -72,8 +73,8 @@ impl Tie {
 }
 
 /// Where a key goes from an internal node read optimistically: down `edge`,
-/// right of separator `edge - 1` if the key equals it, whose entry is the
-/// head of the leftmost leaf below (D17); and the node's length, as read.
+/// with the node's `len` as read. `at_separator` if the key equals separator
+/// `edge - 1`, whose entry is the head of the leftmost leaf below (D17).
 #[derive(Clone, Copy)]
 pub(in crate::tree) struct Routed {
     pub(in crate::tree) edge: usize,
@@ -82,12 +83,12 @@ pub(in crate::tree) struct Routed {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// Whether `key` may sort after every key of this leaf, read in place,
-    /// without its latch, while writers may change it: `false` if the leaf,
-    /// as read, has no key, or a last key whose inline key alone sorts it
-    /// after `key`. A hint for an append, which latches the leaf to know
-    /// (`tree/latched/append.rs`), so that an insert that won't append
-    /// writes nothing to the last leaf.
+    /// Whether `key` may sort after every key of this leaf, read in place
+    /// without its latch while writers may change it. `false` if the leaf, as
+    /// read, has no key, or a last key whose inline key alone sorts it after
+    /// `key`. A hint for an append, which latches the leaf to be sure
+    /// (`tree/latched/append.rs`): an insert that won't append then writes
+    /// nothing to the last leaf.
     #[inline(always)]
     pub(in crate::tree) fn may_go_last_racing<Q>(self, key: &SearchKey<'_, K, S, Q>) -> bool
     where
@@ -106,9 +107,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// [`Self::candidate_line`], read in place while writers may change the
-    /// leaf, and the prefix length it read the leaf at: both hold only if
-    /// the leaf's version is unchanged after. A batch's lane reads it
-    /// before it latches the leaf, to fetch the candidate's entry first
+    /// leaf, and the prefix length it read the leaf at. Both hold only if the
+    /// leaf's version is unchanged after. A batch's lane reads it before it
+    /// latches the leaf, to fetch the candidate's entry first
     /// (`tree/latched/batch.rs`).
     ///
     /// `key` shares the leaf's prefix if it routed here through nodes whose
@@ -134,10 +135,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// The line of the entry an insertion of `key` would shift first, as the
-    /// leaf's inline keys say, read in place while writers may change them:
-    /// for a batch's lane to fetch before its insert searches the leaf
-    /// latched (`tree/latched/batch.rs`). `None` if the key would go last,
-    /// shifting nothing, or the inline keys can't place it.
+    /// leaf's inline keys say, read in place while writers may change them.
+    /// A batch's lane fetches it before its insert searches the leaf latched
+    /// (`tree/latched/batch.rs`). `None` if the key would go last, shifting
+    /// nothing, or the inline keys can't place it.
     #[inline(always)]
     pub(in crate::tree) fn racing_insertion_line<Q>(
         self,
@@ -180,7 +181,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         let page = self.node_ptr();
         // SAFETY: `index` is below the capacity, so key slot `index` and
         // value slot `index` are in the page, which is a leaf's, allocated
-        // while threads share the tree; both are read as plain bytes, which
+        // while threads share the tree. Both are read as plain bytes, which
         // `MaybeUninit` holds whatever they are.
         unsafe {
             RacingEntry {
@@ -207,12 +208,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// Whether key `index` is `key`, decided by the leaf alone, read in place
-    /// while writers may change it: `index` is a candidate whose inline key,
+    /// while writers may change it. `index` is a candidate: its inline key,
     /// at the leaf's `prefix_len`, equals `key`'s. `Some` for a byte string
-    /// that ends within its inline key, which equal lengths then make equal,
-    /// as the length tags tell where they are exact (D36); `None` where only
-    /// the keys' bytes tell. What it says holds only if the leaf's version is
-    /// unchanged after.
+    /// that ends within its inline key: equal lengths then make the keys
+    /// equal, and an exact hash tag tells the length (D36). `None` where
+    /// only the keys' bytes can tell. The answer holds only if the leaf's
+    /// version is unchanged after.
     ///
     /// `key` shares the leaf's prefix if it routed here through nodes whose
     /// versions held.
@@ -235,14 +236,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if !key.ends_within_window::<Self>(prefix_len) {
             return None;
         }
-        let query_tag = key.length_tag().filter(|&tag| LengthTags::is_exact(tag))?;
+        let query_tag = key
+            .hash_tag()
+            .filter(|&tag| HashTags::is_exact_length(tag))?;
         // SAFETY: the page is a leaf's, allocated while threads share the
-        // tree; its length tags were initialized with it (invariant 5), and
-        // tag `index`, below the capacity, is in the page, aligned for a
-        // `u16`, read as an atomic.
+        // tree, and its hash tags were initialized with it (invariant 5).
+        // Tag `index`, below the capacity, is a byte in the page, read as an
+        // atomic.
         let tag = unsafe {
-            let tags = self.node_ptr().key_columns::<Self>().length_tags()?;
-            AtomicU16::from_ptr(tags.slot(index).as_ptr()).load(AtomicOrdering::Relaxed)
+            let tags = self.node_ptr().key_columns::<Self>().hash_tags()?;
+            AtomicU8::from_ptr(tags.slot(index).as_ptr()).load(AtomicOrdering::Relaxed)
         };
         Some(tag == query_tag)
     }
@@ -253,9 +256,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     #[inline(always)]
     pub(in crate::tree) fn load_racing_head_entry(self) -> Option<RacingEntry<K, V>> {
         let page = self.node_ptr();
-        // SAFETY: the page is a leaf's, allocated while threads share the
-        // tree, in a map whose separator keys are heads (D49); its head key
-        // slot and head slot are in it, read as plain bytes.
+        // SAFETY: the page is a leaf's, allocated while threads share the tree,
+        // in a map with inline keys (D49); its head key slot and head slot are
+        // in it, read as plain bytes.
         unsafe {
             page.load_racing_has_head().then(|| RacingEntry {
                 key: page.head_key_slot().cast().read(),
@@ -266,17 +269,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
     /// A copy of the head's key, read in place while writers may change it,
     /// for keys ordered by their own bytes alone
-    /// ([`KeyInliner::orders_by_own_bytes`]): whatever bytes it holds make a
-    /// key that compares by them, and a version check after tells whether
-    /// the comparison held. `None` if the leaf, as read, has no head.
+    /// ([`KeyInliner::orders_by_own_bytes`]). Whatever bytes the copy holds
+    /// make a key that compares by them, and a version check after tells
+    /// whether the comparison held. `None` if the leaf, as read, has no head.
     #[inline(always)]
     fn load_racing_head_key(self) -> Option<ManuallyDrop<K>> {
         debug_assert!(KeyInliner::<K>::orders_by_own_bytes::<S>());
         let page = self.node_ptr();
-        // SAFETY: the page is a leaf's, allocated while threads share the
-        // tree, in a map whose separator keys are heads (D49); its head key
-        // slot is in the page, and initialized once the leaf had a head,
-        // which every bit pattern of such a key is.
+        // SAFETY: the page is a leaf's, allocated while threads share the tree,
+        // in a map with inline keys (D49). Its head key slot is in the page,
+        // and initialized once the leaf has had a head. Every bit pattern is a
+        // valid key of such a type.
         unsafe {
             page.load_racing_has_head()
                 .then(|| ManuallyDrop::new(page.head_key_slot().read()))
@@ -286,10 +289,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// Routes `key` through this node, read at `version`, as
-    /// [`Internal::search`] does, in place while writers may change it: what
-    /// it returns holds only if the version is unchanged after. `None` if a
+    /// [`Internal::search`] does, but in place while writers may change it.
+    /// The result holds only if the version is unchanged after. `None` if a
     /// tie found the node changed, or what it read is no node any writer
-    /// left: the caller starts over.
+    /// left; the caller starts over.
     ///
     /// `key` shares the node's prefix if it routed here through nodes whose
     /// versions held.
@@ -310,9 +313,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     /// Routes `key` through this node, read in place while writers may
-    /// change it, as far as its inline keys tell: where the key goes, or
-    /// the separators it ties with, whose keys, leaf heads, decide (D49).
-    /// What it returns holds only if the node's version is unchanged after.
+    /// change it, as far as its inline keys tell: where the key goes, or the
+    /// separators it ties with, whose keys in leaf heads decide (D49). The
+    /// result holds only if the node's version is unchanged after.
     #[inline(always)]
     fn route_racing_inline<Q>(self, key: &SearchKey<'_, K, S, Q>) -> RacingRoute
     where
@@ -333,8 +336,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             });
         };
         let candidates = inline_keys.equal_range(target.inline_key());
-        // Most searches tie with no separator, and go no further than the
-        // inline keys, nor into a call (D49).
+        // Most searches tie with no separator: they stop at the inline keys,
+        // without a call (D49).
         if candidates.is_empty() {
             return RacingRoute::Routed(Routed {
                 edge: candidates.start,
@@ -349,8 +352,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         })
     }
 
-    /// A binary search among the separators `tie` names, each key read
-    /// where it is, in a leaf's head (D49).
+    /// A binary search among the separators `tie` names, each key read in
+    /// its leaf's head (D49).
     #[inline(never)]
     fn route_tied<Q>(
         self,
@@ -381,24 +384,24 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         Some(tie.routed(low, false))
     }
 
-    /// How `key` orders against the key of a separator of this node, the
-    /// head of `leaf`, the leftmost leaf right of it (D49), read with the
-    /// leaf latched shared, or as a copy for keys ordered by their own
-    /// bytes, if the node, read at `version`, still is once the head is
-    /// read: the walk to the leaf went down first edges, which only a
-    /// thread holding the node changes. `target` is the key's inline key the
-    /// separators tie with, if it has one. `None` if the node changed, or
-    /// the leaf has no head.
+    /// How `key` orders against the key of a separator of this node: the
+    /// head key of `leaf`, the leftmost leaf right of it (D49). The head is
+    /// read with the leaf latched shared, or as a copy for keys ordered by
+    /// their own bytes. The result stands only if the node, read at
+    /// `version`, is unchanged once the head is read: the walk to the leaf
+    /// went down first edges, which only a thread holding the node changes.
+    /// `target` is the key's window the separators tie with, if it has one.
+    /// `None` if the node changed, or the leaf has no head.
     ///
-    /// The caller holds no latch, so waiting for the leaf's waits for no
-    /// thread that waits for it.
+    /// The caller holds no latch, so waiting for the leaf's latch waits for
+    /// no thread that waits for the caller.
     #[inline(always)]
     fn cmp_separator_head<Q>(
         self,
         leaf: Leaf<K, V, S>,
         version: Version,
         key: &SearchKey<'_, K, S, Q>,
-        target: Option<InlineTarget>,
+        target: Option<Window>,
     ) -> Option<Ordering>
     where
         K: Borrow<Q>,
@@ -428,8 +431,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     /// The node's length, read in place while writers may change it, and
-    /// clamped to the capacity: what it holds only if the node's version is
-    /// unchanged after.
+    /// clamped to the capacity. It is the node's only if the node's version
+    /// is unchanged after.
     #[inline(always)]
     pub(in crate::tree) fn racing_len(self) -> usize {
         // SAFETY: the page is an internal node's, allocated while threads
@@ -438,8 +441,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         len.min(Self::capacity())
     }
 
-    /// The node's prefix length, read in place while writers may change it:
-    /// what it holds only if the node's version is unchanged after.
+    /// The node's prefix length, read in place while writers may change it.
+    /// It is the node's only if the node's version is unchanged after.
     #[inline(always)]
     pub(in crate::tree) fn racing_prefix_len(self) -> usize {
         // SAFETY: as for `racing_len`.
@@ -457,10 +460,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     pub(in crate::tree) fn racing_child(self, index: usize) -> Option<Node<K, V, S>> {
         debug_assert!(index <= Self::capacity());
         // SAFETY: `index <= capacity`, so the edge slot is in the page, which
-        // is allocated while threads share the tree, aligned for a pointer,
-        // and initialized, zeroed when allocated; read as a raw pointer, as
-        // a zeroed one is no `NodePtr`. A non-null edge is a pointer to a
-        // node of this map, tagged.
+        // is allocated while threads share the tree. The slot is aligned for a
+        // pointer and initialized, zeroed when allocated. It is read as a raw
+        // pointer, as a zeroed one is no `NodePtr`. A non-null edge is a
+        // tagged pointer to a node of this map.
         unsafe {
             let slot = self.node_ptr().edge_slots().slot(index);
             let tagged = slot.cast::<*mut u8>().read();
@@ -471,9 +474,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
     /// The leftmost leaf of this node, down first edges read in place while
-    /// writers may change them: what the walk reached holds only while the
-    /// node holding this one is unchanged, which only a thread holding it
-    /// changes. `None` if it meets a null edge.
+    /// writers may change them. The leaf reached holds only while the node
+    /// above this one is unchanged, which only a thread holding that node
+    /// changes. `None` if the walk meets a null edge.
     #[inline(always)]
     fn racing_leftmost_leaf(self) -> Option<Leaf<K, V, S>> {
         let mut node = self;
@@ -487,10 +490,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
-    /// The length and prefix length of the `Kind` node on this page, and
-    /// its inline keys, read in place while writers may change them: each
-    /// field read once, and the length clamped to the capacity, so that a
-    /// search over the inline keys stays in bounds whatever it read (D14).
+    /// The length and prefix length of the `Kind` node on this page, and its
+    /// inline keys, read in place while writers may change them. Each field
+    /// is read once, and the length is clamped to the capacity, so a search
+    /// over the inline keys stays in bounds whatever it read (D14).
     ///
     /// # Safety
     ///
@@ -517,8 +520,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 }
 
 /// A copy of a leaf's entry, its key and value, read in place while writers
-/// may change them, and so torn, or of slots no entry fills; an entry the
-/// leaf held only if the leaf's version is unchanged after the read.
+/// may change them. It may be torn, or of slots no entry fills; it is an
+/// entry the leaf held only if the leaf's version is unchanged after the
+/// read.
 pub(in crate::tree) struct RacingEntry<K, V> {
     key: MaybeUninit<K>,
     value: MaybeUninit<V>,
@@ -533,10 +537,11 @@ impl<K, V> RacingEntry<K, V> {
     ///
     /// # Safety
     ///
-    /// The leaf was at one version from before the read, when no thread held
-    /// it exclusively, to after it, and the read was of an entry it held at
-    /// that version: of a key below its length, or of its head, if it had
-    /// one. Both are copies of the tree's, which the caller must not drop.
+    /// The leaf stayed at one version, with no thread holding it
+    /// exclusively, from before the read to after it. The read was of an
+    /// entry the leaf held at that version: a key below its length, or its
+    /// head, if it had one. Both are copies of the tree's, which the caller
+    /// must not drop.
     #[inline(always)]
     pub(in crate::tree) unsafe fn assume_read(self) -> CopiedEntry<K, V> {
         // SAFETY: the slots held the entry's key and value throughout the

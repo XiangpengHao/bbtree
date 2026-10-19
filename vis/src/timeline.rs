@@ -1,5 +1,5 @@
 //! A timeline the browser plays: time runs over a sequence of steps (a
-//! batch's searches, a figure's moments), and a loop in the browser
+//! batch's searches), and a loop in the browser
 //! advances it each frame and writes it to an element as `--t`, so that
 //! what the element draws moves in CSS without a redraw. Rust hears only
 //! when another step starts, and whether it plays.
@@ -8,12 +8,9 @@
 //! paused or stepped, time rests just after a step, which every drawing
 //! shows as done; with reduced motion, it jumps from step to step. Its
 //! element starts at `--t: -1`, nothing shown, until the loop runs
-//! (`.timeline` in `main.css`).
+//! (`.batch-board` in `main.css`).
 
 use dioxus::prelude::*;
-
-use crate::chart_scale::FrameWidth;
-use crate::icons::{Icon, IconGlyph};
 
 /// What controls ask a timeline's loop.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,23 +55,6 @@ impl Timeline {
             slow_ms,
             ..self
         }
-    }
-
-    /// `steps` steps, one a unit.
-    pub(crate) fn of_steps(steps: usize, step_ms: f64) -> Self {
-        Self::new(
-            (0..steps).map(|step| step as f64).collect(),
-            steps as f64,
-            step_ms,
-        )
-    }
-
-    pub(crate) fn total(&self) -> f64 {
-        self.total
-    }
-
-    pub(crate) fn steps(&self) -> usize {
-        self.starts.len()
     }
 
     /// Plays from the start on the element with the id `element`, telling
@@ -214,59 +194,5 @@ impl Timeline {
         document::eval(&format!(
             "document.getElementById('{element}')?.dispatchEvent(new CustomEvent('timeline', {{ detail: {detail} }}));"
         ));
-    }
-}
-
-/// A timeline's controls: play, pause or play again, and a bar of its
-/// time, filled to the moment (`--t` from the element around it), which a
-/// click or the arrow keys move.
-#[component]
-pub(crate) fn TimelineControls(
-    element: String,
-    timeline: Timeline,
-    now: Signal<Option<usize>>,
-    playing: Signal<bool>,
-    /// What the timeline plays, for the bar's name.
-    label: String,
-) -> Element {
-    let steps = timeline.steps();
-    let total = timeline.total();
-    let at_end = now().is_some_and(|now| now + 1 == steps) && !playing();
-    let bar = FrameWidth::use_new();
-    let (toggle_at, bar_at, keys_at) = (element.clone(), element.clone(), element);
-    rsx! {
-        div { class: "timeline-controls",
-            button {
-                class: "icon-button",
-                "aria-label": if playing() { "Pause" } else if at_end { "Play again" } else { "Play" },
-                title: if playing() { "Pause" } else if at_end { "Play again" } else { "Play" },
-                onclick: move |_| Timeline::send(&toggle_at, PlaybackCommand::Toggle),
-                IconGlyph { icon: if playing() { Icon::Pause } else if at_end { Icon::Replay } else { Icon::Play } }
-            }
-            div {
-                class: "timeline-bar",
-                style: "--total:{total}",
-                role: "slider",
-                tabindex: "0",
-                "aria-label": label,
-                "aria-valuemin": "0",
-                "aria-valuemax": "{steps}",
-                "aria-valuenow": "{now().map_or(0, |now| now + 1)}",
-                onresize: move |resized| bar.measure(resized),
-                onclick: move |evt| {
-                    let width = bar.get();
-                    if width > 0.0 {
-                        let share = (evt.element_coordinates().x / width).clamp(0.0, 1.0);
-                        Timeline::seek(&bar_at, share * total);
-                    }
-                },
-                onkeydown: move |evt| match evt.key() {
-                    Key::ArrowLeft => Timeline::send(&keys_at, PlaybackCommand::Back),
-                    Key::ArrowRight => Timeline::send(&keys_at, PlaybackCommand::Forward),
-                    _ => {}
-                },
-                span { class: "timeline-fill" }
-            }
-        }
     }
 }

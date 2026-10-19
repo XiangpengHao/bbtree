@@ -66,8 +66,8 @@ node or the root page, with that kind's layout (D21).
   type (`FreshPage<P>`) carries its layout, so a page goes back with the
   layout it came with; that it goes back to the allocator it came from is
   a convention of the tree's code, as in std's btree, not a type. What
-  outlives a borrow of the map, `IntoIter` and the pieces of `extract_if`
-  and `append`, holds a clone; `clone` and `split_off` give the new map one.
+  outlives a borrow of the map, `IntoIter` and the pieces of `append`,
+  holds a clone; `clone` and `split_off` give the new map one.
   `append` moves entries, not pages, so maps with different allocators of
   one type append soundly; the set operators build on the left set's.
 - **Failure:** a failed allocation calls `handle_alloc_error`, as std's
@@ -244,6 +244,9 @@ Design in 04-inline-key.md.
   `offset..offset + 8` of an encoding that orders like the key, so that a
   node can skip the bytes its keys share (05-fence-key.md, "The trait").
   Windows stay 8 bytes for every key type; nodes keep `WIDTH` of them.
+  It gives a hash tag too, if `HAS_HASH_TAG` (D36), compares ties from
+  where keys differ, if `HAS_CMP_FROM` (D43), and compares itself against
+  what every key shares (`cmp_prefix`, D50).
 - **Why not a plain trait with a default:** "default for every type, override for
   `String`" needs specialization, which is nightly-only and years from stable.
 - **TODO:** when specialization is stable, switch to it, and drop the std-type
@@ -396,8 +399,8 @@ Design in 04-inline-key.md.
   depth, which merges keep until the root lowers, after them. Clearing
   prefixes before a cut reads the nodes on the node stack, and a bulk build
   fits the nodes a new leaf closed with the node stack that hung it (D25).
-  Only a join, which lines two trees up, counts how deep each one's leaves
-  lie, down the border it walks anyway (`Tree::leaf_depth`). A slot read
+  Only a cut counts how deep each part's leaves lie, to count the shorter
+  part's entries (`Tree::leaf_depth`). A slot read
   checks its depth against the levels on the node stack, at most 24, which
   also keeps it in bounds. Measured against D52 at 10M, one run each, in
   instructions per operation: lookups and inserts unchanged, removal 689 →
@@ -441,14 +444,15 @@ Design in 04-inline-key.md.
 - **`collect` and `from`** sort, keep the last of equal keys (as std), and
   build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
   18.2 bytes per entry.
-- **`append`, `retain` and `extract_if`** drain entries in order by value
-  from the front (D23's owning walk; no `Ord`), and rebuild with the
-  builder, keeping std's
-  observable behavior: what the predicate sees and when, which key and
-  value survive, drop order, and what is left after a panic. Removing
-  while walking, as std's `extract_if` does in place, would need the walk's
-  position tracked through every merge and steal, which std's parent
-  pointers give for free.
+- **`append`** drains entries in order by value from the front (D23's
+  owning walk; no `Ord`), and rebuilds with the builder, keeping std's
+  observable behavior: which key and value survive, drop order, and what
+  is left after a panic.
+- **`retain` and `extract_if`** remove in place, as std's do: the walk is a
+  node stack at the next entry, and each removal tracks where that entry
+  goes through its merges and steals, as the slot it lands in
+  (`NodeStackMut::remove_and_go_to_next`, `tree/remove.rs`), which std's
+  parent pointers give for free.
 - **`split_off` cuts the tree where its search went, as std's does**
   (`tree/cut.rs`): from the leaf up, each node on the node stack keeps what
   lies left of it, and what lies right goes into a new node, after the part
@@ -461,11 +465,10 @@ Design in 04-inline-key.md.
   from counting the shorter tree's entries a node at a time, as std's do.
   1M u64→u64, one cut (µs): at the median 12 000 by popping before → 95
   (std 320); at 1%, 2 400 → 3 (std 5).
-- **Cost:** `append` O(n + m) as std's; `retain` O(n) as std's, but
-  moving the entries it keeps; `extract_if` O(n) wherever its range is,
-  where std's is O(log n) plus the part it touches; `split_off` O(log n),
-  plus the shorter tree's nodes to count. A drained entry costs about a
-  step of a walk.
+- **Cost:** `append` O(n + m) as std's; `retain` O(n) and `extract_if`
+  O(log n) plus the part it touches, as std's; `split_off` O(log n), plus
+  the shorter tree's nodes to count. A drained entry costs about a step of
+  a walk.
 
 **D26. Per-node prefix stripping: a node's inline keys skip what its fences share.** (2026-10-08)
 Design and measurements in 05-fence-key.md.
@@ -697,31 +700,56 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   4.50 → 3.99 ns/entry (−11%), `hash32` 9.36 → 8.73 (−7%). The native
   10M fold is unchanged (2.21 ns/entry).
 
-**D36. String leaves keep 2-byte length tags in spare padding.** (2026-10-10)
+**D36. Leaves keep 1-byte hash tags in spare padding.** (2026-10-10)
 
-- **What:** for recognized heap byte strings, a leaf stores each key's
-  length, saturated at 65,535, in 2 bytes, only where existing padding
-  holds the whole tag array before the head's key (D49). Where the head's
-  key took the padding's end, as in `String` → `u64`, the leaf gives up an
-  entry to keep them (24 → 23); where tags never fit, as in `String` →
-  `String`, or a latched `String` → `u64` (D54), it has none, and its plan
-  says so. Allocation size doesn't change. `KeySlots` moves tags with their
-  keys.
-- **Search:** tags are read only when the 8-byte summaries leave more than
-  one candidate. No tag matches: absent. One: compare that full key. Two:
+- **What:** a hash tag is a byte per key that equal keys share, so that
+  keys whose tags differ are different. A leaf stores its keys' tags where
+  existing padding holds the whole tag array before the head's key (D49),
+  as in `String` → `u64`. Where the head's key took the padding's end, the
+  leaf gives up an entry to keep them: `String` → `String` and `String` →
+  `u128` 17 → 16, a latched `String` → `u64` (D54) 24 → 23. Where tags
+  never fit, as in `String` → `()` or `&str` → `u64`, it has none, and its
+  plan says so. Allocation size doesn't change. `KeySlots` moves tags with
+  their keys.
+- **Whose tags:** a recognized heap byte string's is its length,
+  saturated at 255 (`[u8]`'s `InlineKey::hash_tag`). Under
+  `WithInlineKey`, a key's impl gives its own, at any width, if it sets
+  `HAS_HASH_TAG`; std byte strings' impls give their lengths, so a newtype
+  can take its string's. Integers and byte arrays have none: their ties
+  are cheap.
+- **User code while keys move:** a leaf computes a key's tag as it writes
+  the key, while it moves keys too (a head rejoining the entries in a
+  merge). An impl's `hash_tag` runs there behind an abort-on-unwind guard
+  (D48). A tag that breaks the contract gives wrong answers, never
+  undefined behavior.
+- **Why a byte:** keys rarely reach 255 bytes, so a byte tells as many
+  lengths apart as two did, and half the array fits where two bytes
+  didn't: with 2-byte tags, `String` → `u64` gave up an entry (24 → 23),
+  and `String` → `String` and a latched `String` → `u64` kept none.
+  Saturating, not wrapping (`len % 256`), keeps every byte string's tag
+  below 255 an exact length, which D57's unlatched copy relies on.
+- **Search:** tags are read only when the inline keys leave more than one
+  candidate. No tag matches: absent. One: compare that full key. Two:
   compare the upper key, then the lower only if the query sorts below it.
-  Three or more: the old binary search, so equal-length keys never cause
-  a linear scan. The search confirms each candidate a tag picks against
+  Three or more: the old binary search, so keys of one tag never cause a
+  linear scan. The search confirms each candidate a tag picks against
   the full key. D57's unlatched copy alone takes an equal tag for an equal
-  length, for a key that ends within its inline key, and only below
-  65,535: a saturated tag tells nothing of length.
+  length, for a key that ends within its inline key, and only below 255:
+  a saturated tag tells nothing of length.
 - **Why:** path keys tie in their 8-byte windows inside leaves. On 1M
   paths, heap key reads per lookup fall from 1.98 to about 1.0 for hits
   and 2.18 to 0.20 for misses.
 - **Cost:** inserts maintain a third array: 10M path insert +2.0%. JSON
   leaves never have ambiguous runs, so JSON pays upkeep and gains nothing
   on lookups; its timings stayed flat.
-- **Measured** at 10M paths: hits −10.7%, misses −31.2%.
+- **Measured** at 10M paths: hits −10.7%, misses −31.2%. From 2-byte to
+  1-byte tags, 10M, ns per lookup, one run: paths → `u64` hits 503 → 497,
+  misses 398 → 378; JSON → `u64` hits 236 → 234, misses 155 → 159; a
+  latched paths → `u64`, now tagged, hits 646 → 524, misses 618 → 446;
+  paths → `String`, now tagged, hits 578 → 524, misses 546 → 415. A
+  key's own tags, 10M paths as `String` under `WithInlineKey`, untagged
+  → tagged: hits 695 → 606, misses 679 → 462; keys without tags run the
+  same instructions as before (`memtable24`: 470.7 per hit).
 - **Pitfall:** the summary-view wrapper is forced inline. Outlined, as
   LLVM did once it had a second caller, its population count grew from 26
   to 244 instructions, and JSON hits got 25% slower.
@@ -820,13 +848,22 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   leaves and use 4-byte ones in internal nodes. Internal capacity rises
   25 → 28 for `String` and 31 → 36 for `&str`/`Box<str>`; pages stay
   1 KiB. A window an internal node hands out, which may go into a leaf, is
-  read again from its key, the head below (D49), for all 8 bytes. Custom
-  strategies and fixed arrays keep their width.
+  read again from its key, the head below (D49), for all 8 bytes. Fixed
+  arrays keep their width.
+- **Keys with their own impl:** under `WithInlineKey`, an 8-byte impl that
+  sets `HAS_CMP_FROM` gets the same 8 / 4, and its ties compare with its
+  `InlineKey::cmp_from`, past the bytes known equal, as std strings' do
+  (`SearchBytes::cmp_from`, which std byte strings' impls share). The
+  windows its internal nodes read again call its `inline_key_at` while
+  keys move, behind an abort-on-unwind guard (D48). An impl without it
+  keeps its width in both kinds and compares ties with `Ord`.
 - **Why:** about 94% of lookups pass through an internal node without
   ending there, so the extra ties from 4 bytes cost little (JSON: +0.02
   heap reads per hit), while the summaries shrink from 4 cache lines to 2.
   In leaves, 4 bytes would more than double JSON's heap comparisons, so
-  leaves stay at 8.
+  leaves stay at 8. The ties are cheap only because they compare from
+  where keys differ: from byte 0, each reads a key's first lines, which
+  path keys share. So 4 bytes go with the comparison, never without it.
 - **Search on baseline x86-64:** 17–32 four-byte summaries use one SSE2
   packing step and trailing-one counts; above 32, the compiler's count
   (04 Q6). A second packing step for 33–64 cut instructions but was slower
@@ -834,6 +871,14 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
 - **Measured,** 10M native: JSON inserts 314.1 → 282.5 ns, hits
   343.8 → 320.4, misses 282.3 → 235.4; paths about 1.3% faster. Baseline
   x86-64, owned `String`: JSON hits 408.7 → 390.6, misses 335.5 → 297.3.
+  On 10M paths, with hash tags (D36), ns per hit / miss and DRAM lines per
+  hit, one run each: 4 bytes inside and ties from where keys differ
+  481 / 385, 17.2 lines; 8 bytes inside 565 / 427, 18.6; 4 bytes with
+  ties from byte 0 661 / 482, 28.0. Paths as `String` under
+  `WithInlineKey`, from hash tags only (8 bytes inside, `memcmp` from byte
+  0) to `cmp_from` and 8 / 4: 589 / 459 → 575 / 457 ns, 905 → 812
+  instructions and 21.6 → 19.0 lines per hit; with `cmp_prefix` too
+  (D50), 486–491 / 376–389 ns against `Auto`'s 481–489 / 375–383.
 - **Cost:** on baseline x86-64 with borrowed keys (2M diagnostic), path
   misses are 2.2% slower; the other borrowed cells improved about 2%.
 
@@ -900,10 +945,10 @@ Design and measurements in 07-node-plan.md.
 
 - **What:** `NodePlan::of::<S, Kind>()` (`tree/node/node_plan.rs`) decides, per
   key type and node kind, everything the nodes specialize on: summary width,
-  length tags, rehydrated windows, full and tied searches,
+  hash tags, rehydrated windows, full and tied searches,
   whole-key equality, and whether separator keys are heads (D49). One constructor per row of the table,
   each with its reason. Layouts, slots, searches and prefix upkeep read it;
-  none asks what the key type is. Per-key arrays (inline keys, length tags)
+  none asks what the key type is. Per-key arrays (inline keys, hash tags)
   are `KeyColumns`, which every key move moves alike.
 - **Why:** each specialization was spelled where it was used, as a stand-in
   for type identity (`ByteString && width() == Two` for fixed arrays), in 26
@@ -918,9 +963,6 @@ Design and measurements in 07-node-plan.md.
   internal search); the rest within ±9, of which set lookups +2 (an LLVM
   speculation drops `inbounds` and keeps one null test). Debug tests 86 → 75 s, from
   narrowing type recognition before comparing type identities.
-- **Rejected:** a public `KeyBytes` trait and `WithKeyBytes` strategy for
-  byte-ordered newtypes: no measured gain over `WithInlineKey` (311 vs
-  315 ns per lookup on path newtypes).
 
 **D48. A panic in user code is not reconciled.** (2026-10-12)
 
@@ -934,7 +976,8 @@ Design and measurements in 07-node-plan.md.
   User code runs between structural changes, not inside one, so unwinding
   never leaves what unchecked code trusts (lengths, node minimums) half
   done (D26, D37). A change that must call it inside one goes behind an
-  abort-on-unwind guard.
+  abort-on-unwind guard, as a key's hash tag (D36), and the window an
+  internal node reads again from its key (D43), do.
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
   (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,
@@ -995,13 +1038,26 @@ Design in 05-fence-key.md, "The shared prefix".
   query against those bytes once, before the root. A query without them
   sorts before or after every key and reads no node: a lookup misses, a
   range or an entry starts at the first or last leaf edge. Below, every
-  node skips its prefix unchecked.
+  node skips its prefix unchecked. Std byte strings compare 32 bytes at a
+  time. A key with an `InlineKey` impl compares by its
+  `InlineKey::cmp_prefix`: by default a window at a time against the
+  shared bytes read as words; the std byte strings' impls 32 bytes at a
+  time, as `Auto` does, which a newtype takes from its string.
+- **Why the trait has `cmp_prefix`:** on 10M paths, which share 64 bytes,
+  the check was all that kept `String` under `WithInlineKey`, with every
+  other hook (D36, D43), from `Auto`'s speed: 540 / 423 ns per hit / miss
+  with windows against `Auto`'s 481–489 / 375–391, and 486 / 376 without
+  the check. The demand reads from DRAM were `Auto`'s (15.5 lines per
+  hit); the 8 ascending windows of the query's first line drew 1.7 more
+  lines per hit of hardware-prefetch fills past the key, which two 32-byte
+  loads don't, unrolled or not. With the strings' `cmp_prefix`: 486–491 /
+  376–389 ns, and 610 instructions per hit to `Auto`'s 626.
 - **Upkeep, reading no key:** an insert whose key shares less shrinks the
   bytes first, and the border nodes with them, by D26's window shift; an
   empty tree starts from its first key's. Removals leave them: the rest
   share at least as much, so the prefix is correct, not exact. A cut gives
-  both trees the bytes; a join shrinks both to what they share with the
-  separator; a build checks each key as it appends; a clone copies them.
+  both trees the bytes; a build checks each key as it appends; a clone
+  copies them.
 - **Why not per-node local prefixes,** which internal nodes of std keys
   kept where fences share too little, checking each query against their
   first key: that read a key on every search of such a node, a walk to a
@@ -1225,8 +1281,8 @@ Design and measurements in 09-concurrency.md, "Batches".
   subtracted into counters of the slots' width, one `addv` each at the end;
   a capacity that isn't a multiple of the vector ends with an overlapping
   load, its counted lanes masked out. The exact-key equality mask (D41) and
-  the length-tag filter (D36) stay x86-only: the count already tells none
-  from one from many, and length tags only filter ties.
+  the hash-tag filter (D36) stay x86-only: the count already tells none
+  from one from many, and hash tags only filter ties.
 - **Why:** the compiler's own count there widened each compared lane to 64
   bits, one at a time, to add it to a `usize`. A 10M `u64` hit on an M1 Pro
   ran 1,678 instructions, against 228 on Rocket Lake with AVX-512, and
@@ -1252,7 +1308,7 @@ Design and measurements in 09-concurrency.md, "Lookups".
   reads, where the leaf settles the key without following a pointer: a key
   ordered by its own bytes (std integers, byte arrays) is copied and
   compared, and a byte string that ends within its 8-byte inline key is
-  the candidate of the same length, where the leaf's length tags tell it
+  the candidate of the same length, where the leaf's hash tags tell it
   exactly (D36). Otherwise the lookup latches the
   same leaf at the same version and searches it; a leaf that changed sends
   it the latched way, which waits rather than race again.

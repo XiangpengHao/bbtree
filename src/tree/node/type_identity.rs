@@ -1,8 +1,8 @@
 //! Lifetime-erased type identity, and the views of a value that it proves
-//! sound: how [`Auto`] recognizes std byte strings and reads their bytes,
-//! how it recognizes std integers and uses their [`InlineKey`] impls, and
-//! how a key with an `InlineKey` impl, under either strategy, uses a lookup
-//! key as a key (D18, D31).
+//! sound. [`Auto`] uses them to recognize std byte strings and read their
+//! bytes, and to recognize std integers and use their [`InlineKey`] impls
+//! (D18, D31). A key with an `InlineKey` impl, under either strategy, uses
+//! one to treat a lookup key as a key.
 //!
 //! [`Auto`]: crate::Auto
 //! [`InlineKey`]: crate::InlineKey
@@ -12,6 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::TypeId;
 use core::borrow::Borrow;
+use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::{mem, ptr, slice};
 
@@ -107,9 +108,9 @@ impl<T: ?Sized> ByteString<T> {
     /// monomorphization.
     ///
     /// Unoptimized builds compare type identities at run time, on every
-    /// call, so the candidates are first narrowed by what is known
-    /// without comparing any: whether `T` is unsized, and whether it
-    /// owns memory to drop.
+    /// call. So the candidates are first narrowed by what needs no
+    /// comparison: whether `T` is unsized, and whether it owns memory to
+    /// drop.
     #[inline(always)]
     pub(in crate::tree) fn recognize() -> Option<Self> {
         let is_unsized = mem::size_of::<&T>() > mem::size_of::<&u8>();
@@ -203,6 +204,7 @@ impl<T: ?Sized> ByteString<T> {
 pub(in crate::tree) struct StdInteger<T> {
     inline_key_at: fn(&T, usize) -> InlineWord,
     width: InlineWidth,
+    cmp_prefix: fn(&T, &[u8]) -> Ordering,
 }
 
 impl<T> Clone for StdInteger<T> {
@@ -242,16 +244,23 @@ impl<T> StdInteger<T> {
     #[inline(always)]
     unsafe fn of<Integer: InlineKey>() -> Self {
         let inline_key_at: fn(&Integer, usize) -> InlineWord = Integer::inline_key_at;
-        // SAFETY: `T` is `Integer` (the caller's promise), so the two
+        let cmp_prefix: fn(&Integer, &[u8]) -> Ordering = Integer::cmp_prefix;
+        // SAFETY: `T` is `Integer` (the caller's promise), so each two
         // function pointer types are one type.
-        let inline_key_at = unsafe {
-            mem::transmute::<fn(&Integer, usize) -> InlineWord, fn(&T, usize) -> InlineWord>(
-                inline_key_at,
+        let (inline_key_at, cmp_prefix) = unsafe {
+            (
+                mem::transmute::<fn(&Integer, usize) -> InlineWord, fn(&T, usize) -> InlineWord>(
+                    inline_key_at,
+                ),
+                mem::transmute::<fn(&Integer, &[u8]) -> Ordering, fn(&T, &[u8]) -> Ordering>(
+                    cmp_prefix,
+                ),
             )
         };
         Self {
             inline_key_at,
             width: Integer::WIDTH,
+            cmp_prefix,
         }
     }
 
@@ -266,6 +275,12 @@ impl<T> StdInteger<T> {
     pub(in crate::tree) fn width(self) -> InlineWidth {
         self.width
     }
+
+    /// The integer's [`InlineKey::cmp_prefix`].
+    #[inline(always)]
+    pub(in crate::tree) fn cmp_prefix(self) -> fn(&T, &[u8]) -> Ordering {
+        self.cmp_prefix
+    }
 }
 
 /// Proof that a lookup key type `Q` is the key type `K` itself,
@@ -273,13 +288,12 @@ impl<T> StdInteger<T> {
 pub(in crate::tree) struct SameType<K, Q: ?Sized>(PhantomData<fn(&Q) -> &K>);
 
 impl<K: Borrow<Q>, Q: ?Sized> SameType<K, Q> {
-    /// The proof, if `Q` is `K` lifetimes aside. Then they are the same
-    /// type, lifetimes included, as `K: Borrow<Q>` holds: the only impl
-    /// that can prove `Borrow<Q>` for a type that is `Q` lifetimes aside
-    /// is std's `impl<T: ?Sized> Borrow<T> for T`, because any other
-    /// would overlap with it (coherence ignores lifetimes) and is
-    /// rejected; and that impl makes them one type. Folds to a constant
-    /// after monomorphization.
+    /// The proof, if `Q` is `K` lifetimes aside. Then `K: Borrow<Q>` makes
+    /// them the same type, lifetimes included. The only impl that can prove
+    /// `Borrow<Q>` for a type that is `Q` lifetimes aside is std's
+    /// `impl<T: ?Sized> Borrow<T> for T`: any other would overlap with it
+    /// (coherence ignores lifetimes) and is rejected. That impl makes them
+    /// one type. Folds to a constant after monomorphization.
     #[inline(always)]
     pub(in crate::tree) fn recognize() -> Option<Self> {
         ErasedTypeId::is::<K, Q>().then_some(Self(PhantomData))

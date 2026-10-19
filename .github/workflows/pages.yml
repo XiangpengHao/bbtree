@@ -39,14 +39,11 @@ jobs:
       - name: Build
         run: nix develop --command bash -c 'cd vis && dx build --release --debug-symbols false'
 
-      # The post is served at /post/ from its own copy of the page, and any
-      # other path falls back to it, as the README's static hosting does.
+      # The post is served at /post/ from its own copy of the page, with
+      # the post's title and link previews, and any other path falls back
+      # to the explorer's, as the README's static hosting does.
       - name: Lay out the site
-        run: |
-          site=vis/target/dx/bbtree-vis/release/web/public
-          mkdir -p "$site/post"
-          cp "$site/index.html" "$site/post/index.html"
-          cp "$site/index.html" "$site/404.html"
+        run: vis/lay-out-site.sh vis/target/dx/bbtree-vis/release/web/public
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -1,264 +1,380 @@
-The blog post is along with the visualization.
+The blog post that goes with the visualization.
 
 ## Blog content
 
 The post's text as the site shows it (`vis/src/post.rs`,
-`vis/src/how_it_works.rs`). Bracketed lines mark where a figure or the
-charts sit; each figure of "How it works" shows one idea and nothing else,
-given here as what it draws and plays, a sketch of where it ends, and its
-caption. Each plays once the reader sees it, on one timeline
-(`vis/src/timeline.rs`), and the reader can replay, step and change it.
+`vis/src/how_it_works.rs`; its headings and their ids in
+`vis/src/outline.rs`). Bracketed lines mark where a figure or the charts
+sit; each figure names its SVG file and its caption, as the site shows
+them. Keep this text and the site in step: a change to one is a change to
+the other. On the site, the citations sit beside
+their lines in the right margin and the outline in the left, as on the
+author's blog (Quarto's `reference-location: margin`); the three principles
+are numbered, since the post ranks them; and the post has a dark theme. The figures are SVG files that
+`vis/figures/` writes into `vis/assets/figures/` (`cargo run --release
+--manifest-path vis/figures/Cargo.toml`), so that the same files go into
+any other page, such as a Quarto copy of the post: each plays its own CSS
+animation in a loop, rests on its last frame with reduced motion, and the
+site loads it lazily, so it starts as the reader nears it.
 
-Title: bbtree: fastest ordered map in the world
+===============================================
 
-> B-trees are by far the most important access path structure in database and file systems. — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
+# Title: bbtree: fastest ordered map
 
-**bbtree** is by far the fastest btree (ordered map):
-1. 5x faster than std's `BTreeMap` at single thread, 7x faster than `crossbeam-skiplist` at 12 threads.
-2. 30% lower memory usage, 5x lower p99 latency.
+> B-trees are by far the most important access path structure in database and file systems. — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist)) and Andreas Reuter[^gray]
+
+**bbtree** is by far the fastest B-tree (that I'm aware of):
+1. 5× faster than std's `BTreeMap` on a single thread, 12× faster than `crossbeam-skiplist` at 96 threads.
+2. 30% lower memory usage, 5× lower p99 latency.
 3. Zero dependencies, `no_std` compatible.
-4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.
-5. Production-ready by formal verification, model checking, fuzzing, and lots of testing.
+4. `unsync::BBTreeMap` is a drop-in replacement for std's `BTreeMap`/`BTreeSet`.
+5. Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing.
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
 [Charts: Single thread, Concurrent, End to End, Memory, Architectures]
 
-### How it works
+## How it works
 
-A lookup walks from the root to a leaf: 5 nodes at 10M entries.
-At each node, it does two things:
+### Three easy pieces [^ostp]
 
-1. **Search**: pick the child to go to.
-2. **Fetch**: bring that child into cache, usually a miss to DRAM.
+Every performance optimization should be guided by a cost model.
 
-Every B-tree pays both, at every level.
-bbtree makes the search cheaper (prefix keys, SIMD), makes the fetch smaller (layout), and overlaps the fetches of different lookups (batching).
+B-tree optimizations are simple: we just need to remember three principles, in order: 1. the number of **chained cache lines** touched, 2. the number of **instructions** executed, 3. the amount of **cache coherence traffic** (especially important for concurrent access).
 
-#### Prefix keys to improve comparisons
+Before anything, let's remember these:
+1. A cache miss costs about 100 ns.
+2. An instruction costs about 0.5 ns.
+3. Cache coherence traffic forces a cache miss, and costs a little more than 100 ns. But it only happens with concurrent access.
 
-Comparing two `String`s means following two pointers into the heap.
-A binary search over a node of `String`s is a chain of heap misses: each probe waits for the one before.
+### Minimize cache misses
 
-The fix is old database wisdom[^graefe], and the same trick as German strings[^umbra]: keep a short, fixed-size prefix of each key in the node, and compare that instead.
-bbtree keeps up to 8 bytes per key, in a dense array next to the keys.
-Two keys whose prefixes differ are ordered by their prefixes alone; only a tie reads the heap.
+With this cost model, it's clear that the most important optimization is to minimize the number of cache misses.
+To put it another way, for each cache miss, we want to narrow down the search space as much as we can.
 
-But real keys share prefixes.
-In 10M Wikipedia titles, 65% of neighbors share their first 8 bytes, and then the prefix decides nothing.
+#### Thought experiment: binary search vs linear search
 
-So bbtree skips what a node's keys share.
-Every key in a node lies between the node's two fences (the separators beside it in its parents), so every key starts with whatever the fences share.
-The node stores only that length, a `u16`, and keeps the 8 bytes *after* it.
-No fence key is stored.
+Say we have a sorted array of `u64`s, and we want to find a target `u64`.
 
-[Figure 1: four neighboring keys of a key set (Wikipedia titles as the
-benchmarks store them, Linux paths, URLs; the reader picks), an 8-byte
-window framed on each, and what it holds. It plays: the window holds on
-the keys' first 8 bytes, which tie, then slides past what they share, the
-shared bytes dimming, and what it holds and the verdict turn over; a
-switch puts it back (`prefix_keys_figure.rs`).]
+With binary search, each cache miss narrows down the search space by half.
 
-```text
-key                              first 8 bytes   8 bytes past the shared 20
+With linear search, each cache miss narrows down the search space by `cache_line_size / item_size` items, which is 64 / 8 = 8.
 
-List_of_bridges_in_Afghanistan   List_of_        fghanist
-List_of_bridges_in_Alabama       List_of_        labama··
-List_of_bridges_in_Alaska        List_of_        laska···
-List_of_bridges_in_Albania       List_of_        lbania··
+So the break-even point is about 16 items, where binary search costs the same as linear search: two cache misses to find the target.
 
-                                 all tie:        all differ:
-                                 compare in full decided in a register
-```
+But there's a catch: 1. the CPU prefetcher may fetch the next cache lines on its own, which gives linear search an even bigger advantage; 2. linear search is simpler, with much less CPU work per item. So the actual break-even point is usually higher.
 
-> Four neighboring Wikipedia titles. Their first 8 bytes are the same, so a plain prefix decides nothing. They share their first 20 bytes: a node whose keys all share them skips them, and keeps the next 8 bytes, which tell the keys apart.
+[a figure to compare binary search and linear search side by side, with animation: `search-space.svg`. Caption: 64 sorted `u64`s, 8 to a cache line. Each step is one cache miss: binary search halves what is left, linear search rules out one line. Here binary search needs 3 misses and linear search 6; at 16 items, both need at most 2.]
 
-When we added prefix keys, Wikipedia lookups went from 1,073 to 704 ns and loaded half as many cache lines from DRAM.
-Skipping shared prefixes made lookups of Linux paths another 1.5× faster (693 → 457 ns at 1M).
+#### How does that apply to B-trees?
 
-#### AVX-512/NEON SIMD to improve search speed
+In a B-tree, this decides the node size[^cache-conscious]. If we size nodes so that each holds about 16–32 items, we can always do linear search, which lets us do nice things like SIMD (in later sections).
 
-With prefix keys, a node search is a search over a small array of integers: 2 bytes a key for integers and UUIDs, 4 to 8 for strings, which is enough once the shared prefix is gone.
+**What if the keys are Strings?**
+`String`s are different, because their bytes are stored on the heap, not inline in the node.
+This changes our equation completely. We no longer get 8 keys from one cache miss; instead, each key we load is its own cache miss. So we almost always want to do binary search over `String`s.
 
-Binary search is the textbook answer, and the wrong one here.
-Each step waits for the one before, and its branch is a coin flip for the CPU.
+[a small figure to show the layout of an array of `String`s: what's on the heap, what's in the node: `string-keys.svg`. Caption: A node of `String`s holds each key's pointer, length and capacity; its bytes are on the heap. Every comparison of a binary search follows a pointer: 3 heap reads to find one key of 8.]
 
-bbtree doesn't search; it counts.
-The child to follow is the number of keys smaller than the target.
-One AVX-512 instruction compares the target with 32 two-byte keys at once, and a popcount of the result is the answer.
-A whole internal node is two 64-byte vectors: no loop, no branch, every load issued at once.
-Empty slots hold the largest value, so they never count.
+**How does `bbtree` do it?**
+Heap keys are very common, so `bbtree` must handle them well.
+`bbtree` introduces `inline_keys`, an idea databases have used for decades[^graefe-larson][^graefe], similar to German strings[^umbra] and `StringView` in Arrow[^stringview].
 
-[Figure 2: the count against binary search over eight slots, the last
-empty. It plays a step a unit: the count's marks land together in step
-one, binary search's probes one a step; a slider moves the target and they
-race again (`key_count_figure.rs`).]
+With fixed-size inline keys, we get back the benefit of one cache miss loading 8 (or more) keys.
+And we only load the full key when the comparison ties.
 
-```text
-target 45
-prefix keys      3  11  27  40  58  71  90  max
-count            1   1   1   1   0   0   0    0    child 4, in 1 step
-binary search            2   3   1                 child 4, in 3 steps
-```
+[a figure to show the layout of `inline_keys`: `inline-keys.svg`. Caption: The same node with inline keys: the first 8 bytes of every key, 64 bytes, one cache line. One compare of all of them leaves a single candidate, and only it is read from the heap.]
 
-> Move the target. The count compares every slot at once and has the child after one step; binary search probes one slot at a time, each probe waiting for the last: 3 steps here, and 6 in a full node of 49 children.
+**What about keys with long prefixes?**
+Many keys, like URLs and paths, have long prefixes. If we just take the first 8 bytes as the inline key, we may compare nothing at all.
+`bbtree` addresses this with `prefix_keys`: the common prefix of all keys in a node[^prefix-btree].
+The beauty of `prefix_keys` is that they are implicit: every key in a node lies between the two separators around it in its parents, so every key starts with whatever those two separators share.
 
-On ARM, the same count runs in NEON.
-On an M1 Pro, it took a 10M `u64` lookup from 390 to 174 ns, and from 1,678 instructions to 407.
+[a figure with parent and child nodes: two separators in the parent, and the child's prefix is what the two separators share: `prefix-keys.svg`. Caption: Neighboring Wikipedia titles. The parent's two separators share their first 20 bytes, so every key of the child does too. Over the first 8 bytes, the keys all tie; past the shared 20, they all differ.]
 
-AVX-512 needs `-C target-cpu=native` (Rust 1.89 or later); without it, bbtree counts with SSE2.
+So each node only stores the length of its prefix, and keeps the window of each key right after it, which makes inline keys far more effective.
 
-#### Careful layouts to improve cache locality
+**How does this apply to other key types, and how does it work with Rust's type system?**
 
-At 10M entries, the tree is many times larger than the cache, so most fetches go to DRAM.
-What a fetch costs is the number of 64-byte cache lines it touches.
-bbtree lays out each node so that a lookup touches as few as possible:
+It's clear that `String` and `Vec<u8>` benefit from this optimization. But integers like `u64` and `u128` can too; we just need to mind the endianness: stored big-endian, their bytes sort in the same order as the numbers.
 
-1. **1 KiB nodes.** Disk B-trees use big pages because a disk read is expensive. In memory, the unit is a cache line, and every insert shifts half a node. In our sweep, 1 KiB beat everything from 512 B to 8 KiB on random gets and inserts; 4 KiB nodes made random gets 1.4× slower.
-2. **Internal nodes keep no keys**, only prefix keys and child pointers. A search reads the prefix keys, then one pointer; full keys in between took cache lines for nothing. 49 children fit in 512 bytes. On a tie, the search reads the full key from the leaf, where it lives anyway.
-3. **Leaves keep each key next to its value**, aligned so that a pair never straddles two lines: the line that confirms the key brings the value with it.
+[a small figure to show a `u64` array, decomposed into bytes: the common prefix, the inline keys (2 bytes), and the rest of the keys: `integer-keys.svg`. Caption: Four keys of one leaf of a tree of 10M random `u64`s, as bytes: the prefix its separators share, which the leaf skips; the 2 bytes it keeps as each inline key; and the rest, read only on a tie.]
 
-[Figure 3: the leaf of one `u64` lookup in the site's 1M-key tree, a cell
-a 64-byte line, the lines it read lighting up in the order it read them,
-from bbtree's page map and trace; "Another key" looks up a random key of
-the tree, and pointing at a line says what it holds
-(`cache_lines_figure.rs`). Only the leaf: the site runs bbtree built for
-wasm32, whose 4-byte pointers give internal nodes another layout than a
-64-bit machine's; a leaf of `u64` keys and values is the same on both.]
-
-```text
-leaf, 1 KiB: 3 of 16 lines read
-██ ██ ░░ ░░ ░░ ░░ ██ ░░ ░░ ░░ ░░ ░░ ░░ ░░ ░░ ░░
-└───┘ └───────────────────────────────────────┘
-prefix          keys and values
-keys
-```
-
-> The leaf of one `u64` lookup, a cell a 64-byte line, lit in the order the lookup reads them: the prefix keys, then the one line that holds the key and its value. Look up another key: still three lines. An internal node reads the same way, its prefix keys, then one child pointer.
-
-And no software prefetch.
-Prefetch hides a bad layout instead of fixing it: when we tried it, misses got 12–33% slower, and DRAM traffic went up 4–6×.
-
-#### Batching to improve throughput
-
-A single lookup can't beat its chain of misses: the CPU can't fetch a child before the parent's search picks it.
-
-But a caller often has many keys at hand: a join probing an index, a bulk load.
-Their lookups are independent, so their misses can overlap.
-
-`get_many_copied` looks up an array of keys at once:
+For other key types, like compound keys in structs, users can implement the `InlineKey` trait, and when they do, we use the inline keys wherever we can.
 
 ```rust
-let values = map.get_many_copied([&a, &b, &c, &d]);
+pub trait InlineKey: Ord {
+    /// How many bytes of each inline key the nodes keep: 2, 4 or 8.
+    const WIDTH: InlineWidth = InlineWidth::Eight;
+
+    /// Bytes `offset..offset + 8` of the key's encoding, big-endian,
+    /// zero past its end, which orders as the keys do.
+    fn inline_key_at(&self, offset: usize) -> InlineWord;
+}
+
+// A compound key, ordered by customer, then order: its encoding is
+// both fields' bytes, one after the other.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct OrderKey {
+    customer: u32,
+    order: u32,
+}
+
+impl InlineKey for OrderKey {
+    fn inline_key_at(&self, offset: usize) -> InlineWord {
+        let mut bytes = [0; 16];
+        bytes[..4].copy_from_slice(&self.customer.to_be_bytes());
+        bytes[4..8].copy_from_slice(&self.order.to_be_bytes());
+        let start = offset.min(8);
+        u64::from_be_bytes(bytes[start..start + 8].try_into().unwrap())
+    }
+}
+
+let orders: BBTreeMap<OrderKey, u64, _> =
+    BBTreeMap::with_strategy(WithInlineKey);
 ```
 
-Each key walks the tree in its own *lane*: it searches a node, prefetches the child it picked, and steps aside.
-While it waits for memory, the other lanes search.
+The trickiest part is Rust's type system. If we required every key type to implement `InlineKey`, `bbtree` couldn't be a drop-in replacement for std's `BTreeMap`/`BTreeSet`.
+Nightly Rust has `specialization`[^specialization] for exactly this.
+For stable Rust, we specialize the common types by hand: `u64`, `i64`, `u128`, `i128`, `String`, `str`, `&str`, `Vec<u8>`, `&[u8]`, `Box<str>`, `Box<[u8]>`, `[u8; 16]`, `[u8; 20]` and `[u8; 32]`.
+So without any extra work, the built-in types are optimized, and users can still implement the trait for their own types to get the full benefit.
 
-[Figure 4: four `u64` keys looked up together in the site's 1M-key tree,
-a row each: each search a block and, from each prefetch to that key's
-next search, the line on its way; time counted in searches, from
-bbtree's trace of the batch. It plays as the explorer plays a batch: each
-search lands as it runs, each line fills on its way, a playhead walks the
-searches and a count says how many lines are on their way; pointing at a
-row lights its key (`batch_lanes_figure.rs`).]
+#### Results
 
-```text
-131072   ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■
-500000    ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
-851191     ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
-999000      ■━━━━■━━━━■━━━━■━━━━■━━━━■━━━━■━━━■
+After these optimizations, we can show how many cache lines a lookup touches.
 
-■ search   ━ line on its way, from the key's prefetch to its next search
-```
+[a bar chart comparing std's `BTreeMap` and bbtree on different key types: cache lines from memory per lookup: `cache-lines.svg`. Caption: Cache lines brought in from memory per lookup that finds its key, 10M entries, one thread, Ryzen 9 9900X; lower is better.]
 
-> Four `u64` keys looked up together on one thread, a row each, time counted in searches. After each search, a key prefetches the next node it reads; while that line is on its way, the other keys search. Up to 3 lines are on their way at once; one key alone has one.
+#### Bonus: batch mode using Rust's async state machines
 
-On one thread, batching takes a `u64` get from 109 to 74 ns, and a JSON-key get from 162 to 102 ns.
-At 96 threads, UUID gets go from 591 to 795 M/s with 64 keys a call.
+So far we have focused on maximizing the value of a cache miss: packing as much information as possible into one cache line.
 
-Each lane is an `async` block that reads like the plain lookup, and a tiny executor polls the lanes in turn: no allocation, no runtime.
-It is also the only place bbtree prefetches: the one line each lane reads next.
+There's a more advanced optimization: hiding the cost of cache misses.
 
-#### Optimistic latch coupling to improve concurrency
+The simplest way to hide latency is software prefetching: while working on one key, we prefetch the next one.
+This usually works well, but it isn't enough for B-trees.
 
-The usual way to share a B-tree is a reader-writer latch on every node.
-But taking a read latch writes to the latch, and every lookup takes the root's.
-At 96 cores, the root's cache line bounces between cores on every lookup: readers never block each other, yet they still queue for one line.
+This is because a **B-tree's memory accesses are fundamentally chained**: you don't know which node to fetch next until you have searched the current one.
 
-bbtree's readers write nothing.
-Each node carries a version number:
+But B-trees are often read or built in batches, which lets us play a trick with Rust's async state machines.
 
-1. A reader reads the version, reads the node, and checks the version again. Unchanged: what it read is consistent. Changed: start over.
-2. A writer latches the node with a compare-and-swap, changes it, and bumps the version as it lets go.
+The high-level idea is simple: in Rust we often treat an IO operation as a `Future`, and `await` it. In `bbtree`, we treat a cache miss as a `Future`, and `await` it too. Database research has interleaved lookups like this for years, by hand and with coroutines[^interleaving].
 
-Lookups read their leaf the same way: `get_copied` copies the value out and checks the version after, like a seqlock.
-A lookup, hit or miss, writes nothing to shared memory.
+The code looks roughly like this:
 
-[Figure 5: one node's version, a writer, and two readers, a column each,
-time running down. It plays a moment a unit: a playhead walks down and
-each act reveals as it passes (`versions_figure.rs`).]
-
-```text
-version     writer      reader 1      reader 2
-   7                    read v7
-   7                    read node     read v7
-   7                    check v7 ✓    read node
-   7        latch                     read node
-   7        change                    read node
-   7        release                   read node
-   8                                  check v8 ✗
-```
-
-> Time runs down. Readers only read. Reader 1 finished before the writer changed anything, so its read stands. Reader 2 overlapped the change, finds version 8, and starts over.
-
-A reader may still be reading a node that a writer just freed.
-So a freed node never goes back to the allocator while the map lives: it waits on a free list for the next node of its kind.
-A late reader reads a stale node, fails its version check, and retries.
-No epochs, no guards to hold.
-
-At 96 threads, bbtree's lookups run at 86–94% of 96 times its one-thread speed.
-On UUID gets, `RwLock<BTreeMap>` does 19 M/s; bbtree 591 M/s, 795 batched.
-Bf-tree[^bftree] latches its inner nodes the same way[^olc].
-
-#### Model checking and fuzzing to ensure correctness
-
-A faster B-tree is worthless if it loses your data.
-bbtree is checked four ways:
-
-1. **Differential fuzzing against std.** Random operations run on bbtree and std's `BTreeMap` side by side; every answer must match, and the tree's invariants are checked after every operation, under AddressSanitizer. Seven targets, every week and before every release.
-2. **Model checking with Shuttle.** Shuttle runs the threads one at a time and switches between them at every atomic they share: latch words, the root pointer, free lists. It reaches interleavings that stress tests rarely hit, and found two bugs that our threaded tests and a 12-thread stress run had missed. One: after a merge, a lookup of a separator key could run its closure on a stale copy of an entry, which another thread could then remove and free.
-3. **Miri**, with tree borrows and strict provenance, on a selected set of tests.
-4. **Hostile user code.** An `Ord`, `Clone` or `Drop` that panics or lies can give wrong answers, but never undefined behavior. A fuzz target checks exactly that.
-
-### Try it
-
-```bash
-cargo add bbtree
-```
-
-1. Replacing std's `BTreeMap`? Use `bbtree::unsync::BBTreeMap`; change one `use` line.
-2. Sharing it across threads? Use `bbtree::BBTreeMap`.
-3. Many keys at once? Use `get_many_copied` and `insert_many`.
-4. On x86, build with `-C target-cpu=native` for AVX-512.
-
-If you like bbtree, don't forget to cite it in your paper:
-
-```bibtex
-@misc{hao2026bbtree,
-  author       = {Xiangpeng Hao},
-  title        = {{bbtree}: fastest ordered map in the world},
-  year         = {2026},
-  howpublished = {\url{https://github.com/XiangpengHao/bbtree}},
+```rust
+fn get_many<const N: usize>(&self, keys: [&K; N]) -> [Option<V>; N] {
+    let lanes = keys.map(|key| self.search(key));
+    block_on(join_all(lanes))
 }
 ```
 
+And `search` looks like this:
+
+```rust
+async fn search(&self, key: &K) -> Option<V> {
+    let mut node = self.root();
+    while node.is_internal() {
+        let edge = node.search(key);
+        node = node.child(edge);
+        prefetch(node.header()).await;
+    }
+    node.get(key)
+}
+```
+
+[four `u64` keys looked up together, from bbtree's trace of the batch: `batch-lanes.svg`. Caption: Four `u64` keys looked up together on one thread, a row each, time counted in searches, from bbtree's own run of the batch. After each search, a key prefetches the next node it reads; while that line is on its way, the other keys search.]
+
+But we need to be very careful:
+1. A cache miss costs 100 ns, so our `Future` must be as lightweight as possible. This means we can't use `tokio` or any general-purpose async runtime, because their overhead is already higher than a cache miss. `bbtree` polls its lanes with a tiny executor of its own: no allocation, no runtime.
+2. Each async function in Rust is a state machine generated at compile time. We want this state machine to be as small as possible, so that switching between states is cheap.
+3. There's no way to know whether a cache line is already in cache, so we have to guess. In `bbtree` that's not so hard: once the leaves outgrow the L2 cache, a leaf is almost always a cache miss; smaller trees look their keys up one at a time.
+
+### Minimize instructions
+
+In general, minimizing instructions means reducing CPU time,
+which means two things: 1. reducing the instruction count; 2. reducing branches.
+
+A mispredicted branch costs about 20 cycles (the time of 20 instructions), about 10% of a cache miss.
+
+Repeated cache misses stall the CPU pipeline and confuse the cache prefetcher. On an M1 Pro, we kept the same tree, the same nodes and the same cache lines, and only changed how a node is searched (below).
+A 10M `u64` lookup went from 1,678 to 407 instructions, and from 390 to 174 ns.
+
+#### Binary search vs linear search, again
+
+With inline keys, searching a node means searching a small array of small integers: 2 bytes a key for integers and UUIDs, 4 to 8 for strings.
+Now let's count instructions and branches over a node of 32 keys:
+
+1. Binary search: about 5 steps, each a compare and a branch, and the CPU typically guesses wrong half of the time. A branchless binary search[^layouts] avoids the guess, but then each step waits for the one before.
+2. Linear search doesn't stop early: it compares every key, with no branches and no chained dependencies, a perfect fit for the CPU pipeline.
+
+[the count against binary search over eight inline keys: `key-count.svg`. Caption: The count compares every slot at once and has the child after one step; binary search probes one slot at a time, each probe waiting for the last: 3 steps here, and 6 in a full node of 49 children.]
+
+#### How does `bbtree` search?
+
+With SIMD, searching a node takes a handful of instructions[^kary].
+One AVX-512 instruction compares the target with 32 two-byte keys at once; its result is a 32-bit mask, a bit a key, and a popcount of the mask is the answer:
+
+```rust
+fn child_index(inline_keys: &[u16; 32], target: u16) -> usize {
+    let keys = _mm512_loadu_epi16(inline_keys.as_ptr().cast());
+    let smaller =
+        _mm512_cmplt_epu16_mask(keys, _mm512_set1_epi16(target as i16));
+    smaller.count_ones() as usize
+}
+```
+
+The function has only three steps, all branchless and super fast:
+1. `_mm512_loadu_epi16` loads the inline keys into a SIMD register.
+2. `_mm512_cmplt_epu16_mask` compares them with the target and returns a mask, a bit for each smaller key, in key order (e.g., `1111100000000000`).
+3. `smaller.count_ones()` counts the ones in the mask, which is the index of the child to follow.
+
+We also implement the same search for ARM in NEON, so Apple Silicon and AWS Graviton work too.
+On x86, AVX-512 needs `-C target-cpu=native` (Rust 1.89 or later).
+
+#### The compiler is not your friend
+
+We often hear "write simple code and let the compiler optimize it". The extreme version is FastLanes[^fastlanes], whose scalar code the compiler automatically vectorizes (generates SIMD code for).
+
+Here the compiler is not your friend. A node holds few keys, a few dozen at most, and their count is usually not a power of two.
+The compiler often considers it not worth vectorizing, and sometimes can't prove it safe, so we write the SIMD by hand, and handle the boundary cases very carefully.
+
+Vectorization isn't the only problem: sometimes the compiler generates bad code because it doesn't know the workload.
+For example, to compare two `&[u8]`, Rust calls `memcmp`, a function call that isn't inlined.
+But in `bbtree`, we know the keys are usually short, so instead of calling `memcmp`, we load the bytes as integers and compare the integers. Arrow does the same for `StringView`[^stringview][^arrow-compare].
+
+#### Results
+
+[a bar chart comparing std's `BTreeMap` and bbtree on different key types: instructions per lookup: `instructions.svg`. Caption: Instructions per lookup that finds its key, 10M entries, one thread, Ryzen 9 9900X; lower is better.]
+
+### Minimize cache coherence traffic
+
+Cache coherence traffic happens when one core writes to a cache line that other cores hold. To make sure every core sees a consistent view of memory, CPU caches implement a cache coherence protocol[^primer]. At a very high level, a write to a cache line invalidates all copies of that line in other cores.
+
+This causes two problems: 1. more cache misses; 2. more importantly, it puts a ceiling on the B-tree's concurrency.
+
+On modern hardware, a contended cache line takes only about 10 M op/s. So if we simply put a `Mutex` over the B-tree, we reach at most 10 M op/s, while `bbtree` reaches 180 M op/s at 96 threads.
+
+Note that a `RwLock` won't help: even a read lock must __increment__ the lock's reader count, which is a write to its cache line.
+
+So how does `bbtree` solve this?
+
+The key idea is a version lock[^olfit][^olc]. Every node carries a version: a reader reads the version, reads the node, and reads the version again. If the version hasn't changed, what it read is consistent; otherwise, it retries.
+
+[a figure to show the version lock: `version-lock.svg`. Caption: Time runs down. Readers only read. Reader 1 finished before the writer changed anything, so its read stands. Reader 2 overlapped the change, finds version 8, and starts over.]
+
+This allows very high concurrency, because a read causes no write traffic at all.
+
+But there are two things we need to be careful about.
+
+##### Problem 1: we can no longer hand out a `&V` to the user
+
+The value may change, or even be freed, while the user holds the reference, so it's unsafe to use.
+
+We can't return a clone of `V` either, because `V` may not be `Clone`.
+
+Here we use a trick similar to Bf-Tree's[^bftree]: only inner nodes are optimistic; leaves are not.
+This works because (1) contention usually happens at inner nodes, (2) values are stored only in leaves, and (3) leaves are only 20% of the nodes on a lookup's path (assuming a tree of 5 levels).
+For `Copy` values, `get_copied` goes one step further: it reads the leaf optimistically too, copies the value out, and checks the version after, like a seqlock.
+
+##### Problem 2: memory reclamation
+
+The second problem is more subtle: if one thread is reading a node while another thread frees it, the reader may segfault.
+
+The usual solution is epoch-based memory reclamation[^ebr], e.g., `crossbeam-epoch`.
+
+But then we either leak the epoch to the user, which is ugly and error-prone, or pin an epoch on every access (many libraries do this), which is expensive: every access is a global read and a private write.
+
+In `bbtree`, we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved.
+So a late reader can keep checking the version, find that the node is stale, and retry, without any segfault.
+
+#### Results
+
+[the concurrent results again, `u64` gets: `concurrent-gets.svg`. Caption: Gets of `u64` keys, half of them misses, 10M entries, all threads together, a thread a core, on AWS's c8a.metal-24xl (96 cores); the Concurrent card above has the other keys and workloads.]
+
+`bbtree` is wildly concurrent: its get throughput grows 83–90× as the core count grows to 96, 86–94% of linear scaling.
+At this thread count, `bbtree` is even faster than [DashMap](https://github.com/xacrimon/dashmap), a _hashtable_.
+
+
+## How do we make it correct?
+
+Performance optimization is easy: you simply ask Claude or Codex to make the code 10× faster on a workload. Speed is measurable, and LLMs can iterate on it relentlessly.
+
+But making sure the code is correct is hard. Correctness is implicit: you can never list every DON'T in the prompt, you can never write enough tests to prove the code correct, and you can never enumerate every property you want to hold.
+
+`bbtree` has three guards to approach correctness.
+
+### Guard 1: [Xiangpeng Hao](https://xiangpeng.systems)
+
+Xiangpeng is a real human behind `bbtree`, and the front line guarding the correctness of its code.
+All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code.
+
+He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree[^bftree]). Choosing `bbtree` means offloading the attention to Xiangpeng.
+
+### Guard 2: LLMs
+
+No human can write better code than LLMs. All of the implementation is written by LLMs, and cross-checked by LLMs from different providers.
+
+### Guard 3: fuzzing, verification, DSTs
+
+Conventional approaches still apply here:
+1. **Fuzzing** runs random operations on `bbtree` and std's `BTreeMap` side by side, checks that every answer matches, and checks the whole tree's invariants after every operation.
+2. **Verification** with Verus[^verus] proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves.
+3. **DSTs** (deterministic simulation testing) with Shuttle[^shuttle] test concurrent behavior in a deterministic and principled way. 
+
+
+## Reviewers of this post
+
+TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here.
+
+[^ostp]: Not more complicated than an operating system! Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, [Operating Systems: Three Easy Pieces](https://pages.cs.wisc.edu/~remzi/OSTEP/) (2016).
+
+[^gray]: Jim Gray and Andreas Reuter, *Transaction Processing: Concepts and Techniques* (1993), as quoted by Goetz Graefe in [Modern B-Tree Techniques](https://doi.org/10.1561/1900000028) (2011).
+
+[^cache-conscious]: Jun Rao and Kenneth A. Ross, [Making B+-Trees Cache Conscious in Main Memory](https://doi.org/10.1145/342009.335449) (SIGMOD 2000).
+
+[^graefe-larson]: Goetz Graefe and Per-Åke Larson, [B-Tree Indexes and CPU Caches](https://doi.org/10.1109/ICDE.2001.914847) (ICDE 2001).
+
 [^graefe]: Goetz Graefe, [More Modern B-Tree Techniques](https://doi.org/10.1561/1900000070) (2024): keep full keys out of the comparison stream with dense, fixed-width codes, and skip the prefix a page shares.
 
-[^umbra]: [Umbra: A Disk-Based System with In-Memory Performance](https://db.in.tum.de/~freitag/papers/p29-neumann-cidr20.pdf) (CIDR 2020); see also my post on [the nature of strings](https://blog.xiangpeng.systems/posts/nature-of-string/).
+[^umbra]: Thomas Neumann and Michael Freitag, [Umbra: A Disk-Based System with In-Memory Performance](https://db.in.tum.de/~freitag/papers/p29-neumann-cidr20.pdf) (CIDR 2020); see also my post on [the nature of strings](https://blog.xiangpeng.systems/posts/nature-of-string/).
 
-[^bftree]: [Bf-Tree: A Modern Read-Write-Optimized Concurrent Larger-Than-Memory Range Index](https://github.com/microsoft/bf-tree) (VLDB 2024).
+[^stringview]: Xiangpeng Hao and Andrew Lamb, Using StringView / German Style Strings to Make Queries Faster: [Part 1, Reading Parquet](https://datafusion.apache.org/blog/2024/09/13/string-view-german-style-strings-part-1/) and [Part 2, String Operations](https://datafusion.apache.org/blog/2024/09/13/string-view-german-style-strings-part-2/) (2024).
+
+[^prefix-btree]: Rudolf Bayer and Karl Unterauer, [Prefix B-Trees](https://doi.org/10.1145/320521.320530) (TODS 1977).
+
+[^specialization]: [RFC 1210: impl specialization](https://rust-lang.github.io/rfcs/1210-impl-specialization.html), unstable since 2016 ([tracking issue](https://github.com/rust-lang/rust/issues/31844)).
+
+[^interleaving]: Onur Kocberber, Babak Falsafi and Boris Grot, [Asynchronous Memory Access Chaining](https://www.vldb.org/pvldb/vol9/p252-kocberber.pdf) (VLDB 2015); Georgios Psaropoulos et al., [Interleaving with Coroutines: A Practical Approach for Robust Index Joins](https://www.vldb.org/pvldb/vol11/p230-psaropoulos.pdf) (VLDB 2017); Christopher Jonathan et al., [Exploiting Coroutines to Attack the "Killer Nanoseconds"](https://www.vldb.org/pvldb/vol11/p1702-jonathan.pdf) (VLDB 2018).
+
+[^layouts]: Paul-Virak Khuong and Pat Morin, [Array Layouts for Comparison-Based Searching](https://arxiv.org/abs/1509.05053) (2017).
+
+[^kary]: Benjamin Schlegel, Rainer Gemulla and Wolfgang Lehner, [k-ary Search on Modern Processors](https://doi.org/10.1145/1565694.1565705) (DaMoN 2009).
+
+[^fastlanes]: Azim Afroozeh and Peter Boncz, [The FastLanes Compression Layout: Decoding >100 Billion Integers per Second with Scalar Code](https://www.vldb.org/pvldb/vol16/p2132-afroozeh.pdf) (VLDB 2023).
+
+[^arrow-compare]: arrow-rs [#7748](https://github.com/apache/arrow-rs/pull/7748) compares inlined string views as one `u128`, and their 4-byte prefixes as one `u32`, instead of byte by byte.
+
+[^primer]: Vijay Nagarajan, Daniel J. Sorin, Mark D. Hill and David A. Wood, [A Primer on Memory Consistency and Cache Coherence](https://doi.org/10.1007/978-3-031-01764-3), second edition (2020).
+
+[^olfit]: Sang K. Cha, Sangyong Hwang, Kihong Kim and Keunjoo Kwon, [Cache-Conscious Concurrency Control of Main-Memory Indexes on Shared-Memory Multiprocessor Systems](https://www.vldb.org/conf/2001/P181.pdf) (VLDB 2001).
 
 [^olc]: Viktor Leis et al., [The ART of Practical Synchronization](https://db.in.tum.de/~leis/papers/artsync.pdf) (DaMoN 2016).
+
+[^bftree]: Xiangpeng Hao and Badrish Chandramouli, [Bf-Tree: A Modern Read-Write-Optimized Concurrent Larger-Than-Memory Range Index](https://www.vldb.org/pvldb/vol17/p3442-hao.pdf) (VLDB 2024); code at [microsoft/bf-tree](https://github.com/microsoft/bf-tree).
+
+[^ebr]: Keir Fraser, [Practical Lock-Freedom](https://www.cl.cam.ac.uk/techreports/UCAM-CL-TR-579.pdf) (PhD thesis, 2004); in Rust, [`crossbeam-epoch`](https://docs.rs/crossbeam-epoch).
+
+[^pin]: crossbeam's [`SkipMap::get`](https://docs.rs/crossbeam-skiplist/0.1.3/crossbeam_skiplist/map/struct.SkipMap.html) pins an epoch on every call; scc's [`TreeIndex`](https://docs.rs/scc/latest/scc/tree_index/struct.TreeIndex.html) either takes a guard from the caller (`peek`) or pins one on every call (`peek_with`).
+
+[^tsm]: Michael Greenwald and David Cheriton, [The Synergy Between Non-Blocking Synchronization and Operating System Structure](https://www.usenix.org/legacy/publications/library/proceedings/osdi96/full_papers/greenwald/index.html) (OSDI 1996), which calls this type-stable memory.
+
+[^verus]: Andrea Lattuada et al., [Verus: Verifying Rust Programs using Linear Ghost Types](https://doi.org/10.1145/3586037) (OOPSLA 2023); code at [verus-lang/verus](https://github.com/verus-lang/verus).
+
+[^shuttle]: [Shuttle](https://github.com/awslabs/shuttle), a library for testing concurrent Rust code, from AWS.
+
+
+
+
 
 
 ## Status and decisions (2026-10-17, from the runs)
@@ -277,6 +393,23 @@ author's.
   repository's `vis/data/`; a cell rerun (`reruns/`) replaces the first run
   of it. On AWS, `blog/aws-runs.sh` runs `blog/runs.sh` on a spot instance
   it launches and terminates.
+- **Figures (2026-10-18).** "How it works" is drawn by SVG files, the
+  same on the site and in any copy of the post (the author's Quarto
+  blog): `vis/figures/` writes them into `vis/assets/figures/`, the
+  mechanisms from fixed keys, `integer-keys.svg` and `batch-lanes.svg`
+  from a tree of 10M random `u64`s it builds and reads through bbtree's
+  inspect views, and the charts from `vis/data/`. Each plays a CSS loop
+  and rests on its last frame with reduced motion; the charts play once.
+  The two Results charts are `vis/data/9900x-20261018/lookups.csv`:
+  bbtree-eval's `bbtree-bench --perf`, gets that hit, 10M entries, `u64`
+  values, bbtree and std's `BTreeMap`, on `u64`, `hash32` (32-byte
+  hashes), JSON keys and Wikipedia titles, one run. With the NMI watchdog
+  on, the counter group holds four events, so that run counted cycles,
+  instructions, branch misses and lines from memory only. Per get, std
+  against bbtree: lines from memory 10.1 / 13.9 / 45.2 / 45.1 against
+  4.0 / 4.7 / 6.9 / 13.8; instructions 409 / 1,219 / 1,465 / 1,468
+  against 312 / 322 / 411 / 690; branch misses 8.7 / 7.5 / 8.5 / 9.5
+  against 0.5 / 0.5 / 1.0 / 4.4 (not in the post).
 - **One bbtree map (2026-10-17).** The post shows `bbtree::BBTreeMap`,
   the map threads share, as "bbtree" in every tab, one thread included;
   the single-thread `bbtree::unsync::BBTreeMap` runs in none (doc 03,
@@ -343,10 +476,26 @@ author's.
     c8a.metal-24xl,c8a.24xlarge aws-c8a tab2 <keys>`), about $0.90 on
     spot. 10M entries still measure memory there: no map fits the 32 MiB
     L3 of an 8-core group, as on the 9900X.
-  - Memory: a bar a map, the heap once built, its keys' allocations
-    included, and lighter on to the peak while it was built. In these
-    insert-only builds the peak is the end for every map; a churn
-    workload would show a peak above it.
+  - Memory: a bar a map, what its entries cost the machine, its keys'
+    allocations included: the growth of the resident set once built, and
+    lighter on to its peak while it was built, what a machine must have
+    to build it; DashMap, a hash map, last, set apart by a dashed rule and
+    an "unordered, hashtable" note, as std's hash map is on the one-thread
+    card. The resident set, not the bytes asked for, because the
+    allocator's size classes hide unequal costs: mimalloc gives std's
+    192 B `u64` leaf a 224 B block (+21% resident), bbtree's 1 KiB node
+    exactly 1 KiB. bbtree-eval's `blog/runs.sh memory` runs one process a
+    map, holding nothing else: its keys are fed to the map as it is built
+    (integers made from their indexes, strings streamed from a dump a
+    child process makes), so no key set or dataset load shares the
+    resident set. The peak is `VmHWM`'s growth, mimalloc and THP as the
+    machine has them; once built is `VmRSS`'s growth after `mi_collect`
+    hands the free pages back. An empty build grows it by 0.7 MB. DashMap
+    peaks 30–70% above what it keeps (old shard tables freed but still
+    resident); every map built on 24 threads peaks about 5 bytes an entry
+    above on string keys, about 2 MiB a worker that only THP adds (off,
+    the gap is gone; not the stacks), which std's one-thread build
+    doesn't pay.
   - End to End: one bar chart (`baseline_bars.rs`, `BarScale::Relative`), a group a system (the
     note names the maps they ship), a cluster a workload, one bar each:
     the time as shipped, dark, as 100%, and inside it bbtree's, bright,
@@ -438,9 +587,13 @@ author's.
     (bbtree 109, 74 batched), 43 an insert (155).
   - Not in the post: artmap (ART) tied or beat the first round's single
     lookups and inserts of fixed-size keys at 1.2–2× the memory.
-  - Memory, heap bytes per entry: bbtree 26.9 / 39.7 / 80.9 / 68.5 (`u64`,
-    UUID, titles, JSON), std 27.1 / 38.9 / 71.6 / 59.1: even on
-    fixed-size keys, 13–16% more on strings (inline keys and length tags).
+  - Memory, resident bytes per entry once built (2026-10-18, the 9900X's
+    `reruns/memory-<keys>-<map>`): bbtree 27.1 / 39.9 / 88.9 / 72.2
+    (`u64`, UUID, titles, JSON), std 31.5 / 43.8 / 81.0 / 65.2, DashMap
+    31.3 / 45.4 / 89.1 / 72.6; peaks bbtree 27.2 / 40.0 / 93.9 / 77.1, std
+    31.5 / 43.9 / 81.2 / 65.5, DashMap 52.7 / 73.1 / 115.2 / 101.6.
+    bbtree is the least of every map on `u64` and UUID, 10–11% above std on
+    strings once built (asked for: 13–16%).
 - **Integrations**, single thread only (with more, each system is bound by
   its own locks): bbtree-eval's `integrations/{fjall,slatedb,turso,tonbo,lance}`,
   the shipped skiplist against bbtree, re-run on 2026-10-17 with the
@@ -486,6 +639,6 @@ author's.
   - **Neon** (pageserver `InMemoryLayer`, std `BTreeMap` → the unsync
     map): stopped during the first round's final runs, not in the chart;
     not re-run.
-- **Open.** The Jim Gray quote's wording and source. Not in the post:
+- **Open.** Not in the post:
   the unsync map's UUID inserts are slower than the shared map's on the
   same tree code (261 against 167 ns), a bug to find.

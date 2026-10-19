@@ -77,8 +77,6 @@ enum CombinationFinish {
     Max,
     /// Walks a clone of the iterator to the end, then the iterator itself.
     Cloned,
-    /// Prints the iterator, if the sets are small enough to print.
-    Print,
 }
 
 /// One operation on both pairs of sets.
@@ -168,10 +166,6 @@ struct MirroredSets<'i, T> {
 }
 
 impl<'i, T: FuzzKey> MirroredSets<'i, T> {
-    /// Sets and iterators of at most this many elements are printed, and
-    /// the prints compared: printing walks them whole.
-    const PRINTED_LEN: usize = 64;
-
     /// Runs the input's operations on two fresh pairs of sets, comparing
     /// every answer and checking our trees after each change.
     fn run(input: &'i SetInput) {
@@ -354,11 +348,7 @@ impl<'i, T: FuzzKey> MirroredSets<'i, T> {
 
     fn walk(&self, combination: Combination, steps: u8, finish: CombinationFinish) {
         let (left, right) = (&self.left, &self.right);
-        let walk = CombinationWalk {
-            steps,
-            finish,
-            printable: left.ours.len().max(right.ours.len()) <= Self::PRINTED_LEN,
-        };
+        let walk = CombinationWalk { steps, finish };
         match combination {
             Combination::Union => walk.assert_same(
                 left.ours.union(&right.ours),
@@ -406,18 +396,16 @@ impl<'i, T: FuzzKey> MirroredSets<'i, T> {
 struct CombinationWalk {
     steps: u8,
     finish: CombinationFinish,
-    /// Whether the sets are small enough to print the iterators.
-    printable: bool,
 }
 
 impl CombinationWalk {
-    /// Walks both iterators: they must match all along, and so must their
-    /// size hints and, if printable, their prints.
+    /// Walks both iterators: they must match all along, and so must their size
+    /// hints.
     fn assert_same<'a, T, I, J>(&self, mut ours: I, mut theirs: J)
     where
         T: Ord + Debug + 'a,
-        I: Iterator<Item = &'a T> + Clone + Debug,
-        J: Iterator<Item = &'a T> + Clone + Debug,
+        I: Iterator<Item = &'a T> + Clone,
+        J: Iterator<Item = &'a T> + Clone,
     {
         for _ in 0..self.steps {
             assert_eq!(ours.size_hint(), theirs.size_hint());
@@ -439,11 +427,6 @@ impl CombinationWalk {
             CombinationFinish::Cloned => {
                 assert!(ours.clone().eq(theirs.clone()));
                 assert!(ours.eq(theirs));
-            }
-            CombinationFinish::Print => {
-                if self.printable {
-                    assert_eq!(format!("{ours:?}"), format!("{theirs:?}"));
-                }
             }
         }
     }

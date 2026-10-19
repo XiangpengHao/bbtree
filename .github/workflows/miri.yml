@@ -2,7 +2,7 @@
 name: miri
 
 # Tests under Miri, which reports undefined behavior in the unsafe code.
-# Only the tests .config/nextest.toml names run, so that this runs on every
+# Only the tests .github/miri-nextest.toml names run, so that this runs on every
 # change in minutes; normal test runs run them all.
 on:
   push:
@@ -54,14 +54,17 @@ jobs:
       # test from Miri without a word.
       - name: Check that every named test exists
         run: |
-          named=$(grep -c 'test(=' .config/nextest.toml)
-          found=$(cargo miri nextest list --message-format oneline | wc -l)
+          named=$(grep -c 'test(=' .github/miri-nextest.toml)
+          found=$(cargo miri nextest list --config-file .github/miri-nextest.toml \
+            --message-format oneline | wc -l)
           if [ "$named" -ne "$found" ]; then
-            echo "::error::.config/nextest.toml names $named tests; $found exist"
+            echo "::error::.github/miri-nextest.toml names $named tests; $found exist"
             exit 1
           fi
 
       # Miri interprets on one core. Nextest runs each test in a process of
       # its own, so as many tests run at once as the runner has cores.
       - name: Miri
-        run: cargo miri nextest run --test-threads "$(nproc)"
+        run: |
+          cargo miri nextest run --config-file .github/miri-nextest.toml \
+            --test-threads "$(nproc)"

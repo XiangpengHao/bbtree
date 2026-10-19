@@ -1,25 +1,29 @@
-//! Removing from a latched tree, as bbtree removes (`tree/remove.rs`, D22).
+//! Removing from a latched tree, as the unsync tree removes
+//! (`tree/remove.rs`, D22).
 //!
-//! - **A condition** the caller gives decides, run on the entry while its
-//!   leaf is latched exclusively, before anything changes.
-//! - **An entry whose leaf keeps its minimum**, or is the root, comes out
-//!   with the leaf latched exclusively, nothing else held.
-//! - **Otherwise** the removal descends again, keeping its path, and takes,
-//!   without waiting, every node bbtree's removal will change or read a
-//!   separator of: for each level it leaves underfull, from the leaf up,
-//!   the parent and the sibling the child merges with or takes an entry
-//!   from, as `Internal::fix_underfull_child` decides; for a separator, the
-//!   node holding it, the nodes on the path from there down, whose lower
-//!   fence its successor becomes, and the nodes along the right border of
-//!   the subtree left of it, whose upper fence it becomes; and the nodes
-//!   above the topmost one it changes that hold that node's fences, which
-//!   the changed nodes' prefixes are fit to (`tree/prefix.rs`). Then it runs
-//!   bbtree's removal along them ([`NodeStackMut::remove`]), which fixes the
-//!   levels, fits the prefixes, and lowers the tree if the root lost its
-//!   last separator, to a leaf too, in the root page.
-//! - **Freed pages**, a merged node's and the root's child when the root
-//!   lowers, go on the tree's free lists once the removal lets go
-//!   (`pages.rs`). If the last leaf was one, appends go to the leaf that
+//! - **A condition** the caller gives decides. It runs on the entry while
+//!   its leaf is latched exclusively, before anything changes.
+//! - **An entry whose leaf keeps its minimum**, or whose leaf is the root,
+//!   comes out with that leaf latched exclusively and nothing else held.
+//! - **Otherwise** the removal descends again, keeping its path. It takes,
+//!   without waiting, every node [`NodeStackMut::remove`] will change or
+//!   read a separator of:
+//!   - for each level it leaves underfull, from the leaf up, the parent and
+//!     the sibling that `Internal::fix_underfull_child` merges the child
+//!     with or moves an entry from;
+//!   - for a removed separator, the node holding it, the path below it
+//!     (whose lower fence the successor becomes), and the right border of
+//!     the subtree left of it (whose upper fence the successor becomes);
+//!   - the path from the topmost changed node up to the nearest nodes
+//!     holding its fences, which the changed nodes' prefixes are fit to
+//!     (`tree/prefix.rs`).
+//!
+//!   Then it runs [`NodeStackMut::remove`] along them. That fixes the
+//!   levels, fits the prefixes, and lowers the tree in the root page when
+//!   the root loses its last separator, down to a leaf if need be.
+//! - **Freed pages** (a merged node's, and the root's child when the root
+//!   lowers) go on the tree's free lists once the removal lets go
+//!   (`pages.rs`). If the last leaf was freed, appends go to the leaf that
 //!   took its entries.
 //!
 //! [`NodeStackMut::remove`]: super::super::node_stack::NodeStackMut::remove
@@ -41,15 +45,15 @@ use super::pages::NodePages;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-/// A removal that found a node it changes held by another thread, or
-/// changed since its descent: it changed nothing, and starts over.
+/// A removal found a node it needs held by another thread, or changed since
+/// its descent. It changed nothing, and starts over.
 struct StartOver;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Removes the entry whose key equals `key`, if `condition` holds of
     /// it, and returns it, with the key as stored; `None` without one, or if
-    /// `condition` doesn't hold. `condition` runs while the entry's leaf is
-    /// latched exclusively, once a try. Pages a removal frees go on the
+    /// `condition` doesn't hold. `condition` runs once per try, while the
+    /// entry's leaf is latched exclusively. Pages a removal frees go on the
     /// tree's free lists (`pages.rs`); `alloc` is the map's allocator.
     #[inline]
     pub(crate) fn remove_entry<Q>(
@@ -104,7 +108,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        // Dropped last, after the nodes the removal held: see `NodePages`.
+        // Declared outside the loop, so it drops last, after the nodes each
+        // try held: see `NodePages`.
         let pages = self.pages(alloc);
         loop {
             if let Ok(removed) = self.try_remove_rebalancing(key, condition, &pages) {
@@ -115,8 +120,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// One try of [`Self::remove_rebalancing`]: the removal, or, if a node
-    /// it takes is in another thread's way, nothing changed.
+    /// One try of [`Self::remove_rebalancing`]. [`StartOver`], with nothing
+    /// changed, if a node it takes is held by another thread or changed
+    /// since the descent.
     fn try_remove_rebalancing<Q, A: Allocator>(
         &self,
         key: &SearchKey<'_, K, Latched<S>, Q>,
@@ -183,15 +189,15 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 }
                 None => path.node_stack_to_leaf(tree, top, leaf, leaf_index),
             };
-            // A latched tree counts no entries: bbtree's removal counts this
-            // one out of a count of its own.
+            // A latched tree keeps no entry count: `NodeStackMut::remove`
+            // takes this one out of a count of its own.
             let mut uncounted = 1;
             stack.remove(pages, &mut uncounted)
         });
         // A freed last leaf merged into the leaf left of it, under the
-        // topmost node fixed, or moved into the root page: what is last
-        // under that node, or the root, which the removal holds, as every
-        // node down its last edges.
+        // topmost node fixed, or moved into the root page. The new last leaf
+        // is the last under that node, or the root. The removal holds it, as
+        // it holds every node down to it along last edges.
         if (self.rightmost_leaf()).is_some_and(|last| pages.has_freed(last.node_ptr().page())) {
             let top_fixed = match depth - fixes {
                 0 => self
@@ -208,11 +214,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Takes the nodes that fixing the leaf of `path` changes, once a
-    /// removal leaves it with `leaf_len` entries: for each level left
-    /// underfull, from the leaf up, its parent and the sibling it merges
-    /// with or takes an entry from, as `Internal::fix_underfull_child` will.
-    /// Returns how many levels to fix; [`StartOver`] if a node is held by
-    /// another thread or changed since the descent.
+    /// removal leaves it with `leaf_len` entries. For each level left
+    /// underfull, from the leaf up, those are its parent and the sibling
+    /// that `Internal::fix_underfull_child` will merge it with or move an
+    /// entry from. Returns how many levels to fix; [`StartOver`] if a node
+    /// is held by another thread or changed since the descent.
     fn take_fixes(
         path: &TreePath<K, V, S>,
         leaf_len: usize,
@@ -238,26 +244,23 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             if !held_nodes.take_internal_at(parent, version) {
                 return Err(StartOver);
             }
-            let sibling_edge = if routed.edge > 0 {
-                routed.edge - 1
-            } else {
-                routed.edge + 1
-            };
-            let (sibling_len, capacity) = if fixes == 0 {
+            // The sibling and the merge the fixing picks (`tree/remove.rs`).
+            let sibling_edge = Internal::<K, V, Latched<S>>::fixing_sibling(routed.edge);
+            let merges = if fixes == 0 {
                 let sibling = parent.leaf_child(sibling_edge);
                 if !held_nodes.take_leaf(sibling) {
                     return Err(StartOver);
                 }
-                (sibling.len(), Leaf::<K, V, Latched<S>>::capacity())
+                Leaf::<K, V, Latched<S>>::fit_merged(child_len, sibling.len())
             } else {
                 let sibling = parent.internal_child(sibling_edge);
                 if !held_nodes.take_internal(sibling) {
                     return Err(StartOver);
                 }
-                (sibling.len(), Internal::<K, V, Latched<S>>::capacity())
+                Internal::<K, V, Latched<S>>::fit_merged(child_len, sibling.len())
             };
             fixes += 1;
-            if child_len + 1 + sibling_len > capacity {
+            if !merges {
                 // The child takes an entry from its sibling: the parent keeps
                 // its separators.
                 return Ok(fixes);
@@ -266,9 +269,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// Takes the nodes along the right border of the child at edge `edge` of
-    /// `node`, which the caller holds, down to its last leaf: each where the
-    /// one above it, held, keeps it. `false` if another thread holds one.
+    /// Takes the nodes along the right border of `node`'s child at `edge`,
+    /// down to its last leaf; the caller holds `node`. Each is taken at the
+    /// version it is at, as its held parent keeps it in place. `false` if
+    /// another thread holds one.
     fn take_left_border(
         node: Internal<K, V, Latched<S>>,
         edge: usize,

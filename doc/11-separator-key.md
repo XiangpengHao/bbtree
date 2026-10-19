@@ -80,8 +80,9 @@ L2:  [banana's value], berry, blueberry
 - **Leaves.** Paired leaves kept a place for the head's key in entry 0,
   unused (`(hk head)` in `layout.rs`, D29); the head's key takes it. In
   `u64 → u64` leaves it was free (bytes 128–136), so capacity stays 55. In
-  `String → u64` leaves, the D36 length tags (bytes 200–248) extended into
-  it (224–248): the leaf gives up an entry to keep them, 24 → 23.
+  `String → u64` leaves, the D36 hash tags (bytes 200–224) end where it
+  starts, so capacity stays 24. In `String → String` leaves they would
+  extend into it: the leaf gives up an entry to keep them, 17 → 16.
 - **Internal nodes.** A header, inline keys and edges, in 512 B pages:
   49 separators at 2-byte inline keys (`u64`, `u128`, `[u8; 32]`), 41 at 4
   (`String`), 31 at 8, against 56, 38, 24 and 28 in 1 KiB with keys.

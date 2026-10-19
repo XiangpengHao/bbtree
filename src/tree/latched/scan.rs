@@ -1,44 +1,51 @@
 //! Visiting a range of a latched tree's entries, in key order or in
-//! reverse, one leaf at a time (`doc/09-concurrency.md`, Scans): the
+//! reverse, one leaf at a time (`doc/09-concurrency.md`, Scans). The
 //! caller's closure runs on each entry while its leaf is latched shared.
 //!
 //! - **The first leaf** is where the bound the scan starts from belongs
-//!   (`descent.rs`), or the tree's first leaf, down first edges, or its last
-//!   in reverse, down last edges.
-//! - **The next leaf**, the held leaf's neighbor on the scan's side, right
-//!   in key order, left in reverse, is found from the internal nodes the
-//!   descent kept: the nearest one above with an edge on that side of the
-//!   path, then the edges nearest the held leaf down, each read
-//!   optimistically and checked hand over hand. The scan latches it before
-//!   it lets go of the leaf it has, which can't split meanwhile, and it is
-//!   that leaf's neighbor if every node kept from there down is at the
-//!   version read.
+//!   (`descent.rs`). Without a bound, or with one before every key, it is
+//!   the tree's first leaf, down first edges, or in reverse its last, down
+//!   last edges.
+//! - **The next leaf** is the held leaf's neighbor on the scan's side:
+//!   right in key order, left in reverse. The scan finds it from the
+//!   internal nodes the descent kept. It starts at the nearest one above
+//!   with an edge on that side of the path, then follows the edges nearest
+//!   the held leaf down from there. Each node is read optimistically and
+//!   checked hand over hand. The scan latches the next leaf before it lets
+//!   go of the held one, which can't split meanwhile. The latched leaf is
+//!   the held one's neighbor if every node kept from there down is still at
+//!   the version read.
 //! - **Otherwise** the scan searches again for the last key it visited,
-//!   still holding that key's leaf, so that the key stays where it is, and
+//!   still holding that key's leaf so that the key stays where it is, and
 //!   goes on past it: no key is cloned.
 //!
-//! No deadlock: a thread waits for a leaf while it holds one only in a
-//! scan, to latch it shared, which waits only while a thread holds it
-//! exclusively; and a thread holding leaves exclusively takes every other
-//! node without waiting (`held.rs`), but for a page off a free list, which
-//! a thread that reached it through a stale pointer holds a moment, waiting
-//! for nothing (`pages.rs`). So scans in either direction, and writers,
-//! form no cycle.
+//! No deadlock:
+//! - a thread waits for a leaf while it holds one only in a scan, to latch
+//!   it shared, which waits only while a thread holds it exclusively;
+//! - a thread holding leaves exclusively takes every other node without
+//!   waiting (`held.rs`);
+//! - the one exception: taking a page off a free list waits for a thread
+//!   that reached the page through a stale pointer, which holds it a moment
+//!   and waits for nothing meanwhile (`pages.rs`).
+//!
+//! So scans in either direction, and writers, form no cycle.
 //!
 //! A scan is not a snapshot: an entry inserted or removed while it runs may
 //! or may not be visited. An entry present for the whole scan is visited
 //! exactly once, as the scan visits every entry of a leaf while it holds it,
 //! and moves only to keys past it.
 //!
-//! With each entry the closure gets its leaf's [`LeafStamp`]: whether a
-//! thread has changed the leaf since tells a caller that copied entries
-//! whether its copies are still the leaf's (`map/range.rs`). A scan
-//! that the closure stops can keep where it stopped ([`ScanResume`]): the
-//! leaf, its stamp and the place in it. The next scan latches that leaf
-//! again and, if its stamp is current, goes on from there without a
-//! descent. Past that leaf it descends once, from its last key, unless the
-//! resume keeps the path too, in a box its owner asks for once it scans
-//! on: a cursor that only seeks stays a few words.
+//! With each entry the closure gets its leaf's [`LeafStamp`]. A caller that
+//! copied entries learns from it whether a thread has changed the leaf
+//! since, and so whether its copies are still the leaf's (`map/range.rs`).
+//!
+//! A scan that the closure stops can keep where it stopped
+//! ([`ScanResume`]): the leaf, its stamp and the place in it. The next scan
+//! latches that leaf again and, if its stamp is current, goes on from there
+//! without a descent. Past that leaf it descends once, from its last key,
+//! unless the resume keeps the path too. The path lives in a box that its
+//! owner asks for once it scans on, so a cursor that only seeks stays a few
+//! words.
 
 use alloc::boxed::Box;
 use core::borrow::Borrow;
@@ -129,11 +136,10 @@ trait ScanOrder {
     ) -> impl Iterator<Item = (&'a K, &'a V)>;
 
     /// Every entry of `leaf`, which the caller holds, in the scan's order:
-    /// [`Self::entries`] from [`Self::whole_leaf`], but where no key's place
-    /// waits on the header's head flag. A computed first index would make
+    /// [`Self::entries`] from [`Self::whole_leaf`], but no key's index
+    /// depends on the header's head flag. A computed first index would make
     /// every entry load in the leaf wait for the header's line, and the
-    /// hardware prefetcher with them: one memory latency a leaf, a quarter
-    /// of a walk of 17-entry leaves (Tonbo's memtable, 2026-10-17).
+    /// hardware prefetcher with them: one memory latency per leaf.
     fn whole_entries<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>>(
         leaf: Leaf<K, V, Latched<S>>,
     ) -> impl Iterator<Item = (&'a K, &'a V)>;
@@ -150,10 +156,8 @@ trait ScanOrder {
     fn past(cursor: LeafCursor, visited: usize) -> LeafCursor;
 }
 
-/// Key order.
 enum Ascending {}
 
-/// Reverse key order.
 enum Descending {}
 
 impl ScanOrder for Ascending {
@@ -306,10 +310,10 @@ impl LeafCursor {
     }
 }
 
-/// Where a scan the closure stopped stopped, kept for a later scan to go
-/// on from: the leaf, its stamp then, and the place past the last entry
-/// visited; and, once kept ([`Self::keep_path`]), the internal nodes down
-/// to the leaf, in place. The later scan goes on from there only while the
+/// Where a scan stopped by its closure stopped, kept for a later scan to go
+/// on from. It holds the leaf, its stamp then, and the place past the last
+/// entry visited; and, once [`Self::keep_path`] asks for it, the internal
+/// nodes down to the leaf. The later scan goes on from there only while the
 /// stamp is current, the leaf unchanged.
 pub(crate) struct ScanResume<'t, K, V, S: InlineKeyStrategy<K>> {
     stopped: Option<Stopped<'t, K, V, S>>,
@@ -330,9 +334,9 @@ impl<K, V, S: InlineKeyStrategy<K>> ScanResume<'_, K, V, S> {
         }
     }
 
-    /// Keeps the path down to where a scan stops from now on, so that a
-    /// scan that goes on past that leaf needs no descent: for a caller that
-    /// scans on, as one box.
+    /// From now on, keeps the path down to where a scan stops, so that a
+    /// scan going on past that leaf needs no descent. For a caller that
+    /// scans on; the path takes one box.
     pub(crate) fn keep_path(&mut self) {
         if self.path.is_none() {
             self.path = Some(Box::new(TreePath::new()));
@@ -346,10 +350,10 @@ impl<K, V, S: InlineKeyStrategy<K>> ScanResume<'_, K, V, S> {
 }
 
 // SAFETY: a `ScanResume` names a leaf page of a tree that outlives it
-// (`'t`), which stays a node page while the tree lives (`pages.rs`), and
-// reads it only as a scan does, latched and checked by version; the entries
-// it leads to are the tree's, which threads share when they are `Send` and
-// `Sync`.
+// (`'t`). The page stays a node page while the tree lives (`pages.rs`), and
+// the resume reads it only as a scan does, latched and checked by version.
+// The entries it leads to are the tree's, which threads share when they are
+// `Send` and `Sync`.
 unsafe impl<K: Send + Sync, V: Send + Sync, S: InlineKeyStrategy<K>> Send
     for ScanResume<'_, K, V, S>
 {
@@ -383,66 +387,42 @@ enum NextLeaf<K, V, S: InlineKeyStrategy<K>> {
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Runs `f` on every entry whose key lies between `start` and `end`, in
-    /// key order, each while its leaf is latched shared, with the leaf's
-    /// stamp, until `f` breaks: returns what it broke with, or `None` once
-    /// past the range.
+    /// key order, each with its leaf's stamp while the leaf is latched
+    /// shared. Returns what `f` broke with, or `None` once past the range.
+    /// With `resume`, it goes on where the scan that kept it stopped, if
+    /// that leaf is unchanged, else from `start`; and it keeps in `resume`
+    /// where `f` stops this one.
+    // Inlined, so that a scan without `resume` drops what it would keep.
+    #[inline(always)]
     pub(crate) fn scan<'t, Q, R>(
         &'t self,
         start: Bound<&Q>,
         end: Bound<&Q>,
+        resume: Option<&mut ScanResume<'t, K, V, S>>,
         f: impl FnMut(&K, &V, LeafStamp<'t>) -> ControlFlow<R>,
     ) -> Option<R>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.scan_in::<Ascending, Q, R>(start, end, None, f)
+        self.scan_in::<Ascending, Q, R>(start, end, resume, f)
     }
 
     /// [`Self::scan`] in reverse key order.
+    // Inlined, so that a scan without `resume` drops what it would keep.
+    #[inline(always)]
     pub(crate) fn scan_rev<'t, Q, R>(
         &'t self,
         start: Bound<&Q>,
         end: Bound<&Q>,
+        resume: Option<&mut ScanResume<'t, K, V, S>>,
         f: impl FnMut(&K, &V, LeafStamp<'t>) -> ControlFlow<R>,
     ) -> Option<R>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.scan_in::<Descending, Q, R>(start, end, None, f)
-    }
-
-    /// [`Self::scan`], going on where the scan that kept `resume` stopped,
-    /// if its leaf is unchanged, else from `start`; keeping in `resume`
-    /// where `f` stops this one.
-    pub(crate) fn scan_resumable<'t, Q, R>(
-        &'t self,
-        start: Bound<&Q>,
-        end: Bound<&Q>,
-        resume: &mut ScanResume<'t, K, V, S>,
-        f: impl FnMut(&K, &V, LeafStamp<'t>) -> ControlFlow<R>,
-    ) -> Option<R>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.scan_in::<Ascending, Q, R>(start, end, Some(resume), f)
-    }
-
-    /// [`Self::scan_resumable`] in reverse key order.
-    pub(crate) fn scan_rev_resumable<'t, Q, R>(
-        &'t self,
-        start: Bound<&Q>,
-        end: Bound<&Q>,
-        resume: &mut ScanResume<'t, K, V, S>,
-        f: impl FnMut(&K, &V, LeafStamp<'t>) -> ControlFlow<R>,
-    ) -> Option<R>
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        self.scan_in::<Descending, Q, R>(start, end, Some(resume), f)
+        self.scan_in::<Descending, Q, R>(start, end, resume, f)
     }
 
     /// [`Self::scan`] in order `O`; from where `resume` says a scan
@@ -678,11 +658,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// The leaf after the one `path` leads to, in order `O`, which the
-    /// caller holds (`_held`): latched shared before that one is let go,
-    /// and `path` leads to it then, if every node `path` keeps from the
-    /// nearest one with an edge on the scan's side of it down is still at
-    /// the version read (module documentation).
+    /// The leaf after the one `path` leads to, in order `O`; the caller
+    /// holds that one (`_held`). The next leaf is latched shared before the
+    /// held one is let go. It is returned, with `path` leading to it, if
+    /// every node `path` keeps, from the nearest one with an edge on the
+    /// scan's side down, is still at the version read (module
+    /// documentation).
     fn next_leaf<O: ScanOrder>(
         &self,
         path: &mut TreePath<K, V, S>,
@@ -714,11 +695,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         NextLeaf::Latched(next)
     }
 
-    /// Walks down from `node`, read at `version`, through edge `edge`, or
-    /// the edge where order `O` enters it, then each node below there, to a
-    /// leaf, latched shared, recording the internal nodes in `path`, each
-    /// checked hand over hand as the descent checks them; `None` if a check
-    /// fails.
+    /// Walks down from `node`, read at `version`, to a leaf, and latches it
+    /// shared. The walk leaves `node` through `edge`, or else the edge where
+    /// order `O` enters it, and each node below through the edge where `O`
+    /// enters it. It records the internal nodes in `path`, each checked hand
+    /// over hand as the descent checks them. `None` if a check fails.
     fn walk_down<O: ScanOrder>(
         mut node: Internal<K, V, Latched<S>>,
         mut version: Version,

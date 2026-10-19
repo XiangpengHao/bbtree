@@ -1,27 +1,29 @@
-//! Removing from a tree: the entry comes out where a node stack to it ends
-//! (`node_stack.rs`): out of a leaf, or out of an internal node as a
-//! separator. Then, going back up the node stack, each node fixes the child it
-//! leads to if the removal left that child underfull, by merging it with a
-//! sibling or moving one entry over from it (D22). A merge takes a
-//! separator out of the node itself, for its parent to check in turn;
-//! anything else ends the fixing. A root left without separators lowers the
-//! tree: its only child moves up into the root's page.
+//! Removing from a tree. The entry comes out where a node stack to it ends: out
+//! of a leaf, or out of an internal node as a separator. Going back up the node
+//! stack, each node fixes the child it leads to if the removal left that child
+//! underfull. It merges the child with a sibling, or moves one entry over from
+//! the sibling (D22). A merge takes a separator out of the node itself, for its
+//! parent to check in turn; anything else ends the fixing. A root left without
+//! separators lowers the tree: its only child moves up into the root page.
 //!
-//! A separator's value is the head of the leftmost leaf right of it (D17),
-//! and where separator keys are heads, so is its key (D49). Removing the
-//! separator takes that head out, and the leaf's first key takes the
-//! separator's place, with its value as the new head: values never leave
-//! their leaf. The key goes up where internal nodes keep keys, and becomes
-//! the head's key where they don't, its window going up alone.
+//! Removing a separator takes its head out. The first key of the head's
+//! leaf, the separator's successor, takes the separator's place, and the
+//! successor's value becomes the new head: values never leave their leaf
+//! (D17). Without inline keys, the successor's key goes up; with them, it
+//! becomes the head's key, and only its window goes up (D49).
 //!
-//! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes
-//! it changes their parent's prefix. Once the entry is out and counted, the
-//! nodes whose fences changed are fit to them: at each node fixed, the
-//! child the node stack leads to and the sibling that gave it an entry, if one
-//! did; for a separator, also the nodes along the left border of the
-//! subtree right of it, whose lower fence its successor becomes. Those along
-//! the right border of the subtree left of it, whose upper fence it becomes,
-//! are fit before anything changes.
+//! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes it
+//! changes their parent's prefix. Once the entry is out and counted, the
+//! nodes whose fences changed are fit to them:
+//!
+//! - at each node fixed, the child the node stack leads to, and the sibling
+//!   that gave it an entry, if one did;
+//! - for a separator, the nodes along the left border of the subtree right
+//!   of it, whose lower fence the successor becomes.
+//!
+//! The nodes along the right border of the subtree left of a removed
+//! separator, whose upper fence the successor becomes, are fit before
+//! anything changes.
 
 #![forbid(unsafe_code)]
 
@@ -41,11 +43,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// as stored, counting it out of `length`; or `None` if there is none.
     ///
     /// Every `Ord` call happens in the search, before anything changes, so a
-    /// panicking `Ord` leaves the tree unchanged. `InlineKey` is called
-    /// before anything changes too, and last, once the entry is out and
-    /// counted: a panic there leaves a tree without it, still valid. Every
-    /// page a merge frees, and the root's if a merge empties it, goes back
-    /// to `alloc`, the map's allocator.
+    /// panicking `Ord` leaves the tree unchanged. `InlineKey` runs before
+    /// anything changes too, and last, once the entry is out and counted: a
+    /// panic in that last call leaves a valid tree without the entry. Every
+    /// page a merge frees, and the one freed when an emptied root lowers the
+    /// tree, goes back to `alloc`, the map's allocator.
     pub(crate) fn remove_entry<Q>(
         &mut self,
         key: &Q,
@@ -108,23 +110,65 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// Removes the entry the node stack ends at and returns it, counting it
-    /// out of `length`, fixing the nodes up the node stack, and leaves the
-    /// node stack detached; frees pages as [`Tree::remove_entry`] does.
+    /// out of `length`. Fixes the nodes up the node stack, and leaves the
+    /// node stack detached. Frees pages as [`Tree::remove_entry`] does.
     /// Compares no keys.
     ///
     /// # Panics
     ///
     /// If the node stack ends at no key.
     pub(crate) fn remove(&mut self, alloc: &impl Allocator, length: &mut usize) -> (K, V) {
+        let (entry, changed) = self.take_out(alloc, length);
+        self.refit_changed_fences(&changed);
+        self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
+        entry
+    }
+
+    /// Removes the entry the node stack ends at, as [`Self::remove`] does, and
+    /// ends at the entry after it, wherever the fixing moved it; detached past
+    /// the tree's last entry.
+    pub(crate) fn remove_and_go_to_next(
+        &mut self,
+        alloc: &impl Allocator,
+        length: &mut usize,
+    ) -> (K, V) {
+        let (entry, changed) = self.take_out(alloc, length);
+        self.refit_changed_fences(&changed);
+        // The way down to the next entry: as the node stack leads above the
+        // nodes the fixing changed, and as the fixing tracked it from there.
+        let mut path = changed.indexes;
+        for (depth, edge) in path.iter_mut().enumerate().take(self.depth()) {
+            *edge = self.index_at(depth);
+        }
+        let lowered = self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
+        let (slot, edges) = path[usize::from(lowered)..=changed.leaf_depth]
+            .split_last()
+            .expect("the way down ends at the leaf");
+        self.start_at_root();
+        for &edge in edges {
+            self.set_index(edge);
+            self.descend();
+        }
+        self.go_to_entry_at_slot(*slot);
+        entry
+    }
+
+    /// Takes out the entry the node stack ends at, counting it out of `length`,
+    /// and fixes the nodes up the node stack; returns it, and where the fixing
+    /// changed fences, for [`Self::remove`] to refit.
+    fn take_out(&mut self, alloc: &impl Allocator, length: &mut usize) -> ((K, V), ChangedFences) {
         let entry_depth = self.depth();
         let entry_index = self.index();
         let (entry, changed) = if let Node::Leaf(leaf) = self.node() {
             let entry = leaf.remove(entry_index);
-            (entry, self.fix_up_the_stack(None, alloc, |_| {}))
+            // The next entry takes the removed one's place.
+            (
+                entry,
+                self.fix_up_the_stack(entry_index + 1, None, alloc, |_| {}),
+            )
         } else {
             self.refit_left_of_separator();
-            // The separator's value is the head of the leftmost leaf right
-            // of it.
+            // Go down to the separator's head.
             self.set_index(entry_index + 1);
             self.descend_to_leaf::<FirstEdge>();
             let succession = self
@@ -133,7 +177,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
                 .expect("the leaf right of a separator has keys");
             let mut successor = Some(succession.successor);
             let mut replaced = None;
-            let changed = self.fix_up_the_stack(Some(entry_depth), alloc, |node| {
+            // The next entry, the successor, takes the separator's place, just
+            // left of the leaf.
+            let changed = self.fix_up_the_stack(0, Some(entry_depth), alloc, |node| {
                 let successor = successor.take().expect("the separator is replaced once");
                 replaced = Some(node.replace_separator_from_below(entry_index, successor));
             });
@@ -144,28 +190,29 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
             ((key, succession.value), changed)
         };
         *length -= 1;
-        self.refit_changed_fences(&changed);
-        self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
-        entry
+        (entry, changed)
     }
 
-    /// Goes up the node stack from its bottom node, a leaf, which just lost a
-    /// key, and in each node fixes the child the node stack came from while
-    /// that child is underfull; up to depth `must_reach`, if given, it goes
-    /// on regardless, and lets `at_must_reach` change that node before it
-    /// fixes its child. Returns where the fences it changed are; every node
-    /// from `must_reach` down counts as changed.
+    /// Climbs the node stack from its bottom node, a leaf that just lost a
+    /// key. In each node, it fixes the child the node stack came from while
+    /// that child is underfull. If `must_reach` is given, it climbs to that
+    /// depth regardless, and lets `at_must_reach` change that node before
+    /// fixing its child. Returns where the fences it changed are, counting
+    /// every node from `must_reach` down as changed, and where the entry at
+    /// `next_slot` of the leaf ([`NodeStackMut::go_to_entry_at_slot`]) ends
+    /// up.
     ///
-    /// It decides whether to go up from the node it is at, and reads no
+    /// It decides whether to climb from the node it is at, and reads no
     /// node above the last one it changes: a latched tree's removal holds
     /// just the nodes it changes (`tree/latched/remove.rs`).
     fn fix_up_the_stack(
         &mut self,
+        next_slot: usize,
         must_reach: Option<usize>,
         alloc: &impl Allocator,
         mut at_must_reach: impl FnMut(Internal<K, V, S>),
     ) -> ChangedFences {
-        let mut changed = ChangedFences::new(self.depth(), must_reach);
+        let mut changed = ChangedFences::new(self.depth(), next_slot, must_reach);
         let mut child_is_underfull = self.leaf().is_underfull();
         while !self.is_at_root()
             && (child_is_underfull || must_reach.is_some_and(|depth| self.depth() > depth))
@@ -193,10 +240,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         changed
     }
 
-    /// Fits the prefixes of the nodes whose fences a removal changed to them,
-    /// from the bottom up, as `changed` tells; the node stack, which ends
-    /// where the fixing stopped, ends at `changed`'s top depth afterwards.
-    /// Calls `InlineKey`.
+    /// Fits the prefixes of the nodes whose fences a removal changed, from
+    /// the bottom up, as `changed` tells. The node stack ends where the
+    /// fixing stopped, and afterwards at `changed`'s top depth. Calls
+    /// `InlineKey`.
     fn refit_changed_fences(&mut self, changed: &ChangedFences) {
         let Some(top_depth) = changed.top_depth else {
             return;
@@ -235,12 +282,14 @@ enum ChildFix {
     TookFromRight,
 }
 
-/// Where a removal's fixing changed fences, for fitting the prefixes there
-/// once the removal is done.
+/// Where a removal's fixing changed fences, for fitting the prefixes there once
+/// the removal is done, and where the entry after the removed one went.
 struct ChangedFences {
-    /// At each depth the fixing went up to, the edge to the child it came
-    /// from, kept up to date as fixes move entries between that child and
-    /// its siblings: the way back down.
+    /// The way back down. At each depth the fixing climbed to, the edge to
+    /// the child it came from; at the leaf's depth, the slot of the entry
+    /// after the removed one ([`NodeStackMut::go_to_entry_at_slot`]). Fixes
+    /// keep it up to date as they move entries between a child and its
+    /// siblings.
     indexes: [usize; MAX_DEPTH + 1],
     /// At each depth, the edge to the sibling that gave the child an entry,
     /// if one did.
@@ -260,11 +309,14 @@ impl ChangedFences {
         self.top_depth == Some(0)
     }
 
-    /// Nothing fixed yet, up from a leaf at `leaf_depth`, with the children
-    /// of the nodes from `top_depth` down counting as changed.
-    fn new(leaf_depth: usize, top_depth: Option<usize>) -> Self {
+    /// Nothing fixed yet, up from a leaf at `leaf_depth`, whose entry after the
+    /// removed one is at `next_slot`, with the children of the nodes from
+    /// `top_depth` down counting as changed.
+    fn new(leaf_depth: usize, next_slot: usize, top_depth: Option<usize>) -> Self {
+        let mut indexes = [0; MAX_DEPTH + 1];
+        indexes[leaf_depth] = next_slot;
         Self {
-            indexes: [0; MAX_DEPTH + 1],
+            indexes,
             donors: [None; MAX_DEPTH + 1],
             leaf_depth,
             top_depth,
@@ -272,7 +324,8 @@ impl ChangedFences {
     }
 
     /// Records what fixing the child of the node at `depth` did;
-    /// `indexes[depth]` is the edge to it until then.
+    /// `indexes[depth]` is the edge to it until then. A leaf's slots shift as
+    /// its edges do: its head's separator comes before its keys.
     fn record(&mut self, depth: usize, fix: ChildFix) {
         let child = self.indexes[depth];
         match fix {
@@ -298,12 +351,18 @@ impl ChangedFences {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
+    /// The edge of the sibling that fixing an underfull child at edge
+    /// `index` pairs it with: its left one if it has one, else its right one.
+    pub(in crate::tree) fn fixing_sibling(index: usize) -> usize {
+        if index > 0 { index - 1 } else { index + 1 }
+    }
+
     /// Fixes the child at edge `index` if a removal left it underfull, one
-    /// entry short of its minimum (D22): merges it with a sibling, the left
-    /// one if it has one, or, if the two don't fit in one node with the
-    /// separator between them, moves one entry over from the sibling. The
-    /// page a merge frees goes back to `alloc`. Only a merge takes a separator
-    /// from this node.
+    /// entry short of its minimum (D22). It pairs the child with a sibling,
+    /// the left one if there is one. If the two fit in one node with the
+    /// separator between them, they merge, and the freed page goes back to
+    /// `alloc`. Otherwise one entry moves over from the sibling. Only a merge
+    /// takes a separator from this node.
     ///
     /// A sibling too full to merge with holds more than `capacity - min_len`
     /// entries, so it can spare one.
@@ -313,7 +372,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     ///
     /// # Panics
     ///
-    /// If the node has no separators, so that the child has no sibling: a
+    /// If the node has no separators, so that the child has no sibling. A
     /// node that a removal went through holds a separator until it fixes its
     /// child, which is the only time it can lose one.
     fn fix_underfull_child<C: Child<K, V, S>>(
@@ -324,13 +383,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         if C::child_of(self, index).len() >= C::min_len() {
             return ChildFix::Nothing;
         }
-        let (separator_index, child_is_right) = if index > 0 {
-            (index - 1, true)
-        } else if index < self.len() {
-            (index, false)
-        } else {
-            unreachable!("an internal node a removal went through has a separator")
-        };
+        let sibling = Self::fixing_sibling(index);
+        assert!(
+            sibling <= self.len(),
+            "an internal node a removal went through has a separator"
+        );
+        let (separator_index, child_is_right) = (index.min(sibling), sibling < index);
         let mut siblings = self.siblings::<C>(separator_index);
         let left_len = siblings.left_len();
         if siblings.can_merge() {

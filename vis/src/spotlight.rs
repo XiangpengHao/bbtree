@@ -13,7 +13,7 @@ use crate::tree_shape::NodeAt;
 /// A part of a node that more than one panel draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum NodePart {
-    /// Key `index` with all that is kept for it: its inline key, length tag
+    /// Key `index` with all that is kept for it: its inline key, hash tag
     /// and, in a leaf, its value.
     Entry(usize),
     /// Child `edge` of an internal node.

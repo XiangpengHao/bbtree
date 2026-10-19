@@ -1,41 +1,38 @@
 //! Search over a node's inline keys (D18) in explicit vectors, for slots of
-//! 2 and 4 bytes, and for 28 to 31 slots of 8 bytes. AVX-512 broadcasts the
-//! search's inline key to every lane, one load and two compares per 64
-//! bytes of slots, the compares' bits gathered 64 slots to a word, the live
-//! ones kept with one `bzhi` by `len`, and counted with one `popcnt`.
+//! 2 and 4 bytes, and for 28 to 31 slots of 8 bytes. The compiler's own
+//! count is poor at capacities that aren't a multiple of the vector, such
+//! as the 23 slots of a `u64 → [u64; 4]` leaf, or 28 to 31 slots of 8
+//! bytes. There it compares in vectors but takes the mask apart a bit at a
+//! time (05-fence-key.md).
 //!
-//! The compiler's own vectors for the same count depend on the capacity:
-//! for capacities that aren't a multiple of the vector, such as the 23
-//! slots of a `u64 → [u64; 4]` leaf, or 28 to 31 slots of 8 bytes, it
-//! compared in vectors but then took the mask apart a bit at a time, more
-//! than doubling the instructions of the whole lookup (05-fence-key.md).
+//! - AVX-512 broadcasts the search's inline key to every lane: one load and
+//!   two compares per 64 bytes of slots. The compares' bits gather 64 slots
+//!   to a word; one `bzhi` by `len` keeps the live ones, and one `popcnt`
+//!   counts them.
+//! - On x86-64 without hardware popcount, SSE2 compares eight 2-byte or four
+//!   4-byte slots at once. Its masks have one bit per byte, so each lane
+//!   repeats its result. Sorted slots make the masks for `< target` and
+//!   `<= target` runs of low one-bits; their first zeros locate the equal
+//!   range without a software popcount. For 33–64 two-byte or 17–32
+//!   four-byte slots, packing comparison lanes to half their width keeps one
+//!   mask word (D40). More words would add extraction, clipping, and
+//!   accumulation work, so larger capacities, and targets with POPCNT, keep
+//!   the compiler's count unless AVX-512 applies.
+//! - On AArch64, NEON counts every width ([`NeonCount`], D56). The
+//!   compiler's own count there widens each compared lane to 64 bits, one
+//!   at a time, to add it to a `usize`.
 //!
-//! On x86-64 without hardware popcount, SSE2 compares eight 2-byte or four
-//! 4-byte slots at once. Its masks have one bit per byte, so each lane
-//! repeats its result. Sorted slots make the masks for `< target` and
-//! `<= target` runs of low one-bits; their first zeros locate the equal
-//! range without a software popcount. For 33–64 two-byte or 17–32 four-byte
-//! slots, packing comparison lanes to half their width keeps one mask.
-//! Multiple words would add extraction, clipping, and accumulation work;
-//! larger capacities and targets with POPCNT keep the compiler's vector
-//! count unless AVX-512 applies above.
-//!
-//! On AArch64, NEON counts every width ([`NeonCount`]): the compiler's own
-//! count there widened each compared lane to 64 bits, one at a time, to add
-//! it to a `usize`, about six instructions a slot, 1,360 a 2M `u64` hit on
-//! an M1 Pro against 228 a 10M one with AVX-512.
-//!
-//! Two equality searches live here too: an exact-key lookup over 8-byte
-//! slots takes an AVX-512 equality mask ([`U64EqualityMask`], D41), and a
-//! leaf's length tags, which are unsorted, are filtered in SSE2 vectors
-//! ([`U16EqualitySearch`], D36).
+//! Two equality searches live here too. An exact-key lookup over 8-byte
+//! slots takes an AVX-512 equality mask ([`U64EqualityMask`], D41). A
+//! leaf's hash tags, which are unsorted, are filtered in SSE2 vectors
+//! ([`U8EqualitySearch`], D36).
 
 use core::num::NonZeroU64;
 use core::ops::Range;
 
 use super::slots::Slots;
 
-/// Which of a lookup's candidates have its length tag: none, one, two (at
+/// Which of a lookup's candidates have its hash tag: none, one, two (at
 /// these positions), or more.
 pub(super) enum SlotMatches {
     None,
@@ -44,59 +41,58 @@ pub(super) enum SlotMatches {
     Many,
 }
 
-/// The length tags (D36) equal to a target among a lookup's candidates, in
-/// SSE2 vectors whose byte masks fit in one word: tags are unsorted, so this
-/// finds matches, not a range.
-pub(super) struct U16EqualitySearch;
+/// The hash tags (D36) equal to a target among a lookup's candidates, in
+/// SSE2 vectors whose byte masks, a bit per tag, fit in one word. Tags are
+/// unsorted, so this finds matches, not a range.
+pub(super) struct U8EqualitySearch;
 
-impl U16EqualitySearch {
+impl U8EqualitySearch {
     #[inline(always)]
     pub(super) fn matching(
-        slots: &[u16],
+        slots: &[u8],
         candidates: Range<usize>,
-        target: u16,
+        target: u8,
     ) -> Option<SlotMatches> {
         #[cfg(target_arch = "x86_64")]
         {
             use core::arch::x86_64::{
-                _mm_cmpeq_epi16, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi16,
+                _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
             };
-            const LANES: usize = 8;
-            if !(LANES..=32).contains(&slots.len()) {
+            const LANES: usize = 16;
+            if !(LANES..=64).contains(&slots.len()) {
                 return None;
             }
             let mut bits = 0_u64;
             // SAFETY: SSE2 is part of every x86-64 target. Each load starts
-            // at most `slots.len() - LANES`, so all eight initialized slots
+            // at most `slots.len() - LANES`, so all sixteen initialized slots
             // fit.
             // The last partial chunk overlaps the preceding one; equal
             // positions produce the same bits and can be combined with OR.
             unsafe {
-                let target = _mm_set1_epi16(target as i16);
+                let target = _mm_set1_epi8(target as i8);
                 for offset in (0..slots.len()).step_by(LANES) {
                     let start = offset.min(slots.len() - LANES);
                     let chunk = _mm_loadu_si128(slots.as_ptr().add(start).cast());
-                    let equal = _mm_movemask_epi8(_mm_cmpeq_epi16(chunk, target)) as u64;
-                    bits |= equal << (2 * start);
+                    let equal = _mm_movemask_epi8(_mm_cmpeq_epi8(chunk, target)) as u64;
+                    bits |= equal << start;
                 }
             }
-            // Retain one of each slot's two byte bits, then only the
-            // live candidates. Clamping also bounds every shift below.
-            let start = 2 * candidates.start.min(slots.len());
-            let end = 2 * candidates.end.min(slots.len());
-            bits &= 0x5555_5555_5555_5555
-                & u64::MAX.checked_shl(start as u32).unwrap_or(0)
+            // Retain only the live candidates. Clamping also bounds every
+            // shift below.
+            let start = candidates.start.min(slots.len());
+            let end = candidates.end.min(slots.len());
+            bits &= u64::MAX.checked_shl(start as u32).unwrap_or(0)
                 & u64::MAX.checked_shr((64 - end) as u32).unwrap_or(0);
             if bits == 0 {
                 return Some(SlotMatches::None);
             }
             let remaining = bits & (bits - 1);
             Some(if remaining == 0 {
-                SlotMatches::One(bits.trailing_zeros() as usize / 2)
+                SlotMatches::One(bits.trailing_zeros() as usize)
             } else if remaining.is_power_of_two() {
                 SlotMatches::Two {
-                    lower: bits.trailing_zeros() as usize / 2,
-                    upper: remaining.trailing_zeros() as usize / 2,
+                    lower: bits.trailing_zeros() as usize,
+                    upper: remaining.trailing_zeros() as usize,
                 }
             } else {
                 SlotMatches::Many
@@ -210,10 +206,10 @@ pub(in crate::tree) trait VectorCount: Copy {
     /// has no such vectors, or the slots count faster otherwise.
     ///
     /// The loads and compares run over the capacity, `slots.len()`, a
-    /// constant per node kind, so their masks are constants and they don't
-    /// wait for `len`, which clips the results. Slots past `len` are read:
+    /// constant per node kind. So their masks are constants, and they don't
+    /// wait for `len`, which clips the results. Slots past `len` are read.
     /// x86's counts mask them out, so their contents don't affect the
-    /// answer; NEON's count them, so it is exact only where they hold the
+    /// answer. NEON's count them, so it is exact only where they hold the
     /// greatest inline key (invariant 4), as the compiler's count is.
     fn equal_range_in_vectors(slots: Slots<Self>, len: usize, target: Self)
     -> Option<Range<usize>>;
@@ -234,9 +230,8 @@ macro_rules! count_avx512_lanes {
         let (mut below, mut equal) = (0, 0);
         let mut word_start = 0;
         // SAFETY: the caller checks the target features the intrinsics
-        // need. Each mask selects the
-        // lanes of `start..slots.len()`, within the slots, and a masked load
-        // reads only the lanes it selects.
+        // need. Each mask selects the lanes of `start..slots.len()`, within
+        // the slots, and a masked load reads only the lanes it selects.
         unsafe {
             let target = $set1($target as $lane);
             while word_start < $slots.capacity() {
@@ -262,12 +257,13 @@ macro_rules! count_avx512_lanes {
 }
 
 /// The NEON count of a node's slots below and equal to a target, over the
-/// capacity, for every slot width: one compare of each kind per 16 bytes of
-/// slots, whose all-ones lanes are subtracted into counters of the slots'
-/// own width, added up across lanes once, at the end. Slots past `len` count
-/// too, so the counts are exact where they hold the greatest inline key
-/// (invariant 4), which no target is below; masking them out per vector, as
-/// x86 does, cost 8–18% of a 10M-entry lookup on an M1 Pro.
+/// capacity, for every slot width (D56). Each 16 bytes of slots take one
+/// compare of each kind. Their all-ones lanes are subtracted into counters
+/// of the slots' own width, added up across lanes once, at the end.
+///
+/// Slots past `len` count too, so the counts are exact where those hold the
+/// greatest inline key (invariant 4), which no target is below. Masking
+/// them out per vector, as x86 does, is slower here.
 #[cfg(target_arch = "aarch64")]
 struct NeonCount;
 
@@ -623,11 +619,11 @@ vector_count!(
 );
 
 /// 8-byte slots, those of std byte strings' leaves and of 8-byte `InlineKey`
-/// impls, keep the compiler's count with AVX-512, which measured faster than
-/// explicit vectors on string maps (05-fence-key.md), but for 28 to 31 slots,
-/// the capacity of an internal node with 8-byte inline keys, and of a
-/// `String` set's leaf: there the compiler takes the compares' masks apart a
-/// bit at a time, and the count goes the narrow slots' way. NEON counts every
+/// impls, keep the compiler's count with AVX-512, where it beats explicit
+/// vectors on string maps (05-fence-key.md). The exception is 28 to 31
+/// slots, the capacity of an internal node with 8-byte inline keys and of a
+/// `String` set's leaf. There the compiler takes the compares' masks apart a
+/// bit at a time, so these count like the narrow slots. NEON counts every
 /// capacity.
 impl VectorCount for u64 {
     #[inline(always)]

@@ -47,7 +47,7 @@ pub(crate) struct KeyRow {
     pub(crate) shared: String,
     pub(crate) rest: String,
     pub(crate) inline_key: Option<String>,
-    pub(crate) length_tag: Option<u16>,
+    pub(crate) hash_tag: Option<u8>,
     pub(crate) value: Option<String>,
 }
 
@@ -159,9 +159,9 @@ impl NodeDetail {
                     .unwrap_or_default(),
                 self.key_text(slot)
             ),
-            SlotContents::LengthTags => format!(
-                "length {} — of key {slot}",
-                row.and_then(|row| row.length_tag).unwrap_or_default()
+            SlotContents::HashTags => format!(
+                "hash tag {} — of key {slot}",
+                row.and_then(|row| row.hash_tag).unwrap_or_default()
             ),
             SlotContents::Keys => self.key_text(slot),
             SlotContents::Values => format!(

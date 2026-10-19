@@ -1,10 +1,11 @@
-//! Leaves: the nodes that hold the entries. A leaf's page holds its keys,
-//! each paired with its value where the keys have inline keys (D29), the
-//! inline keys a search runs over first (D18), and in a leaf of heap byte
-//! strings, the keys' length tags (D36). It also holds a head: the value of
-//! the separator just left of the leaf, and where separator keys are heads,
-//! that separator's key (D17, D49). Every leaf but the tree's leftmost has a
-//! head.
+//! Leaves: the nodes that hold the entries. A leaf's page holds its keys and
+//! values, each key paired with its value with inline keys (D29). It also
+//! holds the inline keys a search runs over first (D18), and in a leaf of
+//! heap byte strings, the keys' hash tags (D36).
+//!
+//! A leaf also holds a *head*: the value of the separator just left of the
+//! leaf, and with inline keys, that separator's key too (D17, D49). Every
+//! leaf but the tree's leftmost has a head.
 //!
 //! [`Leaf`] is a handle to one, with every operation on one leaf: searching
 //! it, reading and changing its entries and its head, splitting it, cutting
@@ -20,10 +21,10 @@ use core::ptr::NonNull;
 
 #[cfg(test)]
 use super::Insertion;
+use super::hash_tags::{HashTags, SlotMatches};
 use super::inline_key_search::NodeInlineKeys;
-use super::inline_keys::{InlineTarget, SearchKey, Separator, Window, WindowedKey};
+use super::inline_keys::{SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
-use super::length_tags::{LengthTags, SlotMatches};
 use super::node_plan::NodePlan;
 use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
@@ -31,7 +32,7 @@ use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
 #[cfg(test)]
 use crate::allocator::Allocator;
-use crate::inline_key::{InlineKeyStrategy, InlineWord};
+use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// A leaf, by its page.
 pub(crate) struct Leaf<K, V, S> {
@@ -58,8 +59,8 @@ unsafe impl<K, V, S: InlineKeyStrategy<K>> NodeKind for Leaf<K, V, S> {
     const IS_LEAF: bool = true;
 
     #[inline(always)]
-    fn has_room_for_length_tags() -> bool {
-        NodePtr::<K, V, S>::leaf_has_room_for_length_tags()
+    fn has_room_for_hash_tags(inline_width: InlineWidth) -> bool {
+        NodePtr::<K, V, S>::leaf_has_room_for_hash_tags(inline_width)
     }
 }
 
@@ -77,7 +78,6 @@ impl<K, V, S> Leaf<K, V, S> {
         self.node
     }
 
-    /// The number of entries.
     #[inline(always)]
     pub(crate) fn len(self) -> usize {
         // SAFETY: the node is allocated and initialized (invariant 1), and
@@ -85,8 +85,8 @@ impl<K, V, S> Leaf<K, V, S> {
         unsafe { self.node.len() }
     }
 
-    /// Whether the leaf has a head: in a tree built by the node operations,
-    /// every leaf but the leftmost has one (D17).
+    /// Whether the leaf has a head, as every leaf but the tree's leftmost
+    /// does in a tree built by the node operations (D17).
     pub(in crate::tree) fn has_head(self) -> bool {
         // SAFETY: the node is allocated and its header written (invariant 1).
         unsafe { self.node.has_head() }
@@ -127,7 +127,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.node.into_fresh_page() }
     }
 
-    /// Panics if the leaf has no head.
     fn assert_has_head(self) {
         assert!(self.has_head(), "the leaf has no head");
     }
@@ -150,9 +149,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         core::ptr::from_ref(self.key(index)).cast()
     }
 
-    /// An inline-key search can reject a query or identify one entry
-    /// whose first line the next comparison reads. Ties and searches
-    /// without inline keys give no address to speculate about.
+    /// What an inline-key search alone tells a batch about `key`: that the
+    /// leaf lacks it, or the one candidate entry, whose line the next
+    /// comparison reads. Ties, and searches without inline keys, give
+    /// [`CandidateLine::Unknown`].
     #[inline(always)]
     pub(in crate::tree) fn candidate_line<Q>(self, key: &SearchKey<'_, K, S, Q>) -> CandidateLine
     where
@@ -168,13 +168,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         self.candidate_line_among(target, inline_keys, self.len())
     }
 
-    /// [`Self::candidate_line`] for `target`, the key's inline key at the
-    /// leaf's prefix length, among `inline_keys`, the leaf's, `len` of them
-    /// live.
+    /// [`Self::candidate_line`] for `target`, the key's window at the leaf's
+    /// prefix length, among the leaf's `inline_keys`, `len` of them live.
     #[inline(always)]
     pub(super) fn candidate_line_among(
         self,
-        target: InlineTarget,
+        target: Window,
         inline_keys: NodeInlineKeys<'_>,
         len: usize,
     ) -> CandidateLine {
@@ -224,8 +223,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// Confirms the unique candidate kept by a batch's earlier mask step.
-    /// Saving the prefix avoids a dependent header read after the entry
-    /// prefetch, especially when a batch's headers compete in L1.
+    /// Taking the saved `prefix_len` avoids a dependent header read after the
+    /// entry prefetch, which matters when a batch's headers compete in L1.
     ///
     /// # Safety
     ///
@@ -283,7 +282,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.node.key_slots::<Self>() }
     }
 
-    /// The arrays beside the keys: inline keys and length tags.
+    /// The arrays beside the keys: inline keys and hash tags.
     #[inline(always)]
     fn columns(self) -> KeyColumns {
         // SAFETY: the node is an allocated leaf (invariant 1).
@@ -295,19 +294,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.node.value_slots() }
     }
 
-    /// The head key slot, where the key of the separator left of the leaf
-    /// is, if it has a head, in a map whose separator keys are heads (D49).
+    /// The head key slot, which holds the head's key while the leaf has a
+    /// head (D49).
     ///
     /// # Panics
     ///
-    /// If separator keys aren't heads in this map.
+    /// If the map has no inline keys.
     pub(super) fn head_key_slot(self) -> NonNull<K> {
         assert!(
-            NodePtr::<K, V, S>::has_separator_keys_in_heads(),
-            "separator keys are heads only with inline keys"
+            NodePtr::<K, V, S>::has_inline_keys(),
+            "a leaf has a head key only with inline keys"
         );
-        // SAFETY: the node is an allocated leaf (invariant 1), in a map whose
-        // separator keys are heads (checked just above).
+        // SAFETY: the node is an allocated leaf (invariant 1), in a map with
+        // inline keys (checked just above).
         unsafe { self.node.head_key_slot() }
     }
 
@@ -326,8 +325,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { NodeKeys::new(self.key_slots().keys(), self.len()) }
     }
 
-    /// Key `index`.
-    ///
     /// # Panics
     ///
     /// If `index >= len`.
@@ -337,8 +334,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.key_unchecked(index) }
     }
 
-    /// Key `index`, with `index < len`, unchecked.
-    ///
     /// # Safety
     ///
     /// `index < len`.
@@ -350,8 +345,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.key_slots().keys().slot(index).as_ref() }
     }
 
-    /// Key `index` and its value.
-    ///
     /// # Panics
     ///
     /// If `index >= len`.
@@ -361,8 +354,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.key_value_unchecked(index) }
     }
 
-    /// Key `index` and its value, with `index < len`, unchecked.
-    ///
     /// # Safety
     ///
     /// `index < len`.
@@ -380,8 +371,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Value `index`, exclusive, with `index < len`, unchecked.
-    ///
     /// # Safety
     ///
     /// `index < len`.
@@ -394,8 +383,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.value_slots().slot(index).as_mut() }
     }
 
-    /// Value `index`, exclusive.
-    ///
     /// # Panics
     ///
     /// If `index >= len`.
@@ -436,11 +423,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         Some(unsafe { NodeInlineKeys::new(slots, Self::capacity(), self.len()) })
     }
 
-    /// The keys' length tags, if the plan and layout keep them (D36): all
+    /// The keys' hash tags, if the plan and layout keep them (D36): all
     /// `capacity` slots, tag `i` key `i`'s for `i < len`.
     #[inline(always)]
-    pub(in crate::tree) fn length_tags<'a>(self) -> Option<&'a [u16]> {
-        let tags = self.columns().length_tags()?;
+    pub(in crate::tree) fn hash_tags<'a>(self) -> Option<&'a [u8]> {
+        let tags = self.columns().hash_tags()?;
         // SAFETY: every tag was initialized when the leaf was made and can
         // be read while nothing changes it (invariant 5 and the handles'
         // contract).
@@ -464,19 +451,19 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
 /// Searching a leaf.
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// `key`'s inline key at this leaf's prefix length, if the leaf has
-    /// inline keys and `key` one to compare with them (D18).
+    /// `key`'s window at this leaf's prefix length, if the leaf has inline
+    /// keys and `key` has one to compare with them (D18).
     ///
-    /// Each search takes it where it uses it, rather than having it handed
-    /// in: handed across a call, it went through the stack, written right
-    /// before the search read it back, a store the CPU can't always
-    /// forward, which stalled every level. Std byte strings read the
-    /// window directly from the search key.
+    /// Each search computes it where it uses it, rather than taking it as an
+    /// argument. Passed across a call, it would go through the stack right
+    /// before the search reads it back, a store the CPU can't always
+    /// forward, stalling every level. Std byte strings read the window
+    /// directly from the search key.
     #[inline(always)]
     pub(in crate::tree) fn inline_target<Q: ?Sized>(
         self,
         key: &SearchKey<'_, K, S, Q>,
-    ) -> Option<InlineTarget>
+    ) -> Option<Window>
     where
         K: Borrow<Q>,
     {
@@ -512,19 +499,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         self.search_always_inlined(key)
     }
 
-    /// [`Self::search`], always inlined, whatever the plan says: for an
-    /// insert's search (`Node::search_for_insert`), which, unlike a lookup,
-    /// gains more from its leaf search inline than it loses in code size
-    /// (`NodePlan::inlines_node_search`). For std heap byte strings, the
-    /// search out of line cost a random insert 40 instructions more.
+    /// [`Self::search`], always inlined, whatever the plan says. An insert's
+    /// search (`Node::search_for_insert`) uses it: unlike a lookup, it gains
+    /// more from an inlined leaf search than it loses in code size
+    /// (`NodePlan::inlines_node_search`).
     ///
-    /// If the leaf has inline keys and `key` has one to compare (D18), taken
-    /// at the leaf's prefix length, the search runs over them; otherwise over
-    /// the keys, as the leaf's plan says (D19). The key shares the leaf's
-    /// prefix: it lies between the leaf's fences, or within what every key
-    /// of the tree shares, which a search checks at the top (D50). After
-    /// monomorphization, a map without inline keys keeps only the search
-    /// over its keys.
+    /// If the leaf has inline keys and `key` has a window at the leaf's
+    /// prefix length (D18), the search runs over the inline keys; otherwise
+    /// over the keys, as the leaf's plan says (D19). The key shares the
+    /// leaf's prefix: it lies between the leaf's fences, or within what every
+    /// key of the tree shares, which a search checks at the top (D50). A map
+    /// without inline keys monomorphizes to the search over its keys alone.
     #[inline(always)]
     pub(in crate::tree) fn search_always_inlined<Q>(
         self,
@@ -537,9 +522,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if let Some(target) = self.inline_target(key)
             && let Some(candidates) = self.candidates(target)
         {
-            // A key the leaf lacks, as most an insert searches for, mostly
-            // has none: it goes no further than the inline keys, nor into a
-            // call.
+            // Most keys an insert searches for are absent and have no
+            // candidates: they stop at the inline keys, without a call.
             if candidates.is_empty() {
                 return Err(candidates.start);
             }
@@ -555,41 +539,37 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// The candidates for `target`: the positions of the leaf's keys whose
     /// inline keys equal `target`'s in the bytes the leaf keeps (D18), or
     /// `None` if the leaf has no inline keys. Only those keys can equal the
-    /// key searched for; the others differ in their inline keys. The count
-    /// over the inline keys runs over the leaf's capacity, a constant, which
-    /// the compiler unrolls; over a capacity chosen at run time, it
-    /// compiled to a loop of several times the instructions, and over two
-    /// capacities, a leaf's and an internal node's, to one that summed the
-    /// compares' bits one at a time. Keep this small typed view in its
-    /// callers: outlining shared uses also made LLVM expand 64-bit summary
-    /// counts into scalar lane-bit sums.
+    /// key searched for; the others differ in their inline keys.
+    ///
+    /// Counts over `Self::capacity()`, a constant, so it unrolls. Passing the
+    /// capacity in, sharing it with internal nodes, or outlining it
+    /// de-vectorizes the count.
     #[inline(always)]
-    fn candidates(self, target: InlineTarget) -> Option<Range<usize>> {
+    fn candidates(self, target: Window) -> Option<Range<usize>> {
         Some(self.inline_keys()?.equal_range(target.inline_key()))
     }
 
     /// The search among `candidates`, the keys whose inline keys equal
     /// `key`'s (D18). The other keys differ from `key` in their inline keys,
-    /// which order them (the `InlineKey` contract), so if `key` is none of
-    /// the candidates, its edge is where they start, even when there are
-    /// none.
+    /// which order them (the `InlineKey` contract), so `key`'s position lies
+    /// among the candidates, or where they start when there are none.
     ///
-    /// It runs as the leaf's plan says. Keys with their own `InlineKey`
-    /// impl compare by `Ord`, and search as their type picks (D19):
-    /// branchless for plain data such as integers, whose candidates are the
-    /// whole leaf where their kept bytes all tie. Std byte strings search
-    /// them with an early exit, comparing as [`SearchKey::cmp_tied`] does, a
-    /// word at a time from past the bytes the candidates share.
+    /// It runs as the leaf's plan says (D19). Keys with their own `InlineKey`
+    /// impl compare by `Ord`, and search as their type picks: branchless for
+    /// plain data such as integers, whose candidates are the whole leaf when
+    /// their kept bytes all tie. Std byte strings search with an early exit,
+    /// comparing as [`SearchKey::cmp_tied`] does: a word at a time, from past
+    /// the bytes the candidates share.
     ///
     /// In bounds for any `Ord` and `InlineKey`: the candidates lie within
     /// `0..len` whatever the inline keys hold
-    /// ([`NodeInlineKeys::equal_range`]), taking it out of the keys checks
-    /// that, and either search stays within it.
+    /// ([`NodeInlineKeys::equal_range`]), slicing the keys by them checks
+    /// that, and either search stays within the slice.
     fn search_candidates<Q>(
         self,
         candidates: Range<usize>,
         key: &SearchKey<'_, K, S, Q>,
-        target: InlineTarget,
+        target: Window,
     ) -> Result<usize, usize>
     where
         K: Borrow<Q>,
@@ -605,10 +585,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             .map_err(|index| candidates.start + index)
     }
 
-    /// The index of the key equal to `key`, if the leaf holds one: an exact-key
-    /// lookup, which may reject unequal lengths among the candidates (D36) and
-    /// confirm a lone candidate by equality alone (D38). Ordered searches
-    /// still use [`Self::search`]: a length tag gives no edge.
+    /// The index of the key equal to `key`, if the leaf holds one. As an
+    /// exact-key lookup, it may reject candidates of other lengths (D36), and
+    /// confirm a lone candidate by equality alone (D38). Ordered searches use
+    /// [`Self::search`]: a hash tag gives no edge.
     pub(in crate::tree) fn find<Q, CallSite>(
         self,
         key: &SearchKey<'_, K, S, Q>,
@@ -643,10 +623,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                     key.cmp_tied::<Self>(target, stored) == Ordering::Equal
                 };
                 matches.then_some(candidates.start)
-            } else if let Some(tag) = key.length_tag()
-                && let Some(tags) = self.length_tags()
+            } else if let Some(tag) = key.hash_tag()
+                && let Some(tags) = self.hash_tags()
             {
-                match LengthTags::new(tags).matching(candidates.clone(), tag) {
+                match HashTags::new(tags).matching(candidates.clone(), tag) {
                     SlotMatches::None => None,
                     SlotMatches::One(index) => {
                         // The mask only includes live candidates;
@@ -680,11 +660,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
 /// A leaf's head: the entry of the separator just left of it (D17, D49).
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// The head's value.
-    ///
     /// # Panics
     ///
-    /// If the leaf has no head, which only the tree's leftmost has.
+    /// If the leaf has no head: only the tree's leftmost leaf lacks one.
     pub(in crate::tree) fn head_value<'a>(self) -> &'a V {
         self.assert_has_head();
         // SAFETY: the head is initialized (checked just above, invariant 3)
@@ -702,18 +680,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.head_and_value_slots().slot(0).as_mut() }
     }
 
-    /// The head's key, the key of the separator left of the leaf, where
-    /// separator keys are heads (D49).
+    /// The head's key, which it has only with inline keys (D49).
     ///
     /// # Panics
     ///
-    /// If they aren't, in this map, or the leaf has no head.
+    /// If the map has no inline keys, or the leaf has no head.
     pub(in crate::tree) fn head_key<'a>(self) -> &'a K {
         let slot = self.head_key_slot();
         self.assert_has_head();
-        // SAFETY: separator keys are heads (checked by `head_key_slot`) and
-        // the leaf has a head (checked just above), so the head's key slot
-        // is initialized (invariant 3) and stays unchanged while the caller
+        // SAFETY: the map has inline keys (checked by `head_key_slot`), and the
+        // leaf has a head (checked just above). So the head's key slot is
+        // initialized (invariant 3), and stays unchanged while the caller
         // borrows it (the handles' contract).
         unsafe { slot.as_ref() }
     }
@@ -731,27 +708,25 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.head_and_value_slots().slot(0) }
     }
 
-    /// Gives the leaf, which has no head, `value` as its head, the value of
-    /// the separator left of it, and `key`, that separator's key, where
-    /// separator keys are heads (D49); `key` is `None` where internal nodes
-    /// keep them. Keeping heads where separators expect them is the caller's
-    /// business.
+    /// Sets a headless leaf's head to `value`, plus `key` with inline keys
+    /// (D49); otherwise `key` must be `None`. The caller keeps heads
+    /// consistent with separators.
     ///
     /// # Panics
     ///
-    /// If the leaf has a head, or if `key` is not what this map keeps in
-    /// heads; the leaf is unchanged then.
+    /// If the leaf has a head, or `key` is `Some` without inline keys or
+    /// `None` with them; the leaf is unchanged then.
     pub(in crate::tree) fn put_head(self, key: Option<K>, value: V) {
         assert!(!self.has_head(), "the leaf has a head");
         assert_eq!(
             key.is_some(),
-            NodePtr::<K, V, S>::has_separator_keys_in_heads(),
+            NodePtr::<K, V, S>::has_inline_keys(),
             "a head's key goes where the map keeps separator keys"
         );
-        // SAFETY: the access is exclusive (the handles' contract), and the
-        // leaf has no head (checked above), so its head slot, and its head
-        // key slot where separator keys are heads (also checked), hold
-        // nothing: written, then flagged (invariant 3).
+        // SAFETY: the access is exclusive (the handles' contract). The leaf
+        // has no head (checked above), so its head slot, and with inline keys
+        // (also checked) its head key slot, hold nothing (invariant 3). Both
+        // are written, then flagged.
         unsafe {
             if let Some(key) = key {
                 self.head_key_slot().write(key);
@@ -761,10 +736,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Gives the leaf, which has no head, the head of `separator`, the
-    /// separator just left of it: `value`, and where separator keys are
-    /// heads, the key (D49). Returns the separator as its internal node takes
-    /// it: the key where internal nodes keep keys, or its window.
+    /// Makes `separator`, the separator just left of this headless leaf, its
+    /// head: `value`, and with inline keys `separator`'s key (D49). Returns
+    /// the separator as its internal node keeps it: the key without inline
+    /// keys, its window with them.
     ///
     /// # Panics
     ///
@@ -774,7 +749,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         separator: WindowedKey<K, S>,
         value: V,
     ) -> Separator<K, S> {
-        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+        if NodePtr::<K, V, S>::has_inline_keys() {
             let (key, window) = separator.into_parts();
             self.put_head(Some(key), value);
             Separator::without_key(window)
@@ -784,33 +759,31 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Takes the head out of the leaf, which then has none, and returns it,
-    /// with its key where separator keys are heads (D49).
+    /// Takes the head out of the leaf, which then has none: its value, and
+    /// with inline keys its key (D49).
     ///
     /// # Panics
     ///
     /// If the leaf has no head.
     pub(in crate::tree) fn take_head(self) -> (Option<K>, V) {
         self.assert_has_head();
-        // SAFETY: the head is initialized, and so is its key where separator
-        // keys are heads (invariant 3); both are read out, and the header
-        // then says the leaf has none; the access is exclusive.
+        // SAFETY: the head is initialized, and with inline keys so is its key
+        // (invariant 3). Both are read out, then the header says the leaf has
+        // none; the access is exclusive.
         unsafe {
-            let key = NodePtr::<K, V, S>::has_separator_keys_in_heads()
-                .then(|| self.head_key_slot().read());
+            let key = NodePtr::<K, V, S>::has_inline_keys().then(|| self.head_key_slot().read());
             let value = self.head_and_value_slots().slot(0).read();
             self.node.set_has_head(false);
             (key, value)
         }
     }
 
-    /// Puts `key` in place of the head's key, where separator keys are heads
-    /// (D49), and returns the old one. Keeping the keys in order is the
-    /// caller's business.
+    /// Replaces the head's key with `key` and returns the old one (D49). The
+    /// caller keeps the keys in order.
     ///
     /// # Panics
     ///
-    /// If separator keys aren't heads in this map, or the leaf has no head.
+    /// If the map has no inline keys, or the leaf has no head.
     pub(in crate::tree) fn replace_head_key(self, key: K) -> K {
         let slot = self.head_key_slot();
         self.assert_has_head();
@@ -819,13 +792,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { slot.replace(key) }
     }
 
-    /// Takes out the head and the first key, whose value, and where
-    /// separator keys are heads, the key itself, become the new head (D49),
-    /// and returns what the separator being removed gives up and what takes
-    /// its place; `None`, changing nothing, if the leaf has no keys. This is
-    /// how the leaf right of a separator being removed gives up the
-    /// separator's value, its head, and hands up the next key, to take the
-    /// separator's place (D17).
+    /// How the leaf right of a separator being removed gives up its head, the
+    /// separator's entry, and hands up its first key to take the separator's
+    /// place (D17). The first key's value, and with inline keys the key
+    /// itself, become the new head (D49). `None`, changing nothing, if the
+    /// leaf has no keys.
     ///
     /// # Panics
     ///
@@ -836,17 +807,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         if len == 0 {
             return None;
         }
-        // SAFETY: `0 < len`, so key 0 is initialized, with its inline key,
-        // and is read out, shifting keys `1..len` down. The head is
-        // initialized (checked above, invariant 3), so head-and-value slots
-        // `0..=len` are: slot 0, the head, is read out, and value 0 shifts
-        // into it, so the leaf still has a head. Where separator keys are
-        // heads, so is the head's key slot, swapped for key 0. Keys and
-        // values `0..len - 1` stay initialized; the access is exclusive.
+        // SAFETY: `0 < len`, so key 0 is initialized, with its inline key; it
+        // is read out, and keys `1..len` shift down. The head is initialized
+        // (checked above, invariant 3), so head-and-value slots `0..=len` are.
+        // Slot 0, the head, is read out and value 0 shifts into it, so the
+        // leaf still has a head. With inline keys, the head's key slot is
+        // initialized too, and is swapped for key 0. Keys and values
+        // `0..len - 1` stay initialized; the access is exclusive.
         unsafe {
             let first_key = self.key_slots().remove(0, len);
             let value = self.head_and_value_slots().remove(0, len + 1);
-            let (removed_key, successor) = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let (removed_key, successor) = if NodePtr::<K, V, S>::has_inline_keys() {
                 let (first_key, window) = first_key.into_parts();
                 let removed_key = self.head_key_slot().replace(first_key);
                 (Some(removed_key), Separator::without_key(window))
@@ -865,38 +836,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
 /// Changing a leaf's entries.
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// Raises the length to `len`, for entries just written past it: the
-    /// slots past `len` already hold the greatest inline key (invariant 4),
-    /// so none needs refilling.
-    ///
     /// # Safety
     ///
-    /// `self.len() <= len <= capacity`, and all keys, inline keys and
-    /// values described by `len` are initialized, as for `set_len`.
-    unsafe fn grow_len(self, len: usize) {
-        debug_assert!(self.len() <= len && len <= Self::capacity());
-        // SAFETY: the node is allocated and the access exclusive; the length
-        // and initialization requirements are forwarded. Growing preserves
-        // the untouched inline-key padding.
-        unsafe { self.node.set_len(len) }
-    }
-
-    /// Sets the length; the inline-key slots a shorter length leaves get the
-    /// greatest inline key, as all slots past the length hold (invariant
-    /// 4). Called once the slots are where the length says.
-    ///
-    /// # Safety
-    ///
-    /// `len` is at most the capacity, and keys `0..len`, with their inline
-    /// keys, and values `0..len` are initialized and valid at this call.
+    /// As for [`NodePtr::set_len_refilling`]: keys `0..len`, with their
+    /// inline keys, and values `0..len` are initialized and valid at this
+    /// call.
     unsafe fn set_len(self, len: usize) {
-        debug_assert!(len <= Self::capacity());
-        let old_len = self.len();
-        // SAFETY: `old_len <= capacity`, and the access is exclusive.
-        unsafe { self.columns().mark_vacant(len..old_len) };
-        // SAFETY: the node is allocated and the access exclusive; `len <=
-        // capacity` is forwarded.
-        unsafe { self.node.set_len(len) }
+        // SAFETY: forwarded; the node is a leaf (invariant 1).
+        unsafe { self.node.set_len_refilling::<Self>(len) }
     }
 
     /// Inserts `key`, with its inline key, and `value` at edge `index`,
@@ -906,11 +853,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     pub(in crate::tree) fn insert_fit(self, index: usize, key: WindowedKey<K, S>, value: V) {
         let len = self.len();
         debug_assert!(index <= len && len < Self::capacity());
-        // SAFETY: `index <= len < capacity` (the caller); keys (with their
+        // SAFETY: `index <= len < capacity` (the caller). Keys (with their
         // inline keys) and values `0..len` are initialized, and `0..len + 1`
-        // are afterwards. Paired, the entries from key and value `index` on
-        // shift up whole, and the new pair goes into the entry that frees
-        // (D29).
+        // are afterwards. Paired, the entries from `index` on shift up whole,
+        // and the new pair goes into the entry that frees (D29).
         unsafe {
             if NodePtr::<K, V, S>::has_paired_leaf_entries() {
                 self.key_slots().insert_shifting_entries(index, len, key);
@@ -919,7 +865,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 self.key_slots().insert(index, len, key);
                 self.value_slots().insert(index, len, value);
             }
-            self.grow_len(len + 1);
+            // The slots past it already hold the greatest inline key.
+            self.node.set_len(len + 1);
         }
     }
 
@@ -943,11 +890,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Splits the full leaf and inserts `key`/`value` at edge `index`, on
-    /// the side where that edge ended up (`InsertionSide::of_split`). The
-    /// separator goes up; its value becomes the right leaf's head, with its
-    /// key where separator keys are heads (D49), and the left leaf keeps its
-    /// own head, if any (D17). The right half goes into `right_page`.
+    /// Splits the full leaf and inserts `key`/`value` at edge `index`, on the
+    /// side where that edge ended up (`InsertionSide::of_split`). The
+    /// separator goes up, and its entry becomes the right leaf's head (D17,
+    /// D49); the left leaf keeps its own head, if any. The right half goes
+    /// into `right_page`.
     pub(in crate::tree) fn split_insert(
         self,
         index: usize,
@@ -962,7 +909,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         let separator = self.split_around(separator_index, right);
         // A full leaf of `capacity` entries split around one leaves
         // `separator_index < capacity` on the left and `capacity -
-        // separator_index - 1 < capacity` on the right, so both have room,
+        // separator_index - 1 < capacity` on the right. So both have room,
         // and the edge is within its half.
         match inserted {
             InsertionSide::Left(index) => self.insert_fit(index, key, value),
@@ -975,25 +922,25 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Moves the entries right of `separator_index` into `right`, a fresh
-    /// leaf at this leaf's prefix length, and takes out key
-    /// `separator_index`, for the parent; returns it. Its value becomes
-    /// `right`'s head, with its key where separator keys are heads (D49).
+    /// Moves the entries right of `separator_index` into `right`, a fresh leaf
+    /// at this leaf's prefix length. Takes out key `separator_index`, whose
+    /// entry becomes `right`'s head (D49), and returns it as the parent's
+    /// separator.
     fn split_around(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
-        // SAFETY: `separator_index < len`. Keys `separator_index + 1..len`
-        // are initialized and move, with their inline keys, to the start of
-        // `right`, a fresh leaf of the same map at the same prefix length;
-        // so do head-and-value slots `separator_index + 1..=len`, the values
-        // of keys `separator_index..len`, to slots `0..=right_len`, so that
-        // the separator's value becomes the right leaf's head. Key
-        // `separator_index` is then the last initialized one on the left and
-        // is read out, with its inline key: where separator keys are heads,
-        // into the right leaf's head key slot (D49), so that the head is
-        // whole, which the header then flags (invariant 3). The left leaf
-        // keeps `separator_index` keys and values and its head.
+        // SAFETY: `separator_index < len`. Keys `separator_index + 1..len` are
+        // initialized and move, with their inline keys, to the start of
+        // `right`, a fresh leaf of the same map at the same prefix length.
+        // Head-and-value slots `separator_index + 1..=len`, the values of keys
+        // `separator_index..len`, move to its slots `0..=right_len`, so the
+        // separator's value becomes `right`'s head. Key `separator_index` is
+        // then the last initialized key on the left, and is read out with its
+        // inline key. With inline keys, the key goes into `right`'s head key
+        // slot (D49), completing the head, which the header then flags
+        // (invariant 3). The left leaf keeps `separator_index` keys and
+        // values, and its head.
         unsafe {
             self.key_slots()
                 .move_run_to(separator_index + 1, right_len, right.key_slots(), 0);
@@ -1004,7 +951,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 0,
             );
             let key = self.key_slots().read(separator_index);
-            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let separator = if NodePtr::<K, V, S>::has_inline_keys() {
                 let (key, window) = key.into_parts();
                 right.head_key_slot().write(key);
                 Separator::without_key(window)
@@ -1028,8 +975,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         assert!(index < len, "entry index out of bounds");
         // SAFETY: `index < len`, and keys (with their inline keys) and values
         // `0..len` are initialized; afterwards `0..len - 1` are. Paired, key
-        // and value `index` share an entry, read out before the entries after
-        // it shift down whole (D29).
+        // and value `index` share an entry, which is read out before the
+        // entries after it shift down whole (D29).
         unsafe {
             let (key, value) = if NodePtr::<K, V, S>::has_paired_leaf_entries() {
                 let value = self.value_slots().slot(index).read();
@@ -1044,8 +991,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// Replaces key `index` and its inline key, returning the old key.
-    /// Keeping the keys in order is the caller's business.
+    /// Replaces key `index` and its inline key, returning the old key. The
+    /// caller keeps the keys in order.
     ///
     /// # Panics
     ///
@@ -1058,8 +1005,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// Replaces key `index`, its inline key, and its value, returning the
-    /// old key and value. Keeping the keys in order is the caller's
-    /// business.
+    /// old key and value. The caller keeps the keys in order.
     ///
     /// # Panics
     ///
@@ -1096,11 +1042,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         let count = len - index;
         let right = Self::new(page, self.prefix_len());
         // SAFETY: `index <= len`, so keys (with their inline keys) and values
-        // `index..len` are initialized; they move to `0..count` of `right`, a
+        // `index..len` are initialized. They move to `0..count` of `right`, a
         // fresh leaf of the same map, at this leaf's prefix length. The
-        // access is exclusive, and `right` is reached by nothing else yet.
+        // access is exclusive, and nothing else reaches `right` yet.
         // Afterwards this leaf holds `0..index` and its head, and `right`
-        // `0..count` and none.
+        // `0..count` and no head.
         unsafe {
             self.key_slots()
                 .move_run_to(index, count, right.key_slots(), 0);
@@ -1113,84 +1059,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 }
 
-/// A leaf's prefix (05-fence-key.md).
+/// Moving a key through the parent's separator, for a steal.
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// Moves the leaf's prefix length back to `fill`'s, and every inline key
-    /// with it ([`Window::moved_back_to`]), given `fill`, the window there of
-    /// a key whose encoding shares the leaf's prefix: one of its fences, one
-    /// of its keys, or what every key of the tree shares (D50). Reads no key
-    /// and invokes no user code. Does nothing if the prefix is no longer
-    /// than `fill`'s, which includes every leaf without inline keys.
-    pub(in crate::tree) fn move_prefix_back_to(self, fill: Window) {
-        let prefix_len = self.prefix_len();
-        if prefix_len <= fill.prefix_len() {
-            return;
-        }
-        let len = self.len();
-        let Some(inline_keys) = self.columns().inline_keys() else {
-            return;
-        };
-        // SAFETY: inline keys `0..len` are initialized (invariants 1 and 4),
-        // each is rewritten in place with the window of the same key, and
-        // the header with them; the access is exclusive.
-        unsafe {
-            for index in 0..len {
-                let window = Window::new(prefix_len, inline_keys.read(index)).moved_back_to(fill);
-                inline_keys.write(index, window.inline_key());
-            }
-            self.node.set_prefix_len(fill.prefix_len());
-        }
-    }
-
-    /// Makes `inline_keys` the leaf's keys' inline keys, in order, which
-    /// must be their windows at `prefix_len`, and then `prefix_len` its
-    /// prefix length: how a prefix is refit (`tree/prefix.rs`). Does nothing
-    /// to a leaf without inline keys.
-    ///
-    /// # Panics
-    ///
-    /// If `inline_keys` does not say it has one inline key per key; the leaf
-    /// is unchanged then.
-    pub(in crate::tree) fn set_windows(
-        self,
-        prefix_len: usize,
-        inline_keys: impl ExactSizeIterator<Item = InlineWord>,
-    ) {
-        let len = self.len();
-        assert_eq!(inline_keys.len(), len, "one inline key per key");
-        let Some(slots) = self.columns().inline_keys() else {
-            return;
-        };
-        // SAFETY: each slot written has an index below `len <= capacity`,
-        // however many inline keys the iterator gives; inline keys are plain
-        // data, and the access is exclusive.
-        unsafe {
-            for (index, inline_key) in (0..len).zip(inline_keys) {
-                slots.write(index, inline_key);
-            }
-            self.node.set_prefix_len(prefix_len);
-        }
-    }
-
-    /// Sets the prefix length of a leaf with no keys, which any prefix length
-    /// fits: how a copied leaf, or a new root, starts.
-    ///
-    /// # Panics
-    ///
-    /// If the leaf has keys.
-    pub(in crate::tree) fn set_empty_prefix_len(self, prefix_len: usize) {
-        assert_eq!(self.len(), 0, "a leaf with keys keeps their prefix length");
-        // SAFETY: the node is allocated and the access exclusive.
-        unsafe { self.node.set_prefix_len(prefix_len) }
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
-    /// Puts `key`, leaving a sibling, in place of the key of the parent's
-    /// separator `index`, of which this leaf is the right child's leftmost
-    /// leaf, and returns that separator's key, with its window at `fill`,
-    /// the parent's: where separator keys are heads (D49), `key` takes this
-    /// leaf's head key, and the parent keeps its window alone; otherwise the
+    /// Puts `key`, which is leaving a sibling, in place of the key of the
+    /// parent's separator `index`, and returns the old key with `fill` as its
+    /// window, at the parent's prefix length. This leaf is the leftmost leaf
+    /// right of that separator. With inline keys (D49), `key` replaces this
+    /// leaf's head key and the parent keeps only its window; otherwise the
     /// parent keeps `key`.
     ///
     /// # Safety
@@ -1204,7 +1079,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         key: WindowedKey<K, S>,
         fill: Window,
     ) -> WindowedKey<K, S> {
-        if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+        if NodePtr::<K, V, S>::has_inline_keys() {
             let (key, window) = key.into_parts();
             // SAFETY: the leaf has a head (caller), so its head key slot is
             // initialized (invariant 3).
@@ -1223,6 +1098,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     fn child_of(parent: Internal<K, V, S>, index: usize) -> Self {
         parent.leaf_child(index)
+    }
+
+    fn node_ptr(self) -> NodePtr<K, V, S> {
+        self.node
     }
 
     fn len(self) -> usize {
@@ -1247,10 +1126,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         self.has_head()
     }
 
-    fn move_prefix_back_to(self, fill: Window) {
-        Leaf::move_prefix_back_to(self, fill);
-    }
-
     unsafe fn free_page(self) -> PageByType<K, V, S> {
         // SAFETY: forwarded.
         unsafe { self.free() }.into()
@@ -1264,13 +1139,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         // the right leaf room for one more (caller). Both are leaves of the
         // parent's map, and the parent's separator is initialized. The right
         // leaf's head-and-value slots `0..=right_len` are initialized (the
-        // siblings' invariant), so inserting at slot 0 shifts them up: the
-        // old head becomes the value of the key now at key 0, and the left
-        // leaf's last value the head. The key going to key 0 is the old
-        // separator, at the right leaf's prefix length, `fill`'s (caller);
-        // where separator keys are heads (D49), it comes from the head key
-        // slot, which the left leaf's last key takes, and the parent keeps
-        // that key's window alone.
+        // siblings' invariant), so inserting at slot 0 shifts them up. The old
+        // head becomes the value of the new key 0, and the left leaf's last
+        // value becomes the head. The new key 0 is the old separator, at the
+        // right leaf's prefix length, `fill`'s (caller). With inline keys
+        // (D49), it comes from the head key slot, which the left leaf's last
+        // key takes, and the parent keeps only that key's window.
         unsafe {
             let key = left.key_slots().remove(left_len - 1, left_len);
             let value = left.head_and_value_slots().remove(left_len, left_len + 1);
@@ -1286,13 +1160,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
-        // SAFETY: as in `steal_left_unchecked`, mirrored: the right leaf
-        // gives key 0 and head-and-value slot 0 (its head, after which value
-        // 0 shifts into the head), and the left leaf has room at key
-        // `left_len` and head-and-value slot `left_len + 1`. The key going
-        // there is the old separator, at the left leaf's prefix length,
-        // `fill`'s; where separator keys are heads, from the right leaf's
-        // head key slot, which the right leaf's old key 0 takes.
+        // SAFETY: as in `steal_left_unchecked`, mirrored. The right leaf gives
+        // key 0 and head-and-value slot 0, its head; value 0 then shifts into
+        // the head. The left leaf has room at key `left_len` and head-and-value
+        // slot `left_len + 1`. The key going there is the old separator, at
+        // the left leaf's prefix length, `fill`'s. With inline keys, it comes
+        // from the right leaf's head key slot, which the right leaf's old key 0
+        // takes.
         unsafe {
             let key = right.key_slots().remove(0, right_len);
             let value = right.head_and_value_slots().remove(0, right_len + 1);
@@ -1309,15 +1183,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         let (left_len, right_len) = (left.len(), right.len());
         // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
         // separator goes into key slot `left_len`, at the leaves' prefix
-        // length, `fill`'s; where separator keys are heads (D49), it is the
-        // right leaf's head key, with `fill` as its window, every byte of it
-        // a leaf keeps (caller). `right`'s keys `0..right_len` go into
-        // `left_len + 1..`, and its head-and-value slots `0..=right_len`, all
-        // initialized (caller), into `left_len + 1..=left_len + 1 +
-        // right_len`: its head beside the separator as its value. `left`'s
-        // head is untouched.
+        // length, `fill`'s. With inline keys (D49), it is the right leaf's head
+        // key, with `fill` as its window, holding every byte a leaf keeps of
+        // it (caller). `right`'s keys `0..right_len` go into `left_len + 1..`.
+        // Its head-and-value slots `0..=right_len`, all initialized (caller),
+        // go into `left_len + 1..=left_len + 1 + right_len`, so its head lands
+        // beside the separator as its value. `left`'s head is untouched.
         unsafe {
-            let separator = if NodePtr::<K, V, S>::has_separator_keys_in_heads() {
+            let separator = if NodePtr::<K, V, S>::has_inline_keys() {
                 WindowedKey::from_parts(right.head_key_slot().read(), fill)
             } else {
                 separator
@@ -1347,31 +1220,22 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     }
 
     #[cfg(any(test, fuzzing))]
-    fn length_tags<'a>(self) -> Option<&'a [u16]> {
-        Leaf::length_tags(self)
+    fn hash_tags<'a>(self) -> Option<&'a [u8]> {
+        Leaf::hash_tags(self)
     }
 
     /// As far as its fences share: nothing below a leaf bounds it.
     fn allowed_prefix_len(self, prefix_len: usize) -> usize {
         prefix_len
     }
-
-    fn set_windows(
-        self,
-        prefix_len: usize,
-        inline_keys: impl ExactSizeIterator<Item = InlineWord>,
-    ) {
-        Leaf::set_windows(self, prefix_len, inline_keys);
-    }
 }
 
 /// A validated interval of one leaf's entries, which a walk hands out
-/// without going back to the leaf. Paired entries use key pointers as their
-/// cursor and end: `front` and `back` are the next keys at either end, and
-/// advancing needs neither the leaf pointer nor an index multiply. Other
-/// layouts keep the leaf's first key in `front` and the interval in
-/// `start..end`, leaving `back` unused. Which representation applies
-/// depends only on the map's layout.
+/// without going back to the leaf. Which representation it uses depends
+/// only on the map's layout. With paired entries, `front` and `back` are key
+/// pointers, the next keys at either end, so advancing needs neither the
+/// leaf pointer nor an index multiply. Otherwise `front` is the leaf's first
+/// key, the interval is `start..end`, and `back` is unused.
 ///
 /// Invariant: the run's leaf stays allocated with its slot positions
 /// unchanged while the run is used, which the walk that holds it sees to.
@@ -1559,10 +1423,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LeafRun<K, V, S> {
     }
 }
 
-/// Keys of one leaf, in order, which a walk has moved past: for a loop to
-/// visit them without the walk, which it touches once per run rather than
-/// once per key (a merge of two sets). Copied into a local, the run lives
-/// in registers.
+/// Keys of one leaf, in order, that a walk has moved past, for a loop to
+/// visit without the walk. The loop touches the walk once per run rather
+/// than once per key (as in a merge of two sets). Copied into a local, the
+/// run lives in registers.
 ///
 /// Invariant: `remaining` keys from `next`, `stride` bytes apart, are
 /// initialized and shared for `'a`.

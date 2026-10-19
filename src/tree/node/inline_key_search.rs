@@ -1,7 +1,6 @@
-//! A node's inline keys, read in place for a search (D18): the column of
-//! a key's first bytes past the node's prefix that leaves and internal nodes
-//! keep beside their keys, and how a search finds the keys whose inline
-//! keys equal its own, by counting over the whole column.
+//! A node's inline keys (`inline_keys.rs`, D18), read in place for a
+//! search. A search finds the keys whose inline keys equal its own by
+//! counting over every slot, not by a binary search.
 
 use core::marker::PhantomData;
 use core::ops::Range;
@@ -11,19 +10,19 @@ use super::slots::{InlineKeySlots, Slots};
 use super::vector_count::U64EqualityMask;
 use crate::inline_key::InlineWord;
 
-/// A node's inline keys, read in place (D18): every slot up to the
-/// capacity, at this node kind's width, of which slots `0..len` hold the
-/// inline keys of keys `0..len`, and the rest the greatest inline key
-/// (invariant 4), which a count reads and the cuts at `len` leave out. Its
-/// methods narrow an inline key to the bytes the node keeps, and give one
-/// back as those bytes, zeros after.
+/// A node's inline keys, read in place (D18): every slot up to the capacity,
+/// at this node kind's width. Slots `0..len` hold the inline keys of keys
+/// `0..len`. The rest hold the greatest inline key (invariant 4): a count
+/// reads them, and the cuts at `len` leave them out. Its methods narrow an
+/// inline key to the bytes the node keeps, and give one back as those bytes,
+/// zeros after.
 ///
 /// Each typed node kind of a map has one width, so after monomorphization
-/// each method is that of one width. They are not generic, so they need
-/// `#[inline]` to inline into the searches, which other crates instantiate,
-/// and `always`: before the width folds, each looks like a match of three
-/// arms with bounds checks, which the compiler kept out of line, a call and
-/// a match on every level of every insert.
+/// each method works at one width. The methods are not generic, so they need
+/// `#[inline]` to inline into the searches that other crates instantiate.
+/// They need `always` because, before the width folds, each looks like a
+/// three-arm match with bounds checks. The compiler keeps that out of line,
+/// which costs a call and a match on every level of every insert.
 #[derive(Clone, Copy)]
 pub(in crate::tree) enum NodeInlineKeys<'a> {
     Two(InlineKeysOfWidth<'a, u16>),
@@ -47,9 +46,10 @@ impl<'a> NodeInlineKeys<'a> {
     /// The first `capacity` of `slots`, of which the first `len` are live.
     ///
     /// The view reads the slots through their pointer, forming no
-    /// reference to them, so a latched tree's optimistic reader may read an
-    /// internal node a writer is changing (`optimistic.rs`): it gets some
-    /// answer in bounds, which its version check then keeps or throws away.
+    /// reference to them. So a latched tree's optimistic reader may read an
+    /// internal node that a writer is changing (`optimistic.rs`). It gets
+    /// some answer in bounds, which its version check then keeps or throws
+    /// away.
     ///
     /// # Safety
     ///
@@ -168,13 +168,13 @@ impl<W: InlineSlot> InlineKeysOfWidth<'_, W> {
     /// range within `0..len` for any. If none equals it, the empty range at
     /// the first inline key greater than it.
     ///
-    /// Found by a count of every slot, never a binary search: the count's
+    /// Found by a count of every slot, never a binary search. The count's
     /// loads don't depend on one another, so the lines of a node that comes
-    /// from memory arrive together, where a search's probes would wait for
-    /// them one after another (04, Q6). In explicit vectors where the build
-    /// target has them for slots of this width
-    /// ([`VectorCount`](super::vector_count::VectorCount)), otherwise as the
-    /// compiler vectorizes it ([`Self::equal_range_by_count`]).
+    /// from memory arrive together; a binary search's probes would wait for
+    /// them one after another (04, Q6). The count runs in explicit vectors
+    /// where the build target has them for slots of this width
+    /// ([`VectorCount`](super::vector_count::VectorCount)), and otherwise as
+    /// the compiler vectorizes it ([`Self::equal_range_by_count`]).
     #[inline(always)]
     fn equal_range(self, target: W) -> Range<usize> {
         W::equal_range_in_vectors(self.slots, self.len, target)
@@ -190,13 +190,13 @@ impl<W: InlineSlot> InlineKeysOfWidth<'_, W> {
 
     /// One pass over every slot up to the capacity counts the inline keys
     /// below `target` and those equal to it. The slots from `len` on hold
-    /// the greatest inline key (invariant 4), so they never count below it,
-    /// and count equal only to a greatest `target`, whose equal range the cut
-    /// at `len` ends where the live slots do. With no branch, no dependent load
-    /// and no mask per slot, and a trip count that is the capacity, one of
-    /// two constants per map, the compiler unrolls it into a few vector
-    /// compares whose masks it counts. Within `0..len` for any slots, by the
-    /// cuts.
+    /// the greatest inline key (invariant 4), so they never count below
+    /// `target`. They count equal only to a greatest `target`, and the cut at
+    /// `len` ends that equal range where the live slots do. The loop has no
+    /// branch, no dependent load and no mask per slot, and its trip count is
+    /// the capacity, one of two constants per map. So the compiler unrolls it
+    /// into a few vector compares whose masks it counts. The cuts keep the
+    /// range within `0..len` for any slots.
     #[inline(always)]
     fn equal_range_by_count(self, target: W) -> Range<usize> {
         // SAFETY: every slot up to the capacity is initialized (type

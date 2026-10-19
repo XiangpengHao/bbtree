@@ -1,30 +1,32 @@
-//! Finding where a key belongs in a latched tree, as bbtree's search does
-//! (`tree/search.rs`), while other threads change it: optimistic through
-//! the internal nodes, latched at the leaf (optimistic lock coupling,
-//! `node/optimistic.rs`).
+//! Finding where a key belongs in a latched tree while other threads change
+//! it, as the unsync tree's search does (`tree/search.rs`). The descent is
+//! optimistic through the internal nodes and latches the leaf (optimistic
+//! lock coupling, `node/optimistic.rs`).
 //!
 //! - **The root first.** A key that lacks what every key of the tree
-//!   shares (D50) is in no node: the descent says so, once the root's
-//!   version vouches for what it read of the shared prefix, or with the
-//!   root leaf latched, which holds it still.
-//! - **Each internal node** is read at a version: the descent routes the
+//!   shares (D50) is in no node. The descent says so once the root's
+//!   version vouches for what it read of the shared prefix, or while the
+//!   root leaf is latched, which holds the prefix still.
+//! - **Each internal node** is read at a version. The descent routes the
 //!   key through it, reads the edge and the child's version, then checks
-//!   the node's version, so that the child was the node's child when its
-//!   version was read. The root's version it checks before it follows the
-//!   edge too: the root page turns from a leaf into an internal node and
-//!   back in place (`node/root_page.rs`), so an edge read from it may be a
-//!   leaf's bytes. For the same reason the descent checks the root
-//!   pointer's tag again once it has the root's version. Every other page
-//!   keeps its kind, and an edge read from one, even stale, is null or a
+//!   the node's version. So the child was still the node's child when the
+//!   child's version was read.
+//! - **The root's version** is checked before the descent follows an edge
+//!   read from it, too. The root page turns from a leaf into an internal
+//!   node and back in place (`node/root_page.rs`), so an edge read from it
+//!   may be a leaf's bytes. For the same reason, the descent checks the
+//!   root pointer's tag again once it has the root's version. Every other
+//!   page keeps its kind: an edge read from one, even stale, is null or a
 //!   node of the kind its tag says (`pages.rs`).
-//! - **The leaf** is latched, shared or exclusive, and then its parent's
-//!   version checked again, so that the leaf is still where the key
-//!   belongs. A failed check starts over from the root.
+//! - **The leaf** is latched, shared or exclusive, or read at a version
+//!   ([`Optimistic`]). Then its parent's version is checked again, so the
+//!   leaf is still where the key belongs. A failed check starts over from
+//!   the root.
 //!
 //! A descent may keep the internal nodes it went through, each at the
-//! version it read ([`TreePath`]): what a split or a rebalancing removal
-//! takes before it changes them, and then hands to bbtree's operations as a
-//! node stack ([`TreePath::node_stack_to_leaf`]).
+//! version it read ([`TreePath`]). A split or a rebalancing removal takes
+//! them before it changes them, then hands them to the unsync tree's
+//! operations as a node stack ([`TreePath::node_stack_to_leaf`]).
 
 use core::borrow::Borrow;
 use core::cmp::Ordering as KeyOrdering;
@@ -75,9 +77,9 @@ pub(super) enum Shared {}
 /// Latched for changing.
 pub(super) enum Exclusive {}
 
-/// Not latched: read at the version the leaf was at once no thread held it
-/// exclusively, which the reader checks after it reads the leaf in place
-/// (`lookup.rs`). A lookup that this rules out writes nothing.
+/// Not latched: the leaf is read in place at the version it was at once no
+/// thread held it exclusively, which the reader checks after the read
+/// (`lookup.rs`). A miss settled this way writes nothing.
 pub(super) enum Optimistic {}
 
 impl LatchMode for Shared {
@@ -156,7 +158,8 @@ impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> HeldLeaf<K, V, S, M> {
     }
 
     /// Whether the leaf is still as the descent found it, so that what the
-    /// caller read of it since is what it held then ([`LatchMode::is_unchanged`]).
+    /// caller read of it since is what it held then
+    /// ([`LatchMode::is_unchanged`]).
     #[inline(always)]
     pub(super) fn is_unchanged(&self) -> bool {
         M::is_unchanged(self.leaf.latch(), self.held)
@@ -191,8 +194,8 @@ impl<K, V, S: InlineKeyStrategy<K>, M: LatchMode> Drop for HeldLeaf<K, V, S, M> 
 }
 
 /// Where a descent ends: the leaf where its key belongs, latched in mode
-/// `M`, and whether the key is that leaf's head; or, for a key that lacks
-/// what every key shares, where it sorts against them all.
+/// `M`, and whether the key is that leaf's head. For a key that lacks what
+/// every key shares, where it sorts against them all instead.
 pub(super) type Descent<K, V, S, M> = Result<(HeldLeaf<K, V, S, M>, bool), KeyOrdering>;
 
 /// What a descent reads at an internal root ([`LatchedTree::read_root`]).
@@ -270,9 +273,9 @@ impl<K, V, S> TreePath<K, V, S> {
         self.copy_levels_from(other, other.depth);
     }
 
-    /// Levels `0..depth` of `other`, which went through them, as this path's:
-    /// to go down another way from there. In place, as a path returned by
-    /// value is a whole array's copy where the compiler keeps the move.
+    /// Makes levels `0..depth` of `other` this path's, to go down another
+    /// way from there. In place: a path returned by value would copy the
+    /// whole array wherever the compiler keeps the move.
     ///
     /// # Panics
     ///
@@ -294,14 +297,13 @@ impl<K, V, S> TreePath<K, V, S> {
         unsafe { self.levels[level].assume_init() }
     }
 
-    /// The topmost level an operation reads that fits the prefixes of the
-    /// children of the node at `level` to their fences (`tree/prefix.rs`):
-    /// the nearest levels above it with a separator left of the path and
-    /// right of it, which hold the fences the node lacks on that side; the
-    /// node's own level where it lacks a fence above it on both sides, as
-    /// only the root does. A side without one is the tree's border, which a
-    /// node stays on whatever other threads change, and whose fence is what
-    /// every key shares (D50).
+    /// The topmost level read by an operation that fits the prefixes of the
+    /// children of the node at `level` to their fences (`tree/prefix.rs`).
+    /// That is the topmost of the nearest levels above with a separator left
+    /// of the path and right of it, which hold the node's fences. A side
+    /// with no such level is the tree's border: a node stays on it whatever
+    /// other threads change, and its fence there is what every key shares
+    /// (D50). With neither, as only for the root, it is `level` itself.
     pub(super) fn fences_top(&self, level: usize) -> usize {
         let nearest = |has_separator: fn(Routed) -> bool| {
             (0..level)
@@ -315,12 +317,12 @@ impl<K, V, S> TreePath<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> TreePath<K, V, S> {
-    /// A node stack down `tree` along the path, from level `top` down to
-    /// `leaf`, the path's leaf, ending at `index` in it: for bbtree's
+    /// A node stack down `tree` along the path, from level `top` to `leaf`,
+    /// the path's leaf, ending at `index` in it. It is for the unsync tree's
     /// operations, on nodes the caller holds from `top` down
-    /// ([`NodeStackMut::along`]). The node at `top` stands for the root:
-    /// the operation goes no higher, and finds no fence above it, which
-    /// `top` holds ([`Self::fences_top`]).
+    /// ([`NodeStackMut::along`]). The node at `top` stands for the root: the
+    /// operation goes no higher and finds no fence above it, so `top` must
+    /// hold every fence it needs ([`Self::fences_top`]).
     pub(super) fn node_stack_to_leaf<'t>(
         &self,
         tree: &'t mut Tree<K, V, Latched<S>>,
@@ -336,8 +338,9 @@ impl<K, V, S: InlineKeyStrategy<K>> TreePath<K, V, S> {
     }
 
     /// A node stack down `tree` along the path, from level `top` down to the
-    /// node at `level`, ending at its separator `index`: for bbtree's
-    /// removal of that separator ([`Self::node_stack_to_leaf`]).
+    /// node at `level`, ending at its separator `index`: for
+    /// [`NodeStackMut::remove`] of that separator
+    /// ([`Self::node_stack_to_leaf`]).
     pub(super) fn node_stack_to_separator<'t>(
         &self,
         tree: &'t mut Tree<K, V, Latched<S>>,
@@ -371,11 +374,11 @@ impl<K, V, S> DescentPath<K, V, S> for TreePath<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// The leaf where `key` belongs, latched in mode `M`, and whether `key`
-    /// is its head, the entry of the separator left of it (D17), which an
-    /// [`Optimistic`] caller confirms itself; with `path`
-    /// keeping the internal nodes it went through. If `key` lacks what every
-    /// key of the tree shares (D50), it is in no node: where it sorts against
-    /// all of them instead, before or after.
+    /// is its head, the entry of the separator left of it (D17); an
+    /// [`Optimistic`] caller confirms the head itself. `path` keeps the
+    /// internal nodes the descent went through. If `key` lacks what every
+    /// key of the tree shares (D50), it is in no node: returns where it
+    /// sorts against all of them instead, before or after.
     ///
     /// # Panics
     ///
@@ -452,9 +455,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                             continue 'restart;
                         }
                         // The separator the key matched above may have been
-                        // removed since, its successor the head now: the
-                        // parent doesn't change for that. Unlatched, the
-                        // caller checks the head it reads.
+                        // removed since, and its successor be the head now:
+                        // the parent's version check may not catch that. An
+                        // unlatched caller checks the head it reads itself.
                         if M::LATCHES && at_separator && !Self::is_head(leaf, key) {
                             continue 'restart;
                         }
@@ -472,10 +475,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// `root`'s version, for a descent from it, `root` being the root
-    /// page's internal node; or, for a key that lacks what every key of the
-    /// tree shares (D50), where it sorts against all of them, once the
-    /// root's version vouches for the shared prefix read.
+    /// `root`'s version, for a descent from it; `root` is the root page's
+    /// internal node. For a key that lacks what every key of the tree shares
+    /// (D50), where it sorts against all of them instead, once the root's
+    /// version vouches for the shared prefix read.
     #[inline(always)]
     pub(super) fn read_root<Q>(
         &self,
@@ -500,9 +503,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// `root`'s version, `root` being the root page's internal node, if the
-    /// tree's root pointer still tags it internal once the version is read:
-    /// a lowering that turned the root into a leaf may have finished
+    /// `root`'s version, if the tree's root pointer still tags `root`
+    /// internal once the version is read; `root` is the root page's internal
+    /// node. A lowering that turned the root into a leaf may have finished
     /// between the two reads, and it retags the pointer before letting go.
     #[inline(always)]
     pub(super) fn root_version(&self, root: Internal<K, V, Latched<S>>) -> Option<Version> {

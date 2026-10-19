@@ -101,9 +101,9 @@ struct MergedEntries<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> {
     theirs: IntoIter<K, V, S, A>,
     /// Whether an entry of the other map was merged yet.
     took_from_theirs: bool,
-    /// The key of the other map's first entry, if the target had that key:
+    /// The key of the other map's first entry, if the target had that key.
     /// std's `append` holds that entry in a variable until it returns, so it
-    /// drops the key last, where it drops the keys of later duplicates as it
+    /// drops that key last; it drops the keys of later duplicates as it
     /// meets them.
     first_duplicate_key: Option<K>,
 }

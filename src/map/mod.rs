@@ -1,5 +1,5 @@
 //! [`BBTreeMap`]: an ordered map that threads share, on the same nodes as
-//! [`BBTreeMap`](crate::unsync::BBTreeMap) (`doc/09-concurrency.md`).
+//! [`unsync::BBTreeMap`](crate::unsync::BBTreeMap) (`doc/09-concurrency.md`).
 
 #![forbid(unsafe_code)]
 
@@ -36,8 +36,8 @@ use crate::tree::latched::{LatchedTree, ReadOrInsert, Replace};
 /// [`WithInlineKey`](crate::WithInlineKey).
 ///
 /// It iterates by [`Self::scan`] and [`Self::scan_rev`], which run a
-/// closure on each entry of a range, in key order or in reverse, and by
-/// [`Self::range_cloned`], an iterator over clones of the entries, which
+/// closure on each entry of a range, in key order or in reverse.
+/// [`Self::range_cloned`] is an iterator over clones of the entries, which
 /// holds nothing between calls.
 ///
 /// # Deadlocks
@@ -144,11 +144,12 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// Mostly without a latch: it copies the value, then checks that no
     /// thread changed its leaf meanwhile, and looks again, latched, if one
     /// did. So a lookup writes nothing to the map, and threads that look up
-    /// the same keys share their cache lines. That takes a key the leaf
-    /// tells apart without following a pointer: a std integer or byte array
-    /// under [`Auto`], or a std byte string that ends within the bytes a leaf
-    /// keeps of each key, about 8 past what its keys share. Any other key's
-    /// entry it copies with its leaf latched, as [`Self::read`] does.
+    /// the same keys share their cache lines. This works for a key the leaf
+    /// tells apart without following a pointer. That is a std integer or
+    /// byte array under [`Auto`], or a std byte string that ends within the
+    /// bytes a leaf keeps of each key, about 8 past what its keys share. Any
+    /// other key's entry it copies with its leaf latched, as [`Self::read`]
+    /// does.
     ///
     /// ```
     /// use bbtree::BBTreeMap;
@@ -213,7 +214,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         Q: Ord + ?Sized,
     {
         let (start, end) = Self::checked_bounds(&range);
-        self.tree.scan(start, end, |key, value, _| f(key, value))
+        self.tree
+            .scan(start, end, None, |key, value, _| f(key, value))
     }
 
     /// [`Self::scan`] in reverse key order: from the end of `range` to its
@@ -234,17 +236,17 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     {
         let (start, end) = Self::checked_bounds(&range);
         self.tree
-            .scan_rev(start, end, |key, value, _| f(key, value))
+            .scan_rev(start, end, None, |key, value, _| f(key, value))
     }
 
     /// An iterator over clones of the entries whose keys lie in `range`: in
     /// key order, and in reverse from its back ([`DoubleEndedIterator`]).
     ///
-    /// It holds no latch between calls: it clones a few entries of a leaf
-    /// at a time, and hands them out while no thread has changed the leaf,
-    /// or else looks again past the last key it handed out. So, like a scan,
-    /// it is not a snapshot: it hands out an entry other threads insert
-    /// ahead of it, and no entry they removed before it got there.
+    /// It holds no latch between calls. It clones a few entries of a leaf at
+    /// a time, and hands them out while no thread has changed the leaf;
+    /// otherwise it looks again past the last key it handed out. So, like a
+    /// scan, it is not a snapshot: it hands out an entry other threads
+    /// insert ahead of it, and no entry they removed before it got there.
     ///
     /// # Panics
     ///
@@ -296,10 +298,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     }
 
     /// Runs `f` on the entry whose key equals `key`, inserting `key` and
-    /// `value` first if the map holds none, and returns what `f` returned:
-    /// on the entry as the map stores it, and drops `key` and `value` if it
-    /// held one already. `f` runs while no other thread reads or changes the
-    /// entry; on a new one, just before it goes in.
+    /// `value` first if the map holds none, and returns what `f` returned.
+    /// `f` sees the entry as the map stores it; if the map held one already,
+    /// it drops `key` and `value`. `f` runs while no other thread reads or
+    /// changes the entry; on a new one, just before it goes in.
     #[inline]
     pub fn get_or_insert<R>(&self, key: K, value: V, f: impl FnOnce(&K, &V) -> R) -> R
     where
@@ -350,12 +352,12 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
 
 #[cfg(any(test, fuzzing))]
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
-    /// Panics unless the map is a well-formed B+-tree of `length` entries,
-    /// as `unsync::BBTreeMap::check_invariants` checks its own, whose
-    /// appends go to its last leaf. Compiled for tests and for fuzzing
-    /// builds (`--cfg fuzzing`, which `cargo fuzz` sets), where the fuzz
-    /// targets (`fuzz/`) call it; the map keeps no length, so the caller
-    /// says how many entries it holds.
+    /// Panics unless the map is a well-formed B+-tree of `length` entries
+    /// whose appends go to its last leaf, as
+    /// `unsync::BBTreeMap::check_invariants` checks its own. Compiled for
+    /// tests and for fuzzing builds (`--cfg fuzzing`, which `cargo fuzz`
+    /// sets), where the fuzz targets (`fuzz/`) call it. The map keeps no
+    /// length, so the caller says how many entries it holds.
     ///
     /// Calls `Ord` and the strategy's inline-key encoding: a map whose keys
     /// break their contracts fails it.

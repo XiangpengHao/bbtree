@@ -1,23 +1,27 @@
-//! Inserting into a latched tree, as bbtree inserts (`tree/insert.rs`).
+//! Inserting into a latched tree, as the unsync tree inserts
+//! (`tree/insert.rs`).
 //!
-//! - **An equal key** the tree holds already is left in place, with its
-//!   value replaced ([`Replace`], as std's `BTreeMap::insert` does) or as it
+//! - **An equal key** the tree holds already stays in place. Its value is
+//!   replaced ([`Replace`], as std's `BTreeMap::insert` does) or left as it
 //!   is ([`ReadOrInsert`], which reads the entry instead): the insert's
-//!   [`InsertPolicy`].
-//! - **An append** to the last leaf, if the key goes after every key there
-//!   and the leaf has room, latches that leaf alone (`append.rs`, D45).
+//!   [`InsertPolicy`] decides.
+//! - **An append** to the last leaf latches that leaf alone, if the key goes
+//!   after every key there and the leaf has room (`append.rs`, D45).
 //! - **Otherwise** a descent finds the leaf where the key belongs and
 //!   latches it exclusively; the key goes in if the leaf has room. A key
-//!   that lacks what every key shares shrinks it first, and descends again
-//!   (`shared_prefix.rs`, D50).
-//! - **A full leaf splits**: the insert descends again, keeping its path,
-//!   and takes the nodes the split changes, from the leaf's parent up to
-//!   the lowest node with room, which takes the separator, and up to the
-//!   nodes above that one that hold its fences, which the halves' prefixes
-//!   are fit to (`tree/prefix.rs`); then runs bbtree's insert along them
-//!   ([`NodeStackMut::insert_prefixed`]). The pages it allocates come held
-//!   until it is done (`pages.rs`). A split of the last leaf points appends
-//!   at the leaf last now.
+//!   that lacks what every key shares first shrinks the shared prefix, and
+//!   descends again (`shared_prefix.rs`, D50).
+//! - **A full leaf splits.** The insert descends again, keeping its path,
+//!   and takes, without waiting, every node the split changes or reads a
+//!   separator of:
+//!   - the path from the leaf's parent up to the lowest node with room,
+//!     which takes the separator;
+//!   - the path from that node up to the nearest nodes holding its fences,
+//!     which the halves' prefixes are fit to (`tree/prefix.rs`).
+//!
+//!   Then it runs [`NodeStackMut::insert_prefixed`] along them. The pages
+//!   it allocates come latched, and stay so until it is done (`pages.rs`).
+//!   A split of the last leaf points appends at the new last leaf.
 //!
 //! [`NodeStackMut::insert_prefixed`]: super::super::node_stack::NodeStackMut::insert_prefixed
 
@@ -161,12 +165,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// `key`, which the descent found shares what every key of the tree
-    /// shares, bound for `leaf`, which the caller holds exclusively. A root
-    /// leaf, the tree's only node, is every border, so that the caller holds
-    /// what every key shares: bbtree's insert then starts it, in a tree that
-    /// had no key, or shrinks it, as it does for every key
-    /// ([`Tree::shrink_shared_prefix_for`]); `alloc` is the map's.
+    /// `key`, bound for `leaf`, which the caller holds exclusively; the
+    /// descent found that `key` shares what every key of the tree shares.
+    /// A root leaf is the tree's only node and lies on every border, so
+    /// holding it holds the shared prefix. For a root leaf, the unsync
+    /// tree's [`Tree::shrink_shared_prefix_for`] runs, as on every insert
+    /// there: it starts the prefix in a tree that had no key, or shrinks it.
+    /// `alloc` is the map's.
     ///
     /// [`Tree::shrink_shared_prefix_for`]: super::super::root::Tree::shrink_shared_prefix_for
     #[inline(always)]
@@ -196,7 +201,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     where
         K: Ord,
     {
-        // Dropped last, after the nodes the split held: see `NodePages`.
+        // Declared outside the loop, so it drops last, after the nodes each
+        // split held: see `NodePages`.
         let pages = self.pages(alloc);
         loop {
             let mut path = TreePath::new();
@@ -221,11 +227,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// Splits `held`, the full leaf `path` leads to, inserting `key` and
-    /// `value` at `edge` of it, with bbtree's insert, carrying the split up
-    /// as far as it goes, and fitting the halves' prefixes; or, if a node it
-    /// takes is held by another thread or changed since the descent read it,
-    /// changes nothing and gives all back. Pages come from `pages`.
+    /// Splits `held`, the full leaf `path` leads to, and inserts `key` and
+    /// `value` at its `edge`, with `NodeStackMut::insert_prefixed`. The
+    /// split goes up as far as it must, and the halves' prefixes are fit to
+    /// their fences. If a node it takes is held by another thread or changed
+    /// since the descent read it, it changes nothing and gives all back.
+    /// Pages come from `pages`.
     #[expect(
         clippy::too_many_arguments,
         reason = "a refused split gives the entry and its policy back"
@@ -258,15 +265,15 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let key = self.prefixed(key, leaf, pages);
         let output = policy.vacant(key.key(), &value);
         self.change_held(|tree| {
-            // A latched tree counts no entries.
+            // A latched tree keeps no entry count.
             let mut uncounted = 0;
             path.node_stack_to_leaf(tree, top, leaf, edge)
                 .insert_prefixed(key, value, pages, &mut uncounted);
         });
         if was_last_leaf {
-            // The last leaf is the last under the node that took the
-            // separator, or the root, which the split holds, as every node
-            // down its last edges.
+            // The new last leaf is the last under the node that took the
+            // separator, or under the root if none did. The split holds that
+            // node, and every node down its last edges.
             let took_separator = match room {
                 Some(level) => Node::Internal(path.level(level).node),
                 None => self.root_page().expect("a tree that split").node(),

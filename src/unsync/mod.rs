@@ -1,8 +1,8 @@
 //! An ordered map and set for one thread at a time: [`BBTreeMap`] and
 //! [`BBTreeSet`], drop-in replacements for std's `BTreeMap` and `BTreeSet`
-//! (D1), on the same nodes as [`crate::BBTreeMap`], which threads share.
-//! They take `&mut self` to change, lend references into their nodes, and
-//! latch nothing.
+//! (D1). They use the same nodes as [`crate::BBTreeMap`], which threads
+//! share. They take `&mut self` to change, lend references into their nodes,
+//! and latch nothing.
 
 pub(crate) mod map;
 pub(crate) mod set;

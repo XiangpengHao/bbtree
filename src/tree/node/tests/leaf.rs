@@ -212,9 +212,8 @@ where
     ledger.assert_all_dropped_once();
 }
 
-/// What one leaf should hold: the ids of its entries in order, and of its
-/// head, if any, and of the head's key, where separator keys are heads
-/// (D49).
+/// What one leaf should hold: the ids of its entries in order, and of its head,
+/// if any, and of the head's key, with inline keys (D49).
 #[derive(Default)]
 struct LeafModel {
     entries: Vec<(usize, usize)>,
@@ -224,7 +223,7 @@ struct LeafModel {
 
 impl LeafModel {
     /// Puts a new head into `leaf`, which has none, and models it: a tracked
-    /// value, and a tracked key where separator keys are heads (D49).
+    /// value, and with inline keys a tracked key (D49).
     fn put_head<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
         &mut self,
         leaf: Leaf<Tracked<'l>, V, S>,
@@ -232,8 +231,7 @@ impl LeafModel {
     ) {
         let value = V::from_tracked(ledger.track());
         self.head = Some(value.tracked_id());
-        let key =
-            NodePtr::<Tracked<'l>, V, S>::has_separator_keys_in_heads().then(|| ledger.track());
+        let key = NodePtr::<Tracked<'l>, V, S>::has_inline_keys().then(|| ledger.track());
         self.head_key = key.as_ref().map(Tracked::id);
         leaf.put_head(key, value);
     }
@@ -260,8 +258,8 @@ impl LeafModel {
     ) {
         let right = split.right;
         let separator_value = right.head_id().expect("the right half has a head");
-        // The separator's key goes up, or where separator keys are heads,
-        // into the right half's head (D49).
+        // The separator's key goes up, or with inline keys, into the right
+        // half's head (D49).
         let separator_key = Node::Leaf(right).separator_key_id(&split.separator);
         let mut halves = left.tracked_ids();
         halves.push((separator_key, separator_value));
@@ -357,8 +355,8 @@ fn random_operations<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>(
                                 let removed_key = succession.removed_key.as_ref().map(Tracked::id);
                                 assert_eq!(removed_key, model.head_key);
                                 let (first_key_id, first_value_id) = model.entries.remove(0);
-                                // The first key goes up, or where separator
-                                // keys are heads, becomes the head's (D49).
+                                // The first key goes up, or with inline keys,
+                                // becomes the head's (D49).
                                 match succession.successor.key() {
                                     Some(key) => assert_eq!(key.id(), first_key_id),
                                     None => model.head_key = Some(first_key_id),

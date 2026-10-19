@@ -1,42 +1,40 @@
 //! The post (doc/14-blogpost.md, whose text it shows): what bbtree is, how
 //! fast, on one thread, on many, and in real systems
-//! (`performance_cards.rs`), how it works (`how_it_works.rs`), how to try
-//! it, and how to cite it. The figures that read a tree build it as the
-//! reader comes to them, sharing the trees of one workload.
+//! (`performance_cards.rs`), and how it works (`how_it_works.rs`), with
+//! the works it cites.
 
 use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-use crate::figure::TreeStore;
-use crate::how_it_works::{HowItWorks, Notes};
+use crate::how_it_works::{HowItWorks, Note, NoteRef, Notes};
 use crate::measurements::Measurements;
+use crate::outline::PostOutline;
 use crate::performance_cards::PerformanceCards;
 use crate::site::{AUTHOR_PAGE, Credit, SiteHeader, SitePage};
 use crate::spotlight::{HintLayer, PointerHint, Spotlight};
-
-/// The post's BibTeX entry, as doc 14 gives it.
-const CITATION: &str = r"@misc{hao2026bbtree,
-  author       = {Xiangpeng Hao},
-  title        = {{bbtree}: fastest ordered map in the world},
-  year         = {2026},
-  howpublished = {\url{https://github.com/XiangpengHao/bbtree}},
-}";
+use crate::theme::{PostTheme, ThemeSwitch};
 
 #[component]
 pub(crate) fn Post() -> Element {
-    let trees = TreeStore::use_new();
     let hint = PointerHint::use_new();
     // The charts' own spotlight, for their hints: they light no node.
     let charts = Spotlight::use_new(hint);
     let measurements = use_hook(|| Rc::new(Measurements::of_ryzen_9900x()));
+    let theme = PostTheme::use_new();
     rsx! {
-        document::Title { "bbtree: fastest ordered map in the world" }
+        document::Title { "bbtree: fastest ordered map" }
         div { class: "post-page",
-            SiteHeader { current: SitePage::Post }
+            SiteHeader { current: SitePage::Post,
+                ThemeSwitch { theme }
+            }
+            main { class: "post-main",
             article { class: "post",
+                // The opening flows as plain blocks, as the sections do, so
+                // that the quote's note floats past it.
+                div { class: "post-intro",
                 header { class: "post-head",
-                    h1 { class: "post-title", "bbtree: fastest ordered map in the world" }
+                    h1 { class: "post-title", "bbtree: fastest ordered map" }
                 }
                 blockquote { class: "post-quote",
                     p {
@@ -50,21 +48,23 @@ pub(crate) fn Post() -> Element {
                             rel: "noopener",
                             "Jim Gray"
                         }
+                        " and Andreas Reuter"
+                        NoteRef { note: Note::Gray }
                     }
                 }
                 p {
                     strong { "bbtree" }
-                    " is by far the fastest btree (ordered map):"
+                    " is by far the fastest B-tree (that I'm aware of):"
                 }
                 ol {
                     li {
-                        "5x faster than std's "
+                        "5× faster than std's "
                         code { "BTreeMap" }
-                        " at single thread, 7x faster than "
+                        " on a single thread, 12× faster than "
                         code { "crossbeam-skiplist" }
-                        " at 12 threads."
+                        " at 96 threads."
                     }
-                    li { "30% lower memory usage, 5x lower p99 latency." }
+                    li { "30% lower memory usage, 5× lower p99 latency." }
                     li {
                         "Zero dependencies, "
                         code { "no_std" }
@@ -72,16 +72,14 @@ pub(crate) fn Post() -> Element {
                     }
                     li {
                         code { "unsync::BBTreeMap" }
-                        " is a "
-                        strong { "drop-in replacement" }
-                        " for std's "
+                        " is a drop-in replacement for std's "
                         code { "BTreeMap" }
                         "/"
                         code { "BTreeSet" }
                         "."
                     }
                     li {
-                        "Production-ready by formal verification, model checking, fuzzing, and lots of testing."
+                        "Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing."
                     }
                     li {
                         "Brought to you by decades of database research and careful curation by "
@@ -89,45 +87,16 @@ pub(crate) fn Post() -> Element {
                         "."
                     }
                 }
+                }
                 PerformanceCards { measurements, spotlight: charts }
-                HowItWorks { trees }
-                h2 { class: "post-section", "Try it" }
-                pre {
-                    code { "cargo add bbtree" }
+                // The sections, with the outline beside them and the
+                // notes after them.
+                div { class: "post-body",
+                    PostOutline {}
+                    HowItWorks {}
+                    Notes {}
                 }
-                ol {
-                    li {
-                        "Replacing std's "
-                        code { "BTreeMap" }
-                        "? Use "
-                        code { "bbtree::unsync::BBTreeMap" }
-                        "; change one "
-                        code { "use" }
-                        " line."
-                    }
-                    li {
-                        "Sharing it across threads? Use "
-                        code { "bbtree::BBTreeMap" }
-                        "."
-                    }
-                    li {
-                        "Many keys at once? Use "
-                        code { "get_many_copied" }
-                        " and "
-                        code { "insert_many" }
-                        "."
-                    }
-                    li {
-                        "On x86, build with "
-                        code { "-C target-cpu=native" }
-                        " for AVX-512."
-                    }
-                }
-                p { "If you like bbtree, don't forget to cite it in your paper:" }
-                pre {
-                    code { {CITATION} }
-                }
-                Notes {}
+            }
             }
             Credit {}
             HintLayer { hint }

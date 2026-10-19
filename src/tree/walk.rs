@@ -3,40 +3,38 @@
 //! position between two entries of a leaf (`node_stack.rs`). Moving a cursor
 //! never calls `Ord` (D11).
 //!
-//! Within the leaf, the next entry is beside the position. Past the leaf's
-//! last entry, it is the separator of the lowest node on the node stack with a
-//! key right of it, whose value is the head of the leftmost leaf right of that
-//! key (D17); the cursor goes up the node stack to that node and down to that
-//! leaf. Moving backward mirrors this: before the leaf's first entry, the
-//! previous one is the separator of the lowest node on the node stack with a
-//! key left of it, whose value is this leaf's head, and the cursor goes on
-//! from the end of the rightmost leaf left of that key.
+//! Within a leaf, the next entry is beside the position. After a leaf's last
+//! entry comes the nearest ancestor separator to its right; its value is
+//! stored as the next leaf's head (D17). The cursor climbs to it, then
+//! descends to that leaf. Moving backward mirrors this: before a leaf's
+//! first entry comes the nearest ancestor separator to its left, whose value
+//! is this leaf's head. The cursor climbs to it, then descends to the end of
+//! the previous leaf.
 //!
-//! Consuming folds visit the remaining entries of each leaf in one counted
-//! loop, updating the cursor once per leaf. The walk's count, or its other
-//! end's position in the same leaf, limits the final run. This removes the
-//! cursor's per-entry bookkeeping and lets the compiler vectorize simple
-//! reductions; crossing a leaf boundary uses the same code as `next`.
+//! Consuming folds visit the rest of each leaf in one counted loop and
+//! update the cursor once per leaf; the other end's position bounds the last
+//! run. This drops the per-entry cursor bookkeeping and lets the compiler
+//! vectorize simple reductions. Crossing a leaf boundary uses the same code
+//! as `next`.
 //!
 //! A cursor changes in place, field by field, and is never rebuilt and
-//! copied over: a copy reads the cursor with wide loads right after narrow
-//! stores to it, which the CPU can't forward, so the copy waits for the
-//! stores to retire, and with them every older cache miss. Over many small
-//! maps, that serialized their misses (D23).
+//! copied over. A copy's wide loads can't take their data from the narrow
+//! stores just before them, so they wait for those stores to retire, and
+//! with them every older cache miss (D23).
 //!
 //! A [`DyingWalk`] takes the tree apart as it goes, for `IntoIter` and for
-//! dropping a tree: it moves each entry out of its slot, with nothing
-//! shifting and nothing rebalanced, and frees each node once its ends are
-//! done with it.
+//! dropping a tree. It moves each entry out of its slot, shifts and
+//! rebalances nothing, and frees each node once its ends are done with it.
 //!
 //! # Safety argument
 //!
 //! A walk with [`ValMut`] hands out values as `&mut V`, and one with
-//! [`Dying`] moves entries out, which is sound only if it hands out each
-//! entry at most once. Every walk ensures that by construction:
+//! [`Dying`] moves entries out. Both are sound only if the walk hands out
+//! each entry at most once, which every walk ensures by construction:
 //!
 //! - its ends start at the tree's first and last positions, or at a range's
-//!   bounds with the front not after the back, which making the range checks;
+//!   bounds with the front not after the back, which [`RangeWalk::new`]
+//!   checks;
 //! - an end moves only toward the other, never back. A step hands out the
 //!   entry it crosses; a consuming fold hands out each entry of a crossed
 //!   run once. A panicking fold consumes its walk, so it cannot resume at
@@ -45,13 +43,12 @@
 //!   between the ends is above 0. A [`RangeWalk`] stops where its attached
 //!   ends meet, or at the tree's boundary when the opposite, unbounded end
 //!   has not started. An end never hands out an entry the other end has.
-//!   During a cached leaf run, its interval records the logical end while
-//!   its node stack lags; the node stack is reconciled before the other end
-//!   can move;
-//! - a [`BorrowedWalk`] steps as a `RangeWalk` and takes every entry it
-//!   crosses off its count: one per step, a key run's length per run. When
-//!   it folds as a `FullWalk`, its count is the number of entries between
-//!   its reconciled ends.
+//!   During a cached leaf run, the run's interval records where the end is
+//!   while its node stack lags behind; the walk reconciles the node stack
+//!   before the other end can move;
+//! - a [`BorrowedWalk`] steps and folds as a `RangeWalk`, and takes every
+//!   entry it steps across off its count: one per step, a key run's length
+//!   per run.
 //!
 //! The count starts at the map's length, which is its number of entries
 //! whatever `Ord` does, and the positions are structural, so neither depends
@@ -61,15 +58,15 @@
 //! reaches:
 //!
 //! - an end frees a node when it goes up out of it, past its last edge (its
-//!   first, going backward): every entry and child of the node then lies on
-//!   the end's side of where it stands, handed out or freed, so neither end
-//!   comes back to the node, nor reaches it through the node stack, which no
-//!   longer holds it;
+//!   first, going backward). Every entry and child of the node then lies
+//!   behind the end, handed out or freed. So neither end comes back to the
+//!   node, and the end's node stack no longer holds it;
 //! - an end goes up out of a leaf only after handing out what it needs from
 //!   it: going backward, the leaf's head is the separator's value;
-//! - once no entry is left between the ends, they stand at the same position,
-//!   or only one of them moved, and the nodes not yet freed are exactly those
-//!   on that end's node stack, which the walk frees last, from the bottom up.
+//! - once no entry is left between the ends, they stand at the same
+//!   position, or only one of them has moved. The nodes not yet freed are
+//!   then exactly those on that end's node stack, which the walk frees last,
+//!   from the bottom up.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -91,8 +88,8 @@ use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-/// A borrow type that walks can hand out entries with: what it hands out
-/// for an entry.
+/// A borrow type a walk hands out entries with, and what it hands out for
+/// each entry.
 pub(crate) trait WalkBorrow<K, V>: CopyableBorrow + Sized {
     type Item;
 
@@ -131,16 +128,16 @@ impl<K, V> WalkBorrow<K, V> for Dying<K, V> {
 
     unsafe fn item(slots: EntrySlots<K, V>) -> (K, V) {
         // SAFETY: the caller hands out the entry only this once, so its key
-        // and value are moved out once, from nodes not yet freed: a walk
+        // and value are moved out once. Its node is not yet freed: a walk
         // frees a node only once past it (module safety argument).
         unsafe { (slots.key.read(), slots.value.read()) }
     }
 }
 
 /// One end of a walk: a node stack to a position between two entries of a
-/// leaf, or, until it starts, a detached node stack, in which case its first
-/// move starts it at the first or last position of the tree, by the direction
-/// of the move. Not starting writes no node stack.
+/// leaf. Until the cursor starts, its node stack is detached, and its first
+/// move starts it at the tree's first or last position, by the move's
+/// direction. An unstarted cursor writes no node stack.
 ///
 /// Invariant, once started (its node stack attached): the node stack ends at
 /// an edge of a leaf of the walk's tree.
@@ -157,7 +154,6 @@ impl<B: CopyableBorrow, K, V, S> Clone for Cursor<B, K, V, S> {
 impl<B: CopyableBorrow, K, V, S> Copy for Cursor<B, K, V, S> {}
 
 impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
-    /// A cursor that has not started.
     #[inline(always)]
     fn unstarted() -> Self {
         Self {
@@ -182,9 +178,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         self.stack.search_to_edge(key, side, shared);
     }
 
-    /// Starts at the `End` of the tree under `top`, unless the cursor has
-    /// started: its first position, where a walk forward starts, or its
-    /// last, where one backward does.
+    /// Unless the cursor has started, starts it at the `End` of the tree
+    /// under `top`: the first position for a walk forward, the last for one
+    /// backward.
     fn ensure_started<End: NodeEnd>(&mut self, top: WalkTop<K, V, S>) {
         if !self.stack.is_attached() {
             self.stack.attach(top.node());
@@ -256,9 +252,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// staying put, at the end of the tree. A cursor that has not started
     /// starts at the first position of the tree under `top`.
     ///
-    /// Past a leaf's end, it goes up the node stack to the separator after it,
-    /// handing `leave` each node it goes up out of, from the leaf: the nodes
-    /// whose last edge it has passed, which it never comes back to.
+    /// Past a leaf's end, it climbs the node stack to the separator after the
+    /// leaf. It hands `leave` each node it climbs out of, the leaf first:
+    /// nodes whose last edge it has passed, which it never comes back to.
     ///
     /// # Safety
     ///
@@ -286,8 +282,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         unsafe { self.next_separator(leave) }
     }
 
-    /// Crosses a leaf boundary. Keeping the ancestor search outside the
-    /// per-entry path avoids duplicating it in every inlined scan loop.
+    /// Crosses a leaf boundary and hands out the separator there. Keeping the
+    /// ancestor search outside the per-entry path avoids duplicating it in
+    /// every inlined scan loop.
     ///
     /// # Safety
     ///
@@ -309,9 +306,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     /// `None`, staying put, at the start of the tree. A cursor that has not
     /// started starts at the last position of the tree under `top`.
     ///
-    /// Before a leaf's start, it hands out the separator before it, whose
-    /// value is the leaf's head, and only then goes up the node stack to it,
-    /// handing `leave` each node it goes up out of, from the leaf: the nodes
+    /// Before a leaf's start, it hands out the separator before the leaf,
+    /// whose value is the leaf's head, and only then climbs the node stack to
+    /// it. It hands `leave` each node it climbs out of, the leaf first: nodes
     /// whose first edge it has passed, which it never comes back to.
     ///
     /// # Safety
@@ -371,11 +368,11 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         Some(item)
     }
 
-    /// Moves past the rest of the cursor's leaf, and the separator after it,
-    /// to the start of the next leaf, handing nothing out and handing `leave`
-    /// the nodes it goes up out of, as [`Self::next`] does; returns `false`,
-    /// staying put, at the last leaf. A cursor that has not started starts at
-    /// the first position of the tree under `top`.
+    /// Moves past the rest of the cursor's leaf and the separator after it,
+    /// to the start of the next leaf. It hands nothing out, and hands `leave`
+    /// the nodes it climbs out of, as [`Self::next`] does. Returns `false`,
+    /// staying put, at the last leaf. An unstarted cursor first starts at the
+    /// first position of the tree under `top`.
     fn skip_to_next_leaf(
         &mut self,
         top: WalkTop<K, V, S>,
@@ -385,9 +382,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         self.cross_to_next_leaf(leave).is_some()
     }
 
-    /// Goes past the end of the cursor's leaf to the start of the next leaf,
-    /// handing `leave` each node it goes up out of, as [`Self::next`] does,
-    /// and returns the internal node and index of the separator it crossed;
+    /// Goes from the end of the cursor's leaf to the start of the next leaf,
+    /// handing `leave` each node it climbs out of, as [`Self::next`] does.
+    /// Returns the internal node and index of the separator it crossed;
     /// `None`, staying put, at the last leaf.
     fn cross_to_next_leaf(
         &mut self,
@@ -403,9 +400,9 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
         Some((node, index))
     }
 
-    /// Goes up the node stack from the cursor's leaf to `depth`, above it,
-    /// handing `leave` each node it goes up out of, once off the node stack:
-    /// the leaf, then the internal nodes above it.
+    /// Climbs the node stack from the cursor's leaf to `depth`, above it. It
+    /// hands `leave` each node it climbs out of, once the node is off the
+    /// node stack: the leaf, then the internal nodes above it.
     fn ascend_leaving(&mut self, depth: usize, leave: &mut impl FnMut(Node<K, V, S>)) {
         let (leaf, _) = self.leaf_edge();
         self.stack.ascend();
@@ -426,8 +423,8 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Cursor<B, K, V, S> {
     }
 }
 
-/// The node a walk's tree hangs from: where each end starts. 8 bytes, where
-/// the node, sorted by its kind, takes 16.
+/// The top node of a walk's tree, where each end starts: a tagged pointer,
+/// 8 bytes, where a [`Node`] takes 16.
 struct WalkTop<K, V, S> {
     node: NodePtr<K, V, S>,
 }
@@ -499,9 +496,8 @@ impl<B: CopyableBorrow, K, V, S: InlineKeyStrategy<K>> Ends<B, K, V, S> {
     }
 }
 
-/// A borrowed whole-map walk. Ordinary steps reuse the range walk's leaf
-/// runs, while consuming folds reuse the count-bounded full walk below.
-/// Its exact count tracks successful steps from either end.
+/// A borrowed whole-map walk: a range walk over all of it, with an exact count
+/// of the entries left, which steps from either end take off.
 pub(crate) struct BorrowedWalk<B, K, V, S> {
     range: RangeWalk<B, K, V, S>,
     length: usize,
@@ -552,22 +548,11 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S
     }
 
     pub(crate) fn fold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
-        self.into_full_walk().fold(accumulator, fold)
+        self.range.fold(accumulator, fold)
     }
 
     pub(crate) fn rfold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
-        self.into_full_walk().rfold(accumulator, fold)
-    }
-
-    /// The same walk as a [`FullWalk`], its cursor reconciled with its run
-    /// and bounded by the count: each step of the range walk crossed exactly
-    /// one entry and counted it.
-    fn into_full_walk(mut self) -> FullWalk<B, K, V, S> {
-        self.range.finish_run();
-        FullWalk {
-            ends: self.range.ends,
-            length: self.length,
-        }
+        self.range.rfold(accumulator, fold)
     }
 
     pub(crate) fn reborrow(&self) -> BorrowedWalk<Immut<'_>, K, V, S> {
@@ -580,10 +565,10 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> BorrowedWalk<B, K, V, S
 
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> BorrowedWalk<Immut<'a>, K, V, S> {
     /// The keys after the front end, up to its leaf's end or the back end,
-    /// whichever comes first; or, where the front end crosses into another
-    /// leaf, the next key alone, a separator or the new leaf's first. The
-    /// walk moves past all of them at once, for a loop to visit them without
-    /// it. `None` once the ends meet.
+    /// whichever comes first. Where the front end crosses into another leaf,
+    /// the next key alone: a separator or the new leaf's first. The walk
+    /// moves past all of them at once, so a loop can visit them without it.
+    /// `None` once the ends meet.
     pub(crate) fn next_key_run(&mut self) -> Option<KeyRun<'a, K>> {
         let run = self.range.next_key_run()?;
         self.length -= run.len();
@@ -624,64 +609,6 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> FullWalk<B, K, V, S> {
     /// The entry after the front end, which moves past it, if any is left.
     pub(crate) fn next(&mut self) -> Option<B::Item> {
         self.next_leaving(&mut |_| {})
-    }
-
-    fn fold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
-        self.fold_from::<FirstEdge, A>(accumulator, fold)
-    }
-
-    fn rfold<A>(self, accumulator: A, fold: impl FnMut(A, B::Item) -> A) -> A {
-        self.fold_from::<LastEdge, A>(accumulator, fold)
-    }
-
-    /// Counts down by leaves, limiting the final run by the entries left
-    /// after either end has moved. Only separators use a full cursor step.
-    fn fold_from<End: NodeEnd, A>(
-        mut self,
-        mut accumulator: A,
-        mut fold: impl FnMut(A, B::Item) -> A,
-    ) -> A {
-        let Some(ends) = self.ends.as_mut() else {
-            return accumulator;
-        };
-        let top = ends.top;
-        let cursor = if End::IS_LAST {
-            &mut ends.back
-        } else {
-            &mut ends.front
-        };
-        if self.length > 0 {
-            cursor.ensure_started::<End>(top);
-        }
-        while self.length > 0 {
-            let (leaf, index) = cursor.leaf_edge();
-            let available = if End::IS_LAST {
-                index
-            } else {
-                leaf.len() - index
-            };
-            let count = available.min(self.length);
-            self.length -= count;
-            // SAFETY: the count limits the run both to this leaf and to
-            // entries still between the ends (module safety argument).
-            accumulator = unsafe { cursor.fold_leaf::<End, A>(count, accumulator, &mut fold) };
-            if self.length == 0 {
-                break;
-            }
-            self.length -= 1;
-            // SAFETY: an entry is left between the ends; the run stopped
-            // at a leaf boundary, so this step hands out its separator.
-            let item = unsafe {
-                if End::IS_LAST {
-                    cursor.next_back_separator(&mut |_| {})
-                } else {
-                    cursor.next_separator(&mut |_| {})
-                }
-            }
-            .expect("the walk's entry count includes a separator");
-            accumulator = fold(accumulator, item);
-        }
-        accumulator
     }
 
     /// [`Self::next`], handing `leave` the nodes the front end goes up out
@@ -875,10 +802,9 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         walk
     }
 
-    /// The ends, the `End` one started, or `None` once they have met. It
-    /// starts that end before checking: the order matters when switching
-    /// direction after exhausting a range whose other end was still
-    /// unbounded and unstarted.
+    /// Starts the `End` end, then returns the ends, or `None` once they have
+    /// met. Starting first matters when a walk switches direction after
+    /// exhausting a range whose other end is unbounded and has not started.
     fn ends_apart<End: NodeEnd>(&mut self) -> Option<&mut Ends<B, K, V, S>> {
         let ends = self.ends.as_mut()?;
         let top = ends.top;
@@ -1041,10 +967,11 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
     }
 }
 
-/// A walk that takes a tree apart: it moves every entry out, in key order
-/// from either end, and frees each node, its page going back to `alloc`, the
-/// allocator it came from, once its ends are done with it (module safety argument). Nothing shifts and
-/// nothing is rebalanced, as nothing but the walk sees the tree again.
+/// A walk that takes a tree apart. It moves every entry out, in key order
+/// from either end. It frees each node once its ends are done with it
+/// (module safety argument), giving its page back to `alloc`, the allocator
+/// it came from. Nothing shifts and nothing is rebalanced: nothing but the
+/// walk sees the tree again.
 ///
 /// Dropping it drops the entries left between its ends in ascending order,
 /// each key before its value, as std's `BTreeMap` does (D1), then frees the
@@ -1142,9 +1069,9 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
         self.free_remaining();
     }
 
-    /// Frees the nodes the walk has not, once no entry is left between its
-    /// ends: those on the node stack of an end that moved, from the bottom up,
-    /// or the top alone, if neither did.
+    /// Frees the nodes the walk has not freed, once no entry is left between
+    /// its ends. They are those on the node stack of an end that moved, from
+    /// the bottom up, or the top alone if neither did.
     fn free_remaining(&mut self) {
         let Some(ends) = self.walk.ends.take() else {
             return;
@@ -1161,7 +1088,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
         for depth in (1..=stack.depth()).rev() {
             // SAFETY: with no entry left between the ends, every node off this
             // node stack is freed, and every entry on it moved out or skipped
-            // for having no drop glue (module safety argument); each node here
+            // for having no drop glue (module safety argument). Each node here
             // is freed once, after its children.
             unsafe { stack.node_at(depth).free() }.deallocate(&self.alloc);
         }
@@ -1188,7 +1115,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for DyingWalk<K, V, S, A>
     }
 }
 
-/// The rest of a [`DyingWalk`] being dropped, which dropping this drops.
+/// A guard that drops the rest of a [`DyingWalk`] being dropped, if an
+/// entry's `Drop` panics.
 struct DropRest<'w, K, V, S: InlineKeyStrategy<K>, A: Allocator>(&'w mut DyingWalk<K, V, S, A>);
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> Drop for DropRest<'_, K, V, S, A> {

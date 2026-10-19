@@ -356,7 +356,7 @@ impl<K: VisKey> InspectedTree for InspectedMap<K> {
                     rest,
                     inline_key: Option::zip(node.inline_key(index), width)
                         .map(|(word, width)| Self::inline_key_hex(word, width)),
-                    length_tag: node.length_tag(index),
+                    hash_tag: node.hash_tag(index),
                     value: node.value(index).map(u64::to_string),
                 }
             })

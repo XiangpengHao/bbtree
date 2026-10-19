@@ -10,36 +10,35 @@
 //! |---|---|---|---|
 //! | without inline keys | none | nothing | `Ord` (D19) |
 //! | std integers | the impl's width in both | nothing | `Ord` (D19) |
-//! | every key under `WithInlineKey` | the impl's width in both | nothing | `Ord` (D19) |
+//! | every key under `WithInlineKey` | the impl's width in both; 8 / 4 with `cmp_from` (D43) | leaf: hash tags, if the impl has them and they fit (D36) | `Ord` (D19), or the impl's `cmp_from` past the tie |
 //! | std byte arrays | 2 / 2 (D32) | nothing | bytes; an exact-key lookup's one candidate all at once (D38) |
-//! | std heap byte strings | 8 / 4 (D43) | leaf: length tags, where they fit (D36) | bytes, past the tie |
+//! | std heap byte strings | 8 / 4 (D43) | leaf: hash tags, where they fit (D36) | bytes, past the tie |
 //!
-//! Every row with inline keys keeps its separator keys in leaves, each the
-//! head of the leftmost leaf right of it, and its internal nodes keep only
-//! inline keys and children (D49): their searches compare inline keys, and
-//! read a separator's key, down in its leaf, only on a tie. Without inline
-//! keys, internal nodes keep their separator keys (D17).
+//! With inline keys, every row keeps its separator keys as leaf heads, and
+//! its internal nodes keep only inline keys and children (D49). Their
+//! searches compare inline keys, and read a separator's key, down in its
+//! leaf, only on a tie. Without inline keys, internal nodes keep their
+//! separator keys (D17).
 //!
 //! What sets the rows apart is what a tie costs. A key with an `InlineKey`
-//! impl orders by its `Ord`, which may be user code: the nodes call it only
-//! while searching, never while keys move (D26). A std byte array holds its
-//! bytes in the node, so a tie costs a load from a node already read. A std
-//! heap byte string holds them elsewhere, so a tie costs a read past the
-//! node: its leaves keep long inline keys and the keys' lengths to avoid
-//! one, and its internal nodes, which most searches pass through without
-//! ending at a key, keep short ones. Reading a std byte string's window
-//! calls no user code, so its internal nodes may read a window's other
-//! bytes from the key while keys move (D43).
+//! impl orders by its `Ord`, or its `cmp_from`, which may be user code: the
+//! nodes call it only while searching, never while keys move (D26). A std
+//! byte array holds its bytes in the node, so a tie costs a load from a node
+//! already read. A std heap byte string holds them elsewhere, so a tie costs
+//! a read past the node. Its leaves keep long inline keys and the keys' hash
+//! tags, their lengths, to avoid one. Its internal nodes, which most
+//! searches pass through without ending at a key, keep short ones, as do
+//! those of keys whose impl has `cmp_from`. They read a window's other bytes
+//! from its key while keys move (D43), a key's own impl behind an
+//! abort-on-unwind guard (D48).
 //!
-//! Layouts (`layout.rs`), slots (`slots.rs`), searches (`leaf.rs`,
-//! `internal.rs`) and prefix upkeep (`tree/prefix.rs`, `inline_keys.rs`)
-//! read the plan, or the [`KeyInliner`] it is made from; none of them asks
-//! what the key type is.
+//! Layouts, slots, searches and prefix upkeep read the plan, or the
+//! [`KeyInliner`] it is made from; none of them asks what the key type is.
 //!
 //! A plan is a pure function of `K`, `S` and the node kind, which folds to a
 //! constant after monomorphization. Code asks for it where it uses it, from
 //! those types, and never receives it as an argument or keeps it in a
-//! field: a plan handed across a call that is not inlined would be a value
+//! field. A plan handed across a call that is not inlined would be a value
 //! read at run time, and the code behind the call would serve every plan.
 
 #![forbid(unsafe_code)]
@@ -49,7 +48,6 @@ use core::cmp::Ordering;
 use core::mem;
 
 use super::inline_keys::KeyInliner;
-use super::length_tags::LengthTags;
 use super::page::NodeKind;
 use super::slots::KeyList;
 use super::type_identity::ByteString;
@@ -57,8 +55,8 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What the nodes of one kind store beside their keys, and how a search tells
 /// their keys apart, for keys `K` under one map's strategy: a row of the
-/// table above, for one kind. See the module documentation for how to get
-/// one.
+/// module documentation's table, for one kind. The module documentation also
+/// says how to get one.
 pub(in crate::tree) struct NodePlan<K> {
     /// How the keys get inline keys, or `None` if they have none.
     inliner: Option<KeyInliner<K>>,
@@ -68,10 +66,10 @@ pub(in crate::tree) struct NodePlan<K> {
     /// so that a window it hands out, which may go into a leaf, is read from
     /// the key again (D43).
     rehydrates_windows: bool,
-    /// Whether the node stores each key's length, whose 2-byte tags filter an
-    /// exact-key lookup's candidates (D36): a leaf of heap byte strings,
-    /// where its layout has room for them.
-    length_tags: bool,
+    /// Whether the node stores each key's hash tag, which filters an
+    /// exact-key lookup's candidates (D36): a leaf of heap byte strings, or
+    /// of keys whose impl has tags, where its layout has room for them.
+    hash_tags: bool,
     /// The search over the candidates: the keys whose inline keys equal the
     /// search key's.
     candidate_search: KeySearch,
@@ -99,7 +97,17 @@ impl<K> NodePlan<K> {
             return Self::without_inline_keys();
         };
         match inliner {
-            KeyInliner::InlineKeyTrait { width, .. } => Self::with_inline_key_impl(inliner, width),
+            KeyInliner::InlineKeyTrait {
+                width,
+                hash_tag,
+                cmp_from,
+                ..
+            } => Self::with_inline_key_impl::<Kind>(
+                inliner,
+                width,
+                hash_tag.is_some(),
+                cmp_from.is_some(),
+            ),
             KeyInliner::ByteString(byte_string) if byte_string.holds_its_bytes() => {
                 Self::for_byte_arrays(inliner)
             }
@@ -115,7 +123,7 @@ impl<K> NodePlan<K> {
             inliner: None,
             inline_width: None,
             rehydrates_windows: false,
-            length_tags: false,
+            hash_tags: false,
             candidate_search: const { KeySearch::for_key::<K>() },
             whole_key_equality: false,
         }
@@ -124,22 +132,41 @@ impl<K> NodePlan<K> {
     /// Keys with an `InlineKey` impl: std integers under `Auto`, and every
     /// key under `WithInlineKey` (D18, D31). Both kinds keep the impl's
     /// width, and keys whose inline keys tie compare with `Ord`, searched as
-    /// the key type picks.
+    /// the key type picks. Leaves keep the impl's hash tags, if it has them,
+    /// where their layout has room for them (D36).
+    ///
+    /// An impl with `cmp_from` compares ties past the bytes known equal
+    /// instead (`SearchKey::cmp_tied`). Then, as for std heap byte strings,
+    /// internal nodes keep 4 bytes of 8-byte inline keys, and read a
+    /// window's other 4 from its key when they hand it out (D43): the extra
+    /// ties cost little only because they skip what is known equal.
     #[inline(always)]
-    fn with_inline_key_impl(inliner: KeyInliner<K>, width: InlineWidth) -> Self {
+    fn with_inline_key_impl<Kind: NodeKind>(
+        inliner: KeyInliner<K>,
+        width: InlineWidth,
+        has_hash_tag: bool,
+        has_cmp_from: bool,
+    ) -> Self {
+        let narrower_inside = has_cmp_from && width == InlineWidth::Eight && !Kind::IS_LEAF;
         Self {
             inliner: Some(inliner),
-            inline_width: Some(width),
+            inline_width: Some(if narrower_inside {
+                InlineWidth::Four
+            } else {
+                width
+            }),
+            rehydrates_windows: narrower_inside,
+            hash_tags: has_hash_tag && Kind::has_room_for_hash_tags(width),
             ..Self::without_inline_keys()
         }
     }
 
-    /// Std byte arrays, `[u8; 16]`, `[u8; 20]` and `[u8; 32]`, which hold
-    /// their bytes in the node: a tie costs a load from the node, so 2 bytes
-    /// of each inline key do, which pack more of them per cache line (D32).
-    /// Keys whose inline keys tie compare by their bytes, and an exact-key
-    /// lookup's one candidate by all of them at once, a length the compiler
-    /// knows (D38).
+    /// Std byte arrays (`[u8; 16]`, `[u8; 20]` and `[u8; 32]`) hold their
+    /// bytes in the node, where a tie costs only a load. So 2 bytes of each
+    /// inline key do, which packs more of them per cache line (D32). Keys
+    /// whose inline keys tie compare by their bytes. An exact-key lookup
+    /// compares its one candidate by all of them at once, in a length the
+    /// compiler knows (D38).
     #[inline(always)]
     fn for_byte_arrays(inliner: KeyInliner<K>) -> Self {
         Self {
@@ -153,8 +180,8 @@ impl<K> NodePlan<K> {
 
     /// Std heap byte strings, such as `String`, `Vec<u8>`, `Box<str>` and
     /// `&str`, which hold their bytes elsewhere: a tie costs a read past the
-    /// node. Leaves keep 8 bytes of each inline key, and each key's length
-    /// where their layout has room for it (D36). Internal nodes, which most
+    /// node. Leaves keep 8 bytes of each inline key, and each key's hash
+    /// tag, its length, where their layout has room for it (D36). Internal nodes, which most
     /// searches pass through without ending at a key, keep 4 bytes, and read
     /// a window's other 4 from its key when they hand it out (D43). Keys
     /// whose inline keys tie compare by their bytes past the tie.
@@ -169,7 +196,7 @@ impl<K> NodePlan<K> {
                 InlineWidth::Four
             }),
             rehydrates_windows: !leaf,
-            length_tags: Kind::has_room_for_length_tags(),
+            hash_tags: Kind::has_room_for_hash_tags(InlineWidth::Eight),
             candidate_search: KeySearch::EarlyExit,
             ..Self::without_inline_keys()
         }
@@ -195,32 +222,23 @@ impl<K> NodePlan<K> {
         self.rehydrates_windows
     }
 
-    /// Whether the node stores each key's length as a 2-byte tag (D36): a
-    /// leaf of heap byte strings whose layout has room for them.
+    /// Whether the node stores each key's hash tag (D36): a leaf of heap
+    /// byte strings, or of keys whose impl has tags, whose layout has room
+    /// for them.
     #[inline(always)]
-    pub(in crate::tree) fn has_length_tags(self) -> bool {
-        self.length_tags
+    pub(in crate::tree) fn has_hash_tags(self) -> bool {
+        self.hash_tags
     }
 
-    /// The tag the node stores for `key`, if it stores length tags: its
-    /// length in bytes, saturated at 65,535.
+    /// The tag the node stores for `key`, if it stores hash tags
+    /// ([`KeyInliner::hash_tag`]).
     #[inline(always)]
-    pub(in crate::tree) fn length_tag(self, key: &K) -> Option<u16> {
-        self.length_tags.then(|| {
-            let byte_string = self
-                .byte_string()
-                .expect("only std byte strings have length tags");
-            LengthTags::tag_of(byte_string.bytes(key).len())
-        })
-    }
-
-    /// Whether each separator key is the head of the leftmost leaf right of
-    /// it, where its value is too, rather than a key of its internal node
-    /// (D49): for keys with inline keys, the same in both kinds. Internal
-    /// nodes then keep only inline keys and children.
-    #[inline(always)]
-    pub(in crate::tree) fn has_separator_keys_in_heads(self) -> bool {
-        self.inliner.is_some()
+    pub(in crate::tree) fn hash_tag(self, key: &K) -> Option<u8> {
+        if self.hash_tags {
+            self.inliner?.hash_tag(key)
+        } else {
+            None
+        }
     }
 
     /// How a search runs over all of a node's keys when it has no inline key
@@ -249,12 +267,10 @@ impl<K> NodePlan<K> {
     /// Whether every lookup's node search is inlined (`leaf.rs`,
     /// `internal.rs`), or left to LLVM at each caller, as for std heap byte
     /// strings; an insert's leaf search is always inlined. Other keys' node
-    /// searches are short, and LLVM outlined some, each level then returning
-    /// through the stack: 10M `[u8; 32]` lookups ran 442 instructions each
-    /// instead of 271. A heap byte string's search reads keys past the node,
-    /// so a call costs little beside it, and inlined into every lookup it
-    /// made the lookup twice the code, with its state on the stack: the
-    /// benchmark's `String` lookups ran 449 instructions instead of 433.
+    /// searches are short; LLVM may outline them, and then each level returns
+    /// through the stack. A heap byte string's search reads keys past the
+    /// node, so a call costs little beside it. Inlined into every lookup, it
+    /// doubles the lookup's code and puts its state on the stack (D41).
     #[inline(always)]
     pub(in crate::tree) fn inlines_node_search(self) -> bool {
         !self.is_for_heap_byte_strings()
@@ -349,7 +365,7 @@ mod tests {
     struct PlanRow {
         inline_width: Option<InlineWidth>,
         rehydrates_windows: bool,
-        length_tags: bool,
+        hash_tags: bool,
         all_keys_search: KeySearch,
         candidate_search: KeySearch,
         whole_key_equality: bool,
@@ -361,7 +377,7 @@ mod tests {
             Self {
                 inline_width: plan.inline_width(),
                 rehydrates_windows: plan.rehydrates_windows(),
-                length_tags: plan.has_length_tags(),
+                hash_tags: plan.has_hash_tags(),
                 all_keys_search: plan.all_keys_search(),
                 candidate_search: plan.candidate_search(),
                 whole_key_equality: plan.has_whole_key_equality(),
@@ -373,7 +389,7 @@ mod tests {
             Self {
                 inline_width: None,
                 rehydrates_windows: false,
-                length_tags: false,
+                hash_tags: false,
                 all_keys_search,
                 candidate_search: all_keys_search,
                 whole_key_equality: false,
@@ -428,22 +444,41 @@ mod tests {
             two_bytes
         );
 
-        // A std byte string under `WithInlineKey` is a key like any other.
+        // A std byte array under `WithInlineKey` is a key like any other.
         let eight_bytes = PlanRow {
             inline_width: Some(InlineWidth::Eight),
             ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
         };
         assert_eq!(
-            PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
-            eight_bytes
-        );
-        assert_eq!(
-            PlanRow::of::<String, WithInlineKey, Internal<String, (), WithInlineKey>>(),
+            PlanRow::of::<[u8; 32], WithInlineKey, Leaf<[u8; 32], (), WithInlineKey>>(),
             eight_bytes
         );
         assert_eq!(
             PlanRow::of::<[u8; 32], WithInlineKey, Internal<[u8; 32], (), WithInlineKey>>(),
             eight_bytes
+        );
+    }
+
+    /// An impl with `cmp_from`, as `String`'s, keeps 4 bytes of its 8-byte
+    /// inline keys in internal nodes, which read a window's others from its
+    /// key (D43), and all 8 in leaves.
+    #[test]
+    fn inline_key_impls_with_cmp_from_keep_four_bytes_inside() {
+        let leaf = PlanRow {
+            inline_width: Some(InlineWidth::Eight),
+            ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
+        };
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Leaf<String, (), WithInlineKey>>(),
+            leaf
+        );
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Internal<String, (), WithInlineKey>>(),
+            PlanRow {
+                inline_width: Some(InlineWidth::Four),
+                rehydrates_windows: true,
+                ..leaf
+            }
         );
     }
 
@@ -484,8 +519,8 @@ mod tests {
                 candidate_search: KeySearch::EarlyExit,
                 ..PlanRow::without_inline_keys(all_keys_search)
             };
-            // Leaves of `()` values have no room for length tags; see
-            // `leaves_keep_length_tags_where_they_fit` for leaves that do.
+            // Leaves of `()` values have no room for hash tags; see
+            // `leaves_keep_hash_tags_where_they_fit` for leaves that do.
             assert_eq!(
                 PlanRow::of::<K, Auto, Leaf<K, (), Auto>>(),
                 PlanRow {
@@ -510,35 +545,64 @@ mod tests {
         assert_heap_byte_string::<&[u8]>(KeySearch::Branchless);
     }
 
+    /// A key's own impl's hash tags, where it has them, go in leaves whose
+    /// layout has room for them, never in internal nodes (D36). Integers
+    /// have none.
+    #[test]
+    #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
+    fn inline_key_impls_keep_their_hash_tags_in_leaves() {
+        let tagged = PlanRow {
+            inline_width: Some(InlineWidth::Eight),
+            hash_tags: true,
+            ..PlanRow::without_inline_keys(KeySearch::EarlyExit)
+        };
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Leaf<String, u64, WithInlineKey>>(),
+            tagged
+        );
+        assert_eq!(
+            PlanRow::of::<String, WithInlineKey, Internal<String, u64, WithInlineKey>>(),
+            PlanRow {
+                inline_width: Some(InlineWidth::Four),
+                rehydrates_windows: true,
+                hash_tags: false,
+                ..tagged
+            }
+        );
+        let integers = PlanRow::of::<u64, WithInlineKey, Leaf<u64, u64, WithInlineKey>>();
+        assert!(!integers.hash_tags);
+    }
+
     /// A leaf's plan tags each key with its length, saturated
-    /// (`length_tags.rs`), where the leaf keeps tags; an internal node's,
+    /// (`hash_tags.rs`), where the leaf keeps tags; an internal node's,
     /// and a leaf's without room for tags, never does.
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
     fn tagged_leaves_tag_keys_with_their_lengths() {
         let leaf = NodePlan::<String>::of::<Auto, Leaf<String, u64, Auto>>();
-        assert_eq!(leaf.length_tag(&String::from("tags")), Some(4));
-        assert_eq!(leaf.length_tag(&"x".repeat(65_537)), Some(u16::MAX));
+        assert_eq!(leaf.hash_tag(&String::from("tags")), Some(4));
+        assert_eq!(leaf.hash_tag(&"x".repeat(257)), Some(u8::MAX));
         let untagged = NodePlan::<String>::of::<Auto, Leaf<String, (), Auto>>();
-        assert_eq!(untagged.length_tag(&String::from("tags")), None);
+        assert_eq!(untagged.hash_tag(&String::from("tags")), None);
         let internal = NodePlan::<String>::of::<Auto, Internal<String, u64, Auto>>();
-        assert_eq!(internal.length_tag(&String::from("tags")), None);
+        assert_eq!(internal.hash_tag(&String::from("tags")), None);
     }
 
-    /// A leaf's plan keeps length tags only where its layout has room for
+    /// A leaf's plan keeps hash tags only where its layout has room for
     /// them, which the values' size and alignment and the latch word decide
     /// (D36).
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn leaves_keep_length_tags_where_they_fit() {
+    fn leaves_keep_hash_tags_where_they_fit() {
         fn keeps_tags<V, S: InlineKeyStrategy<String>>() -> bool {
-            NodePlan::<String>::of::<S, Leaf<String, V, S>>().has_length_tags()
+            NodePlan::<String>::of::<S, Leaf<String, V, S>>().has_hash_tags()
         }
         assert!(keeps_tags::<u64, Auto>());
-        assert!(!keeps_tags::<u64, Latched<Auto>>());
-        assert!(!keeps_tags::<u128, Auto>());
+        assert!(keeps_tags::<u64, Latched<Auto>>());
+        assert!(keeps_tags::<u128, Auto>());
         assert!(keeps_tags::<u128, Latched<Auto>>());
+        assert!(keeps_tags::<String, Auto>());
         assert!(!keeps_tags::<(), Auto>());
-        assert!(!keeps_tags::<String, Auto>());
+        assert!(!keeps_tags::<(), Latched<Auto>>());
     }
 }

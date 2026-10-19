@@ -18,8 +18,9 @@ nix develop            # the repository's dev shell, or direnv
 cd vis
 dx serve               # http://127.0.0.1:8080, and the post at /post/
 dx build --release --debug-symbols false   # into target/dx/bbtree-vis/release/web/public
-# A static host serves the post from its own copy of the page:
-cd target/dx/bbtree-vis/release/web/public && mkdir -p post && cp index.html post/
+# A static host serves the post from its own copy of the page, with its own
+# title and link previews:
+./lay-out-site.sh target/dx/bbtree-vis/release/web/public
 ```
 
 The release build needs `--debug-symbols false`: the nixpkgs `wasm-opt` crashes
@@ -94,7 +95,7 @@ are the explorer's only: on the post, Space scrolls.
 
 Layouts are those of the wasm32 build the page runs: a pointer takes 4 bytes,
 so internal nodes hold more keys than on a 64-bit target, and `String` leaves
-differ (no length tags fit). Leaves of fixed-size keys and values match.
+differ (no hash tags fit). Leaves of fixed-size keys and values match.
 
 The post's charts compile in the measurements under `data/<machine>/`:
 [bbtree-eval](https://github.com/XiangpengHao/bbtree-eval)'s `blog/runs.sh`

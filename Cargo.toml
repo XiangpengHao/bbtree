@@ -2,7 +2,7 @@
 name = "bbtree"
 version = "0.1.2"
 edition = "2024"
-description = "Blessed B-tree."
+description = "Fastest B-tree."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/XiangpengHao/bbtree"
 

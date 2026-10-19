@@ -2,22 +2,21 @@
 //! keeps for it in place of one.
 //!
 //! Every other node gets its fences from the separators above it, and skips
-//! the prefix they share (05-fence-key.md). The root has nothing above it,
-//! so the tree keeps its fences beside it, as the bytes every key shares
-//! (D50, `shared_prefix.rs`): a search checks a query against them once,
-//! before the root, and a node with no separator above it on a side, along
-//! the tree's left or right border, takes the root's fence there. They live
-//! in the root's page, after the root node (`node/root_page.rs`). The tree
-//! also keeps the last leaf an append went to, to append there again without
-//! a search (D45).
+//! the prefix they share (`prefix.rs`). The root has nothing above it, so
+//! the tree keeps its fences beside it, as the bytes every key shares (D50,
+//! `shared_prefix.rs`). A search checks a query against them once, before
+//! the root. A node along the tree's left or right border, with no
+//! separator above it on that side, takes the root's fence there. The
+//! fences live in the root page, after the root node (`node/root_page.rs`).
+//! The tree also remembers the last leaf an append went to, to append there
+//! again without a search (D45).
 //!
-//! The root node is a leaf, in a tree of one node, or an internal node; the
-//! tree grows and shrinks a level only at its root, in its page, which the
-//! tree keeps for life. Nothing records how tall the tree is: a node stack
-//! down counts its own steps (`node_stack.rs`). A map without entries may have
-//! no tree at all, as std's has no root then (D1): making one allocates
-//! nothing. Every operation on a whole tree starts here, on [`Tree`], each in
-//! its feature's module (`tree/mod.rs`).
+//! The root node is a leaf, in a tree of one node, or an internal node. The
+//! tree grows and shrinks a level only at its root, in the root page, which
+//! it keeps for life. Nothing records how tall the tree is: a node stack
+//! counts its own levels. A map without entries may have no tree at all, as
+//! std's has no root then (D1), so making a map allocates nothing. Every
+//! operation on a whole tree starts at [`Tree`].
 
 use core::cmp::Ordering;
 use core::mem;
@@ -32,22 +31,22 @@ use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
-/// A tree, by its root page, if it has one, which the tree owns with every
-/// node under it; and the last leaf an append went to.
+/// A tree: its root page, if it has one, which the tree owns with every
+/// node under it, and the last leaf an append went to.
 ///
-/// It has no `Drop`: dropping a `Tree` leaks the tree, which is safe;
+/// It has no `Drop`: dropping a `Tree` leaks the tree, which is safe.
 /// `Tree::destroy` takes it apart (`teardown.rs`).
 ///
 /// Invariant: `root_page` holds a well-formed tree, which nothing but this
-/// `Tree` reaches. Every key of the tree shares its shared prefix, and every
-/// node along the tree's left and right borders, the root too, has its
-/// length as its prefix length; searches trust it to route, never to stay
-/// in bounds.
+/// `Tree` reaches. Every key of the tree shares its shared prefix. Every
+/// node along the tree's left and right borders, the root included, has the
+/// shared prefix's length as its prefix length. Searches trust this to
+/// route, never to stay in bounds.
 ///
 /// If present, `rightmost_leaf` points to the tree's physically last leaf.
-/// Every exclusive use of the tree but the owner's fitting append clears it
-/// first ([`Self::root_mut`]). It holds no key reference, cached length, or
-/// assertion about the behavior of `Ord`.
+/// Every exclusive use of the tree except the owner's fitting append clears
+/// it first ([`Self::root_mut`]). It holds no reference to a key, no cached
+/// length, and no assumption about how `Ord` behaves.
 pub(crate) struct Tree<K, V, S> {
     root_page: Option<RootPage<K, V, S>>,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
@@ -72,10 +71,10 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         rightmost_leaf: None,
     };
 
-    /// The tree on `root_page`, with every node under it: a latched tree's
-    /// (`tree/latched`), to take apart once no other thread reaches it, or
-    /// for one of the tree's operations on the nodes a latched operation
-    /// holds, as if it owned them.
+    /// The tree on `root_page`, with every node under it. For a latched
+    /// tree (`tree/latched`): to take it apart once no other thread reaches
+    /// it, or to run one of the tree's operations on the nodes a latched
+    /// operation holds, as if it owned them.
     pub(in crate::tree) fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
         Self {
             root_page: Some(root_page),
@@ -140,10 +139,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         self.root()
     }
 
-    /// How many edges lead down from the root to each leaf: where two trees
-    /// line up, to join them (`tree/join.rs`), or which of two is smaller.
-    /// Counted down the last edges: every leaf lies as deep, and that is the
-    /// border a join of this tree with one right of it walks anyway.
+    /// How many edges lead down from the root to each leaf, which tells
+    /// which of two trees is smaller. Counted down the last edges, as every
+    /// leaf lies as deep.
     ///
     /// # Panics
     ///
@@ -212,10 +210,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             .get_or_insert_with(|| RootPage::new(FreshPage::allocate(alloc)))
     }
 
-    /// The tree of `top` and the nodes under it, on plain pages, whose keys
-    /// all share `shared_prefix`, which every node along its borders must
-    /// have as its prefix length (D50): `top` moves into a root page, from
-    /// and back to `alloc`. The tree owns them from now on.
+    /// The tree of `top` and the nodes under it, on plain pages. Their keys
+    /// all share `shared_prefix`, and every node along the borders must have
+    /// its length as its prefix length (D50). `top` moves into a root page
+    /// from `alloc`, and its plain page goes back to `alloc`. The tree owns
+    /// the nodes from now on.
     pub(in crate::tree) fn from_node(
         top: Node<K, V, S>,
         shared_prefix: SharedPrefix,
@@ -227,19 +226,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             root_page: Some(page),
             rightmost_leaf: None,
         }
-    }
-
-    /// The root node on a plain page of its kind, giving up the tree, for
-    /// another tree to hang under an edge (`tree/join.rs`): its root page
-    /// goes back to `alloc`, and the new one comes from it.
-    ///
-    /// # Panics
-    ///
-    /// Without a tree.
-    pub(in crate::tree) fn into_node(self, alloc: &impl Allocator) -> Node<K, V, S> {
-        let (top, emptied) = self.existing_root_page().into_node(alloc);
-        emptied.deallocate(alloc);
-        top
     }
 
     /// Makes the tree a level taller ([`RootPage::raise`]): the root node
@@ -281,11 +267,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         self.rightmost_leaf = Some(leaf.node_ptr());
     }
 
-    /// An append of `key` to the remembered last leaf, if it has room, and
-    /// `key` is greater than its last key and has what every key shares
-    /// (D50); or else `key` back, for the ordinary search. Forgets the leaf
-    /// before comparing. Always inline: the batch's caller must not outline
-    /// the scalar insert's append check.
+    /// An append of `key` to the remembered last leaf, if the leaf has room
+    /// and `key` is greater than its last key and has what every key shares
+    /// (D50). Otherwise `key` back, for the ordinary search. Forgets the
+    /// leaf before comparing. Always inline, so the batch's caller doesn't
+    /// outline the single-key insert's append check.
     #[inline(always)]
     pub(crate) fn rightmost_append(&mut self, key: K) -> Result<RightmostAppend<'_, K, V, S>, K>
     where
@@ -321,8 +307,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 }
 
-/// An append of a key to the physically last leaf, which has room for it,
-/// lent together with its owner's rightmost-leaf field, forgotten
+/// An append of a key to the physically last leaf, which has room for it.
+/// It borrows its owner's rightmost-leaf field, which stays cleared
 /// meanwhile. Dropping this token drops the key, changes no entries and
 /// leaves the leaf forgotten; consuming it appends and remembers the leaf
 /// again.

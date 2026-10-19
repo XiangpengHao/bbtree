@@ -2,8 +2,8 @@
 //! `inspect` feature, which promises no stability.
 //!
 //! The views read each node through the same handles the map's own code
-//! uses, and say what the node holds as bbtree stores it: its keys, inline
-//! keys, length tags and prefixes, and where each slot array of its page
+//! uses. They say what the node holds as bbtree stores it: its keys, inline
+//! keys, hash tags and prefixes, and where each slot array of its page
 //! lies, from the layout the page was allocated with. Nothing here computes
 //! what the node code computes, so whatever draws a view draws the tree as it
 //! is (`doc/10-visualization.md`).
@@ -22,7 +22,7 @@ use core::ptr;
 
 use super::batch::LaneWatch;
 use super::node::inline_key_search::NodeInlineKeys;
-use super::node::inline_keys::{InlineTarget, SearchKey};
+use super::node::inline_keys::{SearchKey, Window};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodeKind, NodePtr, PageType};
@@ -70,10 +70,10 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
 impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// The steps the map's exact-key lookup takes for `key`
     /// ([`crate::unsync::BBTreeMap::get`]), node by node, through the same
-    /// searches: `search` in each internal node, `find` in the
-    /// leaf. A key found in an internal node is a separator, whose value is
-    /// a head below (D17): the trace then goes on the way the value is read
-    /// (`Internal::head_leaf`), down the separator's right edge and first
+    /// searches: `search` in each internal node, `find` in the leaf. A key
+    /// found in an internal node is a separator, whose value is its head
+    /// (D17). The trace then goes on the way the value is read
+    /// (`Internal::head_leaf`): down the separator's right edge, then first
     /// edges, to the leaf that holds it.
     ///
     /// Empty if the map has no root, or the lookup reads no node: the key
@@ -156,12 +156,13 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         self.root_page?.shared_prefix().place_outside(&search)
     }
 
-    /// The lanes and executor of [`crate::unsync::BBTreeMap::get_many`] (doc 12),
-    /// run for `keys` and watched: every poll of a lane, in the executor's
-    /// order, with the line the lane fetched before it yielded. They run
-    /// whatever the map's size, but on a map without an internal root, where
-    /// batches run no lanes, the trace has no polls; whether `get_many`
-    /// runs them on this map is [`BatchTrace::batches`].
+    /// Runs the lanes and executor of
+    /// [`crate::unsync::BBTreeMap::get_many`] (doc 12) for `keys`, and
+    /// records every poll of a lane, in the executor's order, with the line
+    /// the lane fetched before it yielded. The lanes run whatever the map's
+    /// size. On a map without an internal root, where batches run no lanes,
+    /// the trace has no polls. Whether `get_many` runs lanes on this map is
+    /// [`BatchTrace::batches`].
     pub fn trace_many<Q, const N: usize>(&self, keys: [&Q; N]) -> BatchTrace<'a, K, V, S>
     where
         K: Borrow<Q>,
@@ -235,8 +236,8 @@ impl LaneWatch for BatchRecorder<'_> {
     }
 }
 
-/// A batch lookup as [`crate::unsync::BBTreeMap::get_many`] runs it, poll by poll
-/// ([`TreeView::trace_many`]).
+/// A batch lookup as [`crate::unsync::BBTreeMap::get_many`] runs it, poll
+/// by poll ([`TreeView::trace_many`]).
 pub struct BatchTrace<'a, K, V, S> {
     polls: Vec<BatchPoll<'a, K, V, S>>,
     batches: bool,
@@ -309,7 +310,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TraceStep<'a, K, V, S> {
     /// inline key, `target`, against, the node's own (D18).
     fn searched(
         node: NodeView<'a, K, V, S>,
-        target: Option<InlineTarget>,
+        target: Option<Window>,
         inline_keys: Option<NodeInlineKeys<'_>>,
         outcome: TraceOutcome,
     ) -> Self {
@@ -371,8 +372,8 @@ pub enum TraceOutcome {
     /// `edge - 1` and `edge`: the lookup goes down edge `edge`.
     Descend { edge: usize },
     /// Key `index` equals the searched key. In a leaf its value is beside
-    /// it; in an internal node it is a separator, whose value is the head of
-    /// the leftmost leaf right of it, which the next steps reach.
+    /// it; in an internal node it is a separator, whose value is its head,
+    /// which the next steps reach.
     Found { index: usize },
     /// In a leaf, no key equals the searched key; it would go in at slot
     /// `insert_at`.
@@ -474,9 +475,8 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
         self.node.prefix_len()
     }
 
-    /// Key `index`: of an internal node, separator `index`'s, which in
-    /// maps whose keys have inline keys is the head key of the leftmost leaf
-    /// right of it (D49).
+    /// Key `index`; of an internal node, separator `index`'s key, which in
+    /// maps whose keys have inline keys is its head's key (D49).
     ///
     /// # Panics
     ///
@@ -507,15 +507,15 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
             .map(|inline_keys| inline_keys.inline_key(index)))
     }
 
-    /// Key `index`'s length tag, if the node keeps them (D36).
+    /// Key `index`'s hash tag, if the node keeps them (D36).
     ///
     /// # Panics
     ///
     /// If `index >= len`.
-    pub fn length_tag(&self, index: usize) -> Option<u16> {
+    pub fn hash_tag(&self, index: usize) -> Option<u8> {
         assert!(index < self.len(), "key index out of bounds");
         match self.node {
-            Node::Leaf(leaf) => leaf.length_tags().map(|tags| tags[index]),
+            Node::Leaf(leaf) => leaf.hash_tags().map(|tags| tags[index]),
             Node::Internal(_) => None,
         }
     }
@@ -529,15 +529,14 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
         }
     }
 
-    /// The leaf's head's key, the key of the separator just left of it,
-    /// where separator keys are heads, in maps whose keys have inline keys
-    /// (D49): `None` otherwise, in the leftmost leaf, and in an internal
-    /// node.
+    /// The leaf's head's key, the key of the separator just left of it, in
+    /// maps whose keys have inline keys (D49). `None` otherwise, in the
+    /// leftmost leaf, and in an internal node.
     pub fn head_key(&self) -> Option<&'a K> {
         match self.node {
-            Node::Leaf(leaf) => (leaf.has_head()
-                && NodePtr::<K, V, S>::has_separator_keys_in_heads())
-            .then(|| leaf.head_key()),
+            Node::Leaf(leaf) => {
+                (leaf.has_head() && NodePtr::<K, V, S>::has_inline_keys()).then(|| leaf.head_key())
+            }
             Node::Internal(_) => None,
         }
     }
@@ -640,11 +639,11 @@ impl PageMap {
         let len = leaf.len();
         let capacity = layout.keys.capacity;
         let mut arrays = Self::header_and_inline_keys::<K, V, S, Leaf<K, V, S>>(len);
-        if let Some(offset) = layout.length_tags_offset {
+        if let Some(offset) = layout.hash_tags_offset {
             arrays.push(SlotArray::dense(
-                SlotContents::LengthTags,
+                SlotContents::HashTags,
                 offset,
-                size_of::<u16>(),
+                size_of::<u8>(),
                 capacity,
                 len,
             ));
@@ -693,8 +692,8 @@ impl PageMap {
         let len = internal.len();
         let capacity = layout.keys.capacity;
         let mut arrays = Self::header_and_inline_keys::<K, V, S, Internal<K, V, S>>(len);
-        // With inline keys, its separator keys are heads below (D49).
-        if layout.keeps_keys() {
+        // With inline keys, its separator keys are leaf heads (D49).
+        if !NodePtr::<K, V, S>::has_inline_keys() {
             arrays.push(SlotArray {
                 contents: SlotContents::Keys,
                 offset: layout.keys.keys_offset,
@@ -841,10 +840,10 @@ pub enum SlotContents {
     /// The first bytes of each key's window past the node's prefix (D18).
     InlineKeys,
     /// Each key's length, of byte-string leaves (D36).
-    LengthTags,
+    HashTags,
     Keys,
-    /// A leaf's head's key: the key of the separator just left of it, where
-    /// separator keys are heads, in maps whose keys have inline keys (D49).
+    /// A leaf's head's key: the key of the separator just left of it, in
+    /// maps whose keys have inline keys (D49).
     HeadKey,
     /// A leaf's head: the value of the separator just left of it (D17).
     Head,
@@ -1004,7 +1003,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-    fn string_keys_keep_prefixes_and_length_tags() {
+    fn string_keys_keep_prefixes_and_hash_tags() {
         let mut map = BBTreeMap::new();
         for number in shuffled(20_000, 2) {
             map.insert(format!("https://example.com/users/{number:08}"), number);
@@ -1020,15 +1019,13 @@ mod tests {
             leaf.prefix_len() > 0,
             "a leaf between two fences shares a prefix"
         );
-        let tag = leaf
-            .length_tag(0)
-            .expect("byte-string leaves keep length tags");
+        let tag = leaf.hash_tag(0).expect("byte-string leaves keep hash tags");
         assert_eq!(usize::from(tag), leaf.key(0).len());
         let page = leaf.page_map();
         assert!(
             page.arrays()
                 .iter()
-                .any(|array| array.contents() == SlotContents::LengthTags)
+                .any(|array| array.contents() == SlotContents::HashTags)
         );
     }
 

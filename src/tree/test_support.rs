@@ -1,7 +1,7 @@
 //! Test-only helpers: a deterministic PRNG, which also walks two iterators
 //! alike from random ends and makes random range bounds; steps from either
 //! end of an iterator; hashes; keys and values made from numbers; byte-string
-//! keys that length tags tell apart; drop tracking; padded and over-aligned
+//! keys that hash tags tell apart; drop tracking; padded and over-aligned
 //! test types; nodes of a known kind, trees built through the node API, and
 //! a check of inline keys. The maps' and the set's tests use the first
 //! eight.
@@ -176,31 +176,31 @@ impl FromNumber for String {
     }
 }
 
-/// Byte-string keys whose lookups the leaves' length tags filter (D36), for
+/// Byte-string keys whose lookups the leaves' hash tags filter (D36), for
 /// the tests of both maps: keys that tie on their inline keys and differ in
 /// length, by a few bytes or past where tags saturate, and keys the map
 /// lacks that tie with them.
-pub(crate) struct LengthTagCase {
+pub(crate) struct HashTagCase {
     /// What the map holds; each key's value is its index.
     keys: Vec<String>,
     /// Keys the map lacks, to look up besides its own.
     absent: Vec<String>,
 }
 
-impl LengthTagCase {
+impl HashTagCase {
     /// A key that shares no byte with the others of its case: the tree then
     /// keeps no shared prefix (D50), and its root leaf takes its inline keys
     /// from their first byte, where the others tie.
     const OUTSIDE_KEY: &str = "z";
 
     /// The length from which keys' tags saturate.
-    const SATURATED_LEN: usize = 65_535;
+    const SATURATED_LEN: usize = 255;
 
     /// Every case.
     pub(crate) fn all() -> Vec<Self> {
         let mut cases = Vec::from(Self::two_candidates_per_absent_key());
         cases.extend([
-            Self::lone_candidates_longer_by_64_kib(),
+            Self::lone_candidates_longer_by_256(),
             Self::lone_candidate_in_leaves_with_a_prefix(),
             Self::saturated_key_within_its_inline_key(),
             Self::zero_keys(),
@@ -244,19 +244,19 @@ impl LengthTagCase {
     }
 
     /// Absent keys that end within their inline keys, each with one
-    /// candidate, 65,536 bytes longer: a tag that wrapped would have the
+    /// candidate, 256 bytes longer: a tag that wrapped would have the
     /// absent key's length, and an unlatched copy would take it for it.
-    fn lone_candidates_longer_by_64_kib() -> Self {
+    fn lone_candidates_longer_by_256() -> Self {
         Self::outside_and(
             [
-                format!("user:042{}", "x".repeat(65_536)),
-                format!("a{}", "\0".repeat(65_536)),
+                format!("user:042{}", "x".repeat(256)),
+                format!("a{}", "\0".repeat(256)),
             ],
             [String::from("user:042"), String::from("a")],
         )
     }
 
-    /// As [`Self::lone_candidates_longer_by_64_kib`], among enough keys
+    /// As [`Self::lone_candidates_longer_by_256`], among enough keys
     /// that leaves keep a prefix: the absent key's inline key ends in zeros
     /// past its end, where the long key has them too.
     fn lone_candidate_in_leaves_with_a_prefix() -> Self {
@@ -269,7 +269,7 @@ impl LengthTagCase {
             "{}{}{}",
             name(1_500),
             "\0".repeat(8),
-            "y".repeat(65_528)
+            "y".repeat(248)
         ));
         Self {
             keys,
@@ -277,11 +277,11 @@ impl LengthTagCase {
         }
     }
 
-    /// Absent keys of 65,535 bytes or more, whose tags saturate, that end
+    /// Absent keys of 255 bytes or more, whose tags saturate, that end
     /// within their inline keys, each with one candidate whose tag
     /// saturates too: equal saturated tags tell nothing of lengths. A key
     /// that long ends within its inline key only in a leaf whose fences
-    /// share 65,527 bytes or more: one between two others, as the tree's
+    /// share 247 bytes or more: one between two others, as the tree's
     /// shared prefix stops at 64 bytes (D50).
     fn saturated_key_within_its_inline_key() -> Self {
         let shared = "p".repeat(Self::SATURATED_LEN - 5);
@@ -299,8 +299,8 @@ impl LengthTagCase {
     fn zero_keys() -> Self {
         let zeros = |len| "\0".repeat(len);
         Self {
-            keys: [0, 1, 2, 65_536].map(zeros).into(),
-            absent: [3, 65_535, 65_537].map(zeros).into(),
+            keys: [0, 1, 2, 256].map(zeros).into(),
+            absent: [3, 255, 257].map(zeros).into(),
         }
     }
 
@@ -333,10 +333,10 @@ impl LengthTagCase {
         self.keys.iter().position(|key| key == probe)
     }
 
-    /// Whether the leaves of a map of `String` keys and `V` values, under
-    /// strategy `S`, keep length tags, which the cases need to test them.
-    pub(crate) fn leaves_keep_tags<V, S: InlineKeyStrategy<String>>() -> bool {
-        Leaf::<String, V, S>::plan().has_length_tags()
+    /// Whether the leaves of a map of `K` keys and `V` values, under
+    /// strategy `S`, keep hash tags, which the cases need to test them.
+    pub(crate) fn leaves_keep_tags<K, V, S: InlineKeyStrategy<K>>() -> bool {
+        Leaf::<K, V, S>::plan().has_hash_tags()
     }
 }
 
@@ -526,10 +526,10 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Leaf<K
         self.has_head().then(|| self.head_value().tracked_id())
     }
 
-    /// The id of the head's key, if the leaf has a head and separator keys
-    /// are heads (D49).
+    /// The id of the head's key, if the leaf has a head and the map has inline
+    /// keys (D49).
     pub(super) fn head_key_id(self) -> Option<usize> {
-        (self.has_head() && NodePtr::<K, V, S>::has_separator_keys_in_heads())
+        (self.has_head() && NodePtr::<K, V, S>::has_inline_keys())
             .then(|| self.head_key().tracked_id())
     }
 }
@@ -563,8 +563,8 @@ impl<'l, K: FromTracked<'l>, V: FromTracked<'l>, S: InlineKeyStrategy<K>> Node<K
     }
 
     /// The id of the key of the separator just left of this node, given
-    /// `separator`, as it came out of its node: its own, where internal
-    /// nodes keep keys, or the leftmost leaf's head's under this node (D49).
+    /// `separator`, as it came out of its node: its own without inline keys, or
+    /// with them the leftmost leaf's head's under this node (D49).
     pub(super) fn separator_key_id(self, separator: &Separator<K, S>) -> usize {
         match separator.key() {
             Some(key) => key.tracked_id(),

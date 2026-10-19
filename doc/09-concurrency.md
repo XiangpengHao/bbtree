@@ -252,7 +252,7 @@ version read, the parent checked after. Then, in place:
   std integer or byte array, is copied with the value and compared once
   the version holds; a byte string that ends within the leaf's 8-byte
   inline key is the candidate if their lengths are equal (D36), as the
-  leaf's length tags tell where they are exact, below 65,535, so no heap
+  leaf's hash tags tell where they are exact, below 255, so no heap
   byte is read. Every slot read is a
   `MaybeUninit` until the version holds. A head the descent matched is
   copied and compared the same way.
@@ -271,7 +271,7 @@ free that memory before the check fails. A `Copy` value has no `Drop` and
 no interior mutability, so a torn copy is thrown away unused. Racing plain
 reads are formally a data race, as the internal nodes' are, and crossbeam's
 `AtomicCell` sequence lock's; the threads tests stay out of Miri for that
-(`.config/nextest.toml`).
+(`.github/miri-nextest.toml`).
 
 Measured (2026-10-17, 9900X, 10M `u64`, bbtree-eval's `bbtree-scaling`,
 against the latched lookups of 2026-10-16, millions a second): lookups half of which

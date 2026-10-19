@@ -89,25 +89,11 @@ impl PageMarks {
         )
     }
 
-    /// When, in its search's order of reads, the lookup surely read each
-    /// of `page`'s cache lines: a rank, earlier reads lower, equal for
-    /// lines read together; `None` for a line it didn't surely read.
-    pub(crate) fn line_read_order(&self, page: &PageMap) -> Vec<Option<usize>> {
-        MapDrawing::of(page, self)
-            .lines
-            .iter()
-            .map(|line| {
-                line.filter(|line| line.certainty == Certainty::Certain)
-                    .map(|line| line.phase as usize)
-            })
-            .collect()
-    }
-
     /// Whether slot `slot` of an array of `contents` is where the lookup
     /// ended.
     fn is_result(&self, contents: SlotContents, slot: usize) -> bool {
         match contents {
-            SlotContents::Keys | SlotContents::InlineKeys | SlotContents::LengthTags => {
+            SlotContents::Keys | SlotContents::InlineKeys | SlotContents::HashTags => {
                 self.found == Some(slot)
             }
             SlotContents::Values => self.leaf && self.found == Some(slot),
@@ -145,7 +131,7 @@ impl PageMarks {
                 1 => certain(ReadPhase::Ties),
                 _ => Some((Certainty::Possible, ReadPhase::Ties)),
             },
-            SlotContents::LengthTags if self.tied.contains(&slot) && self.tied.len() > 1 => {
+            SlotContents::HashTags if self.tied.contains(&slot) && self.tied.len() > 1 => {
                 certain(ReadPhase::Ties)
             }
             _ => None,
@@ -220,7 +206,7 @@ impl SlotLook for SlotContents {
         match self {
             SlotContents::Header | SlotContents::RootArea => "slot-header",
             SlotContents::InlineKeys => "slot-inline",
-            SlotContents::LengthTags => "slot-tags",
+            SlotContents::HashTags => "slot-tags",
             SlotContents::Keys | SlotContents::HeadKey => "slot-keys",
             SlotContents::Head | SlotContents::Values | SlotContents::Edges => "slot-trailing",
         }
@@ -231,7 +217,7 @@ impl SlotLook for SlotContents {
             SlotContents::Header => "header",
             SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline key",
-            SlotContents::LengthTags => "length tag",
+            SlotContents::HashTags => "hash tag",
             SlotContents::Keys => "key",
             SlotContents::HeadKey => "head key",
             SlotContents::Head => "head",
@@ -245,7 +231,7 @@ impl SlotLook for SlotContents {
             SlotContents::Header => "header",
             SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline keys",
-            SlotContents::LengthTags => "length tags",
+            SlotContents::HashTags => "hash tags",
             SlotContents::Keys | SlotContents::HeadKey => "keys",
             SlotContents::Head | SlotContents::Values => "values",
             SlotContents::Edges => "children",
@@ -256,7 +242,7 @@ impl SlotLook for SlotContents {
         match self {
             SlotContents::Header | SlotContents::RootArea => None,
             SlotContents::InlineKeys => Some(Concept::InlineKey),
-            SlotContents::LengthTags => Some(Concept::LengthTag),
+            SlotContents::HashTags => Some(Concept::HashTag),
             SlotContents::Keys => None,
             SlotContents::HeadKey | SlotContents::Head | SlotContents::Values => {
                 Some(Concept::Head)
@@ -269,7 +255,7 @@ impl SlotLook for SlotContents {
         match self {
             SlotContents::Header | SlotContents::RootArea => None,
             SlotContents::InlineKeys
-            | SlotContents::LengthTags
+            | SlotContents::HashTags
             | SlotContents::Keys
             | SlotContents::Values => Some(NodePart::Entry(slot)),
             SlotContents::Edges => Some(NodePart::Child(slot)),
@@ -283,7 +269,7 @@ impl SlotLook for SlotContents {
                 marks.tied.contains(&slot)
                     && matches!(
                         self,
-                        SlotContents::Keys | SlotContents::InlineKeys | SlotContents::LengthTags
+                        SlotContents::Keys | SlotContents::InlineKeys | SlotContents::HashTags
                     )
             }
             Concept::FencePrefix => self == SlotContents::Header,

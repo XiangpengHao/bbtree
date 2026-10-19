@@ -155,7 +155,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> Clone for Intersection<'_
     }
 }
 
-/// Prints as std's does, the strategy's name and field names included.
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
     for Intersection<'_, T, S, A>
 {
@@ -169,11 +168,7 @@ impl<T: fmt::Debug, S: InlineKeyStrategy<T>, A: Allocator + Clone> fmt::Debug
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stitch(sides) => f
-                .debug_struct("Stitch")
-                .field("a", &sides.left.printed_as_iter(false))
-                .field("b", &sides.right.printed_as_iter(false))
-                .finish(),
+            Self::Stitch(sides) => f.debug_tuple("Stitch").field(sides).finish(),
             Self::Search {
                 small_iter,
                 large_set,

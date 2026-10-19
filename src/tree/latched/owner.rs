@@ -1,7 +1,7 @@
-//! What a latched tree's owner does with it, through `&mut` or by value:
-//! no other thread reaches the tree then, so bbtree's own lookups and walks
-//! run on it as on a `BBTreeMap`'s tree, without a latch, and hand out
-//! references for as long as the owner lends the tree.
+//! What a latched tree's owner does with it, through `&mut` or by value.
+//! No other thread reaches the tree then, so the unsync tree's own lookups
+//! and walks run on it without a latch. They hand out references for as
+//! long as the owner lends the tree.
 
 use core::borrow::Borrow;
 use core::ops::Bound;
@@ -20,8 +20,8 @@ use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// The value of the entry whose key equals `key`, exclusive, as
-    /// bbtree's lookup finds it; `None` without one.
+    /// The value of the entry whose key equals `key`, exclusive, as the
+    /// unsync tree's lookup finds it; `None` without one.
     pub(crate) fn find_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -36,7 +36,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// A walk over every entry, values exclusive, from both ends, as
-    /// bbtree's `range_mut(..)` walks.
+    /// `unsync::BBTreeMap::range_mut(..)` walks.
     pub(crate) fn walk_mut(&mut self) -> RangeWalk<ValMut<'_, K, V>, K, V, Latched<S>>
     where
         K: Ord,
@@ -49,8 +49,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
 
     /// Takes the tree out, leaving none, as a walk that hands out its
     /// entries in key order and gives each page back to `alloc` once past
-    /// it, as bbtree's `into_iter` does; the pages on the free lists go back
-    /// to `alloc` first.
+    /// it, as `unsync::BBTreeMap::into_iter` does. The pages on the free
+    /// lists go back to `alloc` first.
     pub(crate) fn take_dying_walk<A: Allocator>(
         &mut self,
         alloc: A,

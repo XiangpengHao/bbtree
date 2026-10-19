@@ -8,7 +8,7 @@ use core::iter::FusedIterator;
 use core::ops::BitOr;
 
 use super::BBTreeSet;
-use super::merge::{HeldSide, MergeSides};
+use super::merge::{MergeSides, MergeStep};
 use crate::allocator::Allocator;
 use crate::inline_key::{Auto, InlineKeyStrategy};
 
@@ -22,8 +22,6 @@ use crate::inline_key::{Auto, InlineKeyStrategy};
               without modifying either input set"]
 pub struct Union<'a, T: 'a, S = Auto> {
     sides: MergeSides<'a, T, S>,
-    /// The side std's would hold an element of, taken out of its iterator.
-    held: HeldSide,
 }
 
 impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Union<'a, T, S> {
@@ -32,9 +30,7 @@ impl<'a, T: Ord, S: InlineKeyStrategy<T>> Iterator for Union<'a, T, S> {
     // Inlined into the caller's loop, see `merge.rs`.
     #[inline(always)]
     fn next(&mut self) -> Option<&'a T> {
-        let (step, held) = self.sides.next_step()?;
-        self.held = held;
-        Some(step.element())
+        self.sides.next_step().map(MergeStep::element)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -65,17 +61,13 @@ impl<T, S> Clone for Union<'_, T, S> {
     fn clone(&self) -> Self {
         Self {
             sides: self.sides.clone(),
-            held: self.held,
         }
     }
 }
 
-/// Prints as std's does: `Union(MergeIterInner(..))`.
 impl<T: fmt::Debug, S: InlineKeyStrategy<T>> fmt::Debug for Union<'_, T, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Union")
-            .field(&self.sides.printed_as_merge_iter(self.held))
-            .finish()
+        f.debug_tuple("Union").field(&self.sides).finish()
     }
 }
 
@@ -105,7 +97,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     {
         Union {
             sides: MergeSides::new(self.iter(), other.iter()),
-            held: HeldSide::Neither,
         }
     }
 }

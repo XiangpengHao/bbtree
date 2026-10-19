@@ -1,7 +1,7 @@
 //! The map's tests, against std's `BTreeMap` or a model, through the map's
 //! API and, where the API cannot reach, its tree: the harness that feeds
 //! both maps the same operations (`differential.rs`), and on it, inline
-//! keys; prefixes and length tags; drops and panics; inserts that replay
+//! keys; prefixes and hash tags; drops and panics; inserts that replay
 //! their search or append to the remembered rightmost leaf; iterator folds;
 //! joined trees; the pages a map takes from its allocator; and type
 //! properties.
@@ -10,13 +10,12 @@
 
 mod allocator;
 mod batch;
-mod concat;
 mod differential;
 mod drops;
+mod hash_tag;
 mod inline_key;
 mod insert;
 mod iterator;
-mod length_tag;
 mod prefix;
 mod type_properties;
 

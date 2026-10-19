@@ -14,7 +14,7 @@ use crate::allocator::Global;
 use crate::inline_key::Auto;
 use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
-use crate::tree::test_support::{LengthTagCase, TestRng};
+use crate::tree::test_support::{HashTagCase, TestRng};
 
 /// Inserts `keys` in order, each with its position as its value, into a
 /// `BBTreeMap` and a `BTreeMap`, and checks that they agree on every
@@ -133,9 +133,9 @@ fn strings_match_std() {
 }
 
 /// A map of the case's keys, each to its index, as `u128`s: with 16-byte
-/// values, latched `String` leaves have room for length tags (D36).
-impl From<&LengthTagCase> for BBTreeMap<String, u128> {
-    fn from(case: &LengthTagCase) -> Self {
+/// values, latched `String` leaves have room for hash tags (D36).
+impl From<&HashTagCase> for BBTreeMap<String, u128> {
+    fn from(case: &HashTagCase) -> Self {
         let mut map = Self::new();
         for (index, key) in case.keys().iter().enumerate() {
             map.insert(key.clone(), index as u128);
@@ -145,18 +145,18 @@ impl From<&LengthTagCase> for BBTreeMap<String, u128> {
     }
 }
 
-/// Every lookup of the shared length-tag cases answers as std's map does,
+/// Every lookup of the shared hash-tag cases answers as std's map does,
 /// the unlatched copies among them, which an exact tag may settle alone
 /// (`node/optimistic.rs`).
 #[test]
-fn length_tag_cases_match_std() {
+fn hash_tag_cases_match_std() {
     if cfg!(target_pointer_width = "64") {
         assert!(
-            LengthTagCase::leaves_keep_tags::<u128, Latched<Auto>>(),
-            "the cases test length tags only in leaves that keep them"
+            HashTagCase::leaves_keep_tags::<String, u128, Latched<Auto>>(),
+            "the cases test hash tags only in leaves that keep them"
         );
     }
-    for case in LengthTagCase::all() {
+    for case in HashTagCase::all() {
         let map = BBTreeMap::from(&case);
         for probe in case.probes() {
             let probe = probe.as_str();

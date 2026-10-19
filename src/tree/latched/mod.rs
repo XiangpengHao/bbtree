@@ -1,43 +1,45 @@
-//! A tree that threads share (`doc/09-concurrency.md`): bbtree's tree, with
-//! a latch word in each node (`node/latch.rs`), behind an atomic pointer to
-//! the root page.
+//! A tree that threads share (`doc/09-concurrency.md`, D54): the unsync
+//! tree, with a latch word in each node (`node/latch.rs`), behind an atomic
+//! pointer to the root page.
 //!
-//! It is bbtree's tree in every way but how threads share it: the same
-//! nodes, the same shared prefix (D50) and prefixes fit to their fences,
-//! the same splits, merges and moves between siblings, the same root that
-//! grows and shrinks in its page, and an append to the last leaf (D45). Its
-//! own are the ways threads share it:
+//! It is the unsync tree in every way but how threads share it. It has the
+//! same nodes, the same shared prefix (D50) and prefixes fit to their
+//! fences, and the same splits, merges and moves between siblings. Its root
+//! grows and shrinks in its page, and appends go straight to the last leaf
+//! (D45). What it adds is how threads share it:
 //!
-//! - **Descent** (`descent.rs`): optimistic through the internal nodes, each
-//!   read in place while writers may change it and checked by its version
-//!   (optimistic lock coupling, `node/optimistic.rs`); the leaf latched,
-//!   shared or exclusive, or for a lookup read in place too (`lookup.rs`).
+//! - **Descent** (`descent.rs`) is optimistic through the internal nodes.
+//!   Each is read in place while writers may change it, and checked by its
+//!   version (optimistic lock coupling, `node/optimistic.rs`). The leaf is
+//!   latched, shared or exclusive; a lookup reads it in place too
+//!   (`lookup.rs`, D57).
 //! - **Operations** run the caller's closure on an entry while its leaf is
 //!   latched, and let go before returning: no reference or latch outlives
 //!   the call.
-//! - **Changes to more than a leaf**, a split (`insert.rs`), a removal that
-//!   rebalances (`remove.rs`) or a shrinking of the shared prefix
-//!   (`shared_prefix.rs`), take every node bbtree's operation will change or
-//!   read a separator of, without waiting (`held.rs`), and start over if
-//!   another thread holds one or changed it since the descent. Then they
-//!   run bbtree's operation itself, on the tree as it is, along a node
-//!   stack from the topmost node they hold ([`LatchedTree::change_held`]):
-//!   bbtree's operations go no higher than the nodes they change and the
-//!   nearest separators above them, their fences. A reader that read a
-//!   node meanwhile fails its version check.
-//! - **Pages are type-stable** (`pages.rs`): a node a merge empties goes on
-//!   the tree's free list for its kind, and comes back only as a node of
-//!   that kind, with the same latch word, whose version only grows. So a
-//!   pointer a racing reader loads is always to a node of the kind it says,
-//!   and its version check fails if the node was freed since. The root page
-//!   alone changes kind, and a reader checks a node's version before it
-//!   follows an edge it read there. Pages go back to the allocator when the
-//!   map is dropped.
+//! - **Changes to more than a leaf** are a split (`insert.rs`), a removal
+//!   that rebalances (`remove.rs`) and a shrinking of the shared prefix
+//!   (`shared_prefix.rs`). Each takes, without waiting, every node the
+//!   unsync tree's operation will change or read a separator of
+//!   (`held.rs`). It starts over if another thread holds one, or changed it
+//!   since the descent. Then it runs the unsync tree's operation itself, on
+//!   the tree as it is, along a node stack from the topmost node it holds
+//!   ([`LatchedTree::change_held`]). This works because the unsync tree's
+//!   operations go no higher than the nodes they change and the nearest
+//!   separators above them, their fences. A reader that read a node
+//!   meanwhile fails its version check.
+//! - **Pages are type-stable** (`pages.rs`). A node a merge empties goes on
+//!   the tree's free list for its kind. It comes back only as a node of that
+//!   kind, with the same latch word, whose version only grows. So a pointer
+//!   a racing reader loads always points to a node of the kind it says, and
+//!   the reader's version check fails if the node was freed since. The root
+//!   page alone changes kind, so a reader checks the root's version before
+//!   it follows an edge read from it. Pages go back to the allocator when
+//!   the map is dropped.
 //! - **The last leaf** is where an append goes (`append.rs`), by a pointer
 //!   that only a thread holding that leaf changes.
 //!
 //! A leaf's head key, which internal nodes route by (D49), changes only
-//! while the node holding its separator is held, so a thread holding that
+//! while the node holding its separator is held. So a thread holding that
 //! node reads it where it is (`held.rs`). A reader that holds nothing reads
 //! it with its leaf latched shared (`node/optimistic.rs`).
 
@@ -215,12 +217,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// Runs `operation`, one of bbtree's own, on the tree under the root
-    /// page, of which the caller holds every node the operation changes or
-    /// reads a separator of (module documentation); and if it changed the
-    /// root's kind, raising a root leaf or lowering the tree to one, points
-    /// the tree at the root page as its new kind, while the caller still
-    /// holds the root.
+    /// Runs `operation`, one of the unsync tree's own, on the tree under the
+    /// root page. The caller holds every node the operation changes or reads
+    /// a separator of (module documentation). If the operation changed the
+    /// root's kind, by raising a root leaf or lowering the tree to one, this
+    /// retags the tree's root pointer for the new kind while the caller
+    /// still holds the root.
     fn change_held<R>(&self, operation: impl FnOnce(&mut Tree<K, V, Latched<S>>) -> R) -> R {
         let root_page = self.root_page().expect("a tree to change");
         let mut tree = Tree::of_root_page(root_page);
@@ -263,8 +265,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Panics unless the tree is a well-formed B+-tree of `length` entries
-    /// ([`Tree::check_invariants`]), once no other thread changes it, whose
-    /// appends go to its last leaf.
+    /// ([`Tree::check_invariants`]) whose appends go to its last leaf. The
+    /// caller runs it once no other thread changes the tree.
     #[cfg(any(test, fuzzing))]
     pub(crate) fn check_invariants(&mut self, length: usize)
     where
@@ -351,9 +353,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             .map_or(0, |root_page| root_page.shared_prefix().len())
     }
 
-    /// Takes the tree apart, with `alloc`, the allocator its pages came
-    /// from, the pages on its free lists too, once no other thread reaches
-    /// it.
+    /// Takes the tree apart, the pages on its free lists too, giving the
+    /// pages back to `alloc`, the allocator they came from. The caller runs
+    /// it once no other thread reaches the tree.
     pub(crate) fn destroy(&mut self, alloc: &impl Allocator) {
         if let Some(root_page) = self.root_page() {
             *self.root.get_mut() = ptr::null_mut();

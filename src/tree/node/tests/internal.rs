@@ -35,10 +35,10 @@ impl<'l, K: FromTracked<'l>, S: InlineKeyStrategy<K>> TestPages<K, Tracked<'l>, 
         (leaf, leaf.put_named_entry(ledger))
     }
 
-    /// A new named leaf for the right of separator `key`, with a head to
-    /// hold the separator's value (D17), and its key where separator keys
-    /// are heads (D49). Returns the leaf, its name, the id of its head, and
-    /// the separator, as its parent takes it.
+    /// A new named leaf for the right of separator `key`, with a head to hold
+    /// the separator's value (D17), and with inline keys its key (D49). Returns
+    /// the leaf, its name, the id of its head, and the separator, as its parent
+    /// takes it.
     fn leaf_right_of(
         &self,
         ledger: &'l DropLedger,
