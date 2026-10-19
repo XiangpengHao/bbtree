@@ -17,11 +17,12 @@ pub use self::range::RangeCloned;
 
 use core::borrow::Borrow;
 use core::fmt;
+use core::mem;
 use core::ops::{Bound, ControlFlow, RangeBounds};
 
 use crate::allocator::{Allocator, Global, InsertError};
 use crate::inline_key::{Auto, InlineKeyStrategy};
-use crate::tree::latched::{LatchedTree, ReadOrInsert, Replace};
+use crate::tree::latched::{LatchedTree, ReadOrInsert, UpdateOrInsert};
 
 /// An ordered map that threads share, through `&self`: a B+-tree whose
 /// internal nodes are read optimistically, and whose leaves are latched
@@ -44,9 +45,9 @@ use crate::tree::latched::{LatchedTree, ReadOrInsert, Replace};
 /// # Deadlocks
 ///
 /// A closure that calls into the same map may deadlock: [`Self::update`]'s,
-/// [`Self::get_or_insert`]'s and [`Self::remove_if`]'s on any key of its
-/// entry's leaf, [`Self::read`]'s and the scans' if a writer waits for that
-/// leaf meanwhile.
+/// [`Self::update_or_insert`]'s, [`Self::get_or_insert`]'s and
+/// [`Self::remove_if`]'s on any key of its entry's leaf, [`Self::read`]'s
+/// and the scans' if a writer waits for that leaf meanwhile.
 ///
 /// It is `Sync` if its keys and values are `Send` and `Sync`, as threads
 /// move them in, read them, change them and drop them through `&self`, and
@@ -310,7 +311,43 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     where
         K: Ord,
     {
-        self.tree.insert(key, value, Replace, &self.alloc)
+        self.update_or_insert(key, value, |_, stored, value| mem::replace(stored, value))
+    }
+
+    /// Runs `f` on the entry whose key equals `key`, its value exclusive,
+    /// with `value`, which `f` takes, and returns what `f` returned; or, if
+    /// the map holds none, inserts `key` and `value`, and returns `None`. A
+    /// held entry keeps its key, and `key` drops before `f` runs. `f` runs
+    /// while no other thread reads or changes the entry, so the change and
+    /// the insert are one step to other threads: threads that add to the
+    /// same key's value this way miss none of each other's additions.
+    ///
+    /// [`Self::insert`] is the `f` that replaces the value.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::insert`]'s; `f` doesn't run then.
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    /// let counts = BBTreeMap::<&str, u64>::new();
+    /// for word in ["a", "b", "a"] {
+    ///     counts.update_or_insert(word, 1, |_, count, one| *count += one)?;
+    /// }
+    /// assert_eq!((counts.get_copied(&"a"), counts.get_copied(&"b")), (Some(2), Some(1)));
+    /// # Ok::<(), bbtree::AllocError>(())
+    /// ```
+    #[inline]
+    pub fn update_or_insert<R>(
+        &self,
+        key: K,
+        value: V,
+        f: impl FnOnce(&K, &mut V, V) -> R,
+    ) -> Result<Option<R>, InsertError<K, V>>
+    where
+        K: Ord,
+    {
+        self.tree.insert(key, value, UpdateOrInsert(f), &self.alloc)
     }
 
     /// Runs `f` on the entry whose key equals `key`, inserting `key` and

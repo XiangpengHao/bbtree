@@ -2,9 +2,9 @@
 //! (`tree/insert.rs`).
 //!
 //! - **An equal key** the tree holds already stays in place. Its value is
-//!   replaced ([`Replace`], as std's `BTreeMap::insert` does) or left as it
-//!   is ([`ReadOrInsert`], which reads the entry instead): the insert's
-//!   [`InsertPolicy`] decides.
+//!   changed by a closure that takes the new one ([`UpdateOrInsert`]; std's
+//!   `BTreeMap::insert` replaces it) or left as it is ([`ReadOrInsert`],
+//!   which reads the entry instead): the insert's [`InsertPolicy`] decides.
 //! - **An append** to the last leaf latches that leaf alone, if the key goes
 //!   after every key there and the leaf has room (`append.rs`, D45).
 //! - **Otherwise** a descent finds the leaf where the key belongs and
@@ -28,8 +28,6 @@
 //!   tree, or a page a split takes.
 //!
 //! [`NodeStackMut::insert_prefixed`]: super::super::node_stack::NodeStackMut::insert_prefixed
-
-use core::mem;
 
 use super::super::interleaving::Interleaving;
 use super::super::node::Node;
@@ -61,22 +59,24 @@ pub(crate) trait InsertPolicy<K, V> {
     fn vacant(self, key: &K, value: &V) -> Self::Output;
 }
 
-/// std's `BTreeMap::insert`: the stored key stays, its value is replaced,
-/// and the old one returned.
-pub(crate) struct Replace;
+/// Runs a closure on the stored entry, its value exclusive, and the new
+/// value, which the closure takes; the stored key stays. Returns what the
+/// closure returned, or `None` for an entry inserted. std's
+/// `BTreeMap::insert` is the closure that replaces the value.
+pub(crate) struct UpdateOrInsert<F>(pub(crate) F);
 
-impl<K, V> InsertPolicy<K, V> for Replace {
-    type Output = Option<V>;
+impl<K, V, R, F: FnOnce(&K, &mut V, V) -> R> InsertPolicy<K, V> for UpdateOrInsert<F> {
+    type Output = Option<R>;
 
     #[inline(always)]
-    fn occupied(self, key: K, value: V, _stored: &K, stored_value: &mut V) -> Option<V> {
-        // As std, the new key is dropped before the value changes.
+    fn occupied(self, key: K, value: V, stored: &K, stored_value: &mut V) -> Option<R> {
+        // As std's insert, the new key is dropped before the value changes.
         drop(key);
-        Some(mem::replace(stored_value, value))
+        Some((self.0)(stored, stored_value, value))
     }
 
     #[inline(always)]
-    fn vacant(self, _key: &K, _value: &V) -> Option<V> {
+    fn vacant(self, _key: &K, _value: &V) -> Option<R> {
         None
     }
 }

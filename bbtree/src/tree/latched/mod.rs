@@ -55,7 +55,7 @@ mod remove;
 mod scan;
 mod shared_prefix;
 
-pub(crate) use self::insert::{ReadOrInsert, Replace};
+pub(crate) use self::insert::{ReadOrInsert, UpdateOrInsert};
 pub(crate) use self::scan::{LeafStamp, ScanResume};
 
 use core::alloc::Layout;

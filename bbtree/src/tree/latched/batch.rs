@@ -42,7 +42,7 @@ use super::super::node::leaf::{CandidateLine, Leaf};
 use super::super::node::page::PageAllocator;
 use super::LatchedTree;
 use super::descent::{HeldLeaf, RootRead};
-use super::insert::Replace;
+use super::insert::UpdateOrInsert;
 use super::lookup::{RacingRead, Unsettled};
 use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
@@ -265,23 +265,27 @@ struct LeafLane<'t, 'q, K, V, S, Q: ?Sized> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// Inserts `entries` in input order, and returns each replaced value, or
-    /// the entry back if `alloc` had no page for it, as separate
-    /// [`Self::insert`]s with [`Replace`] do; pages come from `alloc`.
-    pub(crate) fn insert_many<const N: usize>(
+    /// Inserts `entries` in input order, or runs `f` on the stored entry and
+    /// the new value where the tree holds the key, and returns what `f`
+    /// returned, `None` for an entry inserted, or the entry back if `alloc`
+    /// had no page for it: as separate [`Self::insert`]s with
+    /// [`UpdateOrInsert`] do. Pages come from `alloc`.
+    pub(crate) fn update_or_insert_many<R, const N: usize>(
         &self,
         entries: [(K, V); N],
+        mut f: impl FnMut(&K, &mut V, V) -> R,
         alloc: &impl Allocator,
-    ) -> [Result<Option<V>, InsertError<K, V>>; N]
+    ) -> [Result<Option<R>, InsertError<K, V>>; N]
     where
         K: Ord,
     {
         if N < 2 || !self.batches() {
-            return entries.map(|(key, value)| self.insert(key, value, Replace, alloc));
+            return entries
+                .map(|(key, value)| self.insert(key, value, UpdateOrInsert(&mut f), alloc));
         }
         let mut entries = entries.into_iter();
         let (key, value) = entries.next().expect("N >= 2");
-        let first = match self.append(key, value, Replace) {
+        let first = match self.append(key, value, UpdateOrInsert(&mut f)) {
             Ok(first) => {
                 // Ascending keys: the rest most likely append too, which the
                 // single-key insert does without a descent.
@@ -290,11 +294,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     Some(first) => Ok(first),
                     None => {
                         let (key, value) = entries.next().expect("one entry per key");
-                        self.insert(key, value, Replace, alloc)
+                        self.insert(key, value, UpdateOrInsert(&mut f), alloc)
                     }
                 });
             }
-            Err((key, value, Replace)) => (key, value),
+            Err((key, value, _)) => (key, value),
         };
         let mut first = Some(first);
         let entries = core::array::from_fn(|_| {
@@ -302,7 +306,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 .take()
                 .unwrap_or_else(|| entries.next().expect("one entry per key"))
         });
-        self.insert_batch(entries, alloc)
+        self.insert_batch(entries, f, alloc)
     }
 
     /// Finds every key's leaf first, in lanes, then inserts the entries in
@@ -311,11 +315,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// or where the leaf is full, it goes in as a single insert does. Outlined,
     /// to keep the lanes out of appends and small trees.
     #[inline(never)]
-    fn insert_batch<const N: usize>(
+    fn insert_batch<R, const N: usize>(
         &self,
         entries: [(K, V); N],
+        mut f: impl FnMut(&K, &mut V, V) -> R,
         alloc: &impl Allocator,
-    ) -> [Result<Option<V>, InsertError<K, V>>; N]
+    ) -> [Result<Option<R>, InsertError<K, V>>; N]
     where
         K: Ord,
     {
@@ -333,11 +338,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             let destination = destinations[next].take();
             next += 1;
             let Some(destination) = destination else {
-                return self.insert(key, value, Replace, alloc);
+                return self.insert(key, value, UpdateOrInsert(&mut f), alloc);
             };
             let (leaf, version) = (destination.leaf, destination.version);
-            let fallback = match self.insert_at(destination, key, value, alloc) {
-                Ok(previous) => {
+            let fallback = match self.insert_at(destination, key, value, &mut f, alloc) {
+                Ok(output) => {
                     // Later keys whose lanes read the leaf as this insert
                     // found it trust it as it is now. A lane that read it
                     // before another thread changed it doesn't.
@@ -346,7 +351,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                             later.version = version.next();
                         }
                     }
-                    return Ok(previous);
+                    return Ok(output);
                 }
                 Err(fallback) => fallback,
             };
@@ -359,26 +364,29 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     *later = None;
                 }
             }
+            let policy = UpdateOrInsert(&mut f);
             match fallback {
-                Fallback::Full(key, value) => self.insert_splitting(key, value, Replace, alloc),
-                Fallback::Changed(key, value) => self.insert(key, value, Replace, alloc),
+                Fallback::Full(key, value) => self.insert_splitting(key, value, policy, alloc),
+                Fallback::Changed(key, value) => self.insert(key, value, policy, alloc),
             }
         })
     }
 
-    /// Inserts `key` and `value` into the leaf `destination` names, and returns
-    /// the replaced value. That takes latching the leaf exclusively at the
-    /// version its lane read it at, when it held the key's place, and a leaf
-    /// with room or with the key. The leaf is at the next version after.
-    /// Otherwise changes nothing and gives the entry back ([`Fallback`]).
+    /// Inserts `key` and `value` into the leaf `destination` names, or runs
+    /// `f` on the entry there, as [`UpdateOrInsert`] does. That takes
+    /// latching the leaf exclusively at the version its lane read it at,
+    /// when it held the key's place, and a leaf with room or with the key.
+    /// The leaf is at the next version after. Otherwise changes nothing and
+    /// gives the entry back ([`Fallback`]).
     #[inline(always)]
-    fn insert_at(
+    fn insert_at<R>(
         &self,
         destination: Destination<K, V, S>,
         key: K,
         value: V,
+        f: &mut impl FnMut(&K, &mut V, V) -> R,
         alloc: &impl PageAllocator,
-    ) -> Result<Option<V>, Fallback<K, V>>
+    ) -> Result<Option<R>, Fallback<K, V>>
     where
         K: Ord,
     {
@@ -393,9 +401,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         if at_separator && !Self::is_head(leaf, &SearchKey::new(&key)) {
             return Err(Fallback::Changed(key, value));
         }
-        match self.insert_into(&held, at_separator, key, value, Replace, alloc) {
-            Ok(previous) => Ok(previous),
-            Err((key, value, Replace, _)) => Err(Fallback::Full(key, value)),
+        match self.insert_into(&held, at_separator, key, value, UpdateOrInsert(f), alloc) {
+            Ok(output) => Ok(output),
+            Err((key, value, _, _)) => Err(Fallback::Full(key, value)),
         }
     }
 }

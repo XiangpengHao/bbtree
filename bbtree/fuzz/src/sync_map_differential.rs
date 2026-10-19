@@ -15,6 +15,7 @@
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt::Debug;
 use std::ops::{Bound, ControlFlow};
 
@@ -124,6 +125,16 @@ enum SyncMapOperation {
     GetOrInsert {
         key: KeyRecipe,
         value: u16,
+    },
+    /// `update_or_insert`, keeping the larger of the stored value and
+    /// `value`.
+    UpdateOrInsert {
+        key: KeyRecipe,
+        value: u16,
+    },
+    /// `update_or_insert_many`, each entry as `UpdateOrInsert`.
+    UpdateOrInsertBatch {
+        entries: [(KeyRecipe, u16); 8],
     },
     Remove {
         key: KeyRecipe,
@@ -358,6 +369,21 @@ where
                     .or_insert(V::from_input(value));
                 assert_eq!(ours, (key, theirs.clone()));
             }
+            SyncMapOperation::UpdateOrInsert { key, value } => {
+                let (key, value) = (self.key(key), V::from_input(value));
+                let ours = (self.ours)
+                    .update_or_insert(key.clone(), value.clone(), Self::keep_larger)
+                    .unwrap();
+                assert_eq!(ours, self.update_or_insert_theirs(key, value));
+            }
+            SyncMapOperation::UpdateOrInsertBatch { entries } => {
+                let entries = entries.map(|(key, value)| (self.key(key), V::from_input(value)));
+                let expected = entries
+                    .clone()
+                    .map(|(key, value)| self.update_or_insert_theirs(key, value));
+                let ours = self.ours.update_or_insert_many(entries, Self::keep_larger);
+                assert_eq!(ours.map(Result::unwrap), expected);
+            }
             SyncMapOperation::Remove { key } => {
                 let key = self.key(key);
                 assert_eq!(self.ours.remove(&key), self.theirs.remove(&key));
@@ -500,6 +526,30 @@ where
             None
         };
         assert_eq!(ours, theirs);
+    }
+
+    /// The closure of `UpdateOrInsert`: keeps the larger of the stored value
+    /// and `value`, and returns the entry.
+    fn keep_larger(key: &K, stored: &mut V, value: V) -> (K, V) {
+        if value > *stored {
+            *stored = value;
+        }
+        (key.clone(), stored.clone())
+    }
+
+    /// What `update_or_insert` with [`Self::keep_larger`] answers, done on
+    /// std's map.
+    fn update_or_insert_theirs(&mut self, key: K, value: V) -> Option<(K, V)> {
+        match self.theirs.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let key = entry.key().clone();
+                Some(Self::keep_larger(&key, entry.get_mut(), value))
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(value);
+                None
+            }
+        }
     }
 
     /// `scan`, or `scan_rev` if `reverse`, over `range`, breaking with the

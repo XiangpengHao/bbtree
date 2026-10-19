@@ -3,6 +3,7 @@
 
 use core::ops::{Bound, ControlFlow};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::format;
 use std::string::String;
 use std::sync::Barrier;
@@ -357,9 +358,10 @@ fn refused_pages_leave_the_map_unchanged() {
     pages.assert_all_released();
 }
 
-/// A refused `get_or_insert` runs nothing; a batch inserts the entries it
-/// has pages for, and gives the others back. A root leaf's split, given one
-/// of the two pages it takes, keeps that one for its next try.
+/// A refused `get_or_insert` or `update_or_insert` runs nothing; a batch
+/// inserts the entries it has pages for, and gives the others back. A root
+/// leaf's split, given one of the two pages it takes, keeps that one for
+/// its next try.
 #[test]
 fn refused_pages_fail_their_own_entries() {
     let pages = TestPages::<u64, u64>::new();
@@ -367,6 +369,8 @@ fn refused_pages_fail_their_own_entries() {
         let map = BBTreeMap::<u64, u64, Auto, &TestPages<u64, u64>>::new_in(&pages);
         pages.set_budget(Some(0));
         let refused = map.get_or_insert(0, 0, |_, _| panic!("no entry to run on"));
+        assert_eq!(refused.map_err(InsertError::into_entry), Err((0, 0)));
+        let refused = map.update_or_insert(0, 0, |_, _, _| panic!("no entry to run on"));
         assert_eq!(refused.map_err(InsertError::into_entry), Err((0, 0)));
         assert!(map.is_empty());
         pages.set_budget(None);
@@ -1108,9 +1112,10 @@ where
     }
 }
 
-/// Batched inserts answer as std's inserts one at a time, across splits,
-/// repeated keys within a batch, ascending runs that append, and keys that
-/// shrink what every key shares.
+/// Batched inserts and `update_or_insert`s, in turns, answer as std's
+/// inserts and entries one at a time, across splits, repeated keys within a
+/// batch, ascending runs that append, and keys that shrink what every key
+/// shares.
 #[test]
 fn batched_inserts_match_std() {
     fn check<K: Ord + Clone + core::fmt::Debug, const N: usize>(keys: &[K])
@@ -1120,16 +1125,40 @@ fn batched_inserts_match_std() {
         let mut map = BBTreeMap::<K, usize>::default();
         let mut std_map = BTreeMap::new();
         for (batch, chunk) in keys.chunks(N).enumerate() {
-            let entries: [(K, usize); N] =
-                core::array::from_fn(|lane| (chunk[lane % chunk.len()].clone(), batch * N + lane));
+            // Each batch ends with its first key again.
+            let entries: [(K, usize); N] = core::array::from_fn(|lane| {
+                let at = if lane == N - 1 { 0 } else { lane % chunk.len() };
+                (chunk[at].clone(), batch * N + lane)
+            });
+            if batch % 2 == 0 {
+                let expected = entries
+                    .clone()
+                    .map(|(key, value)| std_map.insert(key, value));
+                assert_eq!(
+                    map.insert_many(entries).map(Result::unwrap),
+                    expected,
+                    "batch {batch}"
+                );
+                continue;
+            }
+            // Adds each value to the stored one.
             let expected = entries
                 .clone()
-                .map(|(key, value)| std_map.insert(key, value));
-            assert_eq!(
-                map.insert_many(entries).map(Result::unwrap),
-                expected,
-                "batch {batch}"
-            );
+                .map(|(key, value)| match std_map.entry(key) {
+                    Entry::Occupied(mut entry) => {
+                        *entry.get_mut() += value;
+                        Some((entry.key().clone(), *entry.get()))
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(value);
+                        None
+                    }
+                });
+            let ours = map.update_or_insert_many(entries, |key, sum, value| {
+                *sum += value;
+                (key.clone(), *sum)
+            });
+            assert_eq!(ours.map(Result::unwrap), expected, "batch {batch}");
         }
         map.check_invariants(std_map.len());
         for (key, &value) in &std_map {
@@ -1294,6 +1323,94 @@ fn get_or_insert_matches_std() {
     map.check_invariants(std_map.len());
     for (key, &value) in &std_map {
         assert_eq!(map.get_cloned(key), Some(value));
+    }
+}
+
+/// `update_or_insert` changes an entry the map holds, with the value it was
+/// given, or inserts one, as std's `entry` does, across splits.
+#[test]
+fn update_or_insert_matches_std() {
+    let rng = TestRng::new(109);
+    let mut map = BBTreeMap::<String, usize>::new();
+    let mut std_map = BTreeMap::new();
+    for (position, number) in random_numbers(&rng, 30_000, 1 << 14)
+        .into_iter()
+        .enumerate()
+    {
+        let key = format!("{number:05}");
+        let ours = map
+            .update_or_insert(key.clone(), position, |stored, sum, position| {
+                *sum += position;
+                (stored.clone(), *sum)
+            })
+            .unwrap();
+        let theirs = match std_map.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                *entry.get_mut() += position;
+                Some((key, *entry.get()))
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(position);
+                None
+            }
+        };
+        assert_eq!(ours, theirs);
+    }
+    map.check_invariants(std_map.len());
+    for (key, &value) in &std_map {
+        assert_eq!(map.get_cloned(key), Some(value));
+    }
+}
+
+/// Threads that count the same keys with `update_or_insert`, half of them
+/// in batches, miss none of each other's counts: of each key, one thread
+/// inserts it, and the others see each count after that once.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn threads_counting_the_same_keys_miss_no_count() {
+    let (threads, key_count) = (4, 20_000);
+    let map = BBTreeMap::<u64, usize>::new();
+    let barrier = Barrier::new(threads);
+    let seen: Vec<Vec<usize>> = thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|thread| {
+                let (map, barrier) = (&map, &barrier);
+                scope.spawn(move || {
+                    let rng = TestRng::new(110 + thread as u64);
+                    let mut order: Vec<u64> = (0..key_count).collect();
+                    rng.shuffle(&mut order);
+                    let add_one = |_: &u64, count: &mut usize, one| {
+                        *count += one;
+                        *count
+                    };
+                    let mut seen = std::vec![0; key_count as usize];
+                    barrier.wait();
+                    for chunk in order.as_chunks::<16>().0 {
+                        let counts = if thread % 2 == 0 {
+                            chunk.map(|key| map.update_or_insert(key, 1, add_one))
+                        } else {
+                            map.update_or_insert_many(chunk.map(|key| (key, 1)), add_one)
+                        };
+                        for (&key, count) in chunk.iter().zip(counts) {
+                            seen[key as usize] = count.unwrap().unwrap_or(1);
+                        }
+                    }
+                    seen
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    let mut map = map;
+    map.check_invariants(key_count as usize);
+    for key in 0..key_count {
+        assert_eq!(map.get_copied(&key), Some(threads), "key {key}");
+        let mut counts: Vec<usize> = seen.iter().map(|seen| seen[key as usize]).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, (1..=threads).collect::<Vec<_>>(), "key {key}");
     }
 }
 

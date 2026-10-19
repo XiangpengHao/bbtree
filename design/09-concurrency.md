@@ -2,9 +2,10 @@
 
 Status: built (2026-10-15, 2026-10-16, 2026-10-17): `bbtree::BBTreeMap`,
 the map threads share, with `read`, `update`, `get_copied`, `get_cloned`,
-`contains_key`, `insert`, `get_or_insert`, `remove`, `remove_entry`,
-`remove_if`, `scan`, `scan_rev`, `range_cloned`, `is_empty`; batched
-`read_many`, `get_many_copied`, `get_many_cloned` and `insert_many`; and,
+`contains_key`, `insert`, `update_or_insert`, `get_or_insert`, `remove`,
+`remove_entry`, `remove_if`, `scan`, `scan_rev`, `range_cloned`,
+`is_empty`; batched `read_many`, `get_many_copied`, `get_many_cloned`,
+`insert_many` and `update_or_insert_many` (2026-10-19); and,
 for its owner, `get_mut`, `iter_mut`, `into_iter`, `clear`, `extend` and
 `collect`: the unsync tree, shared through optimistic lock coupling, its
 tree operations the unsync tree's own. No `entry` yet.
@@ -51,6 +52,11 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     }
     /// Runs `f` on the entry while its leaf is latched exclusive.
     fn update<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &mut V) -> R) -> Option<R>;
+    /// Runs `f` on the entry and `value`, which it takes, while the leaf is
+    /// latched exclusive; or inserts `key` and `value` if there is none
+    /// (`None`). `insert` is the `f` that replaces the value.
+    fn update_or_insert<R>(&self, key: K, value: V,
+                           f: impl FnOnce(&K, &mut V, V) -> R) -> Option<R>;
     /// Runs `f` on the entry, inserting `key` and `value` first if there
     /// is none, while the leaf is latched exclusive.
     fn get_or_insert<R>(&self, key: K, value: V, f: impl FnOnce(&K, &V) -> R) -> R;
@@ -75,6 +81,9 @@ impl<K: Ord, V> BBTreeMap<K, V> {
     fn get_many_cloned<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]
     where V: Clone;
     fn insert_many<const N: usize>(&self, entries: [(K, V); N]) -> [Option<V>; N];
+    fn update_or_insert_many<R, const N: usize>(&self, entries: [(K, V); N],
+                                                f: impl FnMut(&K, &mut V, V) -> R)
+        -> [Option<R>; N];
 
     /// The owner's, through `&mut` or by value: no latch (Owners, below).
     fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>;
@@ -94,9 +103,29 @@ shape.
 One entry at a time: an entry can't be held across calls, there is no
 `get_mut` handle through `&self`, and an operation on two entries isn't
 atomic. `entry`,
-std's API within one exclusive latch, is not built: `get_or_insert`
-(insert unless present, then read) and `remove_if` (remove only the entry
-the caller saw) cover what the integrations surveyed need of it.
+std's API within one exclusive latch, is not built: `update_or_insert`
+(change the entry, or insert), `get_or_insert` (insert unless present,
+then read) and `remove_if` (remove only the entry the caller saw) cover
+what the integrations surveyed need of it.
+
+`update_or_insert` is the insert's own policy (`InsertPolicy`,
+`tree/latched/insert.rs`) as a closure; `insert` is the closure that
+replaces the value, and the batch runs the same one per entry. Without
+it, a writer of plain values could not tell an entry it inserted from one
+it found: Lance's adapter (bbtree-eval) marked a fresh `AtomicU64` from
+`get_or_insert`'s closure, then looked each key up before inserting it,
+188 ns a put at 10M against 158 for one descent; and a lookup then an
+insert loses a count when two threads add to one key. Its shape:
+
+- **One closure, for a held entry.** `None` says the entry was inserted,
+  as `update`'s `None` says there was none. A second closure for a new
+  entry could not share a `&mut` capture with the first.
+- **The new value goes to the closure,** which merges it (a sum, an
+  extended list), so making it before the call wastes nothing. A value
+  made only for a new entry would not fit `InsertError`, which hands the
+  value back.
+- **The name is the map's own:** `update` and `or_insert`. scc's `upsert`
+  is a replacing insert, this map's `insert`.
 
 There is no `len`: a shared counter would cost every insert an atomic on
 one line all threads write. The systems integrated (14-blogpost.md) count
@@ -551,8 +580,10 @@ scan's throughput.
 ## Batches
 
 `read_many`, `get_many_copied` and `get_many_cloned` look up a fixed array
-of keys at once, and `insert_many` inserts one, as the unsync map's
-`get_many` and `insert_many` do (doc 12; `tree/latched/batch.rs`,
+of keys at once, and `insert_many` and `update_or_insert_many` insert one,
+as the unsync map's `get_many` and `insert_many` do; the inserts run their
+closure, `insert_many`'s the one that replaces, per entry in input order
+(doc 12; `tree/latched/batch.rs`,
 `map/batch.rs`). Each key descends in its own lane, an async block that
 prefetches the line it reads next and yields, on the unsync tree's executor
 and its `Prefetcher`, the one place that prefetches (D46). Results come in
@@ -666,7 +697,10 @@ interleavings, match std's `range`; a `range_cloned` iterator hands out a
 key inserted ahead of it in a leaf it copied, and not one removed;
 `get_or_insert` matches std's `entry().or_insert`, and threads racing to
 `get_or_insert` the same keys all see the entry the map keeps;
-`remove_if` removes only what its condition holds of. Batched lookups,
+`update_or_insert`, single and batched in turns with `insert_many`,
+matches std's `entry`, and threads counting the same keys with it, half
+in batches, miss no count; `remove_if` removes only what its condition
+holds of. Batched lookups,
 8 and 65 keys at a time, on every key the differential tests insert and
 look up, keys outside the shared prefix included, match separate `read`s
 and run the closure once per entry found; and batches of steady and

@@ -6,8 +6,9 @@ and `bbtree/src/unsync/set/mod.rs`; batched `extend` in
 `bbtree/src/unsync/map/from_entries.rs`; the set operations' batched lookups in
 `bbtree/src/unsync/set/lookups.rs`. D53. Prefetch is allowed here and nowhere else:
 D46's exception. The shared `BBTreeMap`'s batches, `read_many`,
-`get_many_copied` and `insert_many`, run lanes of their own on this
-executor and `Prefetcher` (`bbtree/src/tree/latched/batch.rs`, doc 09, D55).
+`get_many_copied`, `insert_many` and `update_or_insert_many`, run lanes of
+their own on this executor and `Prefetcher`
+(`bbtree/src/tree/latched/batch.rs`, doc 09, D55).
 
 ## Problem
 

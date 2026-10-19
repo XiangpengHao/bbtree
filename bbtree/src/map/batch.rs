@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use core::borrow::Borrow;
+use core::mem;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, InsertError};
@@ -98,7 +99,42 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     where
         K: Ord,
     {
-        self.tree.insert_many(entries, &self.alloc)
+        self.update_or_insert_many(entries, |_, stored, value| mem::replace(stored, value))
+    }
+
+    /// For each entry, runs `f` on the stored entry of its key, with its
+    /// value, or inserts it if the map holds no equal key, and returns what
+    /// `f` returned, `None` for an entry inserted, or the entry back
+    /// ([`InsertError`]): as separate calls to [`Self::update_or_insert`]
+    /// in input order would. A key repeated in the batch runs `f` on the
+    /// entry its earlier one inserted. The entries go in as
+    /// [`Self::insert_many`]'s do, and no more atomically.
+    ///
+    /// ```
+    /// use bbtree::BBTreeMap;
+    /// let counts = BBTreeMap::<&str, u64>::new();
+    /// let added = counts.update_or_insert_many([("a", 1), ("b", 1), ("a", 1)], |_, count, one| {
+    ///     *count += one;
+    ///     *count
+    /// });
+    /// assert_eq!(added.map(Result::unwrap), [None, None, Some(2)]);
+    /// # Ok::<(), bbtree::AllocError>(())
+    /// ```
+    ///
+    /// # Deadlocks
+    ///
+    /// As [`Self::update_or_insert`]'s closure, `f` may deadlock if it
+    /// calls into the map.
+    #[inline]
+    pub fn update_or_insert_many<R, const N: usize>(
+        &self,
+        entries: [(K, V); N],
+        f: impl FnMut(&K, &mut V, V) -> R,
+    ) -> [Result<Option<R>, InsertError<K, V>>; N]
+    where
+        K: Ord,
+    {
+        self.tree.update_or_insert_many(entries, f, &self.alloc)
     }
 
     /// Clones of each key's value, in input order, as separate calls to

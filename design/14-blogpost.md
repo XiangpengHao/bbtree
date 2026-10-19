@@ -61,6 +61,8 @@ Parquet uses stats like min/max/null and sometimes bloom filters to prune the da
 
 `t4` is a super fast disk cache for object store, built on top of `bbtree`.
 
+t4 caches object store data to local disk, and it uses `bbtree` to index the location within the cached file.
+
 
 ## How it works
 

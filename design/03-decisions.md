@@ -82,8 +82,8 @@ node or the root page, with that kind's layout (D21).
 - **Failure:** `allocate_zeroed` returns `AllocError`. The unsync map calls
   `handle_alloc_error`, as std's collections do, wherever the page is
   asked for, the middle of a split included. The shared `BBTreeMap` hands
-  it to the caller: `insert`, `get_or_insert` and each entry of
-  `insert_many` return `InsertError`, with the entry, and leave the map
+  it to the caller: `insert`, `update_or_insert`, `get_or_insert` and each
+  entry of the batches return `InsertError`, with the entry, and leave the map
   unchanged. A split counts the pages it takes from the nodes it holds (a
   leaf's, one per internal node below the one with room, and one for a
   root that moves out of the root page), and takes them, free pages first,
