@@ -1,0 +1,19 @@
+[package]
+name = "bbtree-datafusion-parquet"
+version = "0.1.0"
+edition = "2024"
+description = "bbtree-disk as an index of Parquet files: a column's index embedded in the file, which finds a value's rows and the row groups that hold them."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/XiangpengHao/bbtree"
+publish = false
+
+[dependencies]
+bbtree = { path = "../bbtree", features = ["file"] }
+bbtree-disk = { path = "../bbtree-disk" }
+arrow-array = "60.0.0"
+arrow-cast = "60.0.0"
+arrow-schema = "60.0.0"
+parquet = "60.0.0"
+
+[dev-dependencies]
+mimalloc = "0.1"

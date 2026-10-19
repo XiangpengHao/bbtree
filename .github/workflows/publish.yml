@@ -7,7 +7,7 @@ name: Publish Release
 on:
   push:
     branches: [main]
-    paths: [Cargo.toml]
+    paths: [bbtree/Cargo.toml]
 
 permissions:
   contents: read
@@ -68,7 +68,7 @@ jobs:
               "https://crates.io/api/v1/crates/bbtree/$VERSION"; then
             echo "crates.io already has bbtree $VERSION"
           else
-            cargo publish --locked
+            cargo publish -p bbtree --locked
           fi
 
       - name: Create GitHub Release

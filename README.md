@@ -22,7 +22,7 @@ bbtree is by far the fastest btree (ordered map):
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
 
-![bbtree vs other concurrent maps, get throughput at 96 threads](https://github.com/XiangpengHao/bbtree/raw/main/doc/assets/readme-race.svg)
+![bbtree vs other concurrent maps, get throughput at 96 threads](https://github.com/XiangpengHao/bbtree/raw/main/design/assets/readme-race.svg)
 
 Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
 

@@ -56,7 +56,7 @@ jobs:
         run: |
           named=$(grep -c 'test(=' .github/miri-nextest.toml)
           found=$(cargo miri nextest list --config-file .github/miri-nextest.toml \
-            --features file --message-format oneline | wc -l)
+            -p bbtree --features file --message-format oneline | wc -l)
           if [ "$named" -ne "$found" ]; then
             echo "::error::.github/miri-nextest.toml names $named tests; $found exist"
             exit 1
@@ -67,4 +67,4 @@ jobs:
       - name: Miri
         run: |
           cargo miri nextest run --config-file .github/miri-nextest.toml \
-            --features file --test-threads "$(nproc)"
+            -p bbtree --features file --test-threads "$(nproc)"

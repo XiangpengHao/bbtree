@@ -1,6 +1,6 @@
-# Publishes the visualizer (`vis/`), the explorer and the post, to GitHub
-# Pages at https://bbtree.xiangpeng.systems on every push to main, which is
-# every merged pull request, and on demand.
+# Publishes the visualizer (`bbtree/vis/`), the explorer and the post, to
+# GitHub Pages at https://bbtree.xiangpeng.systems on every push to main,
+# which is every merged pull request, and on demand.
 #
 # One-time setup, outside this file:
 # - Settings → Pages → Source: "GitHub Actions".
@@ -33,21 +33,21 @@ jobs:
 
       # The flake's dev shell has the toolchain the README builds with: the
       # pinned nightly with wasm32, and the nixpkgs `dx`, which wraps the
-      # wasm-bindgen-cli that vis/Cargo.toml pins.
+      # wasm-bindgen-cli that bbtree/vis/Cargo.toml pins.
       - uses: cachix/install-nix-action@v31
 
       - name: Build
-        run: nix develop --command bash -c 'cd vis && dx build --release --debug-symbols false'
+        run: nix develop --command bash -c 'cd bbtree/vis && dx build --release --debug-symbols false'
 
       # The post is served at /post/ from its own copy of the page, with
       # the post's title and link previews, and any other path falls back
       # to the explorer's, as the README's static hosting does.
       - name: Lay out the site
-        run: vis/lay-out-site.sh vis/target/dx/bbtree-vis/release/web/public
+        run: bbtree/vis/lay-out-site.sh bbtree/vis/target/dx/bbtree-vis/release/web/public
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: vis/target/dx/bbtree-vis/release/web/public
+          path: bbtree/vis/target/dx/bbtree-vis/release/web/public
 
   deploy:
     name: deploy

@@ -32,16 +32,16 @@
             "llvm-tools-preview"
             "miri"
           ];
-          # The visualizer (`vis/`) builds bbtree for the browser; CI tests
-          # the library on wasm32-wasip1 under wasmtime.
+          # The visualizer (`bbtree/vis/`) builds bbtree for the browser; CI
+          # tests the library on wasm32-wasip1 under wasmtime.
           targets = [
             "wasm32-unknown-unknown"
             "wasm32-wasip1"
           ];
         };
-        # Verus proves src/proof/ (doc/08-fuzzing-verification.md). Keep the
-        # version in sync with the `vstd` pin in Cargo.toml, and
-        # verusRustToolchain with the release's rust-toolchain.toml.
+        # Verus proves bbtree/src/proof/ (design/08-fuzzing-verification.md).
+        # Keep the version in sync with the `vstd` pin in bbtree/Cargo.toml,
+        # and verusRustToolchain with the release's rust-toolchain.toml.
         verusVersion = "0.2026.08.30.b432e82";
         verusRustToolchain = pkgs.rust-bin.stable."1.97.1".default.override {
           extensions = [
@@ -144,14 +144,14 @@
             pkgs.gdb
             # The bench's `fetch` downloads its datasets with these, and
             # derives those it may not redistribute with
-            # `bench/tools/bbtree_datasets.py`.
+            # `bbtree/bench/tools/bbtree_datasets.py`.
             pkgs.gh
             pkgs.zstd
             pkgs.python3
-            # The visualizer (`vis/`): the Dioxus web toolchain. The nixpkgs
-            # `dx` is built without downloads: it takes wasm-bindgen,
+            # The visualizer (`bbtree/vis/`): the Dioxus web toolchain. The
+            # nixpkgs `dx` is built without downloads: it takes wasm-bindgen,
             # wasm-opt and tailwindcss from PATH, and needs the
-            # `wasm-bindgen` crate in vis/Cargo.toml pinned to the
+            # `wasm-bindgen` crate in bbtree/vis/Cargo.toml pinned to the
             # wasm-bindgen-cli it wraps.
             pkgs.dioxus-cli
             pkgs.tailwindcss_4

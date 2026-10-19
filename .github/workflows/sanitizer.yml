@@ -47,4 +47,4 @@ jobs:
         env:
           RUSTFLAGS: -Zsanitizer=address
           ASAN_OPTIONS: detect_leaks=1
-        run: cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features
+        run: cargo test -p bbtree -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features

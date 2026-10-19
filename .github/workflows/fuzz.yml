@@ -1,7 +1,7 @@
 # Named for its README badge.
 name: fuzzing
 
-# Fuzzing (doc/08-fuzzing-verification.md), for 30 minutes: weekly; for
+# Fuzzing (design/08-fuzzing-verification.md), for 30 minutes: weekly; for
 # every release, before it merges (ci.yml) and on main once it's published
 # (publish.yml); and on demand. Every target in turn, each for its share of the
 # run in as many processes as the machine has threads, continuing from the
@@ -58,8 +58,10 @@ jobs:
     timeout-minutes: 60
     defaults:
       run:
-        # The nightly, cargo-fuzz and gh, from the flake (`devShells.fuzz`).
+        # The nightly, cargo-fuzz and gh, from the flake (`devShells.fuzz`),
+        # which nix finds above the library's directory.
         shell: nix develop .#fuzz --command bash -euo pipefail {0}
+        working-directory: bbtree
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,7 +96,7 @@ jobs:
         run: |
           # Each target's share of the run, in percent, by how much code a
           # bug there would reach and how much harm it would do
-          # (doc/08-fuzzing-verification.md).
+          # (design/08-fuzzing-verification.md).
           budget=(
             "sync_map 20"
             "map_heap_byte_strings 18"
@@ -128,7 +130,7 @@ jobs:
             {
               echo
               echo "The crashing inputs are in the \`fuzz-crashes\` artifact. To replay"
-              echo "one, minimize it, and keep it once fixed:"
+              echo "one, minimize it, and keep it once fixed, in \`bbtree/\`:"
               echo
               echo '```'
               echo "cargo fuzz run --debug-assertions <target> <input>"
@@ -145,7 +147,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-corpora
-          path: fuzz/corpus
+          path: bbtree/fuzz/corpus
           # Three weeks: the next run, or the one after a skipped week,
           # continues from them.
           retention-days: 21
@@ -155,5 +157,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crashes
-          path: fuzz/artifacts
+          path: bbtree/fuzz/artifacts
           retention-days: 90

@@ -2,13 +2,13 @@
 name: shuttle
 
 # The latched tree's thread interleavings, explored by Shuttle
-# (src/map/shuttle_tests.rs, doc/09-concurrency.md): builds with
-# `--cfg shuttle` mark where threads may switch (src/tree/interleaving.rs),
-# and each test runs its threads under thousands of schedules. Release
-# builds, as Shuttle reruns a test once a schedule. Each test explores for at
-# most 50 seconds a scheduler, two schedulers, so it ends within two minutes;
-# the tests run as many at once as the runner has cores, so all end within
-# fifteen.
+# (bbtree/src/map/shuttle_tests.rs, design/09-concurrency.md): builds with
+# `--cfg shuttle` mark where threads may switch
+# (bbtree/src/tree/interleaving.rs), and each test runs its threads under
+# thousands of schedules. Release builds, as Shuttle reruns a test once a
+# schedule. Each test explores for at most 50 seconds a scheduler, two
+# schedulers, so it ends within two minutes; the tests run as many at once as
+# the runner has cores, so all end within fifteen.
 on:
   push:
     branches: [main]
@@ -47,4 +47,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Shuttle
-        run: cargo test --release --lib shuttle_tests
+        run: cargo test -p bbtree --release --lib shuttle_tests

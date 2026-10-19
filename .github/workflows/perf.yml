@@ -71,15 +71,16 @@ jobs:
           echo "BASE=$base" >> "$GITHUB_ENV"
 
       - name: Build the bench
-        working-directory: bench
+        working-directory: bbtree/bench
         run: cargo build --release --bin bbtree-bench
 
       - name: Measure this commit
-        run: bench/target/release/bbtree-bench ci --perf --out "$RUNNER_TEMP/head"
+        run: bbtree/bench/target/release/bbtree-bench ci --perf --out "$RUNNER_TEMP/head"
 
       # The base's results as main's run on this machine kept them, which
       # saves building and running the base here; or else measured here. A
-      # base whose bench lacks the `ci` suite has no results.
+      # base whose bench lacks the `ci` suite, or lies outside `bbtree/bench`,
+      # has no results.
       - name: Measure the base
         if: env.BASE != ''
         run: |
@@ -94,8 +95,8 @@ jobs:
             # RUNNER_TEMP, so a past job's worktree is registered and gone.
             git worktree prune
             git worktree add --detach "$RUNNER_TEMP/base-source" "$BASE"
-            cd "$RUNNER_TEMP/base-source/bench"
-            if cargo build --release --bin bbtree-bench &&
+            if cd "$RUNNER_TEMP/base-source/bbtree/bench" &&
+                cargo build --release --bin bbtree-bench &&
                 target/release/bbtree-bench ci --perf --out "$RUNNER_TEMP/base"; then
               echo "BASE_SOURCE=measured here" >> "$GITHUB_ENV"
             else
@@ -131,7 +132,7 @@ jobs:
             echo "The bench's \`ci\` suite, $head_line, $base_line, on $RUNNER_NAME ($cpu)."
             echo "A report only: nothing here fails the pull request."
             echo
-            bench/target/release/bbtree-bench compare "${compare[@]}"
+            bbtree/bench/target/release/bbtree-bench compare "${compare[@]}"
           } > "$out/report.md"
           cp "$head_csv" "$out/results/$RUNNER_NAME/$GITHUB_SHA.csv"
           cp "${head_csv%.csv}.md" "$out/results/$RUNNER_NAME/$GITHUB_SHA.md"

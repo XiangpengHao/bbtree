@@ -69,9 +69,9 @@ jobs:
             echo "::error::Can't bump $current, which isn't MAJOR.MINOR.PATCH; give a custom version"
             exit 1
           fi
-          sed -i "s/^version = \"$current\"$/version = \"$next\"/" Cargo.toml
+          sed -i "s/^version = \"$current\"$/version = \"$next\"/" bbtree/Cargo.toml
           if [ "$(package_version)" != "$next" ]; then
-            echo "::error::Cargo.toml says version $(package_version), not $next"
+            echo "::error::bbtree/Cargo.toml says version $(package_version), not $next"
             exit 1
           fi
           # The root's lockfile, and those of the workspaces that depend on

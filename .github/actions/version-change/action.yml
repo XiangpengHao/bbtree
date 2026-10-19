@@ -28,8 +28,10 @@ runs:
         BASE: ${{ inputs.base }}
       run: |
         git fetch --quiet --depth=1 origin "$BASE"
+        # The package's manifest; a commit from before the library moved to
+        # bbtree/ has it at the root.
         version_at() {
-          git show "$1:Cargo.toml" | python3 -c \
+          { git show "$1:bbtree/Cargo.toml" 2>/dev/null || git show "$1:Cargo.toml"; } | python3 -c \
             'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'
         }
         version=$(version_at HEAD)
