@@ -26,12 +26,12 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
 use super::node_plan::NodePlan;
+#[cfg(test)]
+use super::page::PageAllocator;
 use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
-#[cfg(test)]
-use crate::allocator::Allocator;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// A leaf, by its page.
@@ -879,7 +879,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         index: usize,
         key: WindowedKey<K, S>,
         value: V,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> Insertion<K, S, Self> {
         if self.len() < Self::capacity() {
             self.insert_fit(index, key, value);

@@ -58,6 +58,7 @@ mod shared_prefix;
 pub(crate) use self::insert::{ReadOrInsert, Replace};
 pub(crate) use self::scan::{LeafStamp, ScanResume};
 
+use core::alloc::Layout;
 use core::borrow::Borrow;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
@@ -184,11 +185,14 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Makes the tree, unless another thread did: a root page from `alloc`,
-    /// an empty leaf, which is the last leaf too.
+    /// zeroed, so that its latch word is unheld and every edge a reader may
+    /// read before its check is initialized; an empty leaf, which is the
+    /// last leaf too. If `alloc` has no page to give, returns the layout it
+    /// was asked for.
     #[cold]
     #[inline(never)]
-    fn start_tree(&self, alloc: &impl Allocator) {
-        let root_page = RootPage::<K, V, Latched<S>>::new(FreshPage::allocate(alloc));
+    fn start_tree(&self, alloc: &impl Allocator) -> Result<(), Layout> {
+        let root_page = RootPage::<K, V, Latched<S>>::new(FreshPage::try_allocate(alloc)?);
         let Node::Leaf(root) = root_page.node() else {
             unreachable!("a new tree's root is a leaf");
         };
@@ -215,6 +219,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 unsafe { root_page.free() }.deallocate(alloc);
             }
         }
+        Ok(())
     }
 
     /// Runs `operation`, one of the unsync tree's own, on the tree under the

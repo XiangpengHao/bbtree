@@ -9,7 +9,7 @@
 use core::borrow::Borrow;
 
 use super::BBTreeMap;
-use crate::allocator::Allocator;
+use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
@@ -24,12 +24,13 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// ```
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, &str>::new();
-    /// map.insert(1, "one");
-    /// map.insert(2, "two");
+    /// map.insert(1, "one")?;
+    /// map.insert(2, "two")?;
     /// assert_eq!(
     ///     map.read_many([&2, &3, &2], |_, value| value.len()),
     ///     [Some(3), None, Some(3)]
     /// );
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     ///
     /// # Deadlocks
@@ -55,8 +56,9 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// ```
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, u64>::new();
-    /// map.insert(1, 10);
+    /// map.insert(1, 10)?;
     /// assert_eq!(map.get_many_copied([&1, &2, &1]), [Some(10), None, Some(10)]);
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     #[inline]
     pub fn get_many_copied<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]
@@ -68,24 +70,31 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         self.tree.get_many_copied(keys)
     }
 
-    /// Inserts `entries` in input order, and returns each replaced value, as
-    /// separate calls to [`Self::insert`] would: a key repeated in the batch
-    /// replaces the value its earlier entry inserted, and keeps that key.
-    /// Each key descends in its own lane first, then the entries go in one
-    /// after another, each into the leaf its lane found unless another
-    /// thread changed that leaf meanwhile.
+    /// Inserts `entries` in input order, and returns each replaced value, or
+    /// the entry back ([`InsertError`]), as separate calls to
+    /// [`Self::insert`] would: a key repeated in the batch replaces the value
+    /// its earlier entry inserted, and keeps that key. Each key descends in
+    /// its own lane first, then the entries go in one after another, each
+    /// into the leaf its lane found unless another thread changed that leaf
+    /// meanwhile.
     ///
     /// Not atomic: other threads may see some of the batch's entries before
+    /// the rest, and an entry the allocator had no page for doesn't stop
     /// the rest.
     ///
     /// ```
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, &str>::new();
-    /// assert_eq!(map.insert_many([(1, "one"), (1, "again")]), [None, Some("one")]);
+    /// let [one, again] = map.insert_many([(1, "one"), (1, "again")]);
+    /// assert_eq!((one?, again?), (None, Some("one")));
     /// assert_eq!(map.get_copied(&1), Some("again"));
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     #[inline]
-    pub fn insert_many<const N: usize>(&self, entries: [(K, V); N]) -> [Option<V>; N]
+    pub fn insert_many<const N: usize>(
+        &self,
+        entries: [(K, V); N],
+    ) -> [Result<Option<V>, InsertError<K, V>>; N]
     where
         K: Ord,
     {
@@ -98,8 +107,9 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// ```
     /// use bbtree::BBTreeMap;
     /// let map = BBTreeMap::<u64, &str>::new();
-    /// map.insert(1, "one");
+    /// map.insert(1, "one")?;
     /// assert_eq!(map.get_many_cloned([&1, &2]), [Some("one"), None]);
+    /// # Ok::<(), bbtree::AllocError>(())
     /// ```
     #[inline]
     pub fn get_many_cloned<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V>; N]

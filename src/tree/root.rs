@@ -24,11 +24,10 @@ use core::mem;
 use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::leaf::Leaf;
-use super::node::page::{FreshPage, NodePtr, PageByType};
+use super::node::page::{FreshPage, NodePtr, PageAllocator, PageByType};
 use super::node::root_page::RootPage;
 use super::prefix::PrefixedKey;
 use super::shared_prefix::SharedPrefix;
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree: its root page, if it has one, which the tree owns with every
@@ -190,7 +189,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
 
     /// A new tree, on a root page from `alloc`: an empty root leaf, without
     /// a head, and nothing shared yet.
-    pub(crate) fn new(alloc: &impl Allocator) -> Self {
+    pub(crate) fn new(alloc: &impl PageAllocator) -> Self {
         Self {
             root_page: Some(RootPage::new(FreshPage::allocate(alloc))),
             rightmost_leaf: None,
@@ -203,7 +202,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     #[inline]
     pub(in crate::tree) fn root_page_or_new(
         &mut self,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> RootPage<K, V, S> {
         *self
             .root_page
@@ -218,7 +217,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     pub(in crate::tree) fn from_node(
         top: Node<K, V, S>,
         shared_prefix: SharedPrefix,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> Self {
         let (page, emptied) = RootPage::from_node(FreshPage::allocate(alloc), top, shared_prefix);
         emptied.deallocate(alloc);
@@ -235,7 +234,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// # Panics
     ///
     /// Without a tree.
-    pub(in crate::tree) fn raise(&mut self, alloc: &impl Allocator) {
+    pub(in crate::tree) fn raise(&mut self, alloc: &impl PageAllocator) {
         self.forget_rightmost_leaf();
         let root_page = self.existing_root_page().raise(alloc);
         self.root_page = Some(root_page);

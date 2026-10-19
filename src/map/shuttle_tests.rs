@@ -161,7 +161,11 @@ fn key(index: u64) -> u64 {
 fn map_of(flags: &DropFlags, len: u64) -> TrackedMap<'_> {
     let map = TrackedMap::new();
     for index in 0..len {
-        assert!(map.insert(key(index), flags.value(key(index))).is_none());
+        assert!(
+            map.insert(key(index), flags.value(key(index)))
+                .unwrap()
+                .is_none()
+        );
     }
     map
 }
@@ -195,7 +199,7 @@ impl Shapes {
             let mut map = TrackedMap::new();
             let mut len = 0;
             while map.node_lengths().len() <= levels + 1 {
-                map.insert(key(len), flags.value(key(len)));
+                map.insert(key(len), flags.value(key(len))).unwrap();
                 len += 1;
             }
             capacity[levels] = len - 1;
@@ -396,7 +400,7 @@ fn lookups_race_the_root_raised_and_lowered() {
         let lowering_len = shapes.lowering_len[0];
         thread::scope(|scope| {
             scope.spawn(|| {
-                assert!(map.insert(added, flags.value(added)).is_none());
+                assert!(map.insert(added, flags.value(added)).unwrap().is_none());
                 assert!(map.remove(&added).is_some());
                 for index in (lowering_len - 1..len).rev() {
                     assert!(map.remove(&key(index)).is_some());
@@ -478,13 +482,20 @@ fn appends_race_a_shrinking_shared_prefix() {
         let len = 2 * shapes.capacity[0];
         let mut map = TrackedMap::new();
         for index in 0..len {
-            map.insert(base + key(index), flags.value(base + key(index)));
+            map.insert(base + key(index), flags.value(base + key(index)))
+                .unwrap();
         }
         assert!(map.shared_prefix_len() >= 3);
         let (appended, outside, first) = (base + key(len), 5, base + key(0));
         thread::scope(|scope| {
-            scope.spawn(|| assert!(map.insert(appended, flags.value(appended)).is_none()));
-            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).is_none()));
+            scope.spawn(|| {
+                assert!(
+                    map.insert(appended, flags.value(appended))
+                        .unwrap()
+                        .is_none()
+                )
+            });
+            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).unwrap().is_none()));
             scope.spawn(|| {
                 assert!(map.read(&first, |_, value| value.check(first)).is_some());
                 map.read(&outside, |_, value| value.check(outside));
@@ -517,7 +528,7 @@ fn appends_race_a_merge_that_frees_the_last_leaf() {
             for key in appended {
                 let map = &map;
                 let flags = &flags;
-                scope.spawn(move || assert!(map.insert(key, flags.value(key)).is_none()));
+                scope.spawn(move || assert!(map.insert(key, flags.value(key)).unwrap().is_none()));
             }
         });
         map.check_invariants(len as usize + 1);
@@ -546,6 +557,7 @@ fn racing_get_or_inserts_see_one_entry() {
                 value.check(contested);
                 value.slot()
             })
+            .unwrap()
         };
         let (first, second) = thread::scope(|scope| {
             let first = scope.spawn(get_or_insert);
@@ -587,7 +599,7 @@ fn cloned_ranges_resume_across_a_freed_and_reused_leaf() {
             scope.spawn(|| {
                 assert!(map.remove(&key(len - 1)).is_some());
                 for &key in &added {
-                    assert!(map.insert(key, flags.value(key)).is_none());
+                    assert!(map.insert(key, flags.value(key)).unwrap().is_none());
                 }
             });
             scope.spawn(|| {
@@ -624,12 +636,18 @@ fn splits_race_to_raise_a_full_internal_root() {
             .map(|index| key(index) + 5)
             .collect();
         for &key in &filled {
-            map.insert(key, flags.value(key));
+            map.insert(key, flags.value(key)).unwrap();
         }
         let (appended, between) = (key(len), key(0) + 1);
         thread::scope(|scope| {
-            scope.spawn(|| assert!(map.insert(appended, flags.value(appended)).is_none()));
-            scope.spawn(|| assert!(map.insert(between, flags.value(between)).is_none()));
+            scope.spawn(|| {
+                assert!(
+                    map.insert(appended, flags.value(appended))
+                        .unwrap()
+                        .is_none()
+                )
+            });
+            scope.spawn(|| assert!(map.insert(between, flags.value(between)).unwrap().is_none()));
             scope.spawn(|| {
                 let steady: Vec<u64> = (0..len).map(key).collect();
                 assert_visited_in_order(&scanned_keys(&map, .., same, true), &steady);
@@ -695,7 +713,13 @@ fn lookups_race_three_levels_lowering_to_two() {
         let steady: Vec<u64> = (0..len - 1).map(key).collect();
         thread::scope(|scope| {
             scope.spawn(|| assert!(map.remove(&key(len - 1)).is_some()));
-            scope.spawn(|| assert!(map.insert(inserted, flags.value(inserted)).is_none()));
+            scope.spawn(|| {
+                assert!(
+                    map.insert(inserted, flags.value(inserted))
+                        .unwrap()
+                        .is_none()
+                )
+            });
             scope.spawn(|| {
                 let found = map.read_many([&before, &separator], |key, value| {
                     value.check(*key);
@@ -735,10 +759,12 @@ fn inserts_race_to_start_the_tree() {
         let low = key(0);
         thread::scope(|scope| {
             scope.spawn(|| {
-                let slot = map.get_or_insert(low, flags.value(low), |_, value| {
-                    value.check(low);
-                    value.slot()
-                });
+                let slot = map
+                    .get_or_insert(low, flags.value(low), |_, value| {
+                        value.check(low);
+                        value.slot()
+                    })
+                    .unwrap();
                 map.read(&low, |_, value| assert_eq!(value.slot(), slot));
                 let found = map.read_many([&low, &key(len - 1)], |key, value| {
                     value.check(*key);
@@ -749,7 +775,11 @@ fn inserts_race_to_start_the_tree() {
             });
             scope.spawn(|| {
                 for index in 1..len {
-                    assert!(map.insert(key(index), flags.value(key(index))).is_none());
+                    assert!(
+                        map.insert(key(index), flags.value(key(index)))
+                            .unwrap()
+                            .is_none()
+                    );
                 }
             });
         });
@@ -773,9 +803,9 @@ fn emptying_the_tree_races_inserts() {
         let (outside, sharing) = (1 << 40, key(1));
         thread::scope(|scope| {
             scope.spawn(|| assert!(map.remove(&key(0)).is_some()));
-            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).is_none()));
+            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).unwrap().is_none()));
             scope.spawn(|| {
-                assert!(map.insert(sharing, flags.value(sharing)).is_none());
+                assert!(map.insert(sharing, flags.value(sharing)).unwrap().is_none());
                 map.read(&key(0), |_, value| value.check(key(0)));
             });
         });
@@ -837,7 +867,8 @@ fn removals_take_entries_from_a_full_sibling_leaf() {
         let left_len = map.leaf_keys()[0].len() as u64;
         // The left leaf filled, with keys between its own.
         for index in 0..shapes.capacity[0] - left_len {
-            map.insert(key(index) + 5, flags.value(key(index) + 5));
+            map.insert(key(index) + 5, flags.value(key(index) + 5))
+                .unwrap();
         }
         let leaves = map.leaf_keys();
         let (giving, separator) = (*leaves[0].last().expect("a full leaf"), leaves[1][0]);
@@ -896,7 +927,8 @@ fn internal_nodes_take_a_child_from_a_full_sibling() {
                 if map.node_lengths()[1][0] as u64 >= too_many {
                     break 'filling;
                 }
-                map.insert(key(index) + offset, flags.value(key(index) + offset));
+                map.insert(key(index) + offset, flags.value(key(index) + offset))
+                    .unwrap();
                 added += 1;
             }
         }
@@ -912,7 +944,13 @@ fn internal_nodes_take_a_child_from_a_full_sibling() {
             .collect();
         thread::scope(|scope| {
             scope.spawn(|| assert!(map.remove(&key(len - 1)).is_some()));
-            scope.spawn(|| assert!(map.insert(inserted, flags.value(inserted)).is_none()));
+            scope.spawn(|| {
+                assert!(
+                    map.insert(inserted, flags.value(inserted))
+                        .unwrap()
+                        .is_none()
+                )
+            });
             scope.spawn(|| {
                 let found = map.read_many([&moving[0], &separator], |key, value| {
                     value.check(*key);
@@ -970,7 +1008,7 @@ fn removing_the_roots_separator_lowers_three_levels() {
             .collect();
         thread::scope(|scope| {
             scope.spawn(|| assert!(map.remove(&separator).is_some()));
-            scope.spawn(|| assert!(map.insert(between, flags.value(between)).is_none()));
+            scope.spawn(|| assert!(map.insert(between, flags.value(between)).unwrap().is_none()));
             scope.spawn(|| {
                 let found = map.read_many([&before, &successor], |key, value| {
                     value.check(*key);
@@ -1011,8 +1049,14 @@ fn shrinking_the_shared_prefix_races_raising_the_root() {
         let shared = map.shared_prefix_len();
         let (outside, first_leaf, last) = (1 << 40, key(0) + 5, key(len - 1));
         thread::scope(|scope| {
-            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).is_none()));
-            scope.spawn(|| assert!(map.insert(first_leaf, flags.value(first_leaf)).is_none()));
+            scope.spawn(|| assert!(map.insert(outside, flags.value(outside)).unwrap().is_none()));
+            scope.spawn(|| {
+                assert!(
+                    map.insert(first_leaf, flags.value(first_leaf))
+                        .unwrap()
+                        .is_none()
+                )
+            });
             scope.spawn(|| {
                 let found = map.read_many([&key(0), &last], |key, value| {
                     value.check(*key);
@@ -1077,7 +1121,7 @@ impl<K: Ord + Clone + fmt::Debug> ModelThread<'_, '_, K> {
     fn insert(&mut self, id: u64) {
         let value = self.run.flags.value(id);
         let slot = value.slot();
-        let old = self.run.map.insert(self.key(id), value);
+        let old = self.run.map.insert(self.key(id), value).unwrap();
         assert_eq!(old.map(|old| old.slot()), self.model.insert(id, slot));
     }
 
@@ -1140,10 +1184,14 @@ impl<K: Ord + Clone + fmt::Debug> ModelThread<'_, '_, K> {
     fn get_or_insert(&mut self, id: u64) {
         let value = self.run.flags.value(id);
         let slot = value.slot();
-        let seen = self.run.map.get_or_insert(self.key(id), value, |_, value| {
-            value.check(id);
-            value.slot()
-        });
+        let seen = self
+            .run
+            .map
+            .get_or_insert(self.key(id), value, |_, value| {
+                value.check(id);
+                value.slot()
+            })
+            .unwrap();
         assert_eq!(seen, *self.model.entry(id).or_insert(slot));
     }
 
@@ -1341,7 +1389,7 @@ fn string_keys_tie_at_separators_while_threads_change_them() {
         let flags = DropFlags::new();
         let map = TrackedMap::<String>::new();
         for id in 0..12 {
-            map.insert(key_of(id), flags.value(id));
+            map.insert(key_of(id), flags.value(id)).unwrap();
         }
         ModelRun {
             map,

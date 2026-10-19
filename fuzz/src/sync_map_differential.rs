@@ -314,7 +314,7 @@ where
                 let expected = entries
                     .clone()
                     .map(|(key, value)| self.theirs.insert(key, value));
-                assert_eq!(self.ours.insert_many(entries), expected);
+                assert_eq!(self.ours.insert_many(entries).map(Result::unwrap), expected);
             }
             SyncMapOperation::Get { key } => self.assert_same_lookup(&self.key(key)),
             SyncMapOperation::GetBorrowed { key } => {
@@ -346,11 +346,12 @@ where
             }
             SyncMapOperation::GetOrInsert { key, value } => {
                 let key = self.key(key);
-                let ours =
-                    self.ours
-                        .get_or_insert(key.clone(), V::from_input(value), |key, value| {
-                            (key.clone(), value.clone())
-                        });
+                let ours = self
+                    .ours
+                    .get_or_insert(key.clone(), V::from_input(value), |key, value| {
+                        (key.clone(), value.clone())
+                    })
+                    .unwrap();
                 let theirs = self
                     .theirs
                     .entry(key.clone())
@@ -447,7 +448,7 @@ where
     }
 
     fn insert(&mut self, key: K, value: V) {
-        let ours = self.ours.insert(key.clone(), value.clone());
+        let ours = self.ours.insert(key.clone(), value.clone()).unwrap();
         assert_eq!(ours, self.theirs.insert(key, value));
     }
 

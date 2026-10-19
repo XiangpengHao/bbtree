@@ -50,12 +50,11 @@
 use super::node::inline_keys::{KeyInliner, Window, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::NodePtr;
+use super::node::page::{NodePtr, PageAllocator};
 use super::node::{Child, Node};
 use super::node_stack::{FirstEdge, LastEdge, MAX_DEPTH, NodeEnd, NodeStackMut};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
-use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
@@ -322,7 +321,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     pub(in crate::tree) fn shrink_shared_prefix_for(
         &mut self,
         key: K,
-        alloc: &impl Allocator,
+        alloc: &impl PageAllocator,
     ) -> PrefixedKey<K> {
         let root_page = self.root_page_or_new(alloc);
         if NodePtr::<K, V, S>::has_inline_keys() {

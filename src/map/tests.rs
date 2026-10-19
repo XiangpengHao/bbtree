@@ -10,7 +10,7 @@ use std::thread;
 use std::vec::Vec;
 
 use super::{BBTreeMap, RangeCloned};
-use crate::allocator::Global;
+use crate::allocator::{Global, InsertError};
 use crate::inline_key::Auto;
 use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
@@ -28,7 +28,7 @@ where
     let mut std_map = BTreeMap::new();
     for (position, key) in keys.iter().enumerate() {
         assert_eq!(
-            map.insert(key.clone(), position),
+            map.insert(key.clone(), position).unwrap(),
             std_map.insert(key.clone(), position),
             "inserting {key:?}"
         );
@@ -138,7 +138,7 @@ impl From<&HashTagCase> for BBTreeMap<String, u128> {
     fn from(case: &HashTagCase) -> Self {
         let mut map = Self::new();
         for (index, key) in case.keys().iter().enumerate() {
-            map.insert(key.clone(), index as u128);
+            map.insert(key.clone(), index as u128).unwrap();
         }
         map.check_invariants(case.keys().len());
         map
@@ -211,7 +211,7 @@ fn assert_removals_match_std<K: Ord + Clone + core::fmt::Debug>(
     rng.shuffle(&mut order);
     for (step, key) in keys.iter().enumerate() {
         assert_eq!(
-            map.insert(key.clone(), step),
+            map.insert(key.clone(), step).unwrap(),
             std_map.insert(key.clone(), step)
         );
         if step >= lag {
@@ -238,7 +238,7 @@ fn assert_removals_match_std<K: Ord + Clone + core::fmt::Debug>(
     map.check_invariants(0);
     for (step, key) in keys.iter().enumerate() {
         assert_eq!(
-            map.insert(key.clone(), step),
+            map.insert(key.clone(), step).unwrap(),
             std_map.insert(key.clone(), step)
         );
     }
@@ -285,7 +285,7 @@ fn emptied_pages_serve_new_nodes() {
     {
         let map = BBTreeMap::<u64, u64, Auto, &TestPages<u64, u64>>::new_in(&pages);
         for &key in &keys {
-            map.insert(key, key);
+            map.insert(key, key).unwrap();
         }
         let filled = pages.in_use_count();
         for &key in &keys {
@@ -293,13 +293,106 @@ fn emptied_pages_serve_new_nodes() {
         }
         assert_eq!(pages.in_use_count(), filled, "pages stay with the map");
         for &key in &keys {
-            map.insert(key, key);
+            map.insert(key, key).unwrap();
         }
         assert!(
             pages.in_use_count() <= filled + 2,
             "{} > {filled}",
             pages.in_use_count()
         );
+    }
+    pages.assert_all_released();
+}
+
+/// An insert the allocator has no page for, the root page of a new tree
+/// or any page a split takes, changes nothing and gives the entry back;
+/// given the pages, it goes in. The pages a refused split took serve its
+/// next try, and every page goes back to the allocator when the map drops.
+#[test]
+fn refused_pages_leave_the_map_unchanged() {
+    /// About 20 entries per leaf, so that a thousand entries make a root
+    /// that splits as an internal node.
+    type Key = [u8; 32];
+    let key = |number: u64| {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&number.to_be_bytes());
+        key
+    };
+    let pages = TestPages::<Key, u64>::new();
+    let rng = TestRng::new(113);
+    let numbers = random_numbers(&rng, 1000, 1 << 40);
+    let mut most_pages = 0;
+    {
+        let mut map = BBTreeMap::<Key, u64, Auto, &TestPages<Key, u64>>::new_in(&pages);
+        let mut std_map = BTreeMap::new();
+        for &number in &numbers {
+            let in_use = pages.in_use_count();
+            let mut entry = (key(number), number);
+            // A try that a budget of `budget` pages refuses leaves the pages
+            // it took with the map, for the next try.
+            for budget in 0.. {
+                pages.set_budget(Some(budget));
+                match map.insert(entry.0, entry.1) {
+                    Ok(replaced) => {
+                        assert_eq!(replaced, std_map.insert(entry.0, entry.1));
+                        break;
+                    }
+                    Err(refused) => {
+                        entry = refused.into_entry();
+                        assert_eq!(entry, (key(number), number));
+                        assert_eq!(map.get_copied(&entry.0), None);
+                        map.check_invariants(std_map.len());
+                    }
+                }
+            }
+            most_pages = most_pages.max(pages.in_use_count() - in_use);
+        }
+        for (key, &value) in &std_map {
+            assert_eq!(map.get_copied(key), Some(value));
+        }
+    }
+    // A full internal root splits: a page for the leaf's right half, one for
+    // the root's, and one for the root node, which moves out of the root
+    // page as the tree grows.
+    assert!(most_pages >= 3, "{most_pages}");
+    pages.assert_all_released();
+}
+
+/// A refused `get_or_insert` runs nothing; a batch inserts the entries it
+/// has pages for, and gives the others back. A root leaf's split, given one
+/// of the two pages it takes, keeps that one for its next try.
+#[test]
+fn refused_pages_fail_their_own_entries() {
+    let pages = TestPages::<u64, u64>::new();
+    {
+        let map = BBTreeMap::<u64, u64, Auto, &TestPages<u64, u64>>::new_in(&pages);
+        pages.set_budget(Some(0));
+        let refused = map.get_or_insert(0, 0, |_, _| panic!("no entry to run on"));
+        assert_eq!(refused.map_err(InsertError::into_entry), Err((0, 0)));
+        assert!(map.is_empty());
+        pages.set_budget(None);
+        map.insert(0, 0).unwrap();
+        // Fills the root leaf.
+        pages.set_budget(Some(0));
+        let mut full_at = 1;
+        while map.insert(full_at, full_at).is_ok() {
+            full_at += 1;
+        }
+        pages.set_budget(Some(1));
+        let [replaced, refused] = map.insert_many([(0, 10), (full_at, full_at)]);
+        assert_eq!(replaced.unwrap(), Some(0));
+        assert_eq!(
+            refused.map_err(InsertError::into_entry),
+            Err((full_at, full_at))
+        );
+        let in_use = pages.in_use_count();
+        pages.set_budget(None);
+        assert_eq!(map.insert(full_at, full_at).unwrap(), None);
+        assert_eq!(pages.in_use_count(), in_use + 1);
+        for number in 1..=full_at {
+            assert_eq!(map.get_copied(&number), Some(number));
+        }
+        assert_eq!(map.get_copied(&0), Some(10));
     }
     pages.assert_all_released();
 }
@@ -315,7 +408,7 @@ fn what_keys_share_grows_shrinks_and_starts_anew() {
     let high = |number: u64| (0xAB << 40) + number * 7;
     for number in 0..3_000 {
         assert_eq!(
-            map.insert(high(number), number),
+            map.insert(high(number), number).unwrap(),
             std_map.insert(high(number), number)
         );
     }
@@ -326,7 +419,10 @@ fn what_keys_share_grows_shrinks_and_starts_anew() {
     map.check_invariants(std_map.len());
     let rng = TestRng::new(101);
     for number in random_numbers(&rng, 2_000, 1 << 20) {
-        assert_eq!(map.insert(number, number), std_map.insert(number, number));
+        assert_eq!(
+            map.insert(number, number).unwrap(),
+            std_map.insert(number, number)
+        );
     }
     assert_eq!(map.shared_prefix_len(), 2, "both ranges start 0x0000");
     map.check_invariants(std_map.len());
@@ -340,17 +436,22 @@ fn what_keys_share_grows_shrinks_and_starts_anew() {
     map.check_invariants(0);
     for number in 0..2_000 {
         let key = (0xCD << 40) + number;
-        assert_eq!(map.insert(key, number), std_map.insert(key, number));
+        assert_eq!(
+            map.insert(key, number).unwrap(),
+            std_map.insert(key, number)
+        );
     }
     assert!(map.shared_prefix_len() >= 3, "an emptied tree starts anew");
     map.check_invariants(std_map.len());
 
     let mut strings = BBTreeMap::<String, usize>::new();
     for number in 0..3_000 {
-        strings.insert(format!("/usr/share/doc/{number:08}"), number);
+        strings
+            .insert(format!("/usr/share/doc/{number:08}"), number)
+            .unwrap();
     }
     assert!(strings.shared_prefix_len() >= "/usr/share/doc/0000".len());
-    strings.insert(String::from("/etc"), 0);
+    strings.insert(String::from("/etc"), 0).unwrap();
     assert_eq!(strings.shared_prefix_len(), 1);
     strings.check_invariants(3_001);
 }
@@ -395,7 +496,7 @@ fn threads_find_what_other_threads_inserted() {
             scope.spawn(move || {
                 barrier.wait();
                 for &key in keys {
-                    assert_eq!(map.insert(key, key ^ writer as u64), None);
+                    assert_eq!(map.insert(key, key ^ writer as u64).unwrap(), None);
                 }
             });
             scope.spawn(move || {
@@ -449,7 +550,7 @@ fn threads_racing_on_the_same_keys_agree() {
                 barrier.wait();
                 for &index in &order {
                     let key = &keys[index];
-                    map.insert(key.clone(), (thread, 0));
+                    map.insert(key.clone(), (thread, 0)).unwrap();
                     map.update(key, |_, (_, count)| *count += 1)
                         .expect("an inserted key stays");
                 }
@@ -479,7 +580,7 @@ fn threads_remove_while_others_insert() {
     // Half the keys are there before, for the removers.
     for thread in 0..threads {
         for index in (0..per_thread).step_by(2) {
-            map.insert(key(thread, index), 1);
+            map.insert(key(thread, index), 1).unwrap();
         }
     }
     let barrier = Barrier::new(2 * threads);
@@ -490,7 +591,7 @@ fn threads_remove_while_others_insert() {
             scope.spawn(move || {
                 barrier.wait();
                 for index in (1..per_thread).step_by(2) {
-                    assert_eq!(map.insert(key(thread, index), 2), None);
+                    assert_eq!(map.insert(key(thread, index), 2).unwrap(), None);
                     assert_eq!(map.get_cloned(&key(thread, index)), Some(2));
                 }
             });
@@ -527,7 +628,7 @@ fn threads_racing_to_remove_take_each_entry_once() {
     let map = BBTreeMap::<String, u64>::new();
     let name = |key: u64| format!("item/{key:06}");
     for key in 0..key_count {
-        map.insert(name(key), 1);
+        map.insert(name(key), 1).unwrap();
     }
     let barrier = Barrier::new(threads);
     let taken: Vec<u64> = thread::scope(|scope| {
@@ -544,7 +645,7 @@ fn threads_racing_to_remove_take_each_entry_once() {
                         taken += map.remove(&name(key)).unwrap_or(0);
                         // Every fourth key, this thread puts one back.
                         if key % 4 == thread as u64 {
-                            map.insert(name(key), 1);
+                            map.insert(name(key), 1).unwrap();
                         }
                     }
                     taken
@@ -614,7 +715,10 @@ fn assert_threads_match_their_models(
                     let inserts = [70, 45, 15][step * 3 / operations];
                     let roll = rng.below(100);
                     if roll < inserts {
-                        assert_eq!(map.insert(key, step as u64), model.insert(key, step as u64));
+                        assert_eq!(
+                            map.insert(key, step as u64).unwrap(),
+                            model.insert(key, step as u64)
+                        );
                     } else if roll < inserts + 30 {
                         assert_eq!(map.remove(&key), model.remove(&key));
                     } else if roll < inserts + 35 {
@@ -658,7 +762,7 @@ fn threads_append_while_another_shrinks_what_keys_share() {
                 barrier.wait();
                 for step in 0..per_appender {
                     let key = base + step * appenders + appender;
-                    assert_eq!(map.insert(key, step), None);
+                    assert_eq!(map.insert(key, step).unwrap(), None);
                     let earlier = base + (step / 2) * appenders + appender;
                     assert!(map.contains_key(&earlier), "lost {earlier}");
                 }
@@ -668,7 +772,7 @@ fn threads_append_while_another_shrinks_what_keys_share() {
             let rng = TestRng::new(102);
             barrier.wait();
             for number in random_numbers(&rng, outsiders as usize, 1 << 32) {
-                map.insert(number, number);
+                map.insert(number, number).unwrap();
                 assert_eq!(map.get_cloned(&number), Some(number));
             }
         });
@@ -697,7 +801,7 @@ fn scans_match_std() {
     let map = BBTreeMap::<u64, u64>::new();
     let mut std_map = BTreeMap::new();
     for number in random_numbers(&rng, 20_000, 1 << 20) {
-        map.insert(number, number * 3);
+        map.insert(number, number * 3).unwrap();
         std_map.insert(number, number * 3);
     }
     let collect = |range: (Bound<u64>, Bound<u64>), reverse: bool| {
@@ -755,7 +859,7 @@ fn scans_match_std() {
     let mut std_strings = BTreeMap::new();
     for (index, number) in random_numbers(&rng, 5_000, 1 << 30).into_iter().enumerate() {
         let key = format!("/srv/{}/{number:08x}", number % 3);
-        strings.insert(key.clone(), index);
+        strings.insert(key.clone(), index).unwrap();
         std_strings.insert(key, index);
     }
     for start in ["", "/srv/1/", "/srv/1/8", "/srv/2/f", "/zzz"] {
@@ -792,7 +896,7 @@ fn scans_visit_every_steady_key_once_while_others_change_the_map() {
     let map = BBTreeMap::<u64, u64>::new();
     // Even keys stay for the whole test; odd ones come and go.
     for number in 0..steady {
-        map.insert(number * 2, number);
+        map.insert(number * 2, number).unwrap();
     }
     let barrier = Barrier::new(writers + scanners);
     thread::scope(|scope| {
@@ -804,7 +908,7 @@ fn scans_visit_every_steady_key_once_while_others_change_the_map() {
                 for _ in 0..100_000 {
                     let key = rng.below_u64(steady) * 2 + 1;
                     if rng.below(2) == 0 {
-                        map.insert(key, key);
+                        map.insert(key, key).unwrap();
                     } else {
                         map.remove(&key);
                     }
@@ -858,7 +962,7 @@ fn batches_find_steady_keys_while_others_change_the_map() {
         let map = BBTreeMap::<u64, u64>::new();
         // Even keys stay for the whole test; odd ones come and go.
         for number in 0..steady {
-            map.insert(number * 2, number);
+            map.insert(number * 2, number).unwrap();
         }
         let changing = steady.max(300);
         let barrier = Barrier::new(writers + readers);
@@ -871,7 +975,7 @@ fn batches_find_steady_keys_while_others_change_the_map() {
                     for _ in 0..100_000 {
                         let key = rng.below_u64(changing) * 2 + 1;
                         if rng.below(2) == 0 {
-                            map.insert(key, key);
+                            map.insert(key, key).unwrap();
                         } else {
                             map.remove(&key);
                         }
@@ -936,7 +1040,7 @@ where
         let map = BBTreeMap::<K, u64>::default();
         // Even numbers stay for the whole test; odd ones come and go.
         for number in (0..steady).map(|number| number * 2) {
-            map.insert(key_of(number), tagged(number, 0));
+            map.insert(key_of(number), tagged(number, 0)).unwrap();
         }
         let changing = steady.max(300);
         let barrier = Barrier::new(writers + readers);
@@ -949,7 +1053,7 @@ where
                     for round in 0..50_000 {
                         let number = rng.below_u64(changing) * 2 + 1;
                         match rng.below(3) {
-                            0 => drop(map.insert(key_of(number), tagged(number, round))),
+                            0 => drop(map.insert(key_of(number), tagged(number, round)).unwrap()),
                             1 => drop(map.remove(&key_of(number))),
                             _ => {
                                 let number = rng.below_u64(steady) * 2;
@@ -1022,7 +1126,11 @@ fn batched_inserts_match_std() {
             let expected = entries
                 .clone()
                 .map(|(key, value)| std_map.insert(key, value));
-            assert_eq!(map.insert_many(entries), expected, "batch {batch}");
+            assert_eq!(
+                map.insert_many(entries).map(Result::unwrap),
+                expected,
+                "batch {batch}"
+            );
         }
         map.check_invariants(std_map.len());
         for (key, &value) in &std_map {
@@ -1055,7 +1163,8 @@ fn threads_insert_batches_while_others_look_up() {
     let map = BBTreeMap::<u64, u64>::new();
     // A tree deep enough for lanes from the start.
     for number in 0..20_000 {
-        map.insert((number * 1_000_003 % (1 << 40)) | (1 << 41), number);
+        map.insert((number * 1_000_003 % (1 << 40)) | (1 << 41), number)
+            .unwrap();
     }
     let barrier = Barrier::new(writers + readers);
     thread::scope(|scope| {
@@ -1069,7 +1178,11 @@ fn threads_insert_batches_while_others_look_up() {
                 rng.shuffle(&mut keys);
                 barrier.wait();
                 for chunk in keys.as_chunks::<16>().0 {
-                    assert_eq!(map.insert_many(chunk.map(|key| (key, key * 3))), [None; 16]);
+                    assert_eq!(
+                        map.insert_many(chunk.map(|key| (key, key * 3)))
+                            .map(Result::unwrap),
+                        [None; 16]
+                    );
                     for &key in chunk {
                         assert_eq!(map.get_copied(&key), Some(key * 3), "{key} after its batch");
                     }
@@ -1153,7 +1266,7 @@ fn owners_match_std() {
     map.clear();
     assert!(map.is_empty());
     assert_eq!(format!("{map:?}"), "{}");
-    map.insert(3, "c");
+    map.insert(3, "c").unwrap();
     assert_eq!(map.get_copied(&3), Some("c"));
     map.check_invariants(1);
 }
@@ -1171,9 +1284,11 @@ fn get_or_insert_matches_std() {
         .enumerate()
     {
         let key = format!("{number:05}");
-        let stored = map.get_or_insert(key.clone(), position, |stored, &value| {
-            (stored.clone(), value)
-        });
+        let stored = map
+            .get_or_insert(key.clone(), position, |stored, &value| {
+                (stored.clone(), value)
+            })
+            .unwrap();
         let expected = *std_map.entry(key.clone()).or_insert(position);
         assert_eq!(stored, (key, expected));
     }
@@ -1202,7 +1317,8 @@ fn threads_racing_to_get_or_insert_agree() {
                     let mut seen = std::vec![usize::MAX; key_count as usize];
                     barrier.wait();
                     for key in order {
-                        seen[key as usize] = map.get_or_insert(key, thread, |_, &value| value);
+                        seen[key as usize] =
+                            map.get_or_insert(key, thread, |_, &value| value).unwrap();
                     }
                     seen
                 })
@@ -1231,7 +1347,7 @@ fn remove_if_removes_what_its_condition_holds_of() {
     let mut map = BBTreeMap::<u64, u64>::new();
     let mut std_map = BTreeMap::new();
     for number in random_numbers(&rng, 30_000, 1 << 20) {
-        map.insert(number, number % 7);
+        map.insert(number, number % 7).unwrap();
         std_map.insert(number, number % 7);
     }
     let keys: Vec<u64> = std_map.keys().copied().collect();
@@ -1260,7 +1376,7 @@ fn cloned_ranges_match_std() {
     let map = BBTreeMap::<u64, u64>::new();
     let mut std_map = BTreeMap::new();
     for number in random_numbers(&rng, 20_000, 1 << 20) {
-        map.insert(number, number * 5);
+        map.insert(number, number * 5).unwrap();
         std_map.insert(number, number * 5);
     }
     for _ in 0..300 {
@@ -1300,7 +1416,7 @@ fn cloned_ranges_match_std() {
 fn cloned_ranges_see_what_changes_ahead_of_them() {
     let map = BBTreeMap::<u64, u64>::new();
     for number in 0..10_000 {
-        map.insert(number * 4, number);
+        map.insert(number * 4, number).unwrap();
     }
     for (taken, from_back) in [(1, false), (5, false), (30, false), (5, true), (30, true)] {
         let mut iter = map.range_cloned(..);
@@ -1321,7 +1437,7 @@ fn cloned_ranges_see_what_changes_ahead_of_them() {
         } else {
             (last + 2, last + 4)
         };
-        map.insert(inserted, 1);
+        map.insert(inserted, 1).unwrap();
         map.remove(&removed);
         let next = |iter: &mut RangeCloned<'_, u64, u64, Auto, Global, u64, _>| {
             if from_back {
@@ -1335,7 +1451,7 @@ fn cloned_ranges_see_what_changes_ahead_of_them() {
         let expected = if from_back { last - 8 } else { last + 8 };
         assert_eq!(after, Some(expected), "after taking {taken}");
         map.remove(&inserted);
-        map.insert(removed, removed / 4);
+        map.insert(removed, removed / 4).unwrap();
     }
 }
 
@@ -1348,7 +1464,7 @@ fn cloned_ranges_hand_out_every_steady_key_once_while_others_change_the_map() {
     let (writers, readers, steady) = (3, 3, 30_000_u64);
     let map = BBTreeMap::<u64, u64>::new();
     for number in 0..steady {
-        map.insert(number * 2, number);
+        map.insert(number * 2, number).unwrap();
     }
     let barrier = Barrier::new(writers + readers);
     thread::scope(|scope| {
@@ -1360,7 +1476,7 @@ fn cloned_ranges_hand_out_every_steady_key_once_while_others_change_the_map() {
                 for _ in 0..100_000 {
                     let key = rng.below_u64(steady) * 2 + 1;
                     if rng.below(2) == 0 {
-                        map.insert(key, key);
+                        map.insert(key, key).unwrap();
                     } else {
                         map.remove(&key);
                     }
@@ -1415,7 +1531,7 @@ fn each_cloned_range_step_hands_out_the_current_successor() {
         let map = BBTreeMap::<u64, u64>::new();
         let mut std_map = BTreeMap::new();
         for number in random_numbers(&rng, 3_000, 4_000) {
-            map.insert(number, number);
+            map.insert(number, number).unwrap();
             std_map.insert(number, number);
         }
         let from_back = seed % 2 == 1;
@@ -1443,7 +1559,7 @@ fn each_cloned_range_step_hands_out_the_current_successor() {
             for _ in 0..rng.below(4) {
                 let key = rng.below_u64(4_000);
                 if rng.below(2) == 0 {
-                    map.insert(key, key);
+                    map.insert(key, key).unwrap();
                     std_map.insert(key, key);
                 } else {
                     map.remove(&key);
