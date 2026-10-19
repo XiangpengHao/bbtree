@@ -273,6 +273,13 @@ impl VarBytesBuf {
     }
 }
 
+/// As [`VarBytesBuf::empty`].
+impl Default for VarBytesBuf {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 impl Deref for VarBytesBuf {
     type Target = VarBytes;
 

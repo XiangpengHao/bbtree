@@ -1,5 +1,6 @@
-//! File maps in files: written once, then mapped into memory and used where
-//! they lie, or read into it.
+//! File maps in files, for [`BBTreeMapFile`](crate::BBTreeMapFile):
+//! written once, then mapped into memory and used where they lie, or read
+//! into it.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -17,8 +18,8 @@ use memmap2::{Mmap, MmapOptions};
 ///
 /// A file map may be the whole file, or a range of it, as one embedded in a
 /// Parquet file is. A range must start at a multiple of the file map's
-/// alignment ([`FileMap::alignment`]), as [`Self::append`] places it.
-pub struct MappedFile<K, V, S: InlineKeyStrategy<K> = Auto> {
+/// alignment ([`FileMap::alignment`]), as [`Self::write_at`] places it.
+pub(crate) struct MappedFile<K, V, S: InlineKeyStrategy<K> = Auto> {
     /// The map in `bytes`, opened once. It borrows `bytes` for as long as
     /// `self` lives, which no lifetime can name: [`Self::map`] lends it
     /// for as long as `self` is borrowed. Neither a mapping nor a buffer
@@ -56,29 +57,36 @@ enum FileMapBytes {
 impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> MappedFile<K, V, S> {
     /// Writes `writer`'s file map to the file at `path`, creating it, or
     /// truncating what it held.
-    pub fn create(path: impl AsRef<Path>, writer: &FileWriter<K, V, S>) -> io::Result<()>
+    pub(crate) fn create(path: impl AsRef<Path>, writer: &FileWriter<K, V, S>) -> io::Result<()>
     where
         S: InlineKeyStrategy<K::InWriter>,
     {
         let mut file = File::create(path)?;
-        Self::append(&mut file, writer)?;
+        Self::write_at(&mut file, 0, writer)?;
         Ok(())
     }
 
-    /// Writes `writer`'s file map at the end of `file`, after zeros up to the
-    /// next multiple of its alignment, and returns where it lies: the range
-    /// [`Self::map`] and [`Self::read`] take.
-    pub fn append(file: &mut File, writer: &FileWriter<K, V, S>) -> io::Result<Range<u64>>
+    /// Writes `writer`'s file map into `file` at `offset`, after zeros up to
+    /// the next multiple of its alignment, in place of what lay there, and
+    /// ends the file after it. Returns where it lies: the range
+    /// [`Self::mmap`] and [`Self::read`] take.
+    pub(crate) fn write_at(
+        file: &mut File,
+        offset: u64,
+        writer: &FileWriter<K, V, S>,
+    ) -> io::Result<Range<u64>>
     where
         S: InlineKeyStrategy<K::InWriter>,
     {
-        let end = file.seek(SeekFrom::End(0))?;
-        let start = end.next_multiple_of(FileMap::<K, V, S>::alignment() as u64);
-        let mut out = BufWriter::with_capacity(1 << 20, file);
-        io::copy(&mut io::repeat(0).take(start - end), &mut out)?;
+        let start = offset.next_multiple_of(FileMap::<K, V, S>::alignment() as u64);
+        let end = start + writer.byte_len() as u64;
+        file.set_len(offset)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut out = BufWriter::with_capacity(1 << 20, &mut *file);
+        io::copy(&mut io::repeat(0).take(start - offset), &mut out)?;
         writer.write(|bytes| out.write_all(bytes))?;
         out.flush()?;
-        Ok(start..start + writer.byte_len() as u64)
+        Ok(start..end)
     }
 
     /// The file map in `range` of `file`, mapped into memory in `pages`.
@@ -90,7 +98,7 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> MappedFile<K, V, S> {
     /// The range holds a file map an [`FileWriter`] wrote, unchanged, and
     /// nothing changes or truncates the file while it is mapped: as for
     /// [`FileMap::open_unchecked`], and for any file mapped into memory.
-    pub unsafe fn mmap(file: &File, range: Range<u64>, pages: OsPages) -> io::Result<Self> {
+    pub(crate) unsafe fn mmap(file: &File, range: Range<u64>, pages: OsPages) -> io::Result<Self> {
         let len = usize::try_from(range.end - range.start).map_err(io::Error::other)?;
         // SAFETY: the caller's: nothing changes the file while it is mapped.
         let mapping = unsafe { MmapOptions::new().offset(range.start).len(len).map(file)? };
@@ -111,7 +119,7 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> MappedFile<K, V, S> {
 
     /// The file map in `range` of `file`, read into memory, after checking
     /// every page ([`FileMap::open`]).
-    pub fn read(file: &mut File, range: Range<u64>) -> io::Result<Self> {
+    pub(crate) fn read(file: &mut File, range: Range<u64>) -> io::Result<Self> {
         let len = usize::try_from(range.end - range.start).map_err(io::Error::other)?;
         let mut buffer = FileBuf::zeroed(len, FileMap::<K, V, S>::alignment());
         file.seek(SeekFrom::Start(range.start))?;
@@ -125,29 +133,16 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> MappedFile<K, V, S> {
         })
     }
 
-    /// The whole file at `path`, a file map, mapped into memory; see
-    /// [`Self::map`].
-    ///
-    /// # Safety
-    ///
-    /// As for [`Self::map`].
-    pub unsafe fn mmap_path(path: impl AsRef<Path>, pages: OsPages) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let len = file.metadata()?.len();
-        // SAFETY: the caller's.
-        unsafe { Self::mmap(&file, 0..len, pages) }
-    }
-
     /// The whole file at `path`, a file map, read into memory; see
     /// [`Self::read`].
-    pub fn read_path(path: impl AsRef<Path>) -> io::Result<Self> {
+    pub(crate) fn read_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let mut file = File::open(path)?;
         let len = file.metadata()?.len();
         Self::read(&mut file, 0..len)
     }
 
     /// The map the file map holds.
-    pub fn map(&self) -> &FileMap<'_, K, V, S> {
+    pub(crate) fn map(&self) -> &FileMap<'_, K, V, S> {
         &self.map
     }
 

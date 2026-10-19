@@ -1,17 +1,23 @@
-//! bbtree on disk (`design/15-index-file.md`): a map compacted into a file map
-//! ([`bbtree::file`]), written to a file, and read back by mapping the file
-//! into memory, where lookups use it as it lies, at a map's speed.
+//! bbtree on disk (`design/15-index-file.md`): a bbtree map compacted into a
+//! file ([`bbtree::file`]), mapped back into memory or read into it, and
+//! looked up where it lies, with the map's own code, at a map's speed.
 //!
-//! - [`IndexFile`] is a map from keys to values of any length in a file,
-//!   read and written as the caller's types, through [`ToBytes`] and
-//!   [`FromBytes`].
-//! - [`MappedFile`] writes a file map to a file, and maps or reads one back,
-//!   whole or from a range of a larger file, in [`OsPages`] of either size.
+//! - [`BBTreeMapFile`] is the map in a file.
+//! - [`DiskType`] is what its keys and values may be, each kept as fits it:
+//!   integers and other plain types as they are, in their slots, text and
+//!   byte strings in the leaves' tails. [`plain_disk_type!`] makes a plain
+//!   type of the caller's one.
+//! - [`DiskQuery`] and [`DiskInput`] are what it looks up with and is
+//!   written from.
 
-mod byte_encoding;
-mod index_file;
+/// The bbtree this crate builds on: what its API names, and what
+/// [`plain_disk_type!`] expands to.
+pub use bbtree;
+
+mod bbtree_map_file;
+mod disk_type;
 mod mapped_file;
 
-pub use byte_encoding::{FromBytes, ToBytes};
-pub use index_file::IndexFile;
-pub use mapped_file::{MappedFile, OsPages};
+pub use bbtree_map_file::{BBTreeMapFile, MmapOptions};
+pub use disk_type::{DiskInput, DiskQuery, DiskType};
+pub use mapped_file::OsPages;

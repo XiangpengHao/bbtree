@@ -45,6 +45,6 @@ Phase 1 built (D51, D52).
 - [ ] We are better than radix tree: 1. support prefix search, 2. better memory usage, 3. faster scan.
 
 - [x] We need to support a file mode. allowing bbtree to be written to a file, and read from a file. This requires key to implement FromBytes and ToBytes.
-  Built as file maps (15-index-file.md, D58): the tree's pages, compacted, edges as offsets, mapped and used in place; keys and values `PlainBytes` in their slots or `VarBytes`, of any length, in each leaf's tail. bbtree-disk has typed index files (`ToBytes`/`FromBytes`); bbtree-datafusion-parquet embeds a column's index in a Parquet file.
+  Built as file maps (15-index-file.md, D58): the tree's pages, compacted, edges as offsets, mapped and used in place; keys and values `PlainBytes` in their slots or `VarBytes`, of any length, in each leaf's tail. bbtree-disk has typed maps in files (`BBTreeMapFile`, `DiskType`); bbtree-datafusion-parquet embeds a column's index in a Parquet file.
 
 - [ ] We need to add a user case of DataFusion index provider for Parquet. and show it in ClickBench.

@@ -7,9 +7,9 @@ leaves, and keys and values of any length in each leaf's tail.
   check in `bbtree/src/tree/file.rs`; the API (`FileWriter`, `FileMap`,
   `Storable`, `PlainBytes`, `FileBuf`) in `bbtree/src/file.rs`; var-length keys
   and values (`VarBytes`, `VarBytesBuf`) in `bbtree/src/file/var_bytes.rs`.
-- **bbtree-disk** (`bbtree-disk/`), generic: `MappedFile`, a file map in a file,
-  mapped or read; `IndexFile`, a typed map of any length, through
-  `ToBytes`/`FromBytes`.
+- **bbtree-disk** (`bbtree-disk/`), generic: `BBTreeMapFile`, a typed map in a
+  file, each key and value type keeping its own storage (`DiskType`);
+  written, mapped or read, whole or as a range of a larger file.
 - **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-disk as an
   index of Parquet files: `ParquetIndex`. The Arrow and Parquet
   dependencies live here alone; DataFusion's, when its integration lands.
@@ -172,8 +172,8 @@ leaf      | …
   buffer is read back by wide loads that can't take their data from the
   narrow stores that wrote it, and wait for them to retire, and with them
   for the previous lookup's cache misses. Lookups then no longer overlap:
-  `IndexFile<u64, u64>` took 347 ns a hit so, 264 ns written in place
-  (`VarBytesBuf::empty`, then `set`).
+  var-length `u64` keys, a buffer a lookup, took 347 ns a hit so, 264 ns
+  written in place (`VarBytesBuf::empty`, then `set`).
 - **Spans aren't `Copy`.** A copy would follow its offset from wherever it
   was copied to. Their fields are private, and nothing hands one out by
   value. `Storable`, sealed, takes `PlainBytes` and `VarBytes` alone.
@@ -183,18 +183,33 @@ leaf      | …
   line, the key's bytes, and the file map takes 49 bytes an entry against
   18.5: 216 ns against 127 a hit at 10M (Measurements).
 
-## Typed index files (bbtree-disk)
+## Typed maps in files (bbtree-disk)
 
-- **`ToBytes`** writes a key or value as bytes. A key's bytes order as the
-  key does, since the tree orders keys by their bytes: text as its UTF-8,
-  integers big-endian, signed ones with the sign bit flipped.
-- **`FromBytes`** reads them back, as a view of the file's bytes where it
-  can: `&str` for `String`, `&[u8]` for `Vec<u8>`, the number for an
-  integer.
-- **`IndexFile<K, V>`** is a map of var-length keys and values in a file:
-  written from a map's entries, in their order; mapped or read; looked up
-  with a borrowed form of the key, as a map is, one key or a batch
-  (`get_many`), each query written in place in a buffer of its own.
+- **`BBTreeMapFile<K, V>`** is a map in a file: written once from a map's
+  entries, in their order; mapped or read, whole or from a range of a
+  larger file (`write_at`, `read_range`), as the Parquet index is; looked
+  up with a borrowed form of the key, as a map is, one key or a batch
+  (`get_many`). Lookups hand back views of the file. Mapping is a builder,
+  `mmap(path)`, whose OS pages and range are optional: small pages and the
+  whole file unless set.
+- **Each type picks its storage** (`DiskType`): its stored type, plain or
+  `VarBytes`; its keys' strategy; and its view. Integers, floats and byte
+  arrays are plain, in their slots, under `Auto`, so a `u64` map in a file
+  is the plain file map, at a map's speed. `String` and `Vec<u8>` are
+  `VarBytes`, under `WithInlineKey`, and come back as `&str` and `&[u8]`.
+  `plain_disk_type!` makes a caller's `PlainBytes` type one, under `Auto`
+  or, with its own `InlineKey` impl, `WithInlineKey`. Rust's coherence rules
+  forbid a blanket impl over `PlainBytes` beside `String`'s, so each plain
+  type opts in.
+- **Why not one layout of bytes for every type:** integers as `VarBytes`
+  read the tail on every hit and take 2.6 times the bytes (Measurements).
+- **Queries** (`DiskQuery`) are the key itself for a plain type, with no
+  copy; for bytes, a `VarBytesBuf`, written in place, one per key of a
+  batch.
+- **Inputs** (`DiskInput`): what the writer takes, owned or borrowed:
+  `&map` of a map, `&mut map` of the shared map, by its owner,
+  `range_cloned(..)` of one threads still change, and `Cow` bytes, which
+  pass to the writer without a copy.
 
 ## The Parquet index (bbtree-datafusion-parquet)
 
@@ -229,8 +244,9 @@ A file map's `get` differs from a map's in its descent loop alone:
 `add rbx, [rbx + rdx*8 + 0x70]` where the map has
 `mov rbx, [r13 + r12*8 + 0x70]`.
 
-**Lookups at 10M random `u64` keys and values** (`bbtree-disk/examples/lookups.rs`;
-the file map 184.7 MB, 18.47 bytes per entry, written in 60 ms):
+**Lookups at 10M random `u64` keys and values** (`bbtree-disk/examples/lookups.rs`,
+and `huge_pages.rs` for the mapped rows, mapped from disk; the file map
+184.7 MB, 18.47 bytes per entry, written in 60 ms):
 
 | | get hit | get miss |
 |---|--:|--:|
@@ -240,17 +256,22 @@ the file map 184.7 MB, 18.47 bytes per entry, written in 60 ms):
 | file map, mapped, huge pages | 126.4 ns | 91.2 ns |
 
 **Lookups of var-length keys and values at 10M entries**
-(`bbtree-disk/examples/var_bytes_lookups.rs`; file maps read into memory, in huge
-pages; queries written in place):
+(`bbtree-disk/examples/var_bytes_lookups.rs`; read into memory; queries
+written in place). One run, pinned, while the machine ran about 1.6 times
+slower than for the table above (its map took 208 ns a hit, against
+125.4): compare rows within this table only.
 
 | | get hit | get miss | bytes an entry |
 |---|--:|--:|--:|
-| `u64`: map | 125.6 ns | 91.2 ns | |
-| `u64`: file map, plain | 127.1 ns | 92.4 ns | 18.5 |
-| `u64`: file map, var-length, one query buffer | 216.5 ns | 125.0 ns | 49.1 |
-| `u64`: `IndexFile<u64, u64>` | 269.6 ns | 126.6 ns | 49.1 |
-| text, 13 to 45 bytes: map of `String` | 311.0 ns | 298.0 ns | |
-| text: `IndexFile<String, u64>` | 342.8 ns | 325.8 ns | 73.4 |
+| `u64`: map | 208.4 ns | 138.7 ns | |
+| `u64`: `BBTreeMapFile<u64, u64>`, in slots | 206.5 ns | 141.1 ns | 18.5 |
+| `u64`: file map, var-length, one query buffer | 338.5 ns | 204.7 ns | 49.1 |
+| text, 13 to 45 bytes: map of `String` | 355.8 ns | 349.4 ns | |
+| text: `BBTreeMapFile<String, u64>` | 333.8 ns | 331.8 ns | 73.4 |
+
+The text map's `u64` values in their slots take no fewer bytes than in
+the tail did: each leaf's tail still rounds up to the same 1 KiB step. At
+1M keys of about 21 bytes, they take 49.1 bytes an entry against 73.4.
 
 **ClickBench `hits.parquet`, 100M rows, 14.8 GB**, an index of `UserID`
 (`bbtree-datafusion-parquet/examples/parquet_lookups.rs`):
@@ -278,8 +299,8 @@ rows in 111 µs, against 40 ms to read the column.
 - **Read only.** Changing a file map would need its pages to go back to an
   allocator that doesn't own them; an index of new data is a new file map.
 - **Queries are copied.** A lookup of var-length keys writes its key into
-  a query buffer first: `IndexFile<String, u64>` is 10% behind a map of
-  `String`s, which searches the caller's `&str` in place. bbtree could
+  a query buffer first, where a map of `String`s searches the caller's
+  `&str` in place. bbtree could
   search a `&[u8]` against `VarBytes` keys, as it does a `&str` against
   `String` keys, if it took `VarBytes` for a byte string, as `Auto` takes
   `String`; that is `Auto`'s recognition, which this design avoided.

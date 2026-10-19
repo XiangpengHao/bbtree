@@ -259,14 +259,17 @@ fn file_maps_depend_on_the_entries_alone() {
     let in_order: BBTreeMap<u64, u64> = numbers.iter().map(|&key| (key, !key)).collect();
     rng.shuffle(&mut numbers);
     let mut shuffled = BBTreeMap::new();
+    let mut shared = crate::BBTreeMap::new();
     for &key in &numbers {
         shuffled.insert(key, !key);
+        shared.insert(key, !key).unwrap();
     }
     let ascending =
         FileWriter::<u64, u64>::from_ascending((0..5000).map(|key| (key, !key))).unwrap();
     let file_bytes = ascending.to_buf();
     assert_eq!(&FileWriter::from(&in_order).to_buf()[..], &file_bytes[..]);
     assert_eq!(&FileWriter::from(&shuffled).to_buf()[..], &file_bytes[..]);
+    assert_eq!(&FileWriter::from(&mut shared).to_buf()[..], &file_bytes[..]);
 }
 
 /// A compact file map of `u64` keys and values takes little more than their

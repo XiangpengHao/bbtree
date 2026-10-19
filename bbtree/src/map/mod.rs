@@ -5,10 +5,14 @@
 #![forbid(unsafe_code)]
 
 mod batch;
+#[cfg(all(test, shuttle))]
+mod batch_read_linearizability_review;
+#[cfg(all(test, shuttle))]
+mod batch_write_linearizability_review;
+#[cfg(test)]
+mod linearizability_review;
 mod owner;
 mod range;
-#[cfg(all(test, shuttle))]
-mod shuttle_review_tests;
 #[cfg(all(test, shuttle))]
 mod shuttle_tests;
 #[cfg(test)]

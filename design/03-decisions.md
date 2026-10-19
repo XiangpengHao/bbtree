@@ -1351,8 +1351,9 @@ Design and measurements in 15-index-file.md.
   `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
   address, for `get` and the batch lanes (D53) alike. Keys and values are `PlainBytes`, kept in their slots, or
   `VarBytes`, of any length, kept in each leaf's tail, the slot holding a
-  span, `{len, offset}` from the slot itself. bbtree-disk maps file maps'
-  files and reads and writes typed maps of any length (`IndexFile`);
+  span, `{len, offset}` from the slot itself. bbtree-disk writes, maps
+  and reads typed maps in files (`BBTreeMapFile`), each key and value type
+  picking plain or `VarBytes` storage (`DiskType`);
   bbtree-datafusion-parquet embeds a column's index in a Parquet file, one
   entry per distinct value.
 - **Why the tree's own pages:** lookups run the map's code, so they take

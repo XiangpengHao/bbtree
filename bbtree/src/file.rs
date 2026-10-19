@@ -111,6 +111,18 @@ pub trait Storable: storage::Storage {}
 
 impl<T: storage::Storage> Storable for T {}
 
+/// What a [`FileWriter`] takes for a key or value of type `T`: the value,
+/// for a [`PlainBytes`] type; its bytes, borrowed or owned (`Cow`), for
+/// [`VarBytes`]. For code generic over the stored type, which can't name
+/// it otherwise.
+pub type Input<'a, T> = <T as storage::Storage>::Input<'a>;
+
+/// What a [`FileWriter`]'s tree holds for a key or value of type `T` while
+/// it builds: `T` itself, for a [`PlainBytes`] type; a pointer to its bytes
+/// in the writer's arena, with the same inline keys and order, for
+/// [`VarBytes`]. A writer's strategy and order bounds name it.
+pub type InWriter<T> = <T as storage::Storage>::InWriter;
+
 /// What [`Storable`] tells a writer, kept out of the public API.
 pub(crate) mod storage {
     pub use super::var_bytes::ByteArena;
@@ -299,6 +311,19 @@ where
     }
 }
 
+impl<K: PlainBytes + Ord, V: PlainBytes, S: InlineKeyStrategy<K>> FileWriter<K, V, S> {
+    /// The compacted map of a map's entries, in key order: copies of
+    /// them in full nodes.
+    fn of_map_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
+        let (tree, length) = Self::build(entries);
+        Self {
+            tree,
+            length,
+            _arena: storage::ByteArena::default(),
+        }
+    }
+}
+
 impl<K, V, S, A> From<&BBTreeMap<K, V, S, A>> for FileWriter<K, V, S>
 where
     K: PlainBytes + Ord,
@@ -308,12 +333,23 @@ where
 {
     /// The map, compacted: a copy of its entries in full nodes.
     fn from(map: &BBTreeMap<K, V, S, A>) -> Self {
-        let (tree, length) = Self::build(map.iter().map(|(&key, &value)| (key, value)));
-        Self {
-            tree,
-            length,
-            _arena: storage::ByteArena::default(),
-        }
+        Self::of_map_entries(map.iter().map(|(&key, &value)| (key, value)))
+    }
+}
+
+impl<K, V, S, A> From<&mut crate::BBTreeMap<K, V, S, A>> for FileWriter<K, V, S>
+where
+    K: PlainBytes + Ord,
+    V: PlainBytes,
+    S: InlineKeyStrategy<K>,
+    A: crate::Allocator,
+{
+    /// The shared map, compacted, read by its owner: `&mut` keeps other
+    /// threads out, so the file map holds exactly the map's entries. Of a
+    /// map threads still change, [`Self::from_ascending`] takes
+    /// `map.range_cloned(..)`, which is not a snapshot.
+    fn from(map: &mut crate::BBTreeMap<K, V, S, A>) -> Self {
+        Self::of_map_entries(map.iter_mut().map(|(&key, &mut value)| (key, value)))
     }
 }
 

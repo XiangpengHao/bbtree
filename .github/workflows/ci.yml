@@ -68,7 +68,8 @@ jobs:
       # on a shared runner mean nothing.
       - name: Quick run
         run: |
-          cargo run --release -p bbtree-disk --example lookups -- 100000 "$RUNNER_TEMP"
+          cargo run --release -p bbtree-disk --example lookups -- 100000
+          cargo run --release -p bbtree-disk --example huge_pages -- 100000 "$RUNNER_TEMP"
           cargo run --release -p bbtree-disk --example var_bytes_lookups -- 100000
 
   bench:

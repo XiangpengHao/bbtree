@@ -3,7 +3,7 @@
 //! after the file's data and named in its footer. Readers that know of it
 //! look rows up by value; other readers see the file they saw before.
 //!
-//! - **Keys** are a value's bytes (`VarBytes`), ordered as the values are
+//! - **Keys** are a value's bytes, ordered as the values are
 //!   ([`KeyEncoding`]): a number as 8 big-endian bytes, text and byte
 //!   strings as they are. Lookups are exact, for every type.
 //! - **Values** are the value's rows, in order, each 4 bytes little-endian,
@@ -27,8 +27,6 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, BinaryViewArray};
 use arrow_schema::DataType;
-use bbtree::WithInlineKey;
-use bbtree::file::{FileWriter, VarBytes, VarBytesBuf};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderBuilder, ParquetRecordBatchReaderBuilder, RowSelection,
@@ -37,10 +35,10 @@ use parquet::file::metadata::{
     FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataReader, ParquetMetaDataWriter,
 };
 
-use bbtree_disk::{MappedFile, OsPages};
+use bbtree_disk::{BBTreeMapFile, OsPages};
 
-/// The file map an index holds: values' bytes, each with its rows.
-type VarBytesFile = MappedFile<VarBytes, VarBytes, WithInlineKey>;
+/// The map an index holds: values' bytes, each with its rows' bytes.
+type RowsByValue = BBTreeMapFile<Vec<u8>, Vec<u8>>;
 
 /// How an index encodes a column's values as the bytes of its keys, which
 /// order as the values do.
@@ -298,7 +296,7 @@ impl<'a> ValueKey<'a> {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct ParquetIndex {
-    file: VarBytesFile,
+    rows_by_value: RowsByValue,
     encoding: KeyEncoding,
     /// How many bytes each row takes in a value's rows.
     row_bytes: usize,
@@ -337,23 +335,17 @@ impl ParquetIndex {
         };
         let (mut values, encoding) = Self::column_values(&file, column)?;
         values.sort();
-        let writer = FileWriter::<VarBytes, VarBytes, WithInlineKey>::from_ascending(
-            values.entries(row_bytes),
-        )
-        .expect("sorted distinct values ascend");
-        drop(values);
-
-        file.set_len(footer.start)?;
-        let written = MappedFile::append(&mut file, &writer).and_then(|range| {
-            let entry = format!(
-                "{}..{} {} {row_bytes}",
-                range.start,
-                range.end,
-                encoding.name()
-            );
-            footer.write_with(&mut file, KeyValue::new(Self::entry_key(column), entry))?;
-            Ok(range.end - range.start)
-        });
+        let written = RowsByValue::write_at(&mut file, footer.start, values.entries(row_bytes))
+            .and_then(|range| {
+                let entry = format!(
+                    "{}..{} {} {row_bytes}",
+                    range.start,
+                    range.end,
+                    encoding.name()
+                );
+                footer.write_with(&mut file, KeyValue::new(Self::entry_key(column), entry))?;
+                Ok(range.end - range.start)
+            });
         if written.is_err() {
             file.set_len(footer.start)?;
             file.seek(SeekFrom::End(0))?;
@@ -416,7 +408,7 @@ impl ParquetIndex {
     }
 
     /// The index of `column` embedded in the Parquet file at `path`,
-    /// mapped into memory in `pages` ([`MappedFile::map`]): opening it reads
+    /// mapped into memory in `pages` ([`BBTreeMapFile::mmap`]): opening it reads
     /// the footer and the index's first page; lookups read the rest as they
     /// reach it.
     ///
@@ -425,19 +417,19 @@ impl ParquetIndex {
     /// The file's index is what [`Self::embed`] wrote, and nothing changes
     /// or truncates the file while it is mapped.
     pub unsafe fn mmap(path: impl AsRef<Path>, column: &str, pages: OsPages) -> io::Result<Self> {
-        let mut file = File::open(path)?;
-        let (range, entry) = Self::locate(&mut file, column)?;
+        let path = path.as_ref();
+        let (range, entry) = Self::locate(&mut File::open(path)?, column)?;
         // SAFETY: the caller's.
-        let mapped = unsafe { MappedFile::mmap(&file, range, pages)? };
+        let mapped = unsafe { RowsByValue::mmap(path).range(range).pages(pages).open()? };
         Ok(entry.index(mapped))
     }
 
     /// The index of `column` embedded in the Parquet file at `path`, read
-    /// into memory and checked whole ([`MappedFile::read`]).
+    /// into memory and checked whole ([`BBTreeMapFile::read_range`]).
     pub fn read(path: impl AsRef<Path>, column: &str) -> io::Result<Self> {
         let mut file = File::open(path)?;
         let (range, entry) = Self::locate(&mut file, column)?;
-        let read = MappedFile::read(&mut file, range)?;
+        let read = RowsByValue::read_range(&mut file, range)?;
         Ok(entry.index(read))
     }
 
@@ -488,7 +480,7 @@ impl ParquetIndex {
 
     /// The number of distinct values indexed, nulls aside.
     pub fn len(&self) -> usize {
-        self.file.map().len()
+        self.rows_by_value.len()
     }
 
     /// Whether no row has a value.
@@ -498,29 +490,25 @@ impl ParquetIndex {
 
     /// The rows whose value is `value`, in order.
     pub fn rows_with(&self, value: ColumnValue<'_>) -> io::Result<Vec<u64>> {
-        let query = VarBytesBuf::new(&value.key_bytes(self.encoding)?);
-        let rows = self.file.map().get(&*query);
+        let key = value.key_bytes(self.encoding)?;
+        let rows = self.rows_by_value.get(&*key);
         Ok(rows.map_or_else(Vec::new, |rows| self.rows_of(rows).collect()))
     }
 
     /// The rows whose value lies within `start` and `end`, in order.
-    pub fn rows_between(
+    pub fn rows_between<'v>(
         &self,
-        start: Bound<ColumnValue<'_>>,
-        end: Bound<ColumnValue<'_>>,
+        start: Bound<ColumnValue<'v>>,
+        end: Bound<ColumnValue<'v>>,
     ) -> io::Result<Vec<u64>> {
-        let query = |bound: Bound<ColumnValue<'_>>| -> io::Result<Bound<VarBytesBuf>> {
+        let key = |bound: Bound<ColumnValue<'v>>| -> io::Result<Bound<Cow<'v, [u8]>>> {
             Ok(match bound {
-                Bound::Included(value) => {
-                    Bound::Included(VarBytesBuf::new(&value.key_bytes(self.encoding)?))
-                }
-                Bound::Excluded(value) => {
-                    Bound::Excluded(VarBytesBuf::new(&value.key_bytes(self.encoding)?))
-                }
+                Bound::Included(value) => Bound::Included(value.key_bytes(self.encoding)?),
+                Bound::Excluded(value) => Bound::Excluded(value.key_bytes(self.encoding)?),
                 Bound::Unbounded => Bound::Unbounded,
             })
         };
-        let (start, end) = (query(start)?, query(end)?);
+        let (start, end) = (key(start)?, key(end)?);
         let (start, end) = (
             start.as_ref().map(|key| &**key),
             end.as_ref().map(|key| &**key),
@@ -534,7 +522,7 @@ impl ParquetIndex {
         if empty {
             return Ok(Vec::new());
         }
-        let mut rows: Vec<u64> = (self.file.map().range::<VarBytes, _>((start, end)))
+        let mut rows: Vec<u64> = (self.rows_by_value.range::<[u8], _>((start, end)))
             .flat_map(|(_, rows)| self.rows_of(rows))
             .collect();
         rows.sort_unstable();
@@ -542,9 +530,9 @@ impl ParquetIndex {
     }
 
     /// The rows a value's entry holds.
-    fn rows_of<'a>(&self, rows: &'a VarBytes) -> impl Iterator<Item = u64> + 'a {
+    fn rows_of<'a>(&self, rows: &'a [u8]) -> impl Iterator<Item = u64> + 'a {
         let row_bytes = self.row_bytes;
-        rows.bytes().chunks_exact(row_bytes).map(move |row| {
+        rows.chunks_exact(row_bytes).map(move |row| {
             let mut bytes = [0; 8];
             bytes[..row_bytes].copy_from_slice(row);
             u64::from_le_bytes(bytes)
@@ -600,10 +588,10 @@ struct IndexMetadata {
 }
 
 impl IndexMetadata {
-    /// The index this entry describes, whose file map is in `file`.
-    fn index(self, file: VarBytesFile) -> ParquetIndex {
+    /// The index this entry describes, whose map is `rows_by_value`.
+    fn index(self, rows_by_value: RowsByValue) -> ParquetIndex {
         ParquetIndex {
-            file,
+            rows_by_value,
             encoding: self.encoding,
             row_bytes: self.row_bytes,
             row_group_starts: self.row_group_starts,
