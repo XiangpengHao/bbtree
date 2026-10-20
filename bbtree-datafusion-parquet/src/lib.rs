@@ -1,12 +1,22 @@
-//! bbtree-disk as an index of Parquet files (`design/15-index-file.md`): the
-//! index of a column embedded in the file, as pq-vector embeds its own,
-//! which finds a value's rows, and the row groups to read them from.
+//! bbtree-disk as an index of Parquet files (`design/15-index-file.md`):
+//! indexes of one or more columns embedded in a Parquet file, which
+//! DataFusion's Parquet scans look their predicates' rows up in.
 //!
-//! - [`ParquetIndex`] embeds a column's index in a Parquet file, opens it,
-//!   and looks rows up by [`ColumnValue`], exactly, for numbers and text.
-//! - [`RowAccess`] applies the rows found to an Arrow reader of the file:
-//!   the row groups that hold them, and a selection within those.
+//! - [`ParquetIndexBuilder`] builds indexes of a file's columns and embeds
+//!   them in the file, beside the indexes it has, and returns what it built
+//!   ([`ParquetIndexStats`]). Other readers read the file as before.
+//! - [`ParquetIndexSessionBuilderExt::with_parquet_index`] has a session's
+//!   Parquet scans look rows up in the indexes of the files they read, by
+//!   the comparisons and `IN` lists of their predicates, and read those
+//!   rows alone.
 
+mod index_key;
+mod indexed_scan;
 mod parquet_index;
+mod parquet_index_builder;
+mod scan_predicate;
+#[cfg(test)]
+mod test_file;
 
-pub use parquet_index::{ColumnValue, KeyEncoding, ParquetIndex, RowAccess};
+pub use indexed_scan::ParquetIndexSessionBuilderExt;
+pub use parquet_index_builder::{ParquetIndexBuilder, ParquetIndexStats};

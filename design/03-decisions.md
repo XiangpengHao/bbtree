@@ -1356,8 +1356,9 @@ Design and measurements in 15-index-file.md.
   a `&[u8]` looks a key up, compared in place. bbtree-disk writes, maps
   and reads typed maps in files (`BBTreeMapFile`), each key and value type
   picking plain or `VarBytes` storage (`DiskType`);
-  bbtree-datafusion-parquet embeds a column's index in a Parquet file, one
-  entry per distinct value.
+  bbtree-datafusion-parquet embeds indexes of one or more columns in a
+  Parquet file, one entry per distinct key, and DataFusion's Parquet scans
+  look their predicates' rows up in them.
 - **Why the tree's own pages:** lookups run the map's code, so they take
   its time: at 10M `u64`, 125.9 ns a hit read into memory, 126.4 ns mapped
   in huge pages, against the map's 125.4. A format of its own would search

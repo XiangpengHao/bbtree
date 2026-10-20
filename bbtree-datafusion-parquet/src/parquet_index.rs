@@ -1,687 +1,509 @@
-//! Indexes inside Parquet files, as pq-vector embeds its own: the file map of
-//! a column's distinct values, each with the rows that hold it, appended
-//! after the file's data and named in its footer. Readers that know of it
-//! look rows up by value; other readers see the file they saw before.
+//! Indexes inside Parquet files, as pq-vector embeds its own: file maps of
+//! rows by the values of one or more columns, after the file's data and
+//! listed in its footer ([`crate::ParquetIndexBuilder`] writes them).
+//! Readers that know of them look rows up by value; other readers see the
+//! file they saw before.
 //!
-//! - **Keys** are a value's bytes, ordered as the values are
-//!   ([`KeyEncoding`]): a number as 8 big-endian bytes, text and byte
-//!   strings as they are. Lookups are exact, for every type.
-//! - **Values** are the value's rows, in order, each 4 bytes little-endian,
-//!   or 8 in a file of 2^32 rows or more: one entry per distinct value, so
-//!   a column of few values takes little more than its rows.
-//! - **In the file**, the file map lies after the last row group, at a
-//!   multiple of its alignment, and before the footer. The footer is
-//!   written again, with the same row groups, plus a key-value entry
-//!   `bbtree.index.<column>` that says where the file map is, how values are
-//!   encoded, and how wide a row is. Nothing else moves: data pages, page
-//!   indexes and bloom filters keep their offsets.
+//! - **Keys** are the values of the index's columns ([`crate::index_key`]):
+//!   a `u64` for one column of numbers, the bytes for one of text, and the
+//!   columns' parts, as bytes, for several. Rows whose first column is null
+//!   are left out: no lookup asks for them.
+//! - **Values** are a key's rows ([`RowIds`]), in order, each a `u32`: one
+//!   entry per distinct key.
+//! - **The footer** lists the indexes in its key-value entry
+//!   `bbtree.indexes`: each one's schema, its columns and the kinds of
+//!   their values, and where its file map lies.
 
 use std::borrow::Cow;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::ops::{Bound, Range};
-use std::path::Path;
-use std::sync::Arc;
+use std::io;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
-use arrow_array::cast::AsArray;
-use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
-use arrow_array::{Array, ArrayRef, BinaryViewArray};
-use arrow_schema::DataType;
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{
-    ArrowReaderBuilder, ParquetRecordBatchReaderBuilder, RowSelection,
-};
-use parquet::file::metadata::{
-    FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataReader, ParquetMetaDataWriter,
-};
+use bbtree::Auto;
+use bbtree::file::{Input, VarBytes};
+use bbtree_disk::{BBTreeMapFile, DiskQuery, DiskType};
+use datafusion::arrow::datatypes::Schema;
+use datafusion::parquet::arrow::arrow_reader::RowSelection;
+use datafusion::parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
+use serde::{Deserialize, Serialize};
 
-use bbtree_disk::{BBTreeMapFile, OsPages};
+use crate::index_key::{KeyForm, KeyRanges, KeyType};
+use crate::scan_predicate::ScanPredicate;
 
-/// The map an index holds: values' bytes, each with its rows' bytes.
-type RowsByValue = BBTreeMapFile<Vec<u8>, Vec<u8>>;
-
-/// How an index encodes a column's values as the bytes of its keys, which
-/// order as the values do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeyEncoding {
-    /// Signed integers, dates and timestamps: as 64 bits, big-endian, the
-    /// sign bit flipped.
-    Signed,
-    /// Unsigned integers: as 64 bits, big-endian.
-    Unsigned,
-    /// Floats: as 64 bits, big-endian, flipped so that they order as
-    /// numbers, `-0.0` apart from `0.0`.
-    Float,
-    /// Byte strings and text: their bytes.
-    Bytes,
+/// The indexes embedded in a Parquet file, as its footer lists them.
+#[derive(Debug)]
+pub(crate) struct ParquetIndexes {
+    path: PathBuf,
+    indexes: Vec<ParquetIndex>,
+    /// The file's number of rows.
+    row_count: u64,
 }
 
-impl KeyEncoding {
-    /// The encoding of a column of Arrow type `data_type`, and the type
-    /// its values are cast to before they are encoded.
-    fn of(data_type: &DataType) -> Option<(Self, DataType)> {
-        let encoding = match data_type {
-            DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::Date32
-            | DataType::Date64
-            | DataType::Timestamp(..)
-            | DataType::Time32(_)
-            | DataType::Time64(_) => (Self::Signed, DataType::Int64),
-            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-                (Self::Unsigned, DataType::UInt64)
-            }
-            DataType::Float16 | DataType::Float32 | DataType::Float64 => {
-                (Self::Float, DataType::Float64)
-            }
-            DataType::Utf8
-            | DataType::LargeUtf8
-            | DataType::Utf8View
-            | DataType::Binary
-            | DataType::LargeBinary
-            | DataType::BinaryView => (Self::Bytes, DataType::BinaryView),
-            DataType::Dictionary(_, values) => return Self::of(values),
-            _ => return None,
-        };
-        Some(encoding)
-    }
+impl ParquetIndexes {
+    /// The footer's key-value entry that lists a file's indexes.
+    const ENTRY_KEY: &str = "bbtree.indexes";
+    /// The version of the entry, and of the indexes it lists.
+    const VERSION: u32 = 2;
 
-    /// The name the footer's entry keeps.
-    fn name(self) -> &'static str {
-        match self {
-            Self::Signed => "signed",
-            Self::Unsigned => "unsigned",
-            Self::Float => "float",
-            Self::Bytes => "bytes",
-        }
-    }
-
-    fn from_name(name: &str) -> Option<Self> {
-        [Self::Signed, Self::Unsigned, Self::Float, Self::Bytes]
-            .into_iter()
-            .find(|encoding| encoding.name() == name)
-    }
-
-    /// Adds to `numbers` each value of `values`, a column of numbers cast
-    /// to this encoding's type, that is not null: its encoding, and its
-    /// row, counted from `first_row`.
-    fn push_numbers(self, values: &dyn Array, first_row: u64, numbers: &mut Vec<(u64, u64)>) {
-        let encoded: Box<dyn Iterator<Item = u64>> = match self {
-            Self::Signed => Box::new(
-                (values.as_primitive::<Int64Type>().values().iter())
-                    .map(|&value| ColumnValue::Signed(value).number()),
-            ),
-            Self::Unsigned => {
-                Box::new(values.as_primitive::<UInt64Type>().values().iter().copied())
-            }
-            Self::Float => Box::new(
-                (values.as_primitive::<Float64Type>().values().iter())
-                    .map(|&value| ColumnValue::Float(value).number()),
-            ),
-            Self::Bytes => unreachable!("byte strings are not numbers"),
-        };
-        let rows = (first_row..).zip(encoded).enumerate();
-        numbers.extend(
-            rows.filter(|&(index, _)| values.is_valid(index))
-                .map(|(_, (row, encoded))| (encoded, row)),
-        );
-    }
-}
-
-/// A value to look rows up by: of the kind the column's index encodes
-/// ([`KeyEncoding`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ColumnValue<'a> {
-    Signed(i64),
-    Unsigned(u64),
-    Float(f64),
-    Bytes(&'a [u8]),
-}
-
-impl<'a> ColumnValue<'a> {
-    /// A number's encoding: 64 bits that order as the numbers do.
-    fn number(self) -> u64 {
-        match self {
-            Self::Signed(value) => value.cast_unsigned() ^ (1 << 63),
-            Self::Unsigned(value) => value,
-            Self::Float(value) => {
-                let bits = value.to_bits();
-                if bits >> 63 == 1 {
-                    !bits
-                } else {
-                    bits | (1 << 63)
-                }
-            }
-            Self::Bytes(_) => unreachable!("a byte string is not a number"),
-        }
-    }
-
-    /// The bytes of the value's key, if it is of the kind `encoding`
-    /// encodes.
-    fn key_bytes(self, encoding: KeyEncoding) -> io::Result<Cow<'a, [u8]>> {
-        match (self, encoding) {
-            (Self::Bytes(bytes), KeyEncoding::Bytes) => Ok(Cow::Borrowed(bytes)),
-            (Self::Signed(_), KeyEncoding::Signed)
-            | (Self::Unsigned(_), KeyEncoding::Unsigned)
-            | (Self::Float(_), KeyEncoding::Float) => {
-                Ok(Cow::Owned(self.number().to_be_bytes().to_vec()))
-            }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{self:?} is not a value of an index of {encoding:?} keys"),
-            )),
-        }
-    }
-}
-
-/// A column's values, read to be indexed: numbers, encoded, each with its
-/// row; or byte strings, in the batches they were read in, each value by
-/// its batch and its index there.
-enum ColumnValues {
-    Numbers(Vec<(u64, u64)>),
-    Bytes {
-        batches: Vec<BinaryViewArray>,
-        /// The first row of each batch.
-        first_rows: Vec<u64>,
-        /// Each value that is not null: its batch, and its index there.
-        values: Vec<(u32, u32)>,
-    },
-}
-
-impl ColumnValues {
-    /// Sorts the values by their keys' bytes, and within a value by row.
-    fn sort(&mut self) {
-        match self {
-            Self::Numbers(numbers) => numbers.sort_unstable(),
-            Self::Bytes {
-                batches, values, ..
-            } => {
-                // Stable: values read in row order keep it among equals.
-                values.sort_by(|&(a_batch, a_index), &(b_batch, b_index)| {
-                    let a = batches[a_batch as usize].value(a_index as usize);
-                    a.cmp(batches[b_batch as usize].value(b_index as usize))
-                });
-            }
-        }
-    }
-
-    /// The sorted values' entries for an index: each distinct value's key
-    /// bytes, and its rows, `row_bytes` wide, little-endian.
-    fn entries(&self, row_bytes: usize) -> impl Iterator<Item = (Cow<'_, [u8]>, Cow<'_, [u8]>)> {
-        let len = match self {
-            Self::Numbers(numbers) => numbers.len(),
-            Self::Bytes { values, .. } => values.len(),
-        };
-        let mut position = 0;
-        std::iter::from_fn(move || {
-            if position == len {
-                return None;
-            }
-            let (key, row) = self.key_and_row(position);
-            let mut rows = Vec::new();
-            rows.extend_from_slice(&row.to_le_bytes()[..row_bytes]);
-            position += 1;
-            while position < len {
-                let (next, row) = self.key_and_row(position);
-                if next != key {
-                    break;
-                }
-                rows.extend_from_slice(&row.to_le_bytes()[..row_bytes]);
-                position += 1;
-            }
-            Some((key.to_bytes(), Cow::Owned(rows)))
+    /// The indexes listed in `metadata`, the footer of the Parquet file at
+    /// `path`.
+    pub(crate) fn of(path: &Path, metadata: &ParquetMetaData) -> io::Result<Self> {
+        let file_metadata = metadata.file_metadata();
+        Ok(Self {
+            path: path.to_owned(),
+            indexes: Self::listed(file_metadata)?,
+            row_count: Self::row_count(file_metadata)?,
         })
     }
 
-    /// The value at `position` of the sorted values, and its row.
-    fn key_and_row(&self, position: usize) -> (ValueKey<'_>, u64) {
-        match self {
-            Self::Numbers(numbers) => {
-                let (number, row) = numbers[position];
-                (ValueKey::Number(number), row)
-            }
-            Self::Bytes {
-                batches,
-                first_rows,
-                values,
-            } => {
-                let (batch, index) = values[position];
-                let row = first_rows[batch as usize] + u64::from(index);
-                (
-                    ValueKey::Bytes(batches[batch as usize].value(index as usize)),
-                    row,
-                )
+    /// The number of rows of a file of footer `metadata`.
+    pub(crate) fn row_count(metadata: &FileMetaData) -> io::Result<u64> {
+        u64::try_from(metadata.num_rows())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a negative number of rows"))
+    }
+
+    /// The indexes the footer's entry lists.
+    pub(crate) fn listed(metadata: &FileMetaData) -> io::Result<Vec<ParquetIndex>> {
+        let mut entries = metadata.key_value_metadata().into_iter().flatten();
+        let Some(entry) = entries.find(|entry| entry.key == Self::ENTRY_KEY) else {
+            return Ok(Vec::new());
+        };
+        let list: IndexList = serde_json::from_str(entry.value.as_deref().unwrap_or_default())?;
+        if list.version != Self::VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("indexes of version {}, not {}", list.version, Self::VERSION),
+            ));
+        }
+        Ok(list.indexes)
+    }
+
+    /// The footer's entry that lists `indexes`.
+    pub(crate) fn entry(indexes: &[ParquetIndex]) -> io::Result<KeyValue> {
+        let list = IndexList {
+            version: Self::VERSION,
+            indexes: indexes.to_vec(),
+        };
+        Ok(KeyValue::new(
+            Self::ENTRY_KEY.to_owned(),
+            serde_json::to_string(&list)?,
+        ))
+    }
+
+    /// Whether the file has no index.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.indexes.is_empty()
+    }
+
+    /// The rows that the indexes say a scan of `schema` keeps by
+    /// `predicate`: those of every index that applies, or `None` if none
+    /// does.
+    pub(crate) fn select_rows(
+        &self,
+        predicate: &ScanPredicate,
+        schema: &Schema,
+    ) -> io::Result<Option<RowSelection>> {
+        let mut selected: Option<Vec<u64>> = None;
+        for index in &self.indexes {
+            let Some(ranges) = predicate.key_ranges(index, schema) else {
+                continue;
+            };
+            let rows = index.rows(&self.path, &ranges)?;
+            selected = Some(match selected {
+                Some(mut selected) => {
+                    selected.retain(|row| rows.binary_search(row).is_ok());
+                    selected
+                }
+                None => rows,
+            });
+        }
+        Ok(selected.map(|rows| self.selection(&rows)))
+    }
+
+    /// The selection of `rows`, which ascend, out of the file's.
+    fn selection(&self, rows: &[u64]) -> RowSelection {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for &row in rows {
+            let row = row as usize;
+            match ranges.last_mut() {
+                Some(last) if last.end == row => last.end += 1,
+                _ => ranges.push(row..row + 1),
             }
         }
+        RowSelection::from_consecutive_ranges(ranges.into_iter(), self.row_count as usize)
     }
 }
 
-/// A column's value, as the index keys it: a number's encoding, or a byte
-/// string borrowed from the batch it was read in.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ValueKey<'a> {
-    Number(u64),
-    Bytes(&'a [u8]),
+/// The footer's entry: the file's indexes.
+#[derive(Serialize, Deserialize)]
+struct IndexList {
+    version: u32,
+    indexes: Vec<ParquetIndex>,
 }
 
-impl<'a> ValueKey<'a> {
-    /// The key's bytes: a number's, big-endian.
-    fn to_bytes(self) -> Cow<'a, [u8]> {
-        match self {
-            Self::Number(number) => Cow::Owned(number.to_be_bytes().to_vec()),
-            Self::Bytes(bytes) => Cow::Borrowed(bytes),
-        }
-    }
-}
-
-/// The index of a Parquet file's column, embedded in the file: rows by
-/// value.
-///
-/// # Examples
-///
-/// ```no_run
-/// use bbtree_datafusion_parquet::{ColumnValue, ParquetIndex};
-/// use bbtree_disk::OsPages;
-///
-/// ParquetIndex::embed("hits.parquet", "UserID")?;
-/// // SAFETY: nothing changes the file while it is mapped.
-/// let index = unsafe { ParquetIndex::mmap("hits.parquet", "UserID", OsPages::Small)? };
-/// let rows = index.rows_with(ColumnValue::Signed(435090932899640449))?;
-/// let file = std::fs::File::open("hits.parquet")?;
-/// let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-/// let reader = index.access(&rows).apply(builder).build()?;
-/// # use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
-/// ```
-pub struct ParquetIndex {
-    rows_by_value: RowsByValue,
-    encoding: KeyEncoding,
-    /// How many bytes each row takes in a value's rows.
-    row_bytes: usize,
-    /// The first row of each of the file's row groups, and after them the
-    /// file's number of rows.
-    row_group_starts: Vec<u64>,
+/// An index embedded in a Parquet file: its schema, the columns it keys
+/// rows by, and where its file map lies.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct ParquetIndex {
+    schema: Vec<IndexColumn>,
+    /// Where the file map lies in the file.
+    file_range: Range<u64>,
 }
 
 impl ParquetIndex {
-    /// The footer's key-value entry for `column`'s index.
-    fn entry_key(column: &str) -> String {
-        format!("bbtree.index.{column}")
+    pub(crate) fn new(schema: Vec<IndexColumn>, file_range: Range<u64>) -> Self {
+        Self { schema, file_range }
     }
 
-    /// Indexes `column` of the Parquet file at `path`, and embeds the index
-    /// in the file: its file map after the last row group, and the footer
-    /// written again after it, with an entry that names it. Returns the
-    /// index's size in bytes.
-    ///
-    /// The file is changed in place: if writing fails, it is put back as it
-    /// was, but a crash meanwhile may leave it without a footer.
-    pub fn embed(path: impl AsRef<Path>, column: &str) -> io::Result<u64> {
-        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
-        let footer = ParquetFooter::read(&mut file)?;
-        if footer.entry(&Self::entry_key(column)).is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("column {column} has an index already"),
-            ));
-        }
-        let row_count = footer.metadata.file_metadata().num_rows();
-        let row_bytes = if u32::try_from(row_count).is_ok() {
-            4
-        } else {
-            8
-        };
-        let (mut values, encoding) = Self::column_values(&file, column)?;
-        values.sort();
-        let written = RowsByValue::write_at(&mut file, footer.start, values.entries(row_bytes))
-            .and_then(|range| {
-                let entry = format!(
-                    "{}..{} {} {row_bytes}",
-                    range.start,
-                    range.end,
-                    encoding.name()
-                );
-                footer.write_with(&mut file, KeyValue::new(Self::entry_key(column), entry))?;
-                Ok(range.end - range.start)
-            });
-        if written.is_err() {
-            file.set_len(footer.start)?;
-            file.seek(SeekFrom::End(0))?;
-            file.write_all(&footer.bytes)?;
-        }
-        written
+    /// The names of the columns the index keys rows by, in order.
+    pub(crate) fn columns(&self) -> impl Iterator<Item = &str> {
+        self.schema.iter().map(IndexColumn::name)
     }
 
-    /// The values of `column`, unsorted, and their encoding.
-    fn column_values(file: &File, column: &str) -> io::Result<(ColumnValues, KeyEncoding)> {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file.try_clone()?)?;
-        let field = builder
-            .schema()
-            .field_with_name(column)
-            .map_err(io::Error::other)?;
-        let (encoding, cast_to) = KeyEncoding::of(field.data_type()).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("no index for column {column} of type {}", field.data_type()),
-            )
-        })?;
-        let row_count = builder.metadata().file_metadata().num_rows();
-        let projection = ProjectionMask::columns(builder.parquet_schema(), [column]);
-        let reader = builder
-            .with_projection(projection)
-            .with_batch_size(64 * 1024)
-            .build()?;
-        let mut values = match encoding {
-            KeyEncoding::Bytes => ColumnValues::Bytes {
-                batches: Vec::new(),
-                first_rows: Vec::new(),
-                values: Vec::new(),
-            },
-            _ => ColumnValues::Numbers(Vec::with_capacity(usize::try_from(row_count).unwrap_or(0))),
-        };
-        let mut first_row = 0;
-        for batch in reader {
-            let batch = batch.map_err(io::Error::other)?;
-            let column: ArrayRef =
-                arrow_cast::cast(batch.column(0), &cast_to).map_err(io::Error::other)?;
-            match &mut values {
-                ColumnValues::Numbers(numbers) => {
-                    encoding.push_numbers(&column, first_row, numbers);
-                }
-                ColumnValues::Bytes {
-                    batches,
-                    first_rows,
-                    values,
-                } => {
-                    let index = u32::try_from(batches.len()).map_err(io::Error::other)?;
-                    let valid = (0..column.len()).filter(|&row| column.is_valid(row));
-                    values.extend(valid.map(|row| (index, row as u32)));
-                    batches.push(column.as_binary_view().clone());
-                    first_rows.push(first_row);
+    /// The columns the index keys rows by, in order, and the kinds of their
+    /// values.
+    pub(crate) fn schema(&self) -> &[IndexColumn] {
+        &self.schema
+    }
+
+    /// The type of the index's keys.
+    pub(crate) fn key_form(&self) -> KeyForm {
+        KeyForm::of(self.schema.iter().map(IndexColumn::key_type))
+    }
+
+    /// The rows of the file at `path` whose keys lie in `ranges`, in order.
+    fn rows(&self, path: &Path, ranges: &KeyRanges) -> io::Result<Vec<u64>> {
+        let mut rows = Vec::new();
+        // SAFETY, of each `open`: the scans trust the indexes they read, as
+        // `with_parquet_index` says: the file holds what the builder wrote,
+        // and nothing changes it while it is read.
+        match ranges {
+            KeyRanges::Numbers(ranges) => {
+                let file_map = BBTreeMapFile::<u64, RowIds>::mmap(path);
+                let index = unsafe { file_map.range(self.file_range.clone()).open()? };
+                for &range in ranges {
+                    for (_, ids) in index.range::<u64, _>(range) {
+                        rows.extend(ids.iter().map(u64::from));
+                    }
                 }
             }
-            first_row += batch.num_rows() as u64;
+            KeyRanges::Bytes(ranges) => {
+                let file_map = BBTreeMapFile::<Vec<u8>, RowIds>::mmap(path);
+                let index = unsafe { file_map.range(self.file_range.clone()).open()? };
+                for (start, end) in ranges {
+                    let range = (
+                        start.as_ref().map(Vec::as_slice),
+                        end.as_ref().map(Vec::as_slice),
+                    );
+                    for (_, ids) in index.range::<[u8], _>(range) {
+                        rows.extend(ids.iter().map(u64::from));
+                    }
+                }
+            }
         }
-        Ok((values, encoding))
-    }
-
-    /// The index of `column` embedded in the Parquet file at `path`,
-    /// mapped into memory in `pages` ([`BBTreeMapFile::mmap`]): opening it reads
-    /// the footer and the index's first page; lookups read the rest as they
-    /// reach it.
-    ///
-    /// # Safety
-    ///
-    /// The file's index is what [`Self::embed`] wrote, and nothing changes
-    /// or truncates the file while it is mapped.
-    pub unsafe fn mmap(path: impl AsRef<Path>, column: &str, pages: OsPages) -> io::Result<Self> {
-        let path = path.as_ref();
-        let (range, entry) = Self::locate(&mut File::open(path)?, column)?;
-        // SAFETY: the caller's.
-        let mapped = unsafe { RowsByValue::mmap(path).range(range).pages(pages).open()? };
-        Ok(entry.index(mapped))
-    }
-
-    /// The index of `column` embedded in the Parquet file at `path`, read
-    /// into memory and checked whole ([`BBTreeMapFile::read_range`]).
-    pub fn read(path: impl AsRef<Path>, column: &str) -> io::Result<Self> {
-        let mut file = File::open(path)?;
-        let (range, entry) = Self::locate(&mut file, column)?;
-        let read = RowsByValue::read_range(&mut file, range)?;
-        Ok(entry.index(read))
-    }
-
-    /// Where `column`'s index lies in `file`, and what else the footer
-    /// says of it.
-    fn locate(file: &mut File, column: &str) -> io::Result<(Range<u64>, IndexMetadata)> {
-        let footer = ParquetFooter::read(file)?;
-        let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
-        let entry = footer.entry(&Self::entry_key(column)).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("no index of {column}"))
-        })?;
-        let mut fields = entry.split(' ');
-        let (range, encoding, row_bytes) = (fields.next(), fields.next(), fields.next());
-        let (start, end) = range
-            .and_then(|range| range.split_once(".."))
-            .ok_or_else(|| invalid("an index entry without a range"))?;
-        let parse = |number: &str| {
-            number
-                .parse::<u64>()
-                .map_err(|_| invalid("an index entry's number"))
-        };
-        let encoding = encoding
-            .and_then(KeyEncoding::from_name)
-            .ok_or_else(|| invalid("an index entry without an encoding"))?;
-        let row_bytes = row_bytes
-            .map(parse)
-            .transpose()?
-            .filter(|&bytes| bytes == 4 || bytes == 8)
-            .ok_or_else(|| invalid("an index entry without a row width"))?;
-        let mut row_group_starts = vec![0];
-        for row_group in footer.metadata.row_groups() {
-            let rows = u64::try_from(row_group.num_rows())
-                .map_err(|_| invalid("a negative number of rows"))?;
-            row_group_starts.push(row_group_starts.last().unwrap() + rows);
-        }
-        let entry = IndexMetadata {
-            encoding,
-            row_bytes: row_bytes as usize,
-            row_group_starts,
-        };
-        Ok((parse(start)?..parse(end)?, entry))
-    }
-
-    /// How the index encodes values.
-    pub fn encoding(&self) -> KeyEncoding {
-        self.encoding
-    }
-
-    /// The number of distinct values indexed, nulls aside.
-    pub fn len(&self) -> usize {
-        self.rows_by_value.len()
-    }
-
-    /// Whether no row has a value.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The rows whose value is `value`, in order.
-    pub fn rows_with(&self, value: ColumnValue<'_>) -> io::Result<Vec<u64>> {
-        let key = value.key_bytes(self.encoding)?;
-        let rows = self.rows_by_value.get(&*key);
-        Ok(rows.map_or_else(Vec::new, |rows| self.rows_of(rows).collect()))
-    }
-
-    /// The rows whose value lies within `start` and `end`, in order.
-    pub fn rows_between<'v>(
-        &self,
-        start: Bound<ColumnValue<'v>>,
-        end: Bound<ColumnValue<'v>>,
-    ) -> io::Result<Vec<u64>> {
-        let key = |bound: Bound<ColumnValue<'v>>| -> io::Result<Bound<Cow<'v, [u8]>>> {
-            Ok(match bound {
-                Bound::Included(value) => Bound::Included(value.key_bytes(self.encoding)?),
-                Bound::Excluded(value) => Bound::Excluded(value.key_bytes(self.encoding)?),
-                Bound::Unbounded => Bound::Unbounded,
-            })
-        };
-        let (start, end) = (key(start)?, key(end)?);
-        let (start, end) = (
-            start.as_ref().map(|key| &**key),
-            end.as_ref().map(|key| &**key),
-        );
-        let empty = match (start, end) {
-            (Bound::Included(start), Bound::Included(end)) => start > end,
-            (Bound::Included(start) | Bound::Excluded(start), Bound::Excluded(end))
-            | (Bound::Excluded(start), Bound::Included(end)) => start >= end,
-            _ => false,
-        };
-        if empty {
-            return Ok(Vec::new());
-        }
-        let mut rows: Vec<u64> = (self.rows_by_value.range::<[u8], _>((start, end)))
-            .flat_map(|(_, rows)| self.rows_of(rows))
-            .collect();
+        // Ranges may overlap, as `a < 5 OR a < 7` does.
         rows.sort_unstable();
+        rows.dedup();
         Ok(rows)
     }
-
-    /// The rows a value's entry holds.
-    fn rows_of<'a>(&self, rows: &'a [u8]) -> impl Iterator<Item = u64> + 'a {
-        let row_bytes = self.row_bytes;
-        rows.chunks_exact(row_bytes).map(move |row| {
-            let mut bytes = [0; 8];
-            bytes[..row_bytes].copy_from_slice(row);
-            u64::from_le_bytes(bytes)
-        })
-    }
-
-    /// What a Parquet reader reads to read `rows` alone, which must be in
-    /// order: the row groups that hold them, and a selection of them within
-    /// those ([`RowAccess::apply`]).
-    pub fn access(&self, rows: &[u64]) -> RowAccess {
-        let mut row_groups: Vec<usize> = Vec::new();
-        let mut ranges: Vec<Range<usize>> = Vec::new();
-        // Rows of the row groups taken before the current one: where its
-        // rows start in the selection.
-        let mut selected_before = 0;
-        for &row in rows {
-            let row_group = self.row_group_starts.partition_point(|&start| start <= row) - 1;
-            if row_groups.last() != Some(&row_group) {
-                if let Some(&last) = row_groups.last() {
-                    selected_before += self.row_group_len(last);
-                }
-                row_groups.push(row_group);
-            }
-            let position = (selected_before + row - self.row_group_starts[row_group]) as usize;
-            match ranges.last_mut() {
-                Some(last) if last.end == position => last.end += 1,
-                _ => ranges.push(position..position + 1),
-            }
-        }
-        let selected = selected_before
-            + row_groups
-                .last()
-                .map_or(0, |&last| self.row_group_len(last));
-        RowAccess {
-            selection: RowSelection::from_consecutive_ranges(ranges.into_iter(), selected as usize),
-            row_groups,
-        }
-    }
-
-    /// The number of rows of row group `row_group`.
-    fn row_group_len(&self, row_group: usize) -> u64 {
-        self.row_group_starts[row_group + 1] - self.row_group_starts[row_group]
-    }
 }
 
-/// What a Parquet file's footer says of an index, but where its file map is:
-/// how it encodes values, how wide a row is, and where each row group
-/// starts, the file's number of rows last.
-struct IndexMetadata {
-    encoding: KeyEncoding,
-    row_bytes: usize,
-    row_group_starts: Vec<u64>,
-}
-
-impl IndexMetadata {
-    /// The index this entry describes, whose map is `rows_by_value`.
-    fn index(self, rows_by_value: RowsByValue) -> ParquetIndex {
-        ParquetIndex {
-            rows_by_value,
-            encoding: self.encoding,
-            row_bytes: self.row_bytes,
-            row_group_starts: self.row_group_starts,
-        }
-    }
-}
-
-/// Rows for a Parquet reader to read, as [`ParquetIndex::access`] found
-/// them: the row groups that hold them, and which of those row groups'
-/// rows they are.
-#[derive(Clone, Debug)]
-pub struct RowAccess {
-    row_groups: Vec<usize>,
-    selection: RowSelection,
-}
-
-impl RowAccess {
-    /// The row groups that hold the rows, in order.
-    pub fn row_groups(&self) -> &[usize] {
-        &self.row_groups
-    }
-
-    /// The rows, out of those of [`Self::row_groups`] one after another.
-    pub fn selection(&self) -> &RowSelection {
-        &self.selection
-    }
-
-    /// `builder`, reading these rows alone: their row groups, and within
-    /// them, the rows.
-    pub fn apply<T>(self, builder: ArrowReaderBuilder<T>) -> ArrowReaderBuilder<T> {
-        builder
-            .with_row_groups(self.row_groups)
-            .with_row_selection(self.selection)
-    }
-}
-
-/// A Parquet file's footer: its metadata, where it starts, and its bytes,
-/// to write it again with an entry more, or as it was.
-struct ParquetFooter {
-    metadata: ParquetMetaData,
-    /// Where the footer's metadata starts: the end of the data.
-    start: u64,
-    /// The footer's bytes, from `start` to the end of the file.
+/// A key's rows, as an index keeps them: their numbers in the file, in
+/// order, each 4 bytes little-endian, kept as bytes, as the file keeps them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RowIds {
     bytes: Vec<u8>,
 }
 
-impl ParquetFooter {
-    fn read(file: &mut File) -> io::Result<Self> {
-        let metadata = ParquetMetaDataReader::new().parse_and_finish(&*file)?;
-        let end = file.seek(SeekFrom::End(0))?;
-        let mut tail = [0; 8];
-        file.seek(SeekFrom::End(-8))?;
-        file.read_exact(&mut tail)?;
-        let metadata_len = u64::from(u32::from_le_bytes(tail[..4].try_into().unwrap()));
-        let start = end - 8 - metadata_len;
-        let mut bytes = vec![0; (end - start) as usize];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut bytes)?;
-        Ok(Self {
-            metadata,
-            start,
-            bytes,
-        })
+impl RowIds {
+    pub(crate) fn push(&mut self, row: u32) {
+        self.bytes.extend_from_slice(&row.to_le_bytes());
     }
 
-    /// The value of the footer's key-value entry `key`, if it has one.
-    fn entry(&self, key: &str) -> Option<&str> {
-        let entries = self.metadata.file_metadata().key_value_metadata()?;
-        let entry = entries.iter().find(|entry| entry.key == key)?;
-        entry.value.as_deref()
+    /// The number of rows.
+    pub(crate) fn len(&self) -> usize {
+        self.bytes.len() / 4
+    }
+}
+
+impl DiskQuery for RowIds {
+    type Stored = VarBytes;
+    type Query = [u8];
+
+    fn query(&self) -> &[u8] {
+        &self.bytes
     }
 
-    /// Writes the footer at the end of `file`, with `entry` added to its
-    /// key-value entries.
-    fn write_with(&self, file: &mut File, entry: KeyValue) -> io::Result<()> {
-        let old = self.metadata.file_metadata();
-        let mut entries = old.key_value_metadata().cloned().unwrap_or_default();
-        entries.push(entry);
-        let file_metadata = FileMetaData::new(
-            old.version(),
-            old.num_rows(),
-            old.created_by().map(str::to_owned),
-            Some(entries),
-            Arc::clone(&old.schema_descr_ptr()),
-            old.column_orders().cloned(),
+    fn input(&self) -> Input<'_, VarBytes> {
+        Cow::Borrowed(&self.bytes)
+    }
+}
+
+/// Kept in the leaf's tail, as `Vec<u8>` is.
+impl DiskType for RowIds {
+    type Strategy = Auto;
+    type View<'a> = RowIdsView<'a>;
+
+    fn view(stored: &VarBytes) -> RowIdsView<'_> {
+        RowIdsView {
+            bytes: stored.bytes(),
+        }
+    }
+}
+
+/// A key's rows, read where the index lies: its bytes, which needn't be
+/// aligned for `u32`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowIdsView<'a> {
+    bytes: &'a [u8],
+}
+
+impl RowIdsView<'_> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = u32> {
+        (self.bytes.as_chunks::<4>().0.iter()).map(|&row| u32::from_le_bytes(row))
+    }
+}
+
+/// A column an index keys rows by, and the kind of its values.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct IndexColumn {
+    name: String,
+    key_type: KeyType,
+}
+
+impl IndexColumn {
+    pub(crate) fn new(name: String, key_type: KeyType) -> Self {
+        Self { name, key_type }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn key_type(&self) -> KeyType {
+        self.key_type
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+    use datafusion::common::ScalarValue;
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::PhysicalExpr;
+    use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
+
+    use super::*;
+    use crate::ParquetIndexBuilder;
+    use crate::test_file::TestFile;
+
+    /// The test file of `name`, with indexes of `id` and of `name`.
+    fn indexed_file(name: &str) -> (TestFile, ParquetIndexes) {
+        let file = TestFile::new(name);
+        (ParquetIndexBuilder::source(file.path()))
+            .index(&["id"])
+            .index(&["name"])
+            .build()
+            .unwrap();
+        let indexes = ParquetIndexes::of(file.path(), &file.metadata()).unwrap();
+        (file, indexes)
+    }
+
+    /// `column op literal`, of `column` at `position` of the schema.
+    fn compare(
+        column: &str,
+        position: usize,
+        op: Operator,
+        literal: ScalarValue,
+    ) -> Arc<dyn PhysicalExpr> {
+        let column = Arc::new(Column::new(column, position));
+        Arc::new(BinaryExpr::new(column, op, Arc::new(Literal::new(literal))))
+    }
+
+    /// The rows the indexes select by `predicate`, in a scan of `schema`,
+    /// or `None` if none applies.
+    fn select(
+        indexes: &ParquetIndexes,
+        predicate: &Arc<dyn PhysicalExpr>,
+        schema: &Schema,
+    ) -> Option<Vec<u64>> {
+        let selection = (indexes.select_rows(&ScanPredicate::new(predicate), schema)).unwrap()?;
+        let mut rows = Vec::new();
+        let mut row = 0;
+        for selector in selection.iter() {
+            if !selector.skip {
+                rows.extend(row..row + selector.row_count as u64);
+            }
+            row += selector.row_count as u64;
+        }
+        assert_eq!(row, TestFile::ROWS as u64, "the selection covers the file");
+        Some(rows)
+    }
+
+    /// The rows whose `values` are `Some` and pass `keep`.
+    fn rows_where<V>(values: Vec<Option<V>>, keep: impl Fn(&V) -> bool) -> Vec<u64> {
+        (values.into_iter().enumerate())
+            .filter(|(_, value)| value.as_ref().is_some_and(&keep))
+            .map(|(row, _)| row as u64)
+            .collect()
+    }
+
+    #[test]
+    fn lookups_find_the_rows_comparisons_keep() {
+        let (file, indexes) = indexed_file("index-lookups");
+        let schema = file.schema();
+        let ops = [
+            Operator::Eq,
+            Operator::Lt,
+            Operator::LtEq,
+            Operator::Gt,
+            Operator::GtEq,
+        ];
+        for op in ops {
+            for literal in [-51, -50, -3, 0, 17, 49, 50] {
+                let predicate = compare("id", 0, op, ScalarValue::Int64(Some(literal)));
+                let found = select(&indexes, &predicate, &schema).expect("the index of `id`");
+                let expected = rows_where(TestFile::ids(), |&id| match op {
+                    Operator::Eq => id == literal,
+                    Operator::Lt => id < literal,
+                    Operator::LtEq => id <= literal,
+                    Operator::Gt => id > literal,
+                    _ => id >= literal,
+                });
+                assert_eq!(found, expected, "id {op} {literal}");
+            }
+        }
+    }
+
+    #[test]
+    fn rows_of_every_index_that_applies_intersect() {
+        let (file, indexes) = indexed_file("index-intersect");
+        let name = ScalarValue::Utf8(Some("user-name-00150".into()));
+        let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+            compare("id", 0, Operator::Gt, ScalarValue::Int64(Some(0))),
+            Operator::And,
+            compare("name", 1, Operator::GtEq, name),
+        ));
+        let found = select(&indexes, &predicate, &file.schema()).unwrap();
+        let names = TestFile::names().into_iter().map(Some).collect();
+        let named = rows_where(names, |name| name.as_str() >= "user-name-00150");
+        let positive = rows_where(TestFile::ids(), |&id| id > 0);
+        let expected: Vec<u64> = named
+            .into_iter()
+            .filter(|row| positive.contains(row))
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(found, expected);
+    }
+
+    #[test]
+    fn indexes_apply_to_the_columns_they_resolve_to() {
+        let (file, indexes) = indexed_file("index-resolve");
+        let schema = file.schema();
+        let id_is = |literal| compare("id", 0, Operator::Eq, literal);
+        let seventeen = || ScalarValue::Int64(Some(17));
+        assert!(select(&indexes, &id_is(seventeen()), &schema).is_some());
+        // No index of `flag`.
+        let flag = compare("flag", 2, Operator::Eq, ScalarValue::Boolean(Some(true)));
+        assert!(select(&indexes, &flag, &schema).is_none());
+        // `id` read as another integer type is of the kind the index holds;
+        // read as text, it isn't.
+        let with_id = |data_type| -> SchemaRef {
+            let mut fields: Vec<Field> = schema
+                .fields()
+                .iter()
+                .map(|field| field.as_ref().clone())
+                .collect();
+            fields[0] = Field::new("id", data_type, true);
+            Arc::new(Schema::new(fields))
+        };
+        let as_int32 = id_is(ScalarValue::Int32(Some(17)));
+        let expected = select(&indexes, &id_is(seventeen()), &schema);
+        assert_eq!(
+            select(&indexes, &as_int32, &with_id(DataType::Int32)),
+            expected
         );
-        let metadata = ParquetMetaData::new(file_metadata, self.metadata.row_groups().to_vec());
-        file.seek(SeekFrom::End(0))?;
-        let mut out = io::BufWriter::new(file);
-        ParquetMetaDataWriter::new(&mut out, &metadata).finish()?;
-        out.flush()
+        let as_text = id_is(ScalarValue::Utf8(Some("17".into())));
+        assert!(select(&indexes, &as_text, &with_id(DataType::Utf8)).is_none());
+        // A column of the same name elsewhere in the schema is another one.
+        let elsewhere = compare("id", 1, Operator::Eq, seventeen());
+        assert!(select(&indexes, &elsewhere, &schema).is_none());
+    }
+
+    #[test]
+    fn footers_list_indexes_of_their_version_alone() {
+        let file = TestFile::new("index-versions");
+        let metadata = file.metadata();
+        let footer = |entry: Option<&str>| {
+            let old = metadata.file_metadata();
+            let entries = entry.map(|value| {
+                vec![KeyValue::new(
+                    ParquetIndexes::ENTRY_KEY.to_owned(),
+                    value.to_owned(),
+                )]
+            });
+            FileMetaData::new(
+                old.version(),
+                old.num_rows(),
+                None,
+                entries,
+                old.schema_descr_ptr(),
+                None,
+            )
+        };
+        assert!(ParquetIndexes::listed(&footer(None)).unwrap().is_empty());
+        let list = |version| format!(r#"{{"version":{version},"indexes":[]}}"#);
+        let empty = list(ParquetIndexes::VERSION);
+        assert!(
+            ParquetIndexes::listed(&footer(Some(&empty)))
+                .unwrap()
+                .is_empty()
+        );
+        let older = list(ParquetIndexes::VERSION - 1);
+        let error = ParquetIndexes::listed(&footer(Some(&older))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn indexes_of_several_columns_find_rows_by_values_then_a_range() {
+        let file = TestFile::new("index-parts");
+        (ParquetIndexBuilder::source(file.path()))
+            .index(&["name", "id"])
+            .build()
+            .unwrap();
+        let indexes = ParquetIndexes::of(file.path(), &file.metadata()).unwrap();
+        let schema = file.schema();
+        let name = "user-name-00150";
+        let name_is = || {
+            compare(
+                "name",
+                1,
+                Operator::Eq,
+                ScalarValue::Utf8(Some(name.into())),
+            )
+        };
+        let rows_where = |keep: &dyn Fn(&str, Option<i64>) -> bool| -> Vec<u64> {
+            (TestFile::names().iter().zip(TestFile::ids()).enumerate())
+                .filter(|(_, (row_name, id))| keep(row_name, *id))
+                .map(|(row, _)| row as u64)
+                .collect()
+        };
+        // A name's keys, nulls of `id` among them.
+        assert!(!rows_where(&|row_name, id| row_name == name && id.is_none()).is_empty());
+        let found = select(&indexes, &name_is(), &schema).unwrap();
+        assert_eq!(found, rows_where(&|row_name, _| row_name == name));
+        // A name's, then a range of `id`.
+        let positive = compare("id", 0, Operator::Gt, ScalarValue::Int64(Some(0)));
+        let both: Arc<dyn PhysicalExpr> =
+            Arc::new(BinaryExpr::new(name_is(), Operator::And, positive));
+        let found = select(&indexes, &both, &schema).unwrap();
+        let expected = rows_where(&|row_name, id| row_name == name && id.is_some_and(|id| id > 0));
+        assert!(!expected.is_empty());
+        assert_eq!(found, expected);
+        // The second column alone: the index doesn't apply.
+        let id_is = compare("id", 0, Operator::Eq, ScalarValue::Int64(Some(0)));
+        assert!(select(&indexes, &id_is, &schema).is_none());
     }
 }

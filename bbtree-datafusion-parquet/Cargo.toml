@@ -2,7 +2,7 @@
 name = "bbtree-datafusion-parquet"
 version = "0.1.0"
 edition = "2024"
-description = "bbtree-disk as an index of Parquet files: a column's index embedded in the file, which finds a value's rows and the row groups that hold them."
+description = "bbtree-disk as an index of Parquet files: an index of one or more columns embedded in the file, which DataFusion's Parquet scans look rows up in."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/XiangpengHao/bbtree"
 publish = false
@@ -10,10 +10,18 @@ publish = false
 [dependencies]
 bbtree = { path = "../bbtree", features = ["file"] }
 bbtree-disk = { path = "../bbtree-disk" }
-arrow-array = "60.0.0"
-arrow-cast = "60.0.0"
-arrow-schema = "60.0.0"
-parquet = "60.0.0"
+# Arrow, Parquet and the object store come through DataFusion's re-exports,
+# so that their versions are always DataFusion's.
+# `serde`, for Arrow's time units in an index's schema.
+datafusion = { version = "55.2.0", default-features = false, features = ["parquet", "serde"] }
+# The morsel API, which `datafusion` doesn't re-export.
+datafusion-datasource = { version = "55.2.0", default-features = false }
+# Sharing a file's lookup among the partitions that read its ranges.
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
+datafusion = { version = "55.2.0", default-features = false, features = ["parquet", "serde", "sql"] }
 mimalloc = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

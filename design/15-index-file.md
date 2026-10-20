@@ -10,9 +10,10 @@ leaves, and keys and values of any length in each leaf's tail.
 - **bbtree-disk** (`bbtree-disk/`), generic: `BBTreeMapFile`, a typed map in a
   file, each key and value type keeping its own storage (`DiskType`);
   written, mapped or read, whole or as a range of a larger file.
-- **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-disk as an
-  index of Parquet files: `ParquetIndex`. The Arrow and Parquet
-  dependencies live here alone; DataFusion's, when its integration lands.
+- **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-disk as
+  indexes of Parquet files (`ParquetIndexBuilder`), which DataFusion's
+  Parquet scans look their predicates' rows up in (`with_parquet_index`). The
+  DataFusion, Arrow and Parquet dependencies live here alone.
 
 Terms: a **file map** is a map compacted into one byte string, which a
 reader uses where it lies; a **file** alone is the operating system's. A
@@ -213,26 +214,81 @@ leaf      | …
   `range_cloned(..)` of one threads still change, and `Cow` bytes, which
   pass to the writer without a copy.
 
-## The Parquet index (bbtree-datafusion-parquet)
+## Parquet indexes (bbtree-datafusion-parquet)
 
-- **One entry per distinct value**: its key is the value's bytes, its
-  value the rows that hold it, in order, each 4 bytes little-endian, or 8
-  in a file of 2^32 rows or more. A column of few values takes little more
-  than its rows; a lookup is one search, and the rows lie together.
-- **Encodings** (`KeyEncoding`) order like the values, and are exact:
-  signed integers, dates and timestamps as 64 bits, big-endian, the sign
-  bit flipped; unsigned integers as 64 bits, big-endian; floats as their
-  bits, flipped to order as numbers; byte strings and text as their bytes.
-- **Embedding** (`ParquetIndex::embed`) appends the file map after the last
-  row group, at a multiple of its alignment, and writes the footer again
-  after it with one more key-value entry, `bbtree.index.<column>`, holding
-  the file map's byte range, the encoding and a row's width. Data pages, page
-  indexes and bloom filters keep their offsets (tested), and other readers
-  read the file as before. If writing fails, the old footer is put back; a
-  crash meanwhile can leave the file without one.
-- **Reading rows** (`ParquetIndex::access`): the row groups that hold the
-  rows found, and a selection within them, applied to an Arrow reader
-  builder in one call. Row groups without a match are never opened.
+- **A file's indexes** (`ParquetIndexBuilder`): any number, each of one
+  or more columns, in order.
+  `ParquetIndexBuilder::source(path).index(&["UserID"]).index(&["CounterID", "EventDate"]).build()`
+  checks every index's columns before it touches the file; then, index by
+  index, reads the columns in file order, by the footer it read first,
+  adds each row to its key's rows in an unsync `BBTreeMap`, and writes the
+  map as a file map after the file's data, past the last row group or the
+  index before it; then writes the footer once, after them. It returns
+  what it built of each (`ParquetIndexStats`): rows, distinct keys, bytes,
+  time. The footer's key-value entry `bbtree.indexes` lists every index,
+  as JSON: its schema, each column's name and the kind of its values, and
+  the file map's byte range. Data pages,
+  page indexes and bloom filters keep their offsets (tested), and other
+  readers read the file as before. If writing fails, the old footer is put
+  back; a crash meanwhile can leave the file without one.
+- **One entry per distinct key**: its value the rows that hold it
+  (`RowIds`, a disk type of the crate's own), in order, each a `u32`,
+  little-endian, in the leaf's tail; files of more rows are refused. Read
+  in file order, each key's rows come out in order: nothing is sorted. A
+  key of many rows takes little more than its rows; a lookup is one
+  search, and the rows lie together. Rows whose first column is null are
+  left out: no lookup asks for them.
+- **Keys** (`index_key.rs`, `KeyForm`), in the file map's own key type
+  where one column allows it:
+  - one column of numbers: `u64`, signed numbers with the sign bit
+    flipped, floats flipped into IEEE 754's total order, as Arrow compares
+    them;
+  - one column of text or byte strings: `Vec<u8>`, the bytes;
+  - several columns: bytes, as the columns are chosen at run time and no
+    Rust type holds any mix of them. Each column's part is a tag byte, 0
+    for null and 1 for a value, then the value: a number as its `u64`,
+    big-endian; bytes with each 0 byte written `0 0xFF`, and `0 0` after
+    them. No part's bytes start another's, so the keys of the rows with
+    given values in the first columns, and a range of values in the next,
+    are one range of keys. Nulls of later columns stay, ordered first:
+    `a = 1` on an index of `(a, b)` finds the rows whose `b` is null.
+- **Kinds of values** (`KeyType`): integers, unsigned integers, floats,
+  bytes (text and binary of every Arrow type), `Date32`, `Date64`, and
+  times and timestamps by unit. Values of one kind encode alike whatever
+  their exact types: an index of an `Int32` column serves a table that
+  reads it as `Int64`, one of `Utf8` a table of `Utf8View`.
+- **Scans** (`with_parquet_index`, on a `SessionStateBuilder`, as
+  pq-vector's `with_pq_vector`): a physical optimizer rule, after
+  DataFusion's own, so after filter pushdown, wraps the source of each
+  Parquet scan with a predicate. As a file is opened, in the morsel API's
+  I/O step, its footer is read through the scan's reader factory, whose
+  metadata cache the scan then reads it from. The indexes that apply look
+  rows up; the rows all of them found become the file's
+  `ParquetRowSelection`, DataFusion's input for external indexes: it reads
+  their row groups alone, and within them their rows, after its own
+  pruning by statistics, page indexes and bloom filters. A file split into
+  ranges that several partitions read is looked up once.
+- **An index applies** when its columns resolve, by name, in the scan's
+  schema, as DataFusion resolves a file's columns, to columns of the kinds
+  it indexed, and the predicate constrains its first column: comparisons
+  to literals (`=`, `<`, `<=`, `>`, `>=`), `IN` lists, and `OR`s and
+  `AND`s of those on one column. Values on its leading columns, then a
+  range on the next, make key ranges: `a = 1 AND b IN (2, 3) AND c > 4` is
+  two. The scan still filters what it reads, so the rows need only hold
+  every row the predicate keeps; what the index can't read of it, a cast
+  column, another column, a function, it leaves to the filter.
+- **Why in the scan:** every Parquet table gets it, `register_parquet`,
+  listing tables, tables of files with and without indexes, with no table
+  provider of its own. The rule itself can't look rows up: rules are
+  synchronous, and would read every file's footer while planning, even
+  files a `LIMIT` never opens. An operator over the scan, as pq-vector's,
+  would look every file up before the first row, and hide the scan from
+  later rules.
+- **Trusted indexes:** an index is mapped from its file and opened
+  unchecked, its header alone. The scans trust that indexed files hold
+  what the builder wrote, and don't change while read: `with_parquet_index`
+  is safe to call, and says so. Checking an index on each query reads it
+  whole: 1.2 GB for `UserID` of `hits.parquet`.
 
 ## Measurements
 
@@ -279,31 +335,45 @@ The text map's `u64` values in their slots take no fewer bytes than in
 the tail did: each leaf's tail still rounds up to the same 1 KiB step. At
 1M keys of about 21 bytes, they take 49.1 bytes an entry against 73.4.
 
-**ClickBench `hits.parquet`, 100M rows, 14.8 GB**, an index of `UserID`
-(`bbtree-datafusion-parquet/examples/parquet_lookups.rs`):
+**ClickBench `hits_99_zstd.parquet`, 997,497 rows, 109 MB**
+(`bbtree-datafusion-parquet/examples/parquet_lookups.rs`; one run each, not
+pinned; `SELECT *`, index against scan, each in a session of its own):
 
-- Embedding: 5.6 s (read the column, sort, compact, write); the index is
-  1.20 GB, 12.0 bytes a row, for 17.6M distinct values. Opening it,
-  mapped: 3–17 ms, mostly the Parquet footer.
-- Rows of one value, warm: 7–16 µs; reading the column to find them:
-  272–275 ms.
-- Cold, the file dropped from the page cache, 1,000 values sampled from the
-  column: the first 100 lookups 212 µs each in small pages, 809 µs in
-  huge; the first 1,000, 80 µs and 149 µs.
-- `SELECT *` of the rows of one value (4 to 2,317 rows), the index and its
-  row groups: 16–40 ms. Parquet's row filter, which decodes `UserID` whole
-  and the rest where it matches: 1.1–1.5 s. The file has no page index:
-  each row group read is decoded whole.
+- `UserID`, 214,397 keys: index 9.6 MB, built in 55 ms. The 30 rows of
+  one value in 12 ms, against 116 ms scanning.
+- `URL`, 289,848 keys: 62.6 MB, 259 ms. `EventDate`, 11 keys: 4.0 MB,
+  24 ms.
+- `(CounterID, EventDate)`, 708 keys: 4.0 MB, 45 ms. The 29,183 rows of
+  one `CounterID` and day in 19 ms, against 24 ms; the 131,072 of one
+  `CounterID` in 65 ms, against 70 ms.
 
-**ClickBench `hits_99.parquet`, 997,497 rows, 160 MB**, an index per
-column: `UserID`, 214,397 distinct values, 13.3 MB, built in 0.03 s;
-`URL`, 289,848, 62.6 MB, 0.31 s; `EventDate`, 11, 4.0 MB. A URL's 32,746
-rows in 111 µs, against 40 ms to read the column.
+**ClickBench `hits.parquet`, 99,997,497 rows, 14.8 GB**, sorted by
+`CounterID` and `EventDate`, warm in the page cache (same example; one run
+each, not pinned; DataFusion's defaults, which don't push filters into the
+Parquet decoder):
+
+- `UserID`, 17.6M keys: index 879 MB, built in 10.8 s, 5.0 GB resident at
+  most. `SELECT *` of one value's rows (35 to 142): 23–85 ms with the
+  index, against 6.0–6.3 s scanning, 74–263 times faster. The scan reads
+  every row group: statistics can't prune a column the file isn't sorted
+  by.
+- `(CounterID, EventDate)`, 22,406 keys: 401 MB, 5.5 s. 2,072 rows of one
+  counter and day: 38 ms, against 244 ms; of one counter: 29 ms, against
+  200 ms; 738,172 rows of `CounterID = 62` in July: 204 ms, against
+  353 ms. The scan prunes row groups by statistics already.
+
+Not yet measured: cold lookups.
 
 ## Limits and open problems
 
 - **Read only.** Changing a file map would need its pages to go back to an
   allocator that doesn't own them; an index of new data is a new file map.
-- **Not in DataFusion yet**, as pq-vector is: the index finds row groups
-  and rows; a `TableProvider` or physical optimizer rule in
-  bbtree-datafusion-parquet would turn a query's predicate into them.
+- **Local files only:** indexes are mapped from their files; files of
+  other object stores are scanned as before. Reading an index's pages
+  through the object store as lookups reach them would lift it.
+- **Every index that applies is used:** a wide range on a column the file
+  isn't sorted by collects and sorts its rows, which lie in every row
+  group. No cost model chooses among indexes, or the scan, yet.
+- **Static predicates only:** dynamic filters, of a join's build side or a
+  TopK, are left to the scan's filter. Looking them up would make index
+  joins.
