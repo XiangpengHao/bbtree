@@ -949,7 +949,14 @@ mod tests {
                 (found, forward, backward, ranged)
             }));
         }
-        assert!(refused > 0 && read > 0, "{refused} refused, {read} read");
+        // Miri, which damages 10 file maps, checks that reading them stays
+        // in bounds, so it needs some read; which of so few it refuses
+        // depends on the layout.
+        if cfg!(miri) {
+            assert!(read > 0, "{refused} refused, {read} read");
+        } else {
+            assert!(refused > 0 && read > 0, "{refused} refused, {read} read");
+        }
     }
 
     type VarBytesMap<'i> = FileMap<'i, VarBytes, VarBytes, WithInlineKey>;
@@ -1050,6 +1057,13 @@ mod tests {
                 )
             }));
         }
-        assert!(refused > 0 && read > 0, "{refused} refused, {read} read");
+        // Miri, which damages 10 file maps, checks that reading them stays
+        // in bounds, so it needs some read; which of so few it refuses
+        // depends on the layout.
+        if cfg!(miri) {
+            assert!(read > 0, "{refused} refused, {read} read");
+        } else {
+            assert!(refused > 0 && read > 0, "{refused} refused, {read} read");
+        }
     }
 }
