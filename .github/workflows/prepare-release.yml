@@ -51,11 +51,13 @@ jobs:
           VERSION_BUMP: ${{ inputs.version_bump }}
           CUSTOM_VERSION: ${{ inputs.custom_version }}
         run: |
+          # bbtree and the crates released with it, at its version.
+          crates="bbtree bbtree-disk bbtree-datafusion-parquet"
           package_version() {
             cargo metadata --no-deps --format-version 1 \
-              | jq -r '.packages[] | select(.name == "bbtree") | .version'
+              | jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version'
           }
-          current=$(package_version)
+          current=$(package_version bbtree)
           if [ -n "$CUSTOM_VERSION" ]; then
             next=$CUSTOM_VERSION
           elif [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -69,15 +71,25 @@ jobs:
             echo "::error::Can't bump $current, which isn't MAJOR.MINOR.PATCH; give a custom version"
             exit 1
           fi
-          sed -i "s/^version = \"$current\"$/version = \"$next\"/" bbtree/Cargo.toml
-          if [ "$(package_version)" != "$next" ]; then
-            echo "::error::bbtree/Cargo.toml says version $(package_version), not $next"
-            exit 1
-          fi
+          # Each crate's version, and its requirements on the others.
+          for crate in $crates; do
+            sed -i \
+              -e "s/^version = \"$current\"$/version = \"$next\"/" \
+              -e "s/\(path = \"\.\.\/bbtree[^\"]*\", version = \)\"$current\"/\1\"$next\"/" \
+              "$crate/Cargo.toml"
+            if [ "$(package_version "$crate")" != "$next" ]; then
+              echo "::error::$crate/Cargo.toml says version $(package_version "$crate"), not $next"
+              exit 1
+            fi
+          done
           # The root's lockfile, and those of the workspaces that depend on
-          # the library by path.
+          # the crates by path.
           for lockfile in $(git ls-files '*Cargo.lock'); do
-            cargo update --package bbtree --manifest-path "$(dirname "$lockfile")/Cargo.toml"
+            for crate in $crates; do
+              if grep -q "^name = \"$crate\"$" "$lockfile"; then
+                cargo update --package "$crate" --manifest-path "$(dirname "$lockfile")/Cargo.toml"
+              fi
+            done
           done
           echo "version=$next" >> "$GITHUB_OUTPUT"
 
@@ -99,7 +111,7 @@ jobs:
             ---
 
             **Once the merge gate passes**, this PR merges itself, and the `publish.yml` workflow will:
-            1. Publish the crate to crates.io
+            1. Publish bbtree, bbtree-disk and bbtree-datafusion-parquet to crates.io
             2. Create a GitHub Release with tag `v${{ steps.bump.outputs.version }}`
           commit-message: "chore: release v${{ steps.bump.outputs.version }}"
           labels: release

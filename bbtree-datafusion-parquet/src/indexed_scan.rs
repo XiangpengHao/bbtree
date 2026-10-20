@@ -17,15 +17,18 @@
 //! - **The scan still filters** the rows it reads, so the indexes need only
 //!   find every row the predicate keeps; what they don't understand, they
 //!   leave to the filter.
-//! - **Local files only**: indexes are mapped from the file. Files of
-//!   other object stores, files without indexes, and files a predicate
-//!   doesn't apply to are scanned as before.
+//! - **Local files only**: indexes are mapped from the file, at its
+//!   location under `/`, if the file there is the one the store lists.
+//!   Files of other object stores, or of a local store rooted elsewhere,
+//!   files without indexes, and files a predicate doesn't apply to are
+//!   scanned as before.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use datafusion::common::config::ConfigOptions;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -41,8 +44,8 @@ use datafusion::datasource::physical_plan::{
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::table_schema::TableSchema;
 use datafusion::execution::SessionStateBuilder;
-use datafusion::object_store::ObjectStore;
 use datafusion::object_store::path::Path as ObjectPath;
+use datafusion::object_store::{ObjectMeta, ObjectStore};
 use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr, PhysicalSortExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -387,6 +390,9 @@ impl IndexLookup {
     /// The rows of `file` its indexes find, if any applies: reads its
     /// footer, and looks them up.
     async fn find_rows(&self, file: PartitionedFile) -> Result<Option<RowSelection>> {
+        let Some(path) = Self::local_path(&file.object_meta) else {
+            return Ok(None);
+        };
         let mut reader = self.readers.create_reader(
             self.partition,
             file.clone(),
@@ -394,7 +400,6 @@ impl IndexLookup {
             &self.metrics,
         )?;
         let metadata = reader.get_metadata(None).await?;
-        let path = PathBuf::from("/").join(file.object_meta.location.as_ref());
         let indexes = ParquetIndexes::of(&path, &metadata)?;
         if indexes.is_empty() {
             return Ok(None);
@@ -405,5 +410,17 @@ impl IndexLookup {
             self.indexed_rows.add(selection.row_count());
         }
         Ok(selection)
+    }
+
+    /// The local path of the object `meta` describes: its location under
+    /// `/`, if the file there is the object, as its size and modification
+    /// time say. A store rooted elsewhere names another file there, or none,
+    /// and its files are scanned as before.
+    fn local_path(meta: &ObjectMeta) -> Option<PathBuf> {
+        let path = PathBuf::from("/").join(meta.location.as_ref());
+        let local = std::fs::metadata(&path).ok()?;
+        let modified = local.modified().ok()?;
+        (local.len() == meta.size && modified == SystemTime::from(meta.last_modified))
+            .then_some(path)
     }
 }

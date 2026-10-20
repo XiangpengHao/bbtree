@@ -10,7 +10,9 @@ use datafusion::arrow::array::{
     ArrayRef, Date32Array, Float64Array, Int64Array, RecordBatch, StringArray, UInt8Array,
 };
 use datafusion::arrow::util::pretty::pretty_format_batches;
+use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::object_store::local::LocalFileSystem;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::{ExecutionPlan, collect, displayable};
@@ -235,4 +237,33 @@ async fn tables_of_files_with_and_without_indexes() {
         assert_eq!(rows, expected, "{predicate}");
         assert_eq!(metric(&plan, "bbtree_indexed_files"), 1, "{predicate}");
     }
+}
+
+#[tokio::test]
+async fn files_of_a_store_rooted_elsewhere_are_scanned_as_before() {
+    // A local store rooted at the test's directory lists `t.parquet`, which
+    // is no file at `/t.parquet`: its index isn't mapped from there.
+    let dir = TestDir::new("rooted");
+    write_file(&dir.file("t.parquet"));
+    build_indexes(&dir.file("t.parquet"));
+    let mut found = Vec::new();
+    for indexed in [false, true] {
+        let state = SessionStateBuilder::new().with_default_features();
+        let state = if indexed {
+            state.with_parquet_index()
+        } else {
+            state
+        };
+        let ctx = SessionContext::new_with_state(state.build());
+        let store = LocalFileSystem::new_with_prefix(&dir.0).unwrap();
+        ctx.register_object_store(ObjectStoreUrl::local_filesystem().as_ref(), Arc::new(store));
+        ctx.register_parquet("t", "file:///t.parquet", ParquetReadOptions::default())
+            .await
+            .unwrap();
+        let (rows, plan) = run(&ctx, "SELECT * FROM t WHERE id = 17").await;
+        assert_eq!(metric(&plan, "bbtree_indexed_files"), 0);
+        found.push(rows);
+    }
+    assert!(!found[0].is_empty());
+    assert_eq!(found[0], found[1]);
 }
