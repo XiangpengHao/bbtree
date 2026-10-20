@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="448" viewBox="0 0 800 448" role="img" aria-label="Concurrent get on 10M UUID keys, 96 threads, AWS c8a, in million operations per second: bbtree 795, scc TreeIndex 132, concurrent-map 81.4, crossbeam SkipMap 62.7, RwLock BTreeMap 19.3; DashMap, unordered, 518.">
+  <!-- vis/data/aws-c8a-20261017/throughput.csv: concurrent, uuid, 96 threads, get-half (bbtree: get-half-batch).
+       A ball's one-way trip takes 0.6 s × (bbtree's throughput / its throughput). -->
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 22px; font-weight: 600; fill: #18181b; }
+    .title { font-weight: 800; }
+    .muted { fill: #52525b; }
+    .faint { fill: #71717a; }
+    .ours { font-weight: 800; }
+    .value { text-anchor: end; }
+    .highlight { fill: #ffd60a; }
+    .track { stroke: #a1a1aa; stroke-width: 3; stroke-linecap: round; }
+    .dashed { stroke-dasharray: 4 6; }
+    .ball { animation: bounce linear infinite alternate; }
+    @keyframes bounce { to { transform: translateX(374px); } }
+  </style>
+  <rect x="0.5" y="0.5" width="799" height="447" rx="12" fill="#fafafa" stroke="#d4d4d8"/>
+
+  <text class="title" x="28" y="52">concurrent get, 96 threads</text>
+  <text class="muted" x="28" y="82">10M UUID keys · AWS c8a · M ops/s</text>
+
+  <rect class="highlight" x="22" y="120" width="92" height="32" rx="4"/>
+  <rect class="highlight" x="722" y="120" width="58" height="32" rx="4"/>
+  <text class="ours" x="28" y="144">bbtree</text>
+  <line class="track" x1="300" y1="136" x2="696" y2="136"/>
+  <circle class="ball" cx="311" cy="136" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 0.6s"/>
+  <text class="ours value" x="772" y="144">795</text>
+
+  <text x="28" y="196">scc TreeIndex</text>
+  <line class="track" x1="300" y1="188" x2="696" y2="188"/>
+  <circle class="ball" cx="311" cy="188" r="11" fill="#3f3f46" style="animation-duration: 3.61s"/>
+  <text class="value" x="772" y="196">132</text>
+
+  <text x="28" y="248">concurrent-map</text>
+  <line class="track" x1="300" y1="240" x2="696" y2="240"/>
+  <circle class="ball" cx="311" cy="240" r="11" fill="#3f3f46" style="animation-duration: 5.86s"/>
+  <text class="value" x="772" y="248">81.4</text>
+
+  <text x="28" y="300">crossbeam SkipMap</text>
+  <line class="track" x1="300" y1="292" x2="696" y2="292"/>
+  <circle class="ball" cx="311" cy="292" r="11" fill="#3f3f46" style="animation-duration: 7.61s"/>
+  <text class="value" x="772" y="300">62.7</text>
+
+  <text x="28" y="352">RwLock&lt;BTreeMap&gt;</text>
+  <line class="track" x1="300" y1="344" x2="696" y2="344"/>
+  <circle class="ball" cx="311" cy="344" r="11" fill="#3f3f46" style="animation-duration: 24.73s"/>
+  <text class="value" x="772" y="352">19.3</text>
+
+  <line class="track dashed" x1="28" y1="376" x2="772" y2="376" stroke-width="1.5"/>
+
+  <text class="faint" x="28" y="416">DashMap (unordered)</text>
+  <line class="track dashed" x1="300" y1="408" x2="696" y2="408"/>
+  <circle class="ball" cx="311" cy="408" r="11" fill="none" stroke="#71717a" stroke-width="2.5" style="animation-duration: 0.92s"/>
+  <text class="faint value" x="772" y="416">518</text>
+</svg>

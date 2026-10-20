@@ -28,12 +28,24 @@ runs:
         BASE: ${{ inputs.base }}
       run: |
         git fetch --quiet --depth=1 origin "$BASE"
+        # The package's manifest; a commit from before the library moved to
+        # bbtree/ has it at the root.
         version_at() {
-          git show "$1:Cargo.toml" | python3 -c \
+          { git show "$1:bbtree/Cargo.toml" 2>/dev/null || git show "$1:Cargo.toml"; } | python3 -c \
             'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'
         }
         version=$(version_at HEAD)
         base_version=$(version_at "$BASE")
+        # The crates released with bbtree are at its version (publish.yml
+        # publishes them at it), checked here, before a release merges.
+        for crate in bbtree-disk bbtree-datafusion-parquet; do
+          crate_version=$(git show "HEAD:$crate/Cargo.toml" | python3 -c \
+            'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])')
+          if [ "$crate_version" != "$version" ]; then
+            echo "::error::$crate is at version $crate_version, not bbtree's $version"
+            exit 1
+          fi
+        done
         echo "version=$version" >> "$GITHUB_OUTPUT"
         if [ "$version" = "$base_version" ]; then
           echo "changed=false" >> "$GITHUB_OUTPUT"

@@ -64,12 +64,20 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+      # Keeps bbtree-disk's examples running as the library changes; timings
+      # on a shared runner mean nothing.
+      - name: Quick run
+        run: |
+          cargo run --release -p bbtree-disk --example lookups -- 100000
+          cargo run --release -p bbtree-disk --example huge_pages -- 100000 "$RUNNER_TEMP"
+          cargo run --release -p bbtree-disk --example var_bytes_lookups -- 100000
+
   bench:
     name: bench (fmt + clippy + test + quick run)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: bench
+        working-directory: bbtree/bench
     steps:
       - uses: actions/checkout@v4
 
@@ -80,16 +88,17 @@ jobs:
           toolchain: nightly-2026-10-07
           components: rustfmt, clippy
 
-      # The bench builds for the runner's CPU (bench/.cargo/config.toml), and
-      # runners differ: a build cached on one with AVX-512 dies of SIGILL on
-      # one without. So each instruction set gets its own cache.
+      # The bench builds for the runner's CPU
+      # (bbtree/bench/.cargo/config.toml), and runners differ: a build cached
+      # on one with AVX-512 dies of SIGILL on one without. So each
+      # instruction set gets its own cache.
       - name: Identify the CPU's instruction set
         id: cpu
         run: echo "flags=$(grep -m1 '^flags' /proc/cpuinfo | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: bench
+          workspaces: bbtree/bench
           key: cpu-${{ steps.cpu.outputs.flags }}
 
       - name: Format
@@ -120,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: fuzz
+        working-directory: bbtree/fuzz
     steps:
       - uses: actions/checkout@v4
 
@@ -133,21 +142,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: fuzz
+          workspaces: bbtree/fuzz
 
       # The structural checks that the fuzz targets call, which only fuzzing
       # builds (`--cfg fuzzing`) compile.
       - name: Clippy (library, fuzzing build)
         working-directory: .
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy -p bbtree --all-features -- -D warnings
         env:
           RUSTFLAGS: --cfg fuzzing
 
       - name: Format
         run: cargo fmt --all -- --check
 
-      # `fuzz/.cargo/config.toml` builds with `--cfg fuzzing`, as cargo-fuzz
-      # does.
+      # `bbtree/fuzz/.cargo/config.toml` builds with `--cfg fuzzing`, as
+      # cargo-fuzz does.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -178,7 +187,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Test
-        run: cargo test --lib --all-features
+        run: cargo test -p bbtree --lib --all-features
 
   test-macos:
     name: test (macOS)
@@ -225,7 +234,7 @@ jobs:
           # walks over page-aligned values need about 1.25 MiB; give the 8 MiB
           # of a native main thread.
           CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -C link-arg=-zstack-size=8388608
-        run: cargo test --target wasm32-wasip1 --lib --all-features
+        run: cargo test -p bbtree --target wasm32-wasip1 --lib --all-features
 
   # The release checks: the fuzzing takes half an hour on the shared runner,
   # so it runs for releases (and weekly, in fuzz.yml) rather than for every
@@ -253,9 +262,11 @@ jobs:
           toolchain: nightly-2026-10-07
 
       # What `cargo publish` will upload, built from those files alone, so
-      # that publishing after the merge doesn't fail on the package.
+      # that publishing after the merge doesn't fail on the packages: bbtree
+      # and the crates released with it, each built against the others'
+      # packages.
       - name: Package
-        run: cargo publish --dry-run --locked
+        run: cargo publish --dry-run --locked -p bbtree -p bbtree-disk -p bbtree-datafusion-parquet
 
   # This workflow's one required check (.github/rulesets/main.json), so the
   # jobs above can change without touching the ruleset. It always runs: a
