@@ -1,6 +1,6 @@
 //! The site's two pages, from one build: the explorer and the post. Which
-//! one the address names, the header both draw with the tabs between them,
-//! and the credit. A tab is a link, so moving between the pages loads the
+//! one the address names, the site's root sending the reader on to the
+//! post, the header both draw with the tabs between them, and the credit. A tab is a link, so moving between the pages loads the
 //! other afresh: the explorer alone writes the browser's history
 //! (`shared_link.rs`).
 
@@ -23,15 +23,16 @@ pub(crate) enum SitePage {
 impl SitePage {
     const ALL: [SitePage; 2] = [SitePage::Explorer, SitePage::Post];
 
-    /// The page the address names: the post at `post/`, the explorer
-    /// anywhere else, so every link made before the post still opens it.
-    pub(crate) fn current() -> Self {
+    /// The page the address names: the post at `post/`, the explorer at
+    /// `explorer/` and anywhere else but the root; `None` at the root,
+    /// which isn't a page ([`SiteRoot`]).
+    pub(crate) fn current() -> Option<Self> {
         let route = history().current_route();
         let path = route.split(['?', '#']).next().unwrap_or_default();
-        if path.trim_end_matches('/') == SitePage::Post.path().trim_end_matches('/') {
-            SitePage::Post
-        } else {
-            SitePage::Explorer
+        match path.trim_end_matches('/') {
+            "" => None,
+            path if path == SitePage::Post.path().trim_end_matches('/') => Some(SitePage::Post),
+            _ => Some(SitePage::Explorer),
         }
     }
 
@@ -44,7 +45,7 @@ impl SitePage {
     /// The page's path under the site's base path.
     fn path(self) -> &'static str {
         match self {
-            SitePage::Explorer => "/",
+            SitePage::Explorer => "/explorer/",
             SitePage::Post => "/post/",
         }
     }
@@ -93,6 +94,30 @@ pub(crate) fn SiteHeader(current: SitePage, children: Element) -> Element {
             }
         }
     }
+}
+
+/// The site's root, which sends the reader on: to the explorer, if the
+/// address carries an explorer's link from when the explorer was the root;
+/// to the post otherwise. The static host does the same without loading
+/// the site (`lay-out-site.sh`); this is for any host that serves the
+/// site's page at the root.
+#[component]
+pub(crate) fn SiteRoot() -> Element {
+    use_hook(|| {
+        let route = history().current_route();
+        let query = route
+            .split_once('?')
+            .map(|(_, query)| query)
+            .unwrap_or_default();
+        let to = if query.is_empty() {
+            SitePage::Post.href()
+        } else {
+            format!("{}?{query}", SitePage::Explorer.href())
+        };
+        let eval = document::eval("location.replace(await dioxus.recv());");
+        let _ = eval.send(to);
+    });
+    rsx! {}
 }
 
 /// Who made the site.

@@ -48,13 +48,14 @@ mod timeline;
 mod trace;
 mod tree_shape;
 mod tree_summary;
+mod use_cases;
 mod workload;
 
 use dioxus::prelude::*;
 
 use crate::explorer::Explorer;
 use crate::post::Post;
-use crate::site::SitePage;
+use crate::site::{SitePage, SiteRoot};
 
 // The stylesheets go into the page's static head (`index.html`), so the
 // page is styled from its first paint, while the wasm still loads; the
@@ -76,7 +77,8 @@ fn main() {
 #[component]
 fn App() -> Element {
     match SitePage::current() {
-        SitePage::Explorer => rsx! { Explorer {} },
-        SitePage::Post => rsx! { Post {} },
+        Some(SitePage::Explorer) => rsx! { Explorer {} },
+        Some(SitePage::Post) => rsx! { Post {} },
+        None => rsx! { SiteRoot {} },
     }
 }

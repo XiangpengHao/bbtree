@@ -508,6 +508,15 @@ next leaf is that one's neighbor if every node kept from there down is at
 the version read. Otherwise it searches again for the last key it visited,
 still holding that key's leaf, and goes on past it: no key is cloned.
 
+A bound that lacks what every key shares (D50), before every key in the
+scan's order, starts the scan at the first leaf, or in reverse the last.
+The descent read the shared prefix at one time and the scan latches that
+leaf at another, and an insert between them can shrink the prefix and put
+a key before the bound. So the scan reads the prefix again once it holds
+the leaf, which, on the tree's border, holds it still, and descends again
+unless the bound still lacks it on the same side. A lookup needs no such
+check: its answer, absent, was true when the descent read the prefix.
+
 Scans in both directions latch a leaf while holding another, left to right
 and right to left, and can't deadlock: a thread waits for a leaf while it
 holds one only in a scan, for a shared latch, which waits only while a
@@ -673,6 +682,13 @@ stays as it is.
   threads in closures on leaves A and B that each call into the other's
   leaf.
 - **Returning free pages** before the map drops, under `&mut self`.
+- **Failed takes bump versions.** A shrink of the shared prefix that finds
+  a node held lets go of the root and the border nodes it took, each with
+  its version bumped, though it changed nothing; so optimistic readers of
+  the root start over. Two shrinks racing while a scan holds a border leaf
+  starve the scan's descent under Shuttle, and the scan keeps both shrinks
+  from finishing (2026-10-19). Letting go of an unchanged node at its old
+  version would end it.
 
 ## Testing
 
@@ -743,7 +759,8 @@ three threads of one to four operations over one change: an empty tree
 started, emptied, raised from a leaf and lowered back, raised from two
 levels to three and lowered back, leaves and internal nodes taking from a
 full sibling, separators removed (the root's too), the shared prefix
-shrunk, the last leaf freed under appends, a freed page reused under a
+shrunk under appends, lookups and scans from outside it, the last leaf
+freed under appends, a freed page reused under a
 cloned range, and removals and `get_or_insert`s racing for one key. Three
 larger ones run random operations, every kind the map has, against
 per-thread models around one leaf, around the last leaves of three levels,
@@ -781,3 +798,10 @@ It found two bugs the threaded tests and the stress run had not:
   version read under its parent. A merge leaves the freed page's bytes as
   they were, so the lookup ran the closure on a stale copy of an entry that
   lives on in the sibling, which another thread could then remove and drop.
+
+ffs, a deterministic-scheduling tester run by an outside reviewer (issue
+#9, 2026-10-19), found one Shuttle had no test for: a scan from a bound
+outside the shared prefix started at the first entry after a shrink had
+put a key before the bound (Scans, above). No test scanned from outside
+the prefix while it shrank. `scans_from_outside_the_shared_prefix_race_a_shrink`
+does, and Shuttle finds the bug in its first schedules.

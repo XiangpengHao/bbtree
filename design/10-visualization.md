@@ -90,9 +90,10 @@ From the original note:
   polls or timing.
 - **A post beside the explorer, from the same panels (2026-10-16).** The
   blog post on bbtree and the visualizer share one build and
-  one look. The explorer stays as it is, at `/`, for readers who want to
-  look around; the post is a page of its own, at `/post/`, with tabs
-  between them. The post is prose with figures, each one idea and nothing
+  one look. The post is the site's front page, at `/post/`, where the root
+  sends the reader (2026-10-19); the explorer is a page of its own, at
+  `/explorer/`, for readers who want to look around, with tabs between
+  them. The post is prose with figures, each one idea and nothing
   else (2026-10-17): a mechanism (the count, version checks, a node of
   strings) drawn plain, from fixed example keys and numbers, which claim
   no tree's state; what bbtree does (a leaf's bytes, a batch's searches
@@ -418,12 +419,17 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 ## The post (`bbtree/vis/`, `/post/`)
 
 - **Two pages, one build, no router** (`site.rs`). The app reads the path
-  once at start: `/post/` mounts the post, anything else the explorer, so
-  every link made before the post still opens it. The tabs are plain
-  links, and moving between the pages loads the other afresh. The
-  explorer alone writes the address and the history (`shared_link.rs`); a
-  router beside it would fight it for both. A static host serves the post
-  from a copy of `index.html` at `post/`; `dx serve` serves it as is.
+  once at start: `/post/` mounts the post, the root sends the reader on,
+  and anything else mounts the explorer, at `/explorer/`. The root goes to
+  the post, or, with a query (an explorer's link from when the explorer
+  was the root), to the explorer with it, so every link made before still
+  opens what it named. The tabs are plain links, and moving between the
+  pages loads the other afresh. The explorer alone writes the address and
+  the history (`shared_link.rs`); a router beside it would fight it for
+  both. A static host serves the post and the explorer from copies of
+  `index.html` at `post/` and `explorer/`, and the root as a page that
+  redirects without loading the site (`lay-out-site.sh`); `dx serve`
+  serves `index.html` at the root, where the app redirects the same way.
 - **A figure is an SVG file** (`bbtree/vis/figures/`, 2026-10-18). A native
   program writes every figure of "How it works" into
   `bbtree/vis/assets/figures/`: the mechanisms from fixed keys, what bbtree does

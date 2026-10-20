@@ -35,36 +35,59 @@ site loads it lazily, so it starts as the reader nears it.
 
 ## What it can do? 
 
+B-trees are the most important data structure in big data systems, a fast b-tree like `bbtree` benefits everything on top of it: agents memory, LLM training, RAG, KV store, state caching, vector search, and more. 
+
 ### Case 1: replace skiplist in LSM-trees
 
-All LSM-trees uses a ordered map to store in memory data. In Rust, this ordered map is usually a skiplist, specifically `crossbeam-skiplist`.
+All LSM-trees use an ordered map to hold recent writes in memory, the memtable. In Rust, this ordered map is usually a skiplist, like `crossbeam-skiplist`.
 
-`bbtree` can easily replace it and is much faster.
+`bbtree` can easily replace it and is much faster. A skiplist takes a cache miss for almost every node it visits on its way down; a `bbtree` lookup touches a handful of cache lines (see How it works, below).
 
-`bbtree` has a simpler interface than `crossbeam-skiplist`, you don't need to worry about when to pin or re-enter an epoch. 
+`bbtree` has a similar interface as `crossbeam-skiplist` but simpler: there is no epoch, no need to worry about when to pin or re-enter an epoch.
 
-`bbtree` has more advanced memory management, it allows you to plugin your own memory allocator, and it allows you to handle allocation error when memory is full.
+`bbtree` allows more advanced memory management:
+1. Custom allocator is supported on day one.
+2. It never allocates on irregular sizes (i.e., not a power of two).
+3. Allocation failure can be gracefully handled.
 
-...
+We integrated `bbtree` into five systems, on each system's own benchmarks:
+1. [fjall](https://github.com/fjall-rs/fjall): gets 2.47×, inserts 1.61×, write batches 3.00×.
+2. [SlateDB](https://github.com/slatedb/slatedb): gets 1.71×, puts 1.65×, write batches of 10 rows 2.36×.
+3. [Tonbo](https://github.com/tonbo-io/tonbo): 10M-row writes 6.83×, conflict-checked transactions 4.10×.
+4. [Lance](https://github.com/lance-format/lance)'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.22×.
+5. [Turso](https://github.com/tursodatabase/turso)'s MVCC store, not an LSM-tree but a skiplist all the same: inserts 2.22×, indexed `SELECT` 1.90×.
 
-[show the end to end chart here again]
+[the End to End card again, as a figure: `end-to-end.svg`. Caption: The End to End card again: each system's own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with `bbtree`; only the map changed.]
 
 ### Case 2: external index for Parquet files
 
-Parquet uses stats like min/max/null and sometimes bloom filters to prune the data to scan.
+Parquet already has advanced stats and bloom filters to prune the data to scan, `bbtree` pushes the pruning to its extreme: it directly pinpoints the rows to read.
 
-`bbtree` can serve as an external index for Parquet files, which allows it to pin-point the data to read, zero data is wasted.
+With `bbtree`, you can directly embed the index to the end of an existing Parquet file without rewriting it.
 
-...
+In DataFusion, it looks like this, more details in [bbtree-datafusion-parquet](https://github.com/XiangpengHao/bbtree/tree/main/bbtree-datafusion-parquet):
 
-### Case 3: fast disk cache for object store
+```rust
+ParquetIndexBuilder::source("hits.parquet")
+    .index(&["UserID"])
+    .index(&["CounterID", "EventDate"])
+    .build()?;
 
-`t4` is a super fast disk cache for object store, built on top of `bbtree`.
+let state = SessionStateBuilder::new()
+    .with_default_features()
+    .with_parquet_index();
+```
 
-t4 caches object store data to local disk, and it uses `bbtree` to index the location within the cached file.
+On ClickBench's `hits.parquet`[^clickbench] (100M rows, 14.8 GB), with an index of `UserID` (879 MB, 6% of the file) and one of `(CounterID, EventDate)` (401 MB), `SELECT * FROM hits WHERE ...` takes:
 
+| Filter | Rows | Without index | With index | Speedup |
+|---|--:|--:|--:|--:|
+| `UserID = -2398344306775305602` | 142 | 5.97 s | 23 ms | 263× |
+| `CounterID = 1298 AND EventDate = 15889` | 2,072 | 244 ms | 38 ms | 6.4× |
+| `CounterID = 1298` | 2,072 | 200 ms | 29 ms | 6.9× |
+| `CounterID = 62 AND EventDate BETWEEN 15887 AND 15917` | 738,172 | 353 ms | 204 ms | 1.7× |
 
-## How it works
+## How it works?
 
 ### Three easy pieces [^ostp]
 
@@ -350,7 +373,7 @@ No human can write better code than LLMs. All of the implementation is written b
 Conventional approaches still apply here:
 1. **Fuzzing** runs random operations on `bbtree` and std's `BTreeMap` side by side, checks that every answer matches, and checks the whole tree's invariants after every operation.
 2. **Verification** with Verus[^verus] proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves.
-3. **DSTs** (deterministic simulation testing) with Shuttle[^shuttle] test concurrent behavior in a deterministic and principled way. 
+3. **DSTs** (deterministic simulation testing) with Shuttle[^shuttle] and ffs[^ffs] test concurrent behavior in a deterministic and principled way. 
 
 
 ## Reviewers of this post
@@ -403,6 +426,11 @@ TODO: plan to ask friends and one person from each of the end-to-end benchmarks 
 
 [^shuttle]: [Shuttle](https://github.com/awslabs/shuttle), a library for testing concurrent Rust code, from AWS.
 
+[^ffs]: [ffs](https://github.com/aoli-al/ffs), fork-based deterministic concurrency testing.
+
+[^clickbench]: [ClickBench](https://github.com/ClickHouse/ClickBench), ClickHouse's analytical benchmark; its `hits` table as one Parquet file.
+
+
 
 
 
@@ -429,7 +457,9 @@ author's.
   blog): `vis/figures/` writes them into `vis/assets/figures/`, the
   mechanisms from fixed keys, `integer-keys.svg` and `batch-lanes.svg`
   from a tree of 10M random `u64`s it builds and reads through bbtree's
-  inspect views, and the charts from `vis/data/`. Each plays a CSS loop
+  inspect views, and the charts from `vis/data/`; `end-to-end.svg`, the
+  End to End card again in "What it can do?", from the 9900X's
+  `integrations.csv`. Each plays a CSS loop
   and rests on its last frame with reduced motion; the charts play once.
   The two Results charts are `vis/data/9900x-20261018/lookups.csv`:
   bbtree-eval's `bbtree-bench --perf`, gets that hit, 10M entries, `u64`

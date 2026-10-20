@@ -2486,6 +2486,15 @@ html[data-page="post"][data-theme="dark"] {
   .post-notes a:hover {
     text-decoration-color: var(--link);
   }
+  /* bbtree, wherever the text names it (`post.rs`, `Bbtree`): on a
+   * faint wash of the site's highlighter, bbtree's color in the charts. */
+  :is(.post-intro, .post-body) > :is(p, ol) .bbtree-name {
+    background: color-mix(in srgb, var(--marker) 12%, transparent);
+    border-radius: 3px;
+    padding: 0.05em 0.25em;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
   /* Code in a sentence: set in the code face alone, no chip, so that a
    * paragraph naming bbtree, u64 or String reads as one line of text. */
   :is(.post-intro, .post-body) > :is(p, ol) code,
@@ -2731,6 +2740,45 @@ html[data-page="post"][data-theme="dark"] {
     .post-contents .outline-level-3 a {
       padding-left: 16px;
     }
+  }
+
+  /* A table of results in the text: a row a query, its numbers right
+   * aligned in the data face; on a phone it scrolls on its own. */
+  .post-body > .post-table {
+    margin: 4px 0 28px;
+    overflow-x: auto;
+  }
+  .post-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.86em;
+  }
+  .post-table th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--graphite);
+    border-bottom: 1px solid var(--rule-strong);
+    padding: 6px 12px 6px 0;
+  }
+  .post-table td {
+    border-bottom: 1px solid var(--rule);
+    padding: 7px 12px 7px 0;
+    vertical-align: baseline;
+  }
+  .post-table :is(th, td):last-child {
+    padding-right: 0;
+  }
+  .post-table .number {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .post-table td.number,
+  .post-table code {
+    font: 0.95em var(--font-data);
+    font-variant-numeric: tabular-nums;
+  }
+  .post-table td.speedup {
+    font-weight: 600;
   }
 
   /* A figure shows one idea, as wide as the text: an SVG file

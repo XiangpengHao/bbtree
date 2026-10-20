@@ -5,7 +5,9 @@
 //! - **The first leaf** is where the bound the scan starts from belongs
 //!   (`descent.rs`). Without a bound, or with one before every key, it is
 //!   the tree's first leaf, down first edges, or in reverse its last, down
-//!   last edges.
+//!   last edges. A bound before every key lacks what every key shares, and
+//!   the scan checks that again once it holds the leaf: a shrink of it may
+//!   have put keys before the bound since the descent.
 //! - **The next leaf** is the held leaf's neighbor on the scan's side:
 //!   right in key order, left in reverse. The scan finds it from the
 //!   internal nodes the descent kept. It starts at the nearest one above
@@ -489,31 +491,34 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let at_from = match from {
-            Bound::Unbounded => None,
-            Bound::Included(key) | Bound::Excluded(key) => {
-                let key = SearchKey::new(key);
-                match self.descend::<Q, Shared, _>(&key, path) {
-                    Ok((held, at_head)) => {
-                        let inclusive = matches!(from, Bound::Included(_));
-                        let cursor =
-                            LeafCursor::at::<O, _, _, _, _>(held.leaf(), &key, at_head, inclusive);
-                        Some((held, cursor))
-                    }
-                    // The bound comes before every key, in the scan's order.
-                    Err(outside) if outside == O::PAST.reverse() => None,
-                    Err(_) => return None,
-                }
-            }
+        let key = match from {
+            Bound::Unbounded => return Some(self.descend_to_first_leaf::<O>(path)),
+            Bound::Included(key) | Bound::Excluded(key) => SearchKey::new(key),
         };
-        Some(match at_from {
-            Some(at_from) => at_from,
-            None => {
-                let held = self.descend_to_first_leaf::<O>(path);
-                let cursor = O::whole_leaf(Self::entry_count(held.leaf()));
-                (held, cursor)
+        loop {
+            match self.descend::<Q, Shared, _>(&key, path) {
+                Ok((held, at_head)) => {
+                    let inclusive = matches!(from, Bound::Included(_));
+                    let cursor =
+                        LeafCursor::at::<O, _, _, _, _>(held.leaf(), &key, at_head, inclusive);
+                    return Some((held, cursor));
+                }
+                // The bound came before every key, in the scan's order, when
+                // the descent read what every key shares. A shrink of that
+                // since may have put keys before the bound. The first leaf,
+                // on the tree's border, holds it still while latched
+                // (`shared_prefix.rs`): the scan starts there if the bound
+                // still lacks it on the same side, and descends again if not.
+                Err(outside) if outside == O::PAST.reverse() => {
+                    let start = self.descend_to_first_leaf::<O>(path);
+                    let root_page = self.root_page().expect("a tree with a first leaf");
+                    if root_page.shared_prefix().place_outside(&key) == Some(outside) {
+                        return Some(start);
+                    }
+                }
+                Err(_) => return None,
             }
-        })
+        }
     }
 
     /// [`Self::scan_in`] from `cursor` in `held`, which `path` leads to if
@@ -623,8 +628,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Visit::Exhausted
     }
 
-    /// The tree's first leaf in order `O`, latched shared, with `path`
-    /// keeping the internal nodes down to it.
+    /// The tree's first leaf in order `O`, latched shared, and the place
+    /// before its entries, with `path` keeping the internal nodes down to
+    /// it.
     ///
     /// # Panics
     ///
@@ -632,8 +638,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     fn descend_to_first_leaf<O: ScanOrder>(
         &self,
         path: &mut TreePath<K, V, S>,
-    ) -> HeldLeaf<K, V, S, Shared> {
-        loop {
+    ) -> (HeldLeaf<K, V, S, Shared>, LeafCursor) {
+        let held = loop {
             path.clear();
             let root_page = self.root_page().expect("a tree to descend");
             let root = match root_page.node() {
@@ -641,7 +647,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     let held = HeldLeaf::lock(leaf);
                     // A split that raised the tree changed the tag first.
                     if self.is_root(leaf) {
-                        return held;
+                        break held;
                     }
                     continue;
                 }
@@ -653,9 +659,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 continue;
             };
             if let Some(held) = Self::walk_down::<O>(root, version, None, path) {
-                return held;
+                break held;
             }
-        }
+        };
+        let cursor = O::whole_leaf(Self::entry_count(held.leaf()));
+        (held, cursor)
     }
 
     /// The leaf after the one `path` leads to, in order `O`; the caller

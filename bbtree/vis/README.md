@@ -10,8 +10,10 @@ next, and the others search while it comes. The trees are
 read from bbtree's own read-only views (`unsync::BBTreeMap::inspect`,
 `TreeView::trace`, the `inspect` feature), never recomputed. Design and decisions are in `design/10-visualization.md`.
 
-One build, two pages, with tabs between them: the explorer at `/`, and the
-post at `/post/`, whose figures each show one idea.
+One build, two pages, with tabs between them: the post at `/post/`, whose
+figures each show one idea, and the explorer at `/explorer/`. The root
+sends the reader on to the post, or, for an explorer's link from when the
+explorer was the root, to the explorer.
 
 ```bash
 nix develop            # the repository's dev shell, or direnv

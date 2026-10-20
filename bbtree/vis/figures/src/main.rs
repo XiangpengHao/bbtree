@@ -1,6 +1,6 @@
-//! Writes the post's figures (design/14-blogpost.md, "How it works") as SVG
-//! files into `vis/assets/figures/`, where the site embeds them and from
-//! where any other page can take them as they are. The figures of a
+//! Writes the post's figures (design/14-blogpost.md, "What it can do?" and
+//! "How it works") as SVG files into `vis/assets/figures/`, where the site
+//! embeds them and from where any other page can take them as they are. The figures of a
 //! mechanism are drawn from a few fixed keys; those of what bbtree does
 //! read real trees, built here; the charts read the measurements in
 //! `vis/data/`.
@@ -11,6 +11,7 @@
 
 mod batch_lanes;
 mod concurrent_gets;
+mod end_to_end;
 mod integer_keys;
 mod key_count;
 mod lookup_counts;
@@ -28,6 +29,7 @@ use bbtree::unsync::BBTreeMap;
 
 use crate::batch_lanes::BatchLanes;
 use crate::concurrent_gets::ConcurrentGets;
+use crate::end_to_end::EndToEnd;
 use crate::integer_keys::IntegerLeaf;
 use crate::key_count::KeyCount;
 use crate::lookup_counts::{LookupCount, LookupCounts};
@@ -76,6 +78,10 @@ impl PostFigures {
         }
         let lines = self.data.join("9900x-20261018/lookups.csv");
         let figures: Vec<(&str, Svg)> = vec![
+            (
+                "end-to-end",
+                EndToEnd::read(&self.data.join("9900x-20261017/integrations.csv"))?.svg(),
+            ),
             ("search-space", SearchSpace::new().svg()),
             ("string-keys", StringNode::plain().svg()),
             ("inline-keys", StringNode::with_inline_keys().svg()),

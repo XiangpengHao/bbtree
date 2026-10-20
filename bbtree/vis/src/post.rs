@@ -1,7 +1,7 @@
 //! The post (design/14-blogpost.md, whose text it shows): what bbtree is, how
 //! fast, on one thread, on many, and in real systems
-//! (`performance_cards.rs`), and how it works (`how_it_works.rs`), with
-//! the works it cites.
+//! (`performance_cards.rs`), what it can do (`use_cases.rs`), and how it
+//! works (`how_it_works.rs`), with the works it cites.
 
 use std::rc::Rc;
 
@@ -14,6 +14,16 @@ use crate::performance_cards::PerformanceCards;
 use crate::site::{AUTHOR_PAGE, Credit, SiteHeader, SitePage};
 use crate::spotlight::{HintLayer, PointerHint, Spotlight};
 use crate::theme::{PostTheme, ThemeSwitch};
+use crate::use_cases::UseCases;
+
+/// bbtree, as the post's text names it: a code word, which the text
+/// lights faintly in the site's highlighter (`.bbtree-name`).
+#[component]
+pub(crate) fn Bbtree() -> Element {
+    rsx! {
+        code { class: "bbtree-name", "bbtree" }
+    }
+}
 
 #[component]
 pub(crate) fn Post() -> Element {
@@ -53,7 +63,7 @@ pub(crate) fn Post() -> Element {
                     }
                 }
                 p {
-                    strong { "bbtree" }
+                    strong { class: "bbtree-name", "bbtree" }
                     " is by far the fastest B-tree (that I'm aware of):"
                 }
                 ol {
@@ -93,6 +103,7 @@ pub(crate) fn Post() -> Element {
                 // notes after them.
                 div { class: "post-body",
                     PostOutline {}
+                    UseCases {}
                     HowItWorks {}
                     Notes {}
                 }

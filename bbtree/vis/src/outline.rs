@@ -11,6 +11,9 @@ use crate::how_it_works::{Note, NoteRef};
 /// A heading of the post's sections, in the order they come.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PostHeading {
+    UseCases,
+    CaseLsmTrees,
+    CaseParquetIndex,
     HowItWorks,
     Principles,
     CacheMisses,
@@ -35,7 +38,10 @@ pub(crate) enum PostHeading {
 }
 
 impl PostHeading {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 24] = [
+        Self::UseCases,
+        Self::CaseLsmTrees,
+        Self::CaseParquetIndex,
         Self::HowItWorks,
         Self::Principles,
         Self::CacheMisses,
@@ -63,8 +69,10 @@ impl PostHeading {
     /// for their sections, 4 and 5 within a section.
     fn level(self) -> u8 {
         match self {
-            Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
-            Self::Principles
+            Self::UseCases | Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
+            Self::CaseLsmTrees
+            | Self::CaseParquetIndex
+            | Self::Principles
             | Self::CacheMisses
             | Self::Instructions
             | Self::Coherence
@@ -79,6 +87,9 @@ impl PostHeading {
     /// The anchor the heading takes, and that its link names.
     fn id(self) -> &'static str {
         match self {
+            Self::UseCases => "what-it-can-do",
+            Self::CaseLsmTrees => "case-lsm-trees",
+            Self::CaseParquetIndex => "case-parquet-index",
             Self::HowItWorks => "how-it-works",
             Self::Principles => "three-easy-pieces",
             Self::CacheMisses => "minimize-cache-misses",
@@ -106,7 +117,10 @@ impl PostHeading {
     /// The heading as plain text, as the outline lists it.
     fn title(self) -> &'static str {
         match self {
-            Self::HowItWorks => "How it works",
+            Self::UseCases => "What it can do?",
+            Self::CaseLsmTrees => "Case 1: replace skiplist in LSM-trees",
+            Self::CaseParquetIndex => "Case 2: external index for Parquet files",
+            Self::HowItWorks => "How it works?",
             Self::Principles => "Three easy pieces",
             Self::CacheMisses => "Minimize cache misses",
             Self::ThoughtExperiment => "Thought experiment: binary search vs linear search",

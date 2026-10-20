@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::icons::{Icon, IconGlyph};
 use crate::outline::{PostHeading, SectionHeading};
+use crate::post::Bbtree;
 use crate::rust_code::RustCode;
 use crate::theme::PostTheme;
 
@@ -192,13 +193,13 @@ fn MinimizeCacheMisses() -> Element {
         p {
             strong { class: "run-in",
                 "How does "
-                code { "bbtree" }
+                Bbtree {}
                 " do it?"
             }
             " Heap keys are very common, so "
-            code { "bbtree" }
+            Bbtree {}
             " must handle them well. "
-            code { "bbtree" }
+            Bbtree {}
             " introduces "
             code { "inline_keys" }
             ", an idea databases have used for decades"
@@ -225,7 +226,7 @@ fn MinimizeCacheMisses() -> Element {
         p {
             strong { class: "run-in", "What about keys with long prefixes?" }
             " Many keys, like URLs and paths, have long prefixes. If we just take the first 8 bytes as the inline key, we may compare nothing at all. "
-            code { "bbtree" }
+            Bbtree {}
             " addresses this with "
             code { "prefix_keys" }
             ": the common prefix of all keys in a node"
@@ -280,7 +281,7 @@ fn MinimizeCacheMisses() -> Element {
             "The trickiest part is Rust's type system. If we required every key type to implement "
             code { "InlineKey" }
             ", "
-            code { "bbtree" }
+            Bbtree {}
             " couldn't be a drop-in replacement for std's "
             code { "BTreeMap" }
             "/"
@@ -349,7 +350,7 @@ fn MinimizeCacheMisses() -> Element {
             ", and "
             code { "await" }
             " it. In "
-            code { "bbtree" }
+            Bbtree {}
             ", we treat a cache miss as a "
             code { "Future" }
             ", and "
@@ -384,7 +385,7 @@ fn MinimizeCacheMisses() -> Element {
                 " must be as lightweight as possible. This means we can't use "
                 code { "tokio" }
                 " or any general-purpose async runtime, because their overhead is already higher than a cache miss. "
-                code { "bbtree" }
+                Bbtree {}
                 " polls its lanes with a tiny executor of its own: no allocation, no runtime."
             }
             li {
@@ -392,7 +393,7 @@ fn MinimizeCacheMisses() -> Element {
             }
             li {
                 "There's no way to know whether a cache line is already in cache, so we have to guess. In "
-                code { "bbtree" }
+                Bbtree {}
                 " that's not so hard: once the leaves outgrow the L2 cache, a leaf is almost always a cache miss; smaller trees look their keys up one at a time."
             }
         }
@@ -480,7 +481,7 @@ fn MinimizeInstructions() -> Element {
             ", Rust calls "
             code { "memcmp" }
             ", a function call that isn't inlined. But in "
-            code { "bbtree" }
+            Bbtree {}
             ", we know the keys are usually short, so instead of calling "
             code { "memcmp" }
             ", we load the bytes as integers and compare the integers. Arrow does the same for "
@@ -515,7 +516,7 @@ fn MinimizeCoherenceTraffic() -> Element {
             "On modern hardware, a contended cache line takes only about 10 M op/s. So if we simply put a "
             code { "Mutex" }
             " over the B-tree, we reach at most 10 M op/s, while "
-            code { "bbtree" }
+            Bbtree {}
             " reaches 180 M op/s at 96 threads."
         }
         p {
@@ -527,7 +528,7 @@ fn MinimizeCoherenceTraffic() -> Element {
         }
         p {
             "So how does "
-            code { "bbtree" }
+            Bbtree {}
             " solve this?"
         }
         p {
@@ -583,7 +584,7 @@ fn MinimizeCoherenceTraffic() -> Element {
         }
         p {
             "In "
-            code { "bbtree" }
+            Bbtree {}
             ", we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved. So a late reader can keep checking the version, find that the node is stale, and retry, without any segfault."
         }
         SectionHeading { heading: PostHeading::CoherenceResults }
@@ -597,9 +598,9 @@ fn MinimizeCoherenceTraffic() -> Element {
             },
         }
         p {
-            code { "bbtree" }
+            Bbtree {}
             " is wildly concurrent: its get throughput grows 83–90× as the core count grows to 96, 86–94% of linear scaling. At this thread count, "
-            code { "bbtree" }
+            Bbtree {}
             " is even faster than "
             a {
                 href: "https://github.com/xacrimon/dashmap",
@@ -625,20 +626,20 @@ fn HowWeMakeItCorrect() -> Element {
             "But making sure the code is correct is hard. Correctness is implicit: you can never list every DON'T in the prompt, you can never write enough tests to prove the code correct, and you can never enumerate every property you want to hold."
         }
         p {
-            code { "bbtree" }
+            Bbtree {}
             " has three guards to approach correctness."
         }
         SectionHeading { heading: PostHeading::GuardHuman }
         p {
             "Xiangpeng is a real human behind "
-            code { "bbtree" }
+            Bbtree {}
             ", and the front line guarding the correctness of its code. All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code."
         }
         p {
             "He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree"
             NoteRef { note: Note::BfTree }
             "). Choosing "
-            code { "bbtree" }
+            Bbtree {}
             " means offloading the attention to Xiangpeng."
         }
         SectionHeading { heading: PostHeading::GuardLlms }
@@ -651,7 +652,7 @@ fn HowWeMakeItCorrect() -> Element {
             li {
                 strong { "Fuzzing" }
                 " runs random operations on "
-                code { "bbtree" }
+                Bbtree {}
                 " and std's "
                 code { "BTreeMap" }
                 " side by side, checks that every answer matches, and checks the whole tree's invariants after every operation."
@@ -666,6 +667,8 @@ fn HowWeMakeItCorrect() -> Element {
                 strong { "DSTs" }
                 " (deterministic simulation testing) with Shuttle"
                 NoteRef { note: Note::Shuttle }
+                " and ffs"
+                NoteRef { note: Note::Ffs }
                 " test concurrent behavior in a deterministic and principled way."
             }
         }
@@ -675,7 +678,7 @@ fn HowWeMakeItCorrect() -> Element {
 /// A figure: an SVG file, played by its own CSS as its image loads, which
 /// it does as the reader nears it, in the post's theme, and its caption.
 #[component]
-fn SvgFigure(
+pub(crate) fn SvgFigure(
     src: Asset,
     alt: &'static str,
     caption: Element,
@@ -726,6 +729,7 @@ fn SvgFigure(
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Note {
     Gray,
+    ClickBench,
     Ostp,
     CacheConscious,
     GraefeLarson,
@@ -746,11 +750,13 @@ pub(crate) enum Note {
     Ebr,
     Verus,
     Shuttle,
+    Ffs,
 }
 
 impl Note {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 23] = [
         Self::Gray,
+        Self::ClickBench,
         Self::Ostp,
         Self::CacheConscious,
         Self::GraefeLarson,
@@ -771,6 +777,7 @@ impl Note {
         Self::Ebr,
         Self::Verus,
         Self::Shuttle,
+        Self::Ffs,
     ];
 
     fn number(self) -> usize {
@@ -790,6 +797,12 @@ impl Note {
                 " (1993), as quoted by Goetz Graefe in "
                 NoteLink { href: "https://doi.org/10.1561/1900000028", title: "Modern B-Tree Techniques" }
                 " (2011)."
+            },
+            Self::ClickBench => rsx! {
+                NoteLink { href: "https://github.com/ClickHouse/ClickBench", title: "ClickBench" }
+                ", ClickHouse's analytical benchmark; its "
+                code { "hits" }
+                " table as one Parquet file."
             },
             Self::Ostp => rsx! {
                 "Not more complicated than an operating system! Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, "
@@ -911,6 +924,10 @@ impl Note {
             Self::Shuttle => rsx! {
                 NoteLink { href: "https://github.com/awslabs/shuttle", title: "Shuttle" }
                 ", a library for testing concurrent Rust code, from AWS."
+            },
+            Self::Ffs => rsx! {
+                NoteLink { href: "https://github.com/aoli-al/ffs", title: "ffs" }
+                ", fork-based deterministic concurrency testing."
             },
         }
     }

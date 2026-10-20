@@ -509,6 +509,64 @@ fn appends_race_a_shrinking_shared_prefix() {
     });
 }
 
+/// Scans, both ways, and a cloned range's two ends, of a range whose bounds
+/// lack what every key shares, just outside the keys, while another thread
+/// inserts a key past each bound, in either order, the first shrinking the
+/// shared prefix; in a root leaf, then in a tree of two levels. A scan that
+/// read its starting bound as before every key must not start at the first
+/// entry once the shrink has put a key there.
+///
+/// One thread inserts both: two shrinks racing while the scan holds a
+/// border leaf starve its descent under Shuttle, as each failed attempt
+/// bumps the root's version.
+#[test]
+fn scans_from_outside_the_shared_prefix_race_a_shrink() {
+    let shapes = Shapes::probe();
+    Exploration {
+        random: 20_000,
+        pct: 20_000,
+    }
+    .run(move || {
+        for len in [4, 2 * shapes.capacity[0]] {
+            let flags = DropFlags::new();
+            let base = 0xAB << 40;
+            let mut map = TrackedMap::new();
+            for index in 0..len {
+                map.insert(base + key(index), flags.value(base + key(index)))
+                    .unwrap();
+            }
+            assert!(map.shared_prefix_len() >= 3);
+            let steady: Vec<u64> = (0..len).map(|index| base + key(index)).collect();
+            // Each differs from every key in the shared third byte.
+            let (below, above) = (0xAA << 40, 0xAC << 40);
+            let mut outside = [0xA9 << 40, 0xAD << 40];
+            if thread_rng().gen_range(0..2) == 1 {
+                outside.reverse();
+            }
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    for key in outside {
+                        assert!(map.insert(key, flags.value(key)).unwrap().is_none());
+                    }
+                });
+                scope.spawn(|| {
+                    for reverse in [false, true] {
+                        assert_eq!(scanned_keys(&map, below..=above, same, reverse), steady);
+                    }
+                    let mut range = map.range_cloned::<u64, _>(below..=above);
+                    let (first, value) = range.next().expect("steady keys");
+                    value.check(first);
+                    let (last, value) = range.next_back().expect("steady keys");
+                    value.check(last);
+                    assert_eq!([first, last], [steady[0], steady[steady.len() - 1]]);
+                });
+            });
+            assert!(map.shared_prefix_len() < 3);
+            map.check_invariants(steady.len() + 2);
+        }
+    });
+}
+
 /// Appends while a removal merges the last leaf into its sibling, frees it,
 /// and lowers the tree into the root leaf: an append that read the pointer
 /// to the last leaf before must not insert into the freed page.
