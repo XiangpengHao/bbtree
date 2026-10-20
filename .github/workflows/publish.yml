@@ -58,18 +58,22 @@ jobs:
         with:
           toolchain: nightly-2026-10-07
 
-      - name: Publish crate
+      # bbtree and the crates released with it, at its version, each after
+      # the crates it depends on.
+      - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          # crates.io asks API clients to name themselves.
-          if curl --silent --fail --output /dev/null \
-              --user-agent "bbtree publish workflow (github.com/$GITHUB_REPOSITORY)" \
-              "https://crates.io/api/v1/crates/bbtree/$VERSION"; then
-            echo "crates.io already has bbtree $VERSION"
-          else
-            cargo publish -p bbtree --locked
-          fi
+          for crate in bbtree bbtree-disk bbtree-datafusion-parquet; do
+            # crates.io asks API clients to name themselves.
+            if curl --silent --fail --output /dev/null \
+                --user-agent "bbtree publish workflow (github.com/$GITHUB_REPOSITORY)" \
+                "https://crates.io/api/v1/crates/$crate/$VERSION"; then
+              echo "crates.io already has $crate $VERSION"
+            else
+              cargo publish -p "$crate" --locked
+            fi
+          done
 
       - name: Create GitHub Release
         env:

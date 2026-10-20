@@ -6,6 +6,10 @@ bbtree index is directly appended at the end of the file, so no rewrite is neede
 
 ### Build index
 
+```bash
+cargo add bbtree-datafusion-parquet
+```
+
 ```rust
 use bbtree_datafusion_parquet::{ParquetIndexBuilder, ParquetIndexSessionBuilderExt};
 use datafusion::execution::SessionStateBuilder;

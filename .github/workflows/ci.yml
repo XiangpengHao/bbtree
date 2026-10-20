@@ -262,9 +262,11 @@ jobs:
           toolchain: nightly-2026-10-07
 
       # What `cargo publish` will upload, built from those files alone, so
-      # that publishing after the merge doesn't fail on the package.
+      # that publishing after the merge doesn't fail on the packages: bbtree
+      # and the crates released with it, each built against the others'
+      # packages.
       - name: Package
-        run: cargo publish -p bbtree --dry-run --locked
+        run: cargo publish --dry-run --locked -p bbtree -p bbtree-disk -p bbtree-datafusion-parquet
 
   # This workflow's one required check (.github/rulesets/main.json), so the
   # jobs above can change without touching the ruleset. It always runs: a

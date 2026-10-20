@@ -2,6 +2,10 @@
 
 bbtree on disk: compact a bbtree map to a file, mmap it back into memory and instantly query it. 
 
+```bash
+cargo add bbtree-disk
+```
+
 ```rust
 use bbtree::unsync::BBTreeMap;
 use bbtree_disk::BBTreeMapFile;

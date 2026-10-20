@@ -1,15 +1,15 @@
 [package]
 name = "bbtree-datafusion-parquet"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 description = "bbtree-disk as an index of Parquet files: an index of one or more columns embedded in the file, which DataFusion's Parquet scans look rows up in."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/XiangpengHao/bbtree"
-publish = false
 
 [dependencies]
-bbtree = { path = "../bbtree", features = ["file"] }
-bbtree-disk = { path = "../bbtree-disk" }
+# Released with bbtree and bbtree-disk, at their version.
+bbtree = { path = "../bbtree", version = "0.1.4", features = ["file"] }
+bbtree-disk = { path = "../bbtree-disk", version = "0.1.4" }
 # Arrow, Parquet and the object store come through DataFusion's re-exports,
 # so that their versions are always DataFusion's.
 # `serde`, for Arrow's time units in an index's schema.
