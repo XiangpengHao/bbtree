@@ -1395,9 +1395,9 @@ Design and measurements in 15-index-file.md.
   address, for `get` and the batch lanes (D53) alike. Keys and values are
   `Storable`: `PlainBytes`, kept in their slots, or a type whose slot
   points to bytes right after its leaf, which a writer's `LeafBytes` lays
-  out and the type's `check` checks. bbtree-disk's `VarBytes` is one: a
+  out and the type's `check` checks. bbtree-mmap's `VarBytes` is one: a
   span, `{len, offset}` from the slot itself, to bytes of any length in
-  heap pages after the leaf, searched with `WithInlineKey`. bbtree-disk
+  heap pages after the leaf, searched with `WithInlineKey`. bbtree-mmap
   writes, maps and reads typed maps in files (`BBTreeMapFile`), each key
   and value type picking plain or `VarBytes` storage (`DiskType`);
   bbtree-datafusion-parquet embeds indexes of one or more columns in a
@@ -1424,9 +1424,9 @@ Design and measurements in 15-index-file.md.
   and `InlineKey` only `&K`; from the slot, that is all a span needs. The
   writer builds over `ArenaBytes`, 8-byte pointers of the span's layout,
   and rewrites them into spans as it lays each leaf's bytes out.
-- **The bytes after a leaf are bbtree-disk's** (2026-10-21): bbtree knows
+- **The bytes after a leaf are bbtree-mmap's** (2026-10-21): bbtree knows
   two hooks, a slot type's check (`Storable::check`) and what follows a
-  leaf (`LeafBytes`), and nothing of spans. bbtree-disk lays each leaf's
+  leaf (`LeafBytes`), and nothing of spans. bbtree-mmap lays each leaf's
   bytes out as a store's leaf keeps its records (D60): heap pages of
   `HEAP_PAGE_SIZE` right after the leaf, records in key order, a key's
   bytes then its value's, each in one page but those larger than a page,

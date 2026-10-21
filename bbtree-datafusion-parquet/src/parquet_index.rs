@@ -20,7 +20,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use bbtree::WithInlineKey;
-use bbtree_disk::{BBTreeMapFile, DiskQuery, DiskType, Input, VarBytes, VarBytesQuery};
+use bbtree_mmap::{BBTreeMapFile, DiskQuery, DiskType, Input, VarBytes, VarBytesQuery};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};

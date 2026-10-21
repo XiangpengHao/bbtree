@@ -1,6 +1,6 @@
 # bbtree-datafusion-parquet
 
-bbtree-disk as indexes of Parquet files.
+bbtree-mmap as indexes of Parquet files.
 
 bbtree index is directly appended at the end of the file, so no rewrite is needed.
 

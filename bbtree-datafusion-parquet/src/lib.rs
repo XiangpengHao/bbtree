@@ -1,4 +1,4 @@
-//! bbtree-disk as an index of Parquet files (`design/15-index-file.md`):
+//! bbtree-mmap as an index of Parquet files (`design/15-index-file.md`):
 //! indexes of one or more columns embedded in a Parquet file, which
 //! DataFusion's Parquet scans look their predicates' rows up in.
 //!

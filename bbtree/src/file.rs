@@ -11,7 +11,7 @@
 //! - [`Storable`] is what keys and values may be: [`PlainBytes`], kept in
 //!   the leaves as they are; or a type whose slot points to bytes that lie
 //!   right after its leaf ([`LeafBytes`]), which the code that keeps them
-//!   lays out and checks: bbtree-disk's `VarBytes`, bytes of any length in
+//!   lays out and checks: bbtree-mmap's `VarBytes`, bytes of any length in
 //!   heap pages.
 //! - [`FileBuf`] holds a file map in memory, aligned for a reader.
 //!
@@ -108,7 +108,7 @@ unsafe impl<T: PlainBytes, const N: usize> PlainBytes for [T; N] {}
 /// [`PlainBytes`] type is one, holding nothing beyond its slot. A type
 /// whose slot points to bytes beyond it (`HAS_BYTES`) has them written
 /// right after its leaf by a writer's [`LeafBytes`], and checked by
-/// [`Self::check`]: bbtree-disk's `VarBytes`, a span to bytes of any length
+/// [`Self::check`]: bbtree-mmap's `VarBytes`, a span to bytes of any length
 /// in heap pages.
 ///
 /// # Safety
@@ -163,7 +163,7 @@ pub type InWriter<T> = <T as Storable>::InWriter;
 
 /// What a file map keeps right after each leaf: the bytes of the leaf's
 /// keys and values whose slots point beyond themselves ([`Storable`]),
-/// which the code that keeps them lays out: bbtree-disk's heap pages.
+/// which the code that keeps them lays out: bbtree-mmap's heap pages.
 /// Nothing for plain keys and values ([`NoLeafBytes`]).
 ///
 /// # Safety

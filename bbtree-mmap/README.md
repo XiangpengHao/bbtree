@@ -1,14 +1,14 @@
-# bbtree-disk
+# bbtree-mmap
 
 bbtree on disk: compact a bbtree map to a file, mmap it back into memory and instantly query it. 
 
 ```bash
-cargo add bbtree-disk
+cargo add bbtree-mmap
 ```
 
 ```rust
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 
 let names = BBTreeMap::from([(7_u64, String::from("ferris")), (42, String::from("corro"))]);
 BBTreeMapFile::<u64, String>::create("names.bbtree", &names)?;

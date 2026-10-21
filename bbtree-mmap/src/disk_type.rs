@@ -165,9 +165,9 @@ impl<T: DiskQuery + ?Sized> DiskInput<T::Stored> for &mut T {
 /// # Examples
 ///
 /// ```
-/// use bbtree_disk::bbtree::file::PlainBytes;
-/// use bbtree_disk::bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
-/// use bbtree_disk::{BBTreeMapFile, plain_disk_type};
+/// use bbtree_mmap::bbtree::file::PlainBytes;
+/// use bbtree_mmap::bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
+/// use bbtree_mmap::{BBTreeMapFile, plain_disk_type};
 ///
 /// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 /// #[repr(transparent)]
@@ -187,7 +187,7 @@ impl<T: DiskQuery + ?Sized> DiskInput<T::Stored> for &mut T {
 ///
 /// plain_disk_type!(UserId, WithInlineKey);
 ///
-/// let path = std::env::temp_dir().join(format!("bbtree-disk-plain-{}", std::process::id()));
+/// let path = std::env::temp_dir().join(format!("bbtree-mmap-plain-{}", std::process::id()));
 /// BBTreeMapFile::<UserId, u64>::create(&path, [(UserId(7), 70_u64), (UserId(42), 420)])?;
 /// let map = BBTreeMapFile::<UserId, u64>::read(&path)?;
 /// assert_eq!(map.get(&UserId(42)), Some(&420));

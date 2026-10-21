@@ -331,7 +331,7 @@ name = "bbtree-datafusion-parquet"
 version = "0.1.4"
 dependencies = [
  "bbtree",
- "bbtree-disk",
+ "bbtree-mmap",
  "datafusion",
  "datafusion-datasource",
  "futures",
@@ -342,7 +342,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bbtree-disk"
+name = "bbtree-mmap"
 version = "0.1.4"
 dependencies = [
  "bbtree",

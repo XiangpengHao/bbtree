@@ -64,13 +64,13 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
-      # Keeps bbtree-disk's examples running as the library changes; timings
+      # Keeps bbtree-mmap's examples running as the library changes; timings
       # on a shared runner mean nothing.
       - name: Quick run
         run: |
-          cargo run --release -p bbtree-disk --example lookups -- 100000
-          cargo run --release -p bbtree-disk --example huge_pages -- 100000 "$RUNNER_TEMP"
-          cargo run --release -p bbtree-disk --example var_bytes_lookups -- 100000
+          cargo run --release -p bbtree-mmap --example lookups -- 100000
+          cargo run --release -p bbtree-mmap --example huge_pages -- 100000 "$RUNNER_TEMP"
+          cargo run --release -p bbtree-mmap --example var_bytes_lookups -- 100000
 
   bench:
     name: bench (fmt + clippy + test + quick run)
@@ -266,7 +266,7 @@ jobs:
       # and the crates released with it, each built against the others'
       # packages.
       - name: Package
-        run: cargo publish --dry-run --locked -p bbtree -p bbtree-disk -p bbtree-datafusion-parquet
+        run: cargo publish --dry-run --locked -p bbtree -p bbtree-mmap -p bbtree-datafusion-parquet
 
   # This workflow's one required check (.github/rulesets/main.json), so the
   # jobs above can change without touching the ruleset. It always runs: a

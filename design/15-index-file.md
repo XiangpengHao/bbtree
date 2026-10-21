@@ -9,12 +9,12 @@ leaves, and keys and values of any length in heap pages after each leaf
   `Storable`, `PlainBytes`, `LeafBytes`, `FileBuf`) in `bbtree/src/file.rs`.
   It knows nothing of bytes of any length but two hooks: a slot type's
   check, and what a writer writes after each leaf.
-- **bbtree-disk** (`bbtree-disk/`), generic: `BBTreeMapFile`, a typed map in a
+- **bbtree-mmap** (`bbtree-mmap/`), generic: `BBTreeMapFile`, a typed map in a
   file, each key and value type keeping its own storage (`DiskType`);
   written, mapped or read, whole or as a range of a larger file. Var-length
   keys and values are its own: spans and queries (`VarBytes`,
   `VarBytesQuery`, `var_bytes.rs`) and their heap pages (`heap_pages.rs`).
-- **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-disk as
+- **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-mmap as
   indexes of Parquet files (`ParquetIndexBuilder`), which DataFusion's
   Parquet scans look their predicates' rows up in (`with_parquet_index`). The
   DataFusion, Arrow and Parquet dependencies live here alone.
@@ -80,7 +80,7 @@ offset 0      header: magic, version, layout fingerprint, entries, root
   on that constant. Maps never see the branch: their machine code is
   unchanged (Measurements).
 - **Keys and values are storable** (`Storable`): a `PlainBytes` type,
-  kept in its slot as it is, or bbtree-disk's `VarBytes`, bytes of any
+  kept in its slot as it is, or bbtree-mmap's `VarBytes`, bytes of any
   length kept in heap pages after the leaf ("Keys and values of any
   length"). A plain type has no
   pointers and no padding, and every bit pattern is a value: the integers,
@@ -129,7 +129,7 @@ offset 0      header: magic, version, layout fingerprint, entries, root
 
 ## Keys and values of any length
 
-`VarBytes`, bbtree-disk's: each leaf keeps an 8-byte span for each, and
+`VarBytes`, bbtree-mmap's: each leaf keeps an 8-byte span for each, and
 their bytes lie in heap pages right after the leaf, as a store's leaf
 keeps its records (16-bbtree-store.md).
 
@@ -168,7 +168,7 @@ leaf      | …
   page starts on a page and runs on over the next. The leaf's last page
   ends where the next leaf may start, as the leaves' alignment is the heap
   pages' size.
-- **Building.** bbtree-disk builds the compact tree in memory over
+- **Building.** bbtree-mmap builds the compact tree in memory over
   `ArenaBytes`: 8-byte pointers to length-prefixed bytes in an arena of
   the writer's (`ByteArena`), which read their bytes alone, as inline keys
   and prefixes need, and stay valid as entries move. They have the span's
@@ -194,7 +194,7 @@ leaf      | …
   line, the key's bytes, and the file map takes 49 bytes an entry against
   18.5: 216 ns against 127 a hit at 10M (Measurements).
 
-## Typed maps in files (bbtree-disk)
+## Typed maps in files (bbtree-mmap)
 
 - **`BBTreeMapFile<K, V>`** is a map in a file: written once from a map's
   entries, in their order; mapped or read, whole or from a range of a
@@ -312,7 +312,7 @@ A file map's `get` differs from a map's in its descent loop alone:
 `add rbx, [rbx + rdx*8 + 0x70]` where the map has
 `mov rbx, [r13 + r12*8 + 0x70]`.
 
-**Lookups at 10M random `u64` keys and values** (`bbtree-disk/examples/lookups.rs`,
+**Lookups at 10M random `u64` keys and values** (`bbtree-mmap/examples/lookups.rs`,
 and `huge_pages.rs` for the mapped rows, mapped from disk; the file map
 184.7 MB, 18.47 bytes per entry, written in 60 ms):
 
@@ -324,7 +324,7 @@ and `huge_pages.rs` for the mapped rows, mapped from disk; the file map
 | file map, mapped, huge pages | 126.4 ns | 91.2 ns |
 
 **Lookups of var-length keys and values at 10M entries**
-(`bbtree-disk/examples/var_bytes_lookups.rs`; read into memory). One run
+(`bbtree-mmap/examples/var_bytes_lookups.rs`; read into memory). One run
 each, unpinned, 2026-10-21, while the machine ran about 1.6 times slower
 than for the table above (its map took 202–213 ns a hit, against 125.4):
 compare rows within this table only. Before: each leaf's bytes in its

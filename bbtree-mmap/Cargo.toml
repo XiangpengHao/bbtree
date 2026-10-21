@@ -1,5 +1,5 @@
 [package]
-name = "bbtree-disk"
+name = "bbtree-mmap"
 version = "0.1.4"
 edition = "2024"
 description = "bbtree on disk: a compact, read-only map written to a file and looked up where it lies, mapped into memory, at a map's speed."

@@ -16,7 +16,7 @@
 mod timed_lookups;
 
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 use timed_lookups::{Numbers, TimedLookups};
 
 #[global_allocator]

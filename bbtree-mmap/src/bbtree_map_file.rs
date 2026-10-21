@@ -31,9 +31,9 @@ use crate::{DiskInput, DiskQuery, DiskType, OsPages};
 ///
 /// ```
 /// use bbtree::unsync::BBTreeMap;
-/// use bbtree_disk::BBTreeMapFile;
+/// use bbtree_mmap::BBTreeMapFile;
 ///
-/// let path = std::env::temp_dir().join(format!("bbtree-disk-doc-{}", std::process::id()));
+/// let path = std::env::temp_dir().join(format!("bbtree-mmap-doc-{}", std::process::id()));
 /// let names = BBTreeMap::from([(7_u64, String::from("ferris")), (42, String::from("corro"))]);
 /// BBTreeMapFile::<u64, String>::create(&path, &names)?;
 ///
@@ -230,9 +230,9 @@ pub(crate) struct DiskWriter<
 ///
 /// ```
 /// use bbtree::unsync::BBTreeMap;
-/// use bbtree_disk::{BBTreeMapFile, OsPages};
+/// use bbtree_mmap::{BBTreeMapFile, OsPages};
 ///
-/// let path = std::env::temp_dir().join(format!("bbtree-disk-mmap-{}", std::process::id()));
+/// let path = std::env::temp_dir().join(format!("bbtree-mmap-options-{}", std::process::id()));
 /// let names = BBTreeMap::from([(7_u64, String::from("ferris"))]);
 /// BBTreeMapFile::<u64, String>::create(&path, &names)?;
 ///

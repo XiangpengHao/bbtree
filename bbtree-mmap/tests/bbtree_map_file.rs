@@ -9,14 +9,14 @@ use std::path::PathBuf;
 
 use bbtree::file::PlainBytes;
 use bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
-use bbtree_disk::{BBTreeMapFile, plain_disk_type};
+use bbtree_mmap::{BBTreeMapFile, plain_disk_type};
 
 /// A file of its own for a test, removed when dropped.
 struct TestFile(PathBuf);
 
 impl TestFile {
     fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bbtree-disk-{name}-{}", std::process::id())))
+        Self(std::env::temp_dir().join(format!("bbtree-mmap-{name}-{}", std::process::id())))
     }
 
     fn len(&self) -> u64 {

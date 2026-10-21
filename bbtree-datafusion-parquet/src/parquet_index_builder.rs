@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::compute::cast;
 use datafusion::parquet::arrow::ProjectionMask;
@@ -421,7 +421,7 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::io::ErrorKind;
 
-    use bbtree_disk::DiskQuery;
+    use bbtree_mmap::DiskQuery;
 
     use super::*;
     use crate::test_file::TestFile;
