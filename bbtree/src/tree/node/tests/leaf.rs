@@ -440,7 +440,7 @@ impl<'l, V: FromTracked<'l>, S: InlineKeyStrategy<Tracked<'l>>>
             entries.len()
         );
         assert!(siblings.can_merge(), "the halves fit again");
-        pages.release(siblings.merge(&pages));
+        pages.release(siblings.merge());
         assert_eq!(root.len(), 0);
 
         pages.release(tree.lower());

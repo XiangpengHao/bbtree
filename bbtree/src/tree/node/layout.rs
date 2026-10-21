@@ -7,14 +7,14 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
-use super::page::{HeapChain, InlineKeyNodeHeader, LatchedNodeHeader, NodeHeader, NodePtr};
+use super::page::{InlineKeyNodeHeader, LatchedNodeHeader, NodeHeader, NodePtr};
 use crate::inline_key::{Auto, InlineWidth, InlineWord};
 use crate::node_config::NodeConfig;
 
 /// Byte layouts of the node pages for keys `K` and values `V`, with the page
-/// sizes of node config `C` (D59): for leaves and for internal nodes (D9,
-/// D12, D17, D21, D29), each without an array of inline keys, and with one
-/// of each [`InlineWidth`] (D18).
+/// sizes of node config `C` (D59) and leaf annex `L` (`leaf_annex.rs`): for
+/// leaves and for internal nodes (D9, D12, D17, D21, D29), each without an
+/// array of inline keys, and with one of each [`InlineWidth`] (D18).
 ///
 /// ```text
 /// leaf      | header | k0 k1 … k_n | head v0 v1 … v_n |
@@ -62,9 +62,10 @@ use crate::node_config::NodeConfig;
 /// which happens before any page of that layout exists. A map picks the
 /// constants its node plans call for (`node_plan.rs`), by a choice that
 /// folds after monomorphization.
-pub(in crate::tree) struct NodeLayout<K, V, C> {
+pub(in crate::tree) struct NodeLayout<K, V, C, L = ()> {
     _types: PhantomData<fn() -> (K, V)>,
     _config: PhantomData<fn() -> C>,
+    _annex: PhantomData<fn() -> L>,
 }
 
 /// Where the keys of one kind of node sit, and how many fit.
@@ -139,32 +140,26 @@ impl TrailingSlot {
 
 /// What a node's header holds besides its plain fields (`page.rs`): a
 /// latch word, in a tree that threads share ([`LatchedNodeHeader`]); and,
-/// right after the node header, a store leaf's heap chain ([`HeapChain`],
-/// `tree/store`).
+/// right after the node header, a leaf's annex, in a map that keeps one
+/// (`leaf_annex.rs`), of layout `annex`: of size 0 in every other node.
 #[derive(Clone, Copy)]
 pub(super) struct Header {
     latched: bool,
-    heap_chain: bool,
+    annex: Layout,
 }
 
 impl Header {
-    const UNLATCHED: Self = Self {
-        latched: false,
-        heap_chain: false,
-    };
-
-    const LATCHED: Self = Self {
-        latched: true,
-        heap_chain: false,
-    };
-
-    /// A store leaf's, in a tree that threads share if `latched`.
-    #[cfg(feature = "store")]
-    const fn store_leaf(latched: bool) -> Self {
+    /// An internal node's: no annex.
+    const fn internal(latched: bool) -> Self {
         Self {
             latched,
-            heap_chain: true,
+            annex: Layout::new::<()>(),
         }
+    }
+
+    /// A leaf's, with an annex of layout `annex`.
+    pub(super) const fn leaf(latched: bool, annex: Layout) -> Self {
+        Self { latched, annex }
     }
 
     /// The node header's size.
@@ -176,23 +171,17 @@ impl Header {
         }
     }
 
-    /// Where a store leaf's heap chain starts: after the node header,
-    /// aligned.
-    pub(super) const fn heap_chain_offset(latched: bool) -> usize {
-        Self {
-            latched,
-            heap_chain: true,
-        }
-        .node_header_size()
-        .next_multiple_of(align_of::<HeapChain>())
+    /// Where the annex starts: after the node header, aligned.
+    pub(super) const fn annex_offset(self) -> usize {
+        self.node_header_size().next_multiple_of(self.annex.align())
     }
 
-    /// The whole header's size, its heap chain's included.
+    /// The whole header's size, its annex's included.
     const fn size(self) -> usize {
-        if self.heap_chain {
-            Self::heap_chain_offset(self.latched) + size_of::<HeapChain>()
-        } else {
+        if self.annex.size() == 0 {
             self.node_header_size()
+        } else {
+            self.annex_offset() + self.annex.size()
         }
     }
 }
@@ -206,7 +195,7 @@ struct KindLayout {
     trailing_stride: usize,
 }
 
-impl<K, V, C: NodeConfig> NodeLayout<K, V, C> {
+impl<K, V, C: NodeConfig, L> NodeLayout<K, V, C, L> {
     /// Every leaf is a multiple of this size, and aligned to it or more
     /// (D15). Leaves of at least 1 KiB bound how deep a tree grows
     /// (`MAX_DEPTH`).
@@ -248,7 +237,7 @@ impl<K, V, C: NodeConfig> NodeLayout<K, V, C> {
 
     /// Where the inline keys start in a node that has them: after its
     /// header, which in a latched tree holds a latch word too
-    /// ([`LatchedNodeHeader`]), and in a store's leaf a heap chain.
+    /// ([`LatchedNodeHeader`]), and in a leaf its annex.
     const fn inline_keys_offset(header: Header) -> usize {
         header.size().next_multiple_of(align_of::<InlineWord>())
     }
@@ -269,112 +258,77 @@ impl<K, V, C: NodeConfig> NodeLayout<K, V, C> {
     };
 
     pub(in crate::tree) const PLAIN_LEAF: LeafLayout =
-        Self::compute_leaf(None, false, Header::UNLATCHED);
+        Self::compute_leaf(None, false, Self::leaf_header(false));
 
     pub(super) const TWO_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Two), false, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Two), false, Self::leaf_header(false));
 
     pub(super) const FOUR_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Four), false, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Four), false, Self::leaf_header(false));
 
     pub(super) const EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), false, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Eight), false, Self::leaf_header(false));
 
     pub(super) const TWO_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Two), true, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Two), true, Self::leaf_header(false));
 
     pub(super) const FOUR_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Four), true, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Four), true, Self::leaf_header(false));
 
     pub(super) const EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), true, Header::UNLATCHED);
+        Self::compute_leaf(Some(InlineWidth::Eight), true, Self::leaf_header(false));
 
     pub(in crate::tree) const PLAIN_INTERNAL: InternalLayout =
-        Self::compute_internal(None, Header::UNLATCHED);
+        Self::compute_internal(None, Header::internal(false));
 
     pub(super) const TWO_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Two), Header::UNLATCHED);
+        Self::compute_internal(Some(InlineWidth::Two), Header::internal(false));
 
     pub(super) const FOUR_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Four), Header::UNLATCHED);
+        Self::compute_internal(Some(InlineWidth::Four), Header::internal(false));
 
     pub(super) const EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Eight), Header::UNLATCHED);
+        Self::compute_internal(Some(InlineWidth::Eight), Header::internal(false));
 
     // A latched tree's nodes, whose keys have inline keys: internal nodes
     // read optimistically must not keep keys (`tree/node/latch.rs`).
 
     pub(super) const LATCHED_TWO_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Two), false, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Two), false, Self::leaf_header(true));
 
     pub(super) const LATCHED_FOUR_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Four), false, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Four), false, Self::leaf_header(true));
 
     pub(super) const LATCHED_EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), false, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Eight), false, Self::leaf_header(true));
 
     pub(super) const LATCHED_TWO_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Two), true, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Two), true, Self::leaf_header(true));
 
     pub(super) const LATCHED_FOUR_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Four), true, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Four), true, Self::leaf_header(true));
 
     pub(super) const LATCHED_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), true, Header::LATCHED);
+        Self::compute_leaf(Some(InlineWidth::Eight), true, Self::leaf_header(true));
 
     pub(super) const LATCHED_TWO_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Two), Header::LATCHED);
+        Self::compute_internal(Some(InlineWidth::Two), Header::internal(true));
 
     pub(super) const LATCHED_FOUR_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Four), Header::LATCHED);
+        Self::compute_internal(Some(InlineWidth::Four), Header::internal(true));
 
     pub(super) const LATCHED_EIGHT_BYTE_INLINE_INTERNAL: InternalLayout =
-        Self::compute_internal(Some(InlineWidth::Eight), Header::LATCHED);
+        Self::compute_internal(Some(InlineWidth::Eight), Header::internal(true));
 
-    // A store's leaves (`tree/store`): a heap chain after the node header,
-    // and keys that are pointers to records, byte strings that hold their
-    // bytes elsewhere, whose leaves keep 8-byte inline keys (`node_plan.rs`).
-
-    #[cfg(feature = "store")]
-    const STORE_EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), false, Header::store_leaf(false));
-
-    #[cfg(feature = "store")]
-    const STORE_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), true, Header::store_leaf(false));
-
-    #[cfg(feature = "store")]
-    const LATCHED_STORE_EIGHT_BYTE_INLINE_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), false, Header::store_leaf(true));
-
-    #[cfg(feature = "store")]
-    const LATCHED_STORE_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF: LeafLayout =
-        Self::compute_leaf(Some(InlineWidth::Eight), true, Header::store_leaf(true));
-
-    /// A store's leaf layout constant for these choices, as [`Self::leaf`]
-    /// picks a map's: with room for hash tags if `hash_tags` and there is
-    /// room, with a latch word if `latched`.
-    ///
-    /// # Panics
-    ///
-    /// Unless the inline keys are 8 bytes, as a store's keys' are.
-    #[cfg(feature = "store")]
-    #[inline(always)]
-    pub(super) fn store_leaf(
-        inline_width: Option<InlineWidth>,
-        hash_tags: bool,
-        latched: bool,
-    ) -> LeafLayout {
-        assert!(
-            matches!(inline_width, Some(InlineWidth::Eight)),
-            "a store's leaves keep 8-byte inline keys"
-        );
-        match (hash_tags, latched) {
-            (false, false) => Self::STORE_EIGHT_BYTE_INLINE_LEAF,
-            (true, false) => Self::STORE_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF,
-            (false, true) => Self::LATCHED_STORE_EIGHT_BYTE_INLINE_LEAF,
-            (true, true) => Self::LATCHED_STORE_EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF,
-        }
+    /// A leaf's header: a latch word and the annex if `latched`, as only a
+    /// latched tree's leaves keep an annex (`page.rs`).
+    const fn leaf_header(latched: bool) -> Header {
+        let annex = if latched {
+            Layout::new::<L>()
+        } else {
+            Layout::new::<()>()
+        };
+        Header::leaf(latched, annex)
     }
 
     /// The leaf layout constant for these choices, which the node plan and
@@ -654,7 +608,9 @@ impl<K, V, C: NodeConfig> NodeLayout<K, V, C> {
         let keys_start = Self::columns_end(header, column_size, capacity);
         match keys.inline_keys_offset {
             None => assert!(
-                keys_start == size_of::<NodeHeader>() && !header.latched && !header.heap_chain
+                keys_start == size_of::<NodeHeader>()
+                    && !header.latched
+                    && header.annex.size() == 0
             ),
             Some(inline_keys_offset) => {
                 assert!(align.is_multiple_of(align_of::<InlineKeyNodeHeader>()));
@@ -663,12 +619,12 @@ impl<K, V, C: NodeConfig> NodeLayout<K, V, C> {
                     assert!(align.is_multiple_of(align_of::<LatchedNodeHeader>()));
                     assert!(inline_keys_offset >= size_of::<LatchedNodeHeader>());
                 }
-                if header.heap_chain {
-                    // The heap chain after the node header, aligned.
-                    let chain = Header::heap_chain_offset(header.latched);
-                    assert!(align.is_multiple_of(align_of::<HeapChain>()));
-                    assert!(chain.is_multiple_of(align_of::<HeapChain>()));
-                    assert!(chain >= header.node_header_size());
+                if header.annex.size() > 0 {
+                    // The annex after the node header, aligned.
+                    let annex = header.annex_offset();
+                    assert!(align.is_multiple_of(header.annex.align()));
+                    assert!(annex.is_multiple_of(header.annex.align()));
+                    assert!(annex >= header.node_header_size());
                     assert!(inline_keys_offset >= header.size());
                 }
                 // Aligned for inline keys of every width.

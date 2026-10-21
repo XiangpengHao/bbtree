@@ -1,20 +1,25 @@
 # 16 — bbtree-store: keys and values of any length, in heap pages
 
-Status: milestone 1 built (2026-10-20): a map from byte strings to byte
+Status: milestone 1 built (2026-10-21): a map from byte strings to byte
 strings that threads share, whose every byte lies in pages from its
 allocator, so that a cache can stay within a memory budget.
 
-- **bbtree**, behind the `store` feature: the store (`BBTreeStore`,
-  `RangeCloned`, `InsertError`) in `bbtree/src/store.rs`; its leaves' heaps
-  (`InStore`, `HeapPage`, the leaf's store operations) in
-  `bbtree/src/tree/node/store.rs`; record pointers (`RecordPtr`), which file
-  maps' writers use too, and an insert's key and value (`RecordParts`), in
-  `bbtree/src/record_ptr.rs`.
-- **bbtree-store** (`bbtree-store/`): the store, re-exported. A budget is
-  the caller's allocator, which refuses pages past it.
-- **Milestone 1** (built): each leaf's records in its chain of heap pages;
-  a record larger than a heap page is refused; lookups, inserts, removals
-  and scans.
+- **bbtree** gives a map's leaves an annex (D60): data of the caller's in
+  each leaf, which the map keeps with its leaf as it splits, merges and
+  goes, and hands to the closures of `update_or_insert_with_leaf` and
+  `remove_with_leaf` while they hold the leaf (`bbtree/src/leaf_annex.rs`,
+  `bbtree/src/map/with_leaf.rs`, `bbtree/src/tree/node/annexed_leaf.rs`).
+  Maps keep `()`, which takes no room: their layouts and code are as
+  before.
+- **bbtree-store** (`bbtree-store/`) is the rest: the store
+  (`store.rs`), records and the keys that point to them (`record.rs`), heap
+  pages (`heap_page.rs`), each leaf's chain of them, its annex
+  (`leaf_heap.rs`), and copied ranges (`range.rs`). A budget is the
+  caller's allocator, which refuses pages past it.
+- **Milestone 1** (built): each leaf's records in its chain of heap pages,
+  records of other leaves among them after splits; a record larger than a
+  heap page is refused; lookups, inserts, removals, scans and copied
+  ranges.
 - **Milestone 2:** overflow chains, for values larger than a heap page.
 
 ## Problem
@@ -28,12 +33,8 @@ bbtree keeps keys and values in two ways, and handles only the first:
 - **Variable length:** bytes whose length is known only at run time.
   bbtree has no story for them. File maps keep them in each leaf's tail
   (15-index-file.md, "Keys and values of any length"), which is a hack:
-  - the tail lies outside the leaf's page and its layout, padded to the
-    next leaf's alignment: half a KiB a leaf on average;
-  - it works only because a file map is written once: no free space, no
-    insert, no compaction;
-  - a span counts its offset from its own slot, because a key's `Ord` gets
-    `&K` and no page: moving the slot breaks it.
+  the tail lies outside the leaf's page and its layout, and works only
+  because a file map is written once.
 
 The use case is a cache with a memory budget: items are inserted, and the
 memory they take must be counted in full. A map's own pages already come
@@ -44,141 +45,110 @@ bytes of any length.
 ## Terms
 
 - **Store:** a `bbtree-store` map. Its keys and values are byte strings.
-- **Heap page:** a page holding records of one leaf, in no order.
-- **Heap chain:** a leaf's heap pages, each linked to the next; the leaf
-  points to the first.
-- **Record:** one entry's key and value, with their lengths, in a heap
-  page.
-- **Record pointer:** what a leaf's entry holds: its record's address,
-  which names the heap page and the offset in it.
-- **Garbage:** the bytes of records no entry points to.
-- **Compaction:** sliding a heap page's live records together, so that its
-  garbage becomes room.
-- **Overflow chain:** the pages holding the part of a value too large for
-  a heap page.
-- **Budget:** the store's allocator, the caller's, which refuses pages
-  past what the cache may use.
+- **Record:** one entry's key and value, with their lengths and a
+  generation, in a heap page.
+- **Heap page:** a page of records, from the allocator's heap method.
+- **Chain:** a leaf's heap pages, its annex pointing to the newest, the
+  head, each linked to the one before.
+- **A record's leaf:** the leaf of the key that points to it. A record may
+  lie in another leaf's chain: a stray.
+- **Hole:** the bytes of a record no key points to.
+- **Orphan:** a heap page no chain holds, where other leaves' records live.
+- **Compaction:** sliding a leaf's records together, in place, over the
+  holes.
+- **Generation:** a leaf's count of splits, its own and the leaves' it
+  split from, wrapping at 256.
 
 ## Design
 
-A B-tree and a heap file. Leaves hold fixed-size entries, in key order,
-each pointing to its record in a heap page. A leaf stays a fixed-size
-leaf: its layout, inline keys, hash tags and search are a map's. Bytes of
-any length live in pages of their own, sized apart from the leaf.
+A B-tree and a heap file. The store is bbtree's shared map,
+`BBTreeMap<StoreKey, (), WithLeafAnnex<Configured<WithInlineKey, C>,
+LeafHeap<C>>>`: leaves hold fixed-size entries, in key order, each key a
+pointer to its record; each leaf's annex chains the heap pages its records
+go into. A leaf stays a map's leaf: its layout, inline keys, hash tags,
+search and latches are the map's, its annex 16 bytes after its header.
 
-### Leaves and heap pages
-
-- **A leaf's entry** is its key's inline key and hash tag, as for a byte
-  string, and an 8-byte record pointer (`RecordPtr`), its key, and `()`,
-  its value. A record pointer is what a file map's writer keeps for a byte
-  string (15): a pointer to bytes, length first, which compares, and has
-  inline keys and a hash tag (its length), as its bytes do. `Auto` takes it
-  for a byte string, so a `&[u8]` looks a store up.
-- **A record pointer is a heap page and an offset.** A heap page is aligned
-  to its size, so the page is the pointer rounded down to it, and the
-  offset the rest.
-- **A heap page belongs to one leaf.** A leaf's records lie in its own
-  heap pages, which no other leaf points into, so whatever moves a record
-  holds the one leaf that points to it.
-- **A leaf's heap pages are a chain.** The leaf keeps one pointer, in its
-  header, to its newest heap page, which links to the one before, and so
-  on to the oldest. A record goes into the newest page, and a new page
-  goes in front: neither walks the chain. A leaf is full when its entries
-  are: its heap grows by a page when its records need room, not by
-  splitting the leaf. A lookup never walks the chain, as its record
-  pointer leads to its page; writers do, to compact.
-- **The pointer moves with its leaf.** Raising and lowering the root copy
-  a node's page whole (`move_node_to`), header and all.
-- **Records lie in no order** in a heap page: a new one goes after the
-  last record of the newest page. Entries stay sorted in the leaf.
-- **Heap page size:** a node config constant (D59), `HEAP_PAGE_SIZE`,
-  `LEAF_PAGE_SIZE` by default; a power of two, as every page size is,
-  for the rounding above.
-- **The leaf's header holds its chain** (`HeapChain`, `tree/node/page.rs`):
-  the newest heap page, the chain's garbage, the bytes of records no entry
-  points to, and how many pages it holds. It lies after the node header,
-  8-aligned (`Header`, `tree/node/layout.rs`), and pushes the inline keys
-  16 bytes further: a store's leaves are four more layout constants.
-
-### Records
+### Keys and records
 
 ```text
-heap page | next | top | record | record | … | room |
-record    | key length | key | value length | value |
+heap page | next | top | live | record | record | … | room |
+record    | key length | value length | generation | key | value |
 ```
 
-- **The header** holds `next`, the chain's next (older) heap page, and
-  `top`, where the next record goes: 16 bytes.
-- **A record** is its key, length first, then its value, length first: a
-  record pointer leads to the key as it leads a file map's writer to its
-  bytes, and the value follows. Lengths are `u32`s, unaligned. A value too
-  large for a heap page will keep only its last part here, with its
-  overflow chain ("Larger than a heap page").
-- **A hit reads the leaf, then the record,** whose first line holds the
-  key and, for short keys, the value's start.
+- **A key (`StoreKey`) is an atomic pointer to its record.** It orders,
+  and has inline keys and a hash tag (its length), as its key bytes do,
+  through `WithInlineKey`. A store swaps the pointer, while it holds the
+  key's leaf exclusively, as the record moves or the value changes.
+- **A lookup's key points to the caller's bytes** (`QueryKey`), behind a
+  length no record has (`u32::MAX`), so that the map looks it up with
+  inline keys. A new key is one until its record is written: the store
+  repoints it before it goes in.
+- **A record** is both lengths, `u32`s, then its generation, a byte, then
+  the key and the value, unaligned. A hit reads the leaf, then the record,
+  whose first line holds the key and, for short keys, the value's start.
+- **A heap page** is aligned to its size (`HEAP_PAGE_SIZE`, a node config
+  constant, D59, the leaves' by default), so a record's page is its
+  address rounded down. Its header holds `next`, the chain's link, and
+  `top`, where the next record goes, both its leaf's alone, and `live`, the
+  bytes of its live records, an atomic, with a bit for an orphan.
 
-### Inserting
+### Chains
 
-An insert finds its leaf as a map's does, and splits it only if its
-entries are full ("Removing and compaction"). A leaf has room when it has
-an entry free; its heap makes room for the record as it needs:
+- **A record goes into its leaf's chain:** after the last record of the
+  head; else into another page of the chain with room, which becomes the
+  head; else, once a compaction made room ("Holes"); else into a new page,
+  in front.
+- **A split moves no record.** The new leaf starts with no page; its
+  records lie in the old leaf's chain, strays. Both leaves take the next
+  generation (`LeafAnnex::split`).
+- **A merge splices the leaving leaf's chain** in behind the head
+  (`LeafAnnex::merge`). A steal moves entries and no record: strays again.
+- **Strays come home two generations on.** Once a leaf's generation
+  changed, its next write reads its records that lie outside its chain,
+  and moves each written two generations or more before into its chain:
+  its key range split twice since, so its page holds the records of leaves
+  further and further off. One generation behind, it shares a page with a
+  neighbour's records, which a range scan over both reads anyway. A leaf
+  that compacts takes all its strays in.
+- **Dropping the store** frees the chains with their leaves
+  (`LeafAnnex::release`), and kills every record first while orphans are
+  out, which free themselves as they empty.
 
-1. **The newest page has room after `top`:** the record goes there.
-2. **Otherwise, the chain's garbage would hold it:** compact the chain,
-   keeping room for it, then as in 1.
-3. **Otherwise, a new heap page** from the allocator, chained in front.
+### Holes
 
-The insert holds the leaf the while, on its fast path: no slow path, no
-reservation, as a heap page comes straight from the allocator.
-
-A key already present: a value no longer than the old one is written over
-it, in place, and the bytes it no longer needs count as garbage; a longer
-one is a new record, and the old record is garbage.
-
-### Removing and compaction
-
-- **A removal marks the record deleted:** the leaf drops the entry,
-  shifting those after it as a map's leaf does (D22), and the record's
-  bytes count as its chain's garbage. Nothing in the heap page moves.
-- **Compaction runs when:**
-  - the leaf splits or merges;
-  - an insert into the leaf finds no room in its heap chain ("Inserting",
-    2).
-- **In place:** the leaf's record pointers, sorted by their page's place
-  in the chain, then by offset; each record slid down to the end of the
-  one before it, into the page before if it fits there, and its pointer
-  rewritten. The pages it empties go back to the allocator, but one,
-  kept empty, if the record that asked for room needs it. It takes no
-  page, so it works with the budget spent. Records don't span pages, so
-  the garbage doesn't always make room: then the insert takes a page.
-- **A split** copies the records of the entries that move into the new
-  leaf's heap chain, then compacts the old leaf's. Before it changes
-  anything, it grows the old leaf's chain with the empty pages those
-  records, and the new one, fill (`grow_heap_by`); the split hands them to
-  the new leaf. If the split can't take its node pages after all, they go
-  back.
-- **A merge** splices the leaving leaf's chain onto the survivor's, the
-  pages changing hands, then compacts it.
-- **Store leaves merge, and never steal.** A steal would bring a record
-  into a leaf whose heap may lack room, and the remove path allocates
-  nothing; a leaf left below its minimum stays so, down to empty, until a
-  removal lets it merge. Internal nodes steal as a map's do. The invariant
-  check exempts store leaves from their minimum.
-- **Removed bytes serve the leaf's own inserts.** Garbage becomes room in
-  the leaf's heap; a page goes back to the allocator only when compaction
-  empties it, or the leaf merges. A store whose budget is spent takes new
-  records into leaves with garbage, and refuses those that need a split
-  elsewhere.
+- **A record dies** when its key goes, or points to a new record: a hole.
+  A value no longer than the old one goes in place instead, the bytes it no
+  longer needs a hole.
+- **A leaf compacts** when a removal leaves a page of its chain, and the
+  chain, half holes; or when a record finds no room and a quarter of the
+  chain is holes (worth it: a compaction moves at most three live bytes a
+  byte of holes, and saves a page); or when the allocator refuses a page
+  and the chain has holes at all.
+- **In place, no page taken:** in the pages of the chain where only the
+  leaf's records live, its records slide together as one run, in place,
+  from the first such page on; the pages the run empties go back to the
+  allocator, and the one it ends in becomes the head. Pages where none of
+  its records live go too, or become orphans while others' do. A store
+  whose budget is spent takes its holes back.
+- **A page where another leaf's records live keeps its holes** until they
+  go: only their own leaf moves them, holding it. Whether one does is in
+  the page's live count: live bytes the leaf's own records don't account
+  for are others'.
+- **An orphan frees itself:** whichever thread empties it, by killing its
+  last record or by orphaning it empty, frees it, the orphan bit and the
+  live count one atomic.
+- **A removed record dies after the removal returns.** The map reads the
+  key until then: removing a separator refits prefixes with its key. The
+  record's page counts it live meanwhile, so no compaction slides over it
+  or frees it.
 
 ### Larger than a heap page
 
-- **Keys are capped.** A key's bytes must lie together: inline keys are
-  windows at any offset past what a node's keys share (D26), and ties
-  compare from where keys differ (`cmp_from`), in the search's hot path.
-  An insert of a longer key fails. Most systems cap keys, B-trees at a
-  fraction of their page, so that a node holds several (SlateDB and fjall
-  checked in their source, Bigtable and RocksDB in their docs,
-  2026-10-20):
+- **Keys are capped** at a quarter of a heap page: a key's bytes must lie
+  together, as inline keys are windows at any offset (D26) and ties
+  compare from where keys differ, in the search's hot path. Most systems
+  cap keys, B-trees at a fraction of their page (SlateDB and fjall checked
+  in their source, Bigtable and RocksDB in their docs, 2026-10-20):
 
   | system | key limit |
   |---|---|
@@ -192,71 +162,46 @@ one is a new record, and the old record is garbage.
   | Bigtable | 4 KiB (Cloud Bigtable); 64 KB in the paper |
   | memcached | 250 B |
 
-- **A value too large for a heap page goes to an overflow chain:** pages
-  of the heap page's size, from the same allocator, each holding the next
-  page, then value bytes. The record keeps the key, the
-  value's length, the part of the value that doesn't fill a whole page
-  (SQLite's rule, so that every page of the chain is full), and the
-  chain's first and last page.
-- **A chain, not a list of pages.** A list that outgrows its record needs
-  an indirect page, then a tree of them; a chain has no limit but the
-  budget. Its dependent loads mostly hide: the next page's address sits in
-  the page's first line, so that load issues while the rest of the page is
-  copied, about one miss a page, which is about what copying a 2–4 KiB
-  page takes (an estimate, not measured). At 1 KiB pages a chain is bound
-  by latency. A list would read or change a value at an offset without
-  walking it, which a store, reading and writing values whole, doesn't do;
-  InnoDB went from a chain to a LOB index in MySQL 8.0 for partial updates
-  of JSON documents.
-- **Freeing a chain** gives each of its pages back to the allocator.
+- **A record larger than a heap page is refused,** until milestone 2:
+  overflow chains, pages of the heap page's size each holding the next
+  page, then value bytes, the record keeping the key, the value's length,
+  the part that doesn't fill a whole page (SQLite's rule) and the chain's
+  ends. A chain, not a list of pages: a list that outgrows its record
+  needs an indirect page, a chain has no limit but the budget, and a store
+  reads and writes values whole.
 
 ### When the allocator refuses
 
-An insert that needs a page the allocator refuses (a split, or "Inserting",
-3) fails with `AllocError`, the store unchanged, as the shared
-`BBTreeMap`'s insert does (D8). Freeing room, by finding cold pages or
-cold records, is the cache's policy, to be designed later, above the
-store.
+An insert that needs a page the allocator refuses, a node or a heap page,
+fails with `AllocError`, the store holding what it held, as the shared
+map's insert does (D8). A refused heap page compacts first. The room a
+leaf's chain frees stays that leaf's: a store whose budget is spent takes
+new records into leaves with holes, and refuses others. Freeing room, by
+finding cold records, is the cache's policy, above the store.
 
 ### Threads
 
-The shared store is the shared `BBTreeMap`'s tree (D54), with heap pages
-beside its leaves.
-
-- **One version covers a leaf and its records.** Whatever changes a record
-  (an insert, an overwrite, a compaction, a split or merge) holds the
-  record's leaf, whose release bumps its version.
-- **A lookup reads as a `String` key's does** (D57): a key that ends
-  within its inline key is settled in the leaf, unlatched; otherwise the
-  lookup latches the leaf shared, and copies the value out under the latch.
-- **Heap pages come from the map's allocator, and go back to it.** A
-  record is read only by whoever holds its leaf: a lookup copies under the
-  leaf's shared latch, and an unlatched read settles a key from its inline
-  key and hash tag, never following a record pointer (D57). So heap pages
-  need none of what node pages get from the tree's page pool
-  (`tree/latched/pages.rs`): type-stable reuse, latching, freeing only once
-  the operation lets go. They are a kind of page of their own
-  (`allocate_heap`, `deallocate_heap`, D8), which the pool passes through
-  to the allocator; a freed heap page's memory goes back to the
-  allocator, and so to the budget, at once.
-- **Unlatched reads of records** would need type-stable heap pages again:
-  a lookup that follows a record pointer before its leaf's version
-  confirms it may read a page that went back to the allocator.
-- **A value in an overflow chain is read under the leaf's shared latch:**
-  an unlatched walk would follow next pages it can't check, and a long
-  copy would retry on any write to its leaf.
+- **Only a thread holding a record's leaf exclusively moves, changes or
+  kills it**; a lookup or a scan reads it holding the leaf shared, under
+  the map's closures. The map's unlatched reads settle a key from its
+  inline key and hash tag, and never read its bytes (D57: a `StoreKey`
+  doesn't order by its own bytes), and a descent that ties reads a
+  separator's key holding its leaf shared.
+- **A page's chain fields are its leaf's;** `live` is any record's leaf's,
+  atomically, as a stray dies in another leaf's page.
+- **No page goes while a record lives in it,** so no record goes while a
+  thread reads it: a chain's page goes by its leaf, once none of its
+  records live; an orphan by the thread that empties it.
 
 ### API
 
 ```rust
-impl<S, A: Allocator> BBTreeStore<S, A> {
-    const MAX_KEY_LEN: usize;      // a quarter of a heap page
-    const MAX_RECORD_SIZE: usize;  // a heap page, less its header
-    fn with_strategy_in(strategy: S, alloc: A) -> Self;
-    fn allocator(&self) -> &A;
+impl<A: Allocator + Clone, C: NodeConfig> BBTreeStore<A, C> {
+    fn with_config_in(config: C, alloc: A) -> Self;
+    fn max_key_len(&self) -> usize;      // a quarter of a heap page
+    fn max_record_size(&self) -> usize;  // a heap page, less its header
     /// Appends the value to `buf`, as `Read::read_to_end` does; returns its length.
     fn get_into(&self, key: &[u8], buf: &mut Vec<u8>) -> Option<usize>;
-    /// `get_into` a new `Vec`.
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn contains_key(&self, key: &[u8]) -> bool;
     /// Whether a value was replaced.
@@ -265,88 +210,89 @@ impl<S, A: Allocator> BBTreeStore<S, A> {
     fn scan<Q, R>(&self, range: impl RangeBounds<Q>,
                   f: impl FnMut(&[u8], &[u8]) -> ControlFlow<R>) -> Option<R>;
     fn scan_rev<Q, R>(/* as `scan` */) -> Option<R>;
-    fn range_cloned<Q, R>(&self, range: R) -> RangeCloned<'_, S, Q, R>;
+    fn range<Q, R>(&self, range: R) -> RangeCopies<'_, A, C>;
 }
 ```
 
-- **Values are copied out.** There is no `&V`: compaction moves records,
-  and a value can span pages.
-- **Into the caller's `Vec`, appended.** The value's length is known only
-  once its record is read, so the buffer grows within the one read; a
-  slice too small would need a second lookup, which another thread may
-  race. Appending lets a batch put every value in one buffer.
-- **With unlatched reads (planned), a length read is bounded by the
-  largest value** before the buffer grows: a torn read must not ask for
-  gigabytes. A failed check truncates the buffer back and retries.
-- **Inserts take `&[u8]`, and copy it once.** The shared insert's key is
-  the leaf's key type, a record pointer; an insert's points to the
-  caller's key and value where they are (`RecordParts`), whose first field
-  is a length no record has (`u32::MAX`), which tells it from a record.
-  The search reads the key through it, and the leaf writes the record into
-  its heap as the entry goes in (`Leaf::insert_fit`), or as a held entry
-  takes the value. Inserts return whether a value was replaced, not the
-  old value, a copy most callers don't want. They fail on a key over the
-  cap, a record over a heap page, or the allocator's refusal
-  (`InsertError`).
-- **Ranges:** `scan` and `scan_rev` run a closure on each entry's key and
-  value bytes under its leaf's shared latch, as a map's do;
-  `range_cloned` hands out each entry's key and value as `Vec<u8>`s,
-  holding no latch between them, as a map's does. A range's bounds are
-  byte strings of any kind (`AsRef<[u8]>`).
-- **Configuration:** the allocator, which is the budget, and the node
-  config, `HEAP_PAGE_SIZE` with the other page sizes (D59).
+- **Values are copied out,** appended to the caller's `Vec`: there is no
+  `&V`, as compaction moves records. The value's length is known only once
+  its record is read, so the buffer grows within the one read.
+- **Inserts take `&[u8]`, and copy it once,** into the record. They return
+  whether a value was replaced, and fail on a key over the cap, a record
+  over a heap page, or the allocator's refusal (`InsertError`).
+- **Ranges:** `scan` and `scan_rev` run a closure on each entry's bytes
+  under its leaf's shared latch; `range` hands out copies, key and value,
+  from either end, sixteen at a time, by scans that start past what each
+  end handed out last, holding no latch between them.
 
-## What a store shares with the map
+## What bbtree gives a store
 
-The store is the shared `BBTreeMap`'s tree, `LatchedTree<RecordPtr, (),
-InStore<S>>`: its descent, latches, splits, merges, page pool, shared
-prefix and lookups are the map's. The strategy `InStore<S>` sets a flag,
-`IN_STORE`, which `Latched` forwards, as `InFile` and `Latched` set theirs
-(D54, D58); every store operation in the node code runs under
-`NodePtr::is_in_store()`, which folds away for maps. What bbtree changed
-for it:
+One generic mechanism, the leaf annex (D60), in the core; everything about
+heap pages is the store's.
 
-- **Record pointers** are the file writer's `ArenaBytes`, renamed
-  `RecordPtr` and moved to `record_ptr.rs`, recognized by `Auto` with
-  either feature.
-- **Layouts** take a `Header` (latched, heap chain) where they took a
-  `latched` flag.
-- **Leaves:** `insert_fit` takes a new entry's record in;
-  `make_room_for` makes room in the heap for it, and `replace_record` gives
-  a held entry a new value, both fallible, and nothing in a map;
-  `split_insert` and `split_around` take the page allocator and move the
-  right half's records; `Child::append` and `Siblings::merge` take the page
-  allocator, and splice the chains; `remove` and `take_head_and_first_key`
-  count the record as garbage.
-- **Inserts:** a leaf has room when it has an entry free, as a map's. The
-  latched tree's `insert_into` makes the heap room itself, and refuses
-  with `Refused::NoPage` if the allocator has no page, as `Refused::Full`
-  sends the entry to a split. The append path makes room too. A split
-  first grows the leaf's chain with the empty pages its moving records,
-  and the new one, fill.
-- **Pages:** the allocator has a method pair per kind of page (D8); heap
-  pages are one kind, which a latched tree's page pool passes through.
-- **Ranges:** the map's `range_cloned` machinery is the latched tree's
-  `CopiedRange`, which takes how to copy an entry out of its leaf: a map
-  clones it, a store copies its bytes. The bounds check beside the scans
-  serves both (`LatchedTree::checked_bounds`).
-- **Removal:** `fix_underfull_child` merges store leaves, and never steals.
-- **Teardown:** `DyingWalk` gives a store leaf's heap pages back with it.
-- **Tests:** `store/tests.rs` (std's `BTreeMap` as the model, heap
-  invariants with the tree's, ranges, a limit of pages in use of
-  `TestPages`, threads), `store/shuttle_tests.rs` (Shuttle, as the map's,
-  sharing their `Exploration`).
+- **`LeafAnnex`**, a trait: `Default`, `split(&mut self, right: &mut
+  Self)`, `merge(&mut self, right: Self)`, `release(self, alloc)`. `()`
+  implements it, taking no room.
+- **`WithLeafAnnex<S, L>`**, a strategy: `S`'s inline keys and node
+  config, and annex `L`. `InlineKeyStrategy` has `type LeafAnnex`, `()` but
+  there; `Configured`, `Latched` and `InFile` forward it. Only a
+  `BBTreeMap`'s leaves keep an annex: a latched tree's; a map for one
+  thread or a file map with one fails to compile.
+- **Layout:** `NodeLayout<K, V, C, L>` puts `L` after a latched leaf's
+  header (`Header`), aligned; of size 0, every layout is as before.
+- **Node code:** a new leaf gets `Default`'s annex (`NodePtr::initialize`);
+  a leaf's split and merge call the annex's (`Leaf::split_around`,
+  `Child::append`); the dying walk releases it (`DyingWalk`); raising and
+  lowering the root copy it with the node (`move_node_to`).
+- **`AnnexedLeaf<'a, K, V, S>`:** a leaf an operation holds exclusively,
+  its annex (`annex()`) and keys (`keys()`), which
+  `update_or_insert_with_leaf` hands to its closures, `occupied` with the
+  held entry, `vacant` with the new one right before it goes in, either
+  free to refuse for want of a page (the entry comes back, the map
+  unchanged); and `remove_with_leaf` to its closure right before the entry
+  comes out. A refused split gives its reserved node pages back
+  (`NodePages::unreserve`).
 
-Not yet checked: that maps compile to the same machine code with the
-`store` feature on and off.
+A map's insert, get and remove run the same instructions as before: 400.8,
+244.7 and 475.1 a `u64` operation at 1M keys before and 400.6, 244.7 and
+474.7 after (`instructions:u`, 2026-10-21); get compiles to the same
+machine code.
+
+## Measurements
+
+10M entries, 20-byte keys and 32-byte values, keys hashed so that insert
+order is unrelated to key order, mimalloc, 1 KiB leaves and heap pages
+(`bbtree-store/examples/bench.rs`, 2026-10-21), against the designs this
+one replaced: a store with every record in its own leaf's chain, records
+moved at every split (the first milestone 1), and a store on the map whose
+records went into size classes shared by all leaves (a prototype).
+
+| | this store | records in own leaf | size classes |
+|---|---|---|---|
+| insert, 1 thread | 419 ns | 393 ns | 274 ns |
+| get | 334 ns | 354 ns | 348 ns |
+| scan | 17.2 ns an entry | 13.3 ns | 23.9 ns |
+| bytes an entry, nodes + heap | 25.0 + 82.9 = 107.8 | 25.0 + 76.9 = 101.9 | 25.3 + 68.3 = 93.6 |
+| insert, 8 threads | 71 ns | 69 ns | 191 ns |
+| get, 8 threads | 49 ns | 51 ns | 55 ns |
+
+- **Under churn,** values replaced with ones of 16 to 64 bytes and a
+  quarter of the entries removed and put back, the heap holds 1.54 bytes a
+  live record byte once steady, 1.85 when a leaf compacted only at half
+  holes.
+- **Strays two generations behind coming home** cost, at 5M inserts, 38 ns
+  an insert (394 against 356) and a quarter more heap pages (0.095 a
+  record against 0.075, as moved records leave holes), for scans 11%
+  faster (17.5 against 19.6 ns an entry).
 
 ## Open questions
 
-- **The key cap:** a quarter of a heap page, built, which bounds what a
-  record leaves unused at the end of a heap page to a quarter page: 256 B
-  at 1 KiB, about memcached's 250.
-- **Freeing a heap page when its last record is removed,** instead of at
-  the leaf's next compaction.
+- **The key cap:** a quarter of a heap page, which bounds what a record
+  leaves unused at the end of a page to a quarter page: 256 B at 1 KiB,
+  about memcached's 250.
+- **The two thresholds:** a quarter of the chain holes before a page is
+  taken, half on a removal; and whether strays should come home two
+  generations on, or only as their leaf compacts.
 - **File maps:** whether variable-length file maps keep their tails, or
   take heap pages.
 - **The budget's policy** ("When the allocator refuses").

@@ -100,6 +100,7 @@
 //! every position a search returns is in bounds. A wrong `InlineKey`, or a
 //! wrong prefix length, gives wrong answers, never undefined behavior.
 
+pub(crate) mod annexed_leaf;
 mod hash_tags;
 pub(in crate::tree) mod inline_key_search;
 pub(crate) mod inline_keys;
@@ -113,8 +114,6 @@ pub(crate) mod page;
 pub(in crate::tree) mod root_page;
 pub(in crate::tree) mod siblings;
 mod slots;
-#[cfg(feature = "store")]
-pub(crate) mod store;
 #[cfg(test)]
 mod tests;
 mod type_identity;
@@ -127,7 +126,7 @@ use self::inline_keys::{Separator, Window};
 use self::internal::Internal;
 use self::leaf::Leaf;
 use self::node_plan::NodePlan;
-use self::page::{NodeKind, NodePtr, PageAllocator, PageByType};
+use self::page::{NodeKind, NodePtr, PageByType};
 use self::siblings::Siblings;
 use crate::inline_key::{InlineKeyStrategy, InlineWord};
 
@@ -463,15 +462,9 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     /// right.len() <= capacity`. `right` is another node of this kind, in a
     /// tree of the same map type, with its leaves as deep below it as
     /// `left`'s. Its trailing slot 0 is initialized, and nothing reaches its
-    /// page afterwards but to free it. `alloc` takes back a store's heap
-    /// pages that the merged leaf no longer needs (`store.rs`).
-    unsafe fn append(
-        left: Self,
-        fill: Window,
-        separator: Separator<K, S>,
-        right: Self,
-        alloc: &impl PageAllocator,
-    );
+    /// page afterwards but to free it. A leaf's annex takes `right`'s
+    /// (`annexed_leaf.rs`).
+    unsafe fn append(left: Self, fill: Window, separator: Separator<K, S>, right: Self);
 
     /// Key `index`, the one its inline key is taken from: a leaf's own, or an
     /// internal node's separator key ([`Internal::separator_key`]), which

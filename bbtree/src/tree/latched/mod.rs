@@ -45,7 +45,6 @@
 
 mod append;
 mod batch;
-mod copied_range;
 mod descent;
 mod held;
 mod insert;
@@ -56,8 +55,8 @@ mod remove;
 mod scan;
 mod shared_prefix;
 
-pub(crate) use self::copied_range::CopiedRange;
-pub(crate) use self::insert::{ReadOrInsert, UpdateOrInsert};
+pub(crate) use self::insert::{ReadOrInsert, UpdateOrInsert, WithLeaf};
+pub(crate) use self::scan::{LeafStamp, ScanResume};
 
 use core::alloc::Layout;
 use core::borrow::Borrow;
@@ -216,8 +215,11 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             }
             Err(_) => {
                 // SAFETY: the page is a new, empty root page that no other
-                // thread ever reached.
-                unsafe { root_page.free() }.deallocate(alloc);
+                // thread ever reached, its leaf's annex released once.
+                unsafe {
+                    root.release_annex(alloc);
+                    root_page.free().deallocate(alloc);
+                }
             }
         }
         Ok(())

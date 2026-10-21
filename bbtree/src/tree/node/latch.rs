@@ -45,10 +45,11 @@ impl<K, S: InlineKeyStrategy<K>> Sealed<K> for Latched<S> {
     const SOURCE: InlineKeySource<K> = S::SOURCE;
     type Config = S::Config;
     const LATCHED: bool = true;
-    const IN_STORE: bool = S::IN_STORE;
 }
 
-impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for Latched<S> {}
+impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for Latched<S> {
+    type LeafAnnex = S::LeafAnnex;
+}
 
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, Latched<S>> {
     /// The leaf's latch word, for as long as the caller picks: a latched

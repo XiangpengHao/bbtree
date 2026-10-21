@@ -46,8 +46,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// - all leaves are at the same depth, the kinds of the nodes as the
     ///   tags of the edges to them tell (`tree/node/page.rs`);
     /// - every node below the root holds at least its `min_len` keys, which
-    ///   splits and removals keep (D22), but a store's leaves, which merge
-    ///   and never steal (`node/store.rs`);
+    ///   splits and removals keep (D22);
     /// - the root of a non-empty tree holds a key, and so does an internal
     ///   root;
     /// - every leaf but the leftmost has a head, and the leftmost has none:
@@ -245,10 +244,6 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
         match node {
             Node::Leaf(leaf) => {
                 self.check_node(leaf, &bounds, depth);
-                #[cfg(feature = "store")]
-                if NodePtr::<K, V, S>::is_in_store() {
-                    leaf.check_heap();
-                }
                 let first_depth = *self.leaf_depth.get_or_insert(depth);
                 assert_eq!(depth, first_depth, "leaves at different depths");
                 let is_leftmost = self.leaves == 0;
@@ -286,10 +281,7 @@ impl<'a, K: Ord> InOrderWalk<'a, K> {
     ) {
         node.assert_inline_keys_match();
         node.assert_prefix_fits_fences(bounds.lower, bounds.upper, self.shared_prefix.len());
-        // A store's leaves merge but never steal, and may stay below their
-        // minimum (`node/store.rs`).
-        let keeps_minimum = !(C::IS_LEAF && NodePtr::<K, V, S>::is_in_store());
-        if depth > 0 && keeps_minimum {
+        if depth > 0 {
             assert!(
                 node.len() >= C::min_len(),
                 "a node below the root has {} keys, fewer than its minimum of {}",

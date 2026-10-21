@@ -21,10 +21,6 @@ shuttle = "0.9.7"
 # File maps (`bbtree::file`): a map compacted into one byte string that a reader
 # maps from a file and uses in place.
 file = []
-# Stores (`bbtree::store`): a map of byte strings to byte strings whose every
-# byte lies in pages from its allocator, each leaf's records in heap pages of
-# its own (`design/16-bbtree-store.md`).
-store = []
 # Read-only views of a map's nodes (`BBTreeMap::inspect`), for the visualizer
 # in `vis/`. No stability promise.
 inspect = []

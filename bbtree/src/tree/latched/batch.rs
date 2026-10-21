@@ -42,7 +42,7 @@ use super::super::node::leaf::{CandidateLine, Leaf};
 use super::super::node::page::PageAllocator;
 use super::LatchedTree;
 use super::descent::{HeldLeaf, RootRead};
-use super::insert::UpdateOrInsert;
+use super::insert::{NotInserted, UpdateOrInsert};
 use super::lookup::{RacingRead, Unsettled};
 use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
@@ -285,8 +285,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
         let mut entries = entries.into_iter();
         let (key, value) = entries.next().expect("N >= 2");
-        let first = match self.append(key, value, UpdateOrInsert(&mut f), alloc) {
-            Ok(first) => {
+        let first = match self.append(key, value, UpdateOrInsert(&mut f)) {
+            Ok(Err(_)) => unreachable!("an update never refuses"),
+            Ok(Ok(first)) => {
                 // Ascending keys: the rest most likely append too, which the
                 // single-key insert does without a descent.
                 let mut first = Some(first);
@@ -403,7 +404,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
         match self.insert_into(&held, at_separator, key, value, UpdateOrInsert(f), alloc) {
             Ok(output) => Ok(output),
-            Err((key, value, _, _)) => Err(Fallback::Full(key, value)),
+            Err(NotInserted::Full(key, value, _, _)) => Err(Fallback::Full(key, value)),
+            Err(NotInserted::Refused(_)) => unreachable!("an update never refuses"),
         }
     }
 }

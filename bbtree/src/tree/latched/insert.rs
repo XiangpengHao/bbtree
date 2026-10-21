@@ -29,40 +29,52 @@
 //!
 //! [`NodeStackMut::insert_prefixed`]: super::super::node_stack::NodeStackMut::insert_prefixed
 
+use core::alloc::Layout;
+
 use super::super::interleaving::Interleaving;
 use super::super::node::Node;
+use super::super::node::annexed_leaf::AnnexedLeaf;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::internal::Internal;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
-#[cfg(feature = "store")]
-use super::super::node::page::NodePtr;
 use super::super::node::page::PageAllocator;
-#[cfg(feature = "store")]
-use super::super::node::{Child, InsertionSide};
 use super::super::node_stack::LastEdge;
 use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf, TreePath};
 use super::held::HeldNodes;
 use super::pages::NodePages;
-use core::alloc::Layout;
-
 use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
 
 /// What an insert does where the tree holds a key equal to its own, and
-/// what it returns.
-pub(crate) trait InsertPolicy<K, V> {
+/// where it holds none, in the leaf it holds exclusively, with the leaf's
+/// annex (`node/annexed_leaf.rs`); and what it returns. Either may refuse,
+/// for want of a page of the layout it gives back, having changed nothing:
+/// the insert then gives the entry back. A map's policies never refuse.
+pub(crate) trait InsertPolicy<K, V, S: InlineKeyStrategy<K>> {
     type Output;
 
-    /// The tree holds `stored`, equal to `key`, with `stored_value`, in a
-    /// leaf the insert holds exclusively.
-    fn occupied(self, key: K, value: V, stored: &K, stored_value: &mut V) -> Self::Output;
+    /// The tree holds `stored`, equal to `key`, with `stored_value`, in
+    /// `leaf`.
+    fn occupied(
+        self,
+        leaf: AnnexedLeaf<'_, K, V, S>,
+        key: K,
+        value: V,
+        stored: &K,
+        stored_value: &mut V,
+    ) -> Result<Self::Output, (K, V, Layout)>;
 
-    /// `key` and `value` go in right after this call, into a leaf the insert
-    /// holds exclusively: the insert can no longer fail.
-    fn vacant(self, key: &K, value: &V) -> Self::Output;
+    /// `key` and `value` go into `leaf` right after this call, unless it
+    /// refuses: the insert can no longer fail.
+    fn vacant(
+        self,
+        leaf: AnnexedLeaf<'_, K, V, S>,
+        key: &K,
+        value: &V,
+    ) -> Result<Self::Output, Layout>;
 }
 
 /// Runs a closure on the stored entry, its value exclusive, and the new
@@ -71,19 +83,33 @@ pub(crate) trait InsertPolicy<K, V> {
 /// `BTreeMap::insert` is the closure that replaces the value.
 pub(crate) struct UpdateOrInsert<F>(pub(crate) F);
 
-impl<K, V, R, F: FnOnce(&K, &mut V, V) -> R> InsertPolicy<K, V> for UpdateOrInsert<F> {
+impl<K, V, S: InlineKeyStrategy<K>, R, F: FnOnce(&K, &mut V, V) -> R> InsertPolicy<K, V, S>
+    for UpdateOrInsert<F>
+{
     type Output = Option<R>;
 
     #[inline(always)]
-    fn occupied(self, key: K, value: V, stored: &K, stored_value: &mut V) -> Option<R> {
+    fn occupied(
+        self,
+        _leaf: AnnexedLeaf<'_, K, V, S>,
+        key: K,
+        value: V,
+        stored: &K,
+        stored_value: &mut V,
+    ) -> Result<Option<R>, (K, V, Layout)> {
         // As std's insert, the new key is dropped before the value changes.
         drop(key);
-        Some((self.0)(stored, stored_value, value))
+        Ok(Some((self.0)(stored, stored_value, value)))
     }
 
     #[inline(always)]
-    fn vacant(self, _key: &K, _value: &V) -> Option<R> {
-        None
+    fn vacant(
+        self,
+        _leaf: AnnexedLeaf<'_, K, V, S>,
+        _key: &K,
+        _value: &V,
+    ) -> Result<Option<R>, Layout> {
+        Ok(None)
     }
 }
 
@@ -91,28 +117,73 @@ impl<K, V, R, F: FnOnce(&K, &mut V, V) -> R> InsertPolicy<K, V> for UpdateOrInse
 /// one inserted.
 pub(crate) struct ReadOrInsert<F>(pub(crate) F);
 
-impl<K, V, R, F: FnOnce(&K, &V) -> R> InsertPolicy<K, V> for ReadOrInsert<F> {
+impl<K, V, S: InlineKeyStrategy<K>, R, F: FnOnce(&K, &V) -> R> InsertPolicy<K, V, S>
+    for ReadOrInsert<F>
+{
     type Output = R;
 
     #[inline(always)]
-    fn occupied(self, key: K, value: V, stored: &K, stored_value: &mut V) -> R {
+    fn occupied(
+        self,
+        _leaf: AnnexedLeaf<'_, K, V, S>,
+        key: K,
+        value: V,
+        stored: &K,
+        stored_value: &mut V,
+    ) -> Result<R, (K, V, Layout)> {
         drop((key, value));
-        (self.0)(stored, stored_value)
+        Ok((self.0)(stored, stored_value))
     }
 
     #[inline(always)]
-    fn vacant(self, key: &K, value: &V) -> R {
-        (self.0)(key, value)
+    fn vacant(self, _leaf: AnnexedLeaf<'_, K, V, S>, key: &K, value: &V) -> Result<R, Layout> {
+        Ok((self.0)(key, value))
     }
 }
 
-/// Why [`LatchedTree::insert_into`] gave an entry back.
-pub(super) enum Refused {
+/// Runs the first closure on the stored entry, the second on the new one,
+/// each with the leaf and its annex; either may refuse. The new key and
+/// value are dropped once the first runs.
+pub(crate) struct WithLeaf<O, N>(pub(crate) O, pub(crate) N);
+
+impl<K, V, S, R, O, N> InsertPolicy<K, V, S> for WithLeaf<O, N>
+where
+    S: InlineKeyStrategy<K>,
+    O: FnOnce(AnnexedLeaf<'_, K, V, S>, &K, &mut V) -> Result<R, Layout>,
+    N: FnOnce(AnnexedLeaf<'_, K, V, S>, &K, &V) -> Result<R, Layout>,
+{
+    type Output = R;
+
+    #[inline(always)]
+    fn occupied(
+        self,
+        leaf: AnnexedLeaf<'_, K, V, S>,
+        key: K,
+        value: V,
+        stored: &K,
+        stored_value: &mut V,
+    ) -> Result<R, (K, V, Layout)> {
+        match (self.0)(leaf, stored, stored_value) {
+            Ok(output) => {
+                drop((key, value));
+                Ok(output)
+            }
+            Err(layout) => Err((key, value, layout)),
+        }
+    }
+
+    #[inline(always)]
+    fn vacant(self, leaf: AnnexedLeaf<'_, K, V, S>, key: &K, value: &V) -> Result<R, Layout> {
+        (self.1)(leaf, key, value)
+    }
+}
+
+/// Why [`LatchedTree::insert_into`] didn't insert.
+pub(super) enum NotInserted<K, V, P> {
     /// The leaf is full: the key goes at this edge, once it splits.
-    Full(usize),
-    /// A store's leaf needed a heap page for the entry's record, and the
-    /// allocator had none to give, of this layout.
-    NoPage(Layout),
+    Full(K, V, P, usize),
+    /// The policy refused.
+    Refused(InsertError<K, V>),
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
@@ -121,7 +192,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// from `alloc`; if it has none to give, the tree is unchanged, and the
     /// entry comes back.
     #[inline]
-    pub(crate) fn insert<P: InsertPolicy<K, V>>(
+    pub(crate) fn insert<P: InsertPolicy<K, V, S>>(
         &self,
         key: K,
         value: V,
@@ -136,8 +207,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         {
             return Err(InsertError::new(key, value, layout));
         }
-        let (mut key, value, policy) = match self.append(key, value, policy, alloc) {
-            Ok(output) => return Ok(output),
+        let (mut key, value, policy) = match self.append(key, value, policy) {
+            Ok(appended) => return appended,
             Err(entry) => entry,
         };
         loop {
@@ -149,10 +220,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             };
             return match self.insert_into(&held, at_separator, key, value, policy, alloc) {
                 Ok(output) => Ok(output),
-                Err((key, value, _, Refused::NoPage(layout))) => {
-                    Err(InsertError::new(key, value, layout))
-                }
-                Err((key, value, policy, Refused::Full(_))) => {
+                Err(NotInserted::Refused(error)) => Err(error),
+                Err(NotInserted::Full(key, value, policy, _)) => {
                     drop(held);
                     self.insert_splitting(key, value, policy, alloc)
                 }
@@ -161,12 +230,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Inserts into `held`, the leaf where `key` belongs, as [`Self::insert`]
-    /// does, if it holds `key` or has an entry free; or gives all back, and
-    /// why ([`Refused`]). In a store, the entry, new or held, takes `key`'s
-    /// record into the leaf's heap, which chains a page from `alloc` if it
-    /// lacks room (`node/store.rs`).
+    /// does, if it holds `key` or has room; or gives all back, with the edge
+    /// where `key` goes in the full leaf ([`NotInserted`]).
     #[inline(always)]
-    pub(super) fn insert_into<P: InsertPolicy<K, V>>(
+    pub(super) fn insert_into<P: InsertPolicy<K, V, S>>(
         &self,
         held: &HeldLeaf<K, V, S, Exclusive>,
         at_separator: bool,
@@ -174,35 +241,35 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         value: V,
         policy: P,
         alloc: &impl PageAllocator,
-    ) -> Result<P::Output, (K, V, P, Refused)>
+    ) -> Result<P::Output, NotInserted<K, V, P>>
     where
         K: Ord,
     {
         let leaf = held.leaf();
-        if at_separator {
-            if let Err(layout) = leaf.replace_record(None, &key, alloc) {
-                return Err((key, value, policy, Refused::NoPage(layout)));
-            }
-            return Ok(policy.occupied(key, value, leaf.head_key(), leaf.head_value_mut()));
-        }
-        match leaf.search_always_inlined(&SearchKey::new(&key)) {
-            Ok(index) => {
-                if let Err(layout) = leaf.replace_record(Some(index), &key, alloc) {
-                    return Err((key, value, policy, Refused::NoPage(layout)));
+        let (stored, stored_value) = if at_separator {
+            (leaf.head_key(), leaf.head_value_mut())
+        } else {
+            match leaf.search_always_inlined(&SearchKey::new(&key)) {
+                Ok(index) => (leaf.key(index), leaf.value_mut(index)),
+                Err(edge) if leaf.len() < Leaf::<K, V, Latched<S>>::capacity() => {
+                    let output = match policy.vacant(AnnexedLeaf::new(leaf), &key, &value) {
+                        Ok(output) => output,
+                        Err(layout) => {
+                            return Err(NotInserted::Refused(InsertError::new(key, value, layout)));
+                        }
+                    };
+                    let key = self.prefixed(key, leaf, alloc);
+                    leaf.insert_fit(edge, key.window_at(leaf.prefix_len()), value);
+                    return Ok(output);
                 }
-                Ok(policy.occupied(key, value, leaf.key(index), leaf.value_mut(index)))
+                Err(edge) => return Err(NotInserted::Full(key, value, policy, edge)),
             }
-            Err(edge) if leaf.len() < Leaf::<K, V, Latched<S>>::capacity() => {
-                if let Err(layout) = leaf.make_room_for(&key, alloc) {
-                    return Err((key, value, policy, Refused::NoPage(layout)));
-                }
-                let key = self.prefixed(key, leaf, alloc);
-                let output = policy.vacant(key.key(), &value);
-                leaf.insert_fit(edge, key.window_at(leaf.prefix_len()), value);
-                Ok(output)
-            }
-            Err(edge) => Err((key, value, policy, Refused::Full(edge))),
-        }
+        };
+        policy
+            .occupied(AnnexedLeaf::new(leaf), key, value, stored, stored_value)
+            .map_err(|(key, value, layout)| {
+                NotInserted::Refused(InsertError::new(key, value, layout))
+            })
     }
 
     /// `key`, bound for `leaf`, which the caller holds exclusively; the
@@ -232,7 +299,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// the internal nodes it goes through, and splits, until it inserts or
     /// `alloc` has no page for the split.
     #[inline(never)]
-    pub(super) fn insert_splitting<P: InsertPolicy<K, V>>(
+    pub(super) fn insert_splitting<P: InsertPolicy<K, V, S>>(
         &self,
         mut key: K,
         mut value: V,
@@ -257,10 +324,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             (key, value, policy, edge) =
                 match self.insert_into(&held, at_separator, key, value, policy, alloc) {
                     Ok(output) => return Ok(output),
-                    Err((key, value, _, Refused::NoPage(layout))) => {
-                        return Err(InsertError::new(key, value, layout));
-                    }
-                    Err((key, value, policy, Refused::Full(edge))) => (key, value, policy, edge),
+                    Err(NotInserted::Refused(error)) => return Err(error),
+                    Err(NotInserted::Full(key, value, policy, edge)) => (key, value, policy, edge),
                 };
             match self.split(&path, &held, edge, key, value, policy, &pages) {
                 Ok(inserted) => return inserted,
@@ -273,8 +338,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
 
     /// Splits `held`, the full leaf `path` leads to, and inserts `key` and
     /// `value` at its `edge`, with `NodeStackMut::insert_prefixed`; or, if
-    /// `pages` has none for the split, changes nothing and gives the entry
-    /// back. The split goes up as far as it must, and the halves' prefixes
+    /// `pages` has none for the split, or the policy refuses, changes
+    /// nothing and gives the entry back. The split goes up as far as it must, and the halves' prefixes
     /// are fit to their fences. If a node it takes is held by another
     /// thread or changed since the descent read it, it changes nothing and
     /// gives all back, to try again.
@@ -286,7 +351,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         clippy::type_complexity,
         reason = "the insert's outcome, or all back to try again"
     )]
-    fn split<P: InsertPolicy<K, V>>(
+    fn split<P: InsertPolicy<K, V, S>>(
         &self,
         path: &TreePath<K, V, S>,
         held: &HeldLeaf<K, V, S, Exclusive>,
@@ -320,35 +385,19 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             (None, _) => (1, splits + 1),
             (Some(_), _) => (1, splits),
         };
-        let leaf = held.leaf();
-        // A store's split also takes the heap pages of the records that move,
-        // and of the new one: empty pages in front of the leaf's heap, which
-        // the split hands to its new leaf (`node/store.rs`).
-        #[cfg(feature = "store")]
-        let in_store = NodePtr::<K, V, Latched<S>>::is_in_store();
-        #[cfg(feature = "store")]
-        if in_store {
-            let separator_index = InsertionSide::of_split(
-                Leaf::<K, V, Latched<S>>::capacity(),
-                edge,
-                Leaf::<K, V, Latched<S>>::min_len(),
-            )
-            .0;
-            let count = leaf.heap_pages_for_split(separator_index);
-            if let Err(layout) = leaf.grow_heap_by(count, pages) {
-                return Ok(Err(InsertError::new(key, value, layout)));
-            }
-        }
         if let Err(layout) = pages.reserve(leaves, internals) {
-            #[cfg(feature = "store")]
-            if in_store {
-                leaf.free_spare_heap_pages(pages);
-            }
             return Ok(Err(InsertError::new(key, value, layout)));
         }
+        let leaf = held.leaf();
+        let output = match policy.vacant(AnnexedLeaf::new(leaf), &key, &value) {
+            Ok(output) => output,
+            Err(layout) => {
+                pages.unreserve();
+                return Ok(Err(InsertError::new(key, value, layout)));
+            }
+        };
         let was_last_leaf = self.is_rightmost_leaf(leaf);
         let key = self.prefixed(key, leaf, pages);
-        let output = policy.vacant(key.key(), &value);
         self.change_held(|tree| {
             // A latched tree keeps no entry count.
             let mut uncounted = 0;

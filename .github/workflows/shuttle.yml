@@ -47,4 +47,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Shuttle
-        run: cargo test -p bbtree --release --features store --lib shuttle_tests
+        run: cargo test -p bbtree --release --lib shuttle_tests

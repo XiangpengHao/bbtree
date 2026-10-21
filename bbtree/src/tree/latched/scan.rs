@@ -52,7 +52,7 @@
 use alloc::boxed::Box;
 use core::borrow::Borrow;
 use core::cmp::Ordering as KeyOrdering;
-use core::ops::{Bound, ControlFlow, RangeBounds};
+use core::ops::{Bound, ControlFlow};
 use core::{mem, ptr};
 
 use super::super::node::Node;
@@ -388,30 +388,6 @@ enum NextLeaf<K, V, S: InlineKeyStrategy<K>> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
-    /// `range`'s bounds, for a scan or a copied range: a map's or a store's.
-    ///
-    /// # Panics
-    ///
-    /// As std's `BTreeMap::range`: if `range` starts after it ends, or
-    /// starts and ends at the same key, both excluded.
-    pub(crate) fn checked_bounds<Q>(range: &impl RangeBounds<Q>) -> (Bound<&Q>, Bound<&Q>)
-    where
-        Q: Ord + ?Sized,
-    {
-        let (start, end) = (range.start_bound(), range.end_bound());
-        match (start, end) {
-            (Bound::Excluded(start), Bound::Excluded(end)) if start == end => {
-                panic!("range start and end are equal and excluded")
-            }
-            (
-                Bound::Included(start) | Bound::Excluded(start),
-                Bound::Included(end) | Bound::Excluded(end),
-            ) if start > end => panic!("range start is greater than range end"),
-            _ => {}
-        }
-        (start, end)
-    }
-
     /// Runs `f` on every entry whose key lies between `start` and `end`, in
     /// key order, each with its leaf's stamp while the leaf is latched
     /// shared. Returns what `f` broke with, or `None` once past the range.

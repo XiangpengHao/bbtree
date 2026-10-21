@@ -2,10 +2,11 @@
 //! parameter, `A`, as in std's collections (D8). The default is [`Global`],
 //! the global allocator.
 //!
-//! A map asks it for pages of four kinds, each by a method of its own:
-//! internal nodes', leaves', the root page, which holds the root node of
-//! either kind (`tree/node/page.rs`), and a store's heap pages
-//! (`tree/node/store.rs`). Every page of one kind in a map has one layout,
+//! A map asks it for pages of three kinds, each by a method of its own:
+//! internal nodes', leaves', and the root page, which holds the root node of
+//! either kind (`tree/node/page.rs`); a fourth kind, heap pages, is for the
+//! code that keeps a map's keys and values beside it (`bbtree-store`). Every
+//! page of one kind in a map has one layout,
 //! which the map's types and node config fix. By default every kind comes
 //! from [`Allocator::allocate_zeroed`], the part of std's unstable
 //! `core::alloc::Allocator` a map needs, with its names and contract, so
@@ -17,12 +18,13 @@ use core::error::Error;
 use core::fmt;
 use core::ptr::NonNull;
 
-/// An allocator of the pages a map keeps its nodes, and a store its
-/// records, in.
+/// An allocator of the pages a map keeps its nodes in, and that the code
+/// keeping a map's keys and values beside it keeps them in (heap pages).
 ///
 /// A map asks only for pages of non-zero size, each kind by its own method:
-/// [`Self::allocate_internal`], [`Self::allocate_leaf`],
-/// [`Self::allocate_root`] and [`Self::allocate_heap`]. It asks for every
+/// [`Self::allocate_internal`], [`Self::allocate_leaf`] and
+/// [`Self::allocate_root`]; heap pages come from [`Self::allocate_heap`].
+/// It asks for every
 /// page of one kind with one layout, the same each time: so an allocator
 /// may keep each kind in a pool of pages of one size. By default each kind
 /// comes from [`Self::allocate_zeroed`] and goes back to
@@ -32,8 +34,7 @@ use core::ptr::NonNull;
 /// asked for it with, to the allocator it came from or a clone of it. A
 /// shared [`BBTreeMap`](crate::BBTreeMap) gives its internal nodes' and
 /// leaves' pages back when it is dropped, as threads may still read them
-/// until then; its root page too; and a store's heap pages as soon as it
-/// empties them.
+/// until then; its root page too.
 ///
 /// A failed allocation is an [`AllocError`]. The map for one thread,
 /// [`unsync::BBTreeMap`](crate::unsync::BBTreeMap), then calls
@@ -119,14 +120,14 @@ pub unsafe trait Allocator {
         unsafe { self.deallocate(page, layout) }
     }
 
-    /// A store's heap page, which holds its leaves' records
-    /// (`HEAP_PAGE_SIZE`), of any contents; by default
+    /// A heap page, which holds keys and values that a map's leaves point
+    /// to (`bbtree-store`, `HEAP_PAGE_SIZE`), of any contents; by default
     /// [`Self::allocate_zeroed`]'s.
     fn allocate_heap(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         self.allocate_zeroed(layout)
     }
 
-    /// Takes back a store's heap page; by default with
+    /// Takes back a heap page; by default with
     /// [`Self::deallocate`].
     ///
     /// # Safety
@@ -146,7 +147,6 @@ pub(crate) enum PageKind {
     Internal,
     Leaf,
     Root,
-    Heap,
 }
 
 impl PageKind {
@@ -160,7 +160,6 @@ impl PageKind {
             Self::Internal => alloc.allocate_internal(layout),
             Self::Leaf => alloc.allocate_leaf(layout),
             Self::Root => alloc.allocate_root(layout),
-            Self::Heap => alloc.allocate_heap(layout),
         }
     }
 
@@ -182,7 +181,6 @@ impl PageKind {
                 Self::Internal => alloc.deallocate_internal(page, layout),
                 Self::Leaf => alloc.deallocate_leaf(page, layout),
                 Self::Root => alloc.deallocate_root(page, layout),
-                Self::Heap => alloc.deallocate_heap(page, layout),
             }
         }
     }
@@ -277,7 +275,11 @@ impl fmt::Display for AllocError {
 impl Error for AllocError {}
 
 /// An insert into a [`BBTreeMap`](crate::BBTreeMap) whose allocator had no
-/// page to give: the map is as it was, and the entry comes back.
+/// page to give, or whose closure refused for want of one
+/// ([`BBTreeMap::update_or_insert_with_leaf`]): the map is as it was, and
+/// the entry comes back.
+///
+/// [`BBTreeMap::update_or_insert_with_leaf`]: crate::BBTreeMap::update_or_insert_with_leaf
 pub struct InsertError<K, V> {
     key: K,
     value: V,

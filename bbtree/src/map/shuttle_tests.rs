@@ -23,6 +23,7 @@ use core::fmt;
 use core::mem;
 use core::ops::{Bound, ControlFlow, RangeBounds};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::time::Duration;
 use std::collections::{BTreeMap, BTreeSet};
 use std::format;
 use std::string::String;
@@ -30,10 +31,41 @@ use std::sync::Arc;
 use std::vec::Vec;
 
 use shuttle::rand::{Rng, thread_rng};
-use shuttle::thread;
+use shuttle::scheduler::{PctScheduler, RandomScheduler, Scheduler};
+use shuttle::{Config, Runner, thread};
 
 use super::BBTreeMap;
-use crate::tree::test_support::Exploration;
+
+/// How many schedules a test explores, from Shuttle's random scheduler and
+/// from PCT, which finds bugs that take a few preemptions at the right
+/// points; each within a time cap, so that a test ends within two minutes
+/// on a slow machine.
+struct Exploration {
+    random: usize,
+    pct: usize,
+}
+
+impl Exploration {
+    /// PCT's depth: how many preemptions it places in a schedule.
+    const PCT_DEPTH: usize = 3;
+    /// The most time each scheduler explores for: a schedule that starts
+    /// before the cap runs to its end.
+    const TIME_CAP: Duration = Duration::from_secs(50);
+
+    /// Runs `test` under each schedule of the exploration.
+    fn run(self, test: impl Fn() + Send + Sync + 'static) {
+        let test = Arc::new(test);
+        let random_test = Arc::clone(&test);
+        Self::run_with(RandomScheduler::new(self.random), move || random_test());
+        Self::run_with(PctScheduler::new(Self::PCT_DEPTH, self.pct), move || test());
+    }
+
+    fn run_with(scheduler: impl Scheduler + 'static, test: impl Fn() + Send + Sync + 'static) {
+        let mut config = Config::new();
+        config.max_time = Some(Self::TIME_CAP);
+        Runner::new(scheduler, config).run(test);
+    }
+}
 
 /// Whether the map dropped each value a test made: a flag a value, in an
 /// arena that outlives the map, so that a value read through a stale copy

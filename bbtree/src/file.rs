@@ -125,7 +125,7 @@ pub type InWriter<T> = <T as storage::Storage>::InWriter;
 
 /// What [`Storable`] tells a writer, kept out of the public API.
 pub(crate) mod storage {
-    pub use super::var_bytes::ByteArena;
+    pub use super::var_bytes::{ArenaBytes, ByteArena};
 
     /// How a file map keeps a key or a value of this type, and what its
     /// writer builds it from.

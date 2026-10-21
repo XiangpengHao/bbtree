@@ -122,4 +122,6 @@ impl<K, S: InlineKeyStrategy<K>, C: NodeConfig> Sealed<K> for Configured<S, C> {
     type Config = C;
 }
 
-impl<K, S: InlineKeyStrategy<K>, C: NodeConfig> InlineKeyStrategy<K> for Configured<S, C> {}
+impl<K, S: InlineKeyStrategy<K>, C: NodeConfig> InlineKeyStrategy<K> for Configured<S, C> {
+    type LeafAnnex = S::LeafAnnex;
+}

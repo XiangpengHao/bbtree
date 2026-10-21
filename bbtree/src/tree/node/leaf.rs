@@ -26,7 +26,9 @@ use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{SearchKey, Separator, Window, WindowedKey};
 use super::internal::Internal;
 use super::node_plan::NodePlan;
-use super::page::{FreshPage, NodeKind, NodePtr, PageAllocator, PageByType, PageType};
+#[cfg(test)]
+use super::page::PageAllocator;
+use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
@@ -281,17 +283,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     fn key_slots(self) -> KeySlots<K, S, Self> {
         // SAFETY: the node is an allocated leaf (invariant 1).
         unsafe { self.node.key_slots::<Self>() }
-    }
-
-    /// Key `index`'s slot.
-    ///
-    /// # Safety
-    ///
-    /// `index < capacity`.
-    #[cfg(feature = "store")]
-    pub(super) unsafe fn key_slot(self, index: usize) -> NonNull<K> {
-        // SAFETY: `index < capacity` (caller).
-        unsafe { self.key_slots().keys().slot(index) }
     }
 
     /// The arrays beside the keys: inline keys and hash tags.
@@ -837,12 +828,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 (None, Separator::with_key(first_key))
             };
             self.set_len(len - 1);
-            #[cfg(feature = "store")]
-            if let Some(removed_key) = &removed_key
-                && NodePtr::<K, V, S>::is_in_store()
-            {
-                self.discard_record(removed_key);
-            }
             Some(HeadSuccession {
                 removed_key,
                 value,
@@ -864,62 +849,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         unsafe { self.node.set_len_refilling::<Self>(len) }
     }
 
-    /// Makes room for a new entry with `key`, in a leaf with an entry free:
-    /// in a store, room for its record in the leaf's heap, compacting it or
-    /// chaining a page from the map's allocator (`store.rs`); or, if that
-    /// has none to give, returns the layout it was asked for. Nothing in a
-    /// map.
-    #[inline(always)]
-    pub(in crate::tree) fn make_room_for(
-        self,
-        key: &K,
-        alloc: &impl PageAllocator,
-    ) -> Result<(), Layout> {
-        debug_assert!(self.len() < Self::capacity());
-        #[cfg(feature = "store")]
-        if NodePtr::<K, V, S>::is_in_store() {
-            return self.make_heap_room(key, alloc);
-        }
-        let _ = (key, alloc);
-        Ok(())
-    }
-
-    /// In a store, gives entry `index`, the head for `None`, the record of
-    /// `key`, an insert's, whose key is the entry's (`store.rs`); or, if the
-    /// map's allocator has no heap page for it, returns the layout it was
-    /// asked for, the entry as it was. Nothing in a map, whose insert policy
-    /// changes the value.
-    #[inline(always)]
-    pub(in crate::tree) fn replace_record(
-        self,
-        index: Option<usize>,
-        key: &K,
-        alloc: &impl PageAllocator,
-    ) -> Result<(), Layout> {
-        #[cfg(feature = "store")]
-        if NodePtr::<K, V, S>::is_in_store() {
-            return self.replace_record_in_heap(index, key, alloc);
-        }
-        let _ = (index, key, alloc);
-        Ok(())
-    }
-
     /// Inserts `key`, with its inline key, and `value` at edge `index`,
     /// shifting later entries right. The leaf has room: `len < capacity`,
-    /// and `index <= len`; in a store, its heap has room for `key`'s record
-    /// ([`Self::make_room_for`]).
+    /// and `index <= len`.
     #[inline]
     pub(in crate::tree) fn insert_fit(self, index: usize, key: WindowedKey<K, S>, value: V) {
         let len = self.len();
         debug_assert!(index <= len && len < Self::capacity());
-        // A store's new entry brings its record, the caller's key and value,
-        // into the leaf's heap, which has room for it (`store.rs`).
-        #[cfg(feature = "store")]
-        let key = if NodePtr::<K, V, S>::is_in_store() {
-            self.take_record_in(key)
-        } else {
-            key
-        };
         // SAFETY: `index <= len < capacity` (the caller). Keys (with their
         // inline keys) and values `0..len` are initialized, and `0..len + 1`
         // are afterwards. Paired, the entries from `index` on shift up whole,
@@ -953,7 +889,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             Insertion::Fit(index)
         } else {
             let right_page = FreshPage::allocate(alloc);
-            Insertion::Split(self.split_insert(index, key, value, right_page, alloc))
+            Insertion::Split(self.split_insert(index, key, value, right_page))
         }
     }
 
@@ -961,41 +897,26 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// side where that edge ended up (`InsertionSide::of_split`). The
     /// separator goes up, and its entry becomes the right leaf's head (D17,
     /// D49); the left leaf keeps its own head, if any. The right half goes
-    /// into `right_page`. In a store, the heap pages of the right half's
-    /// records, and of the new one if it needs one, come from `alloc`
-    /// (`store.rs`).
+    /// into `right_page`.
     pub(in crate::tree) fn split_insert(
         self,
         index: usize,
         key: WindowedKey<K, S>,
         value: V,
         right_page: FreshPage<Self>,
-        alloc: &impl PageAllocator,
     ) -> Split<K, S, Self> {
         debug_assert_eq!(self.len(), Self::capacity());
         let (separator_index, inserted) =
             InsertionSide::of_split(Self::capacity(), index, Self::min_len());
         let right = Self::new(right_page, self.prefix_len());
-        let separator = self.split_around(separator_index, right, alloc);
+        let separator = self.split_around(separator_index, right);
         // A full leaf of `capacity` entries split around one leaves
         // `separator_index < capacity` on the left and `capacity -
         // separator_index - 1 < capacity` on the right. So both have room,
         // and the edge is within its half.
-        let (half, index) = match inserted {
-            InsertionSide::Left(index) => (self, index),
-            InsertionSide::Right(index) => (right, index),
-        };
-        // A store's new record goes into the half's heap, onto the empty
-        // pages in front of this leaf's if it needs one; then this leaf's
-        // heap compacts (`store.rs`).
-        #[cfg(feature = "store")]
-        if NodePtr::<K, V, S>::is_in_store() {
-            self.give_heap_room(half, key.key_ref(), alloc);
-        }
-        half.insert_fit(index, key, value);
-        #[cfg(feature = "store")]
-        if NodePtr::<K, V, S>::is_in_store() {
-            self.compact_heap(alloc);
+        match inserted {
+            InsertionSide::Left(index) => self.insert_fit(index, key, value),
+            InsertionSide::Right(index) => right.insert_fit(index, key, value),
         }
         Split {
             separator,
@@ -1007,14 +928,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// Moves the entries right of `separator_index` into `right`, a fresh leaf
     /// at this leaf's prefix length. Takes out key `separator_index`, whose
     /// entry becomes `right`'s head (D49), and returns it as the parent's
-    /// separator. In a store, the records of the entries that move follow
-    /// them into `right`'s heap, its pages from `alloc`.
-    fn split_around(
-        self,
-        separator_index: usize,
-        right: Self,
-        alloc: &impl PageAllocator,
-    ) -> Separator<K, S> {
+    /// separator. Then the leaves' annexes split (`annexed_leaf.rs`).
+    fn split_around(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
         debug_assert!(separator_index < len);
         let right_len = len - separator_index - 1;
@@ -1049,11 +964,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             right.node.set_has_head(true);
             right.set_len(right_len);
             self.set_len(separator_index);
-            #[cfg(feature = "store")]
-            if NodePtr::<K, V, S>::is_in_store() {
-                self.move_records_to(right, alloc);
-            }
-            let _ = alloc;
+            self.split_annex(right);
             separator
         }
     }
@@ -1080,10 +991,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 (key.into_key(), self.value_slots().remove(index, len))
             };
             self.set_len(len - 1);
-            #[cfg(feature = "store")]
-            if NodePtr::<K, V, S>::is_in_store() {
-                self.discard_record(&key);
-            }
             (key, value)
         }
     }
@@ -1136,10 +1043,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     pub(in crate::tree) fn cut_off_at(self, index: usize, page: FreshPage<Self>) -> Self {
         let len = self.len();
         assert!(index <= len, "cutting a leaf past its last edge");
-        debug_assert!(
-            !NodePtr::<K, V, S>::is_in_store(),
-            "a store's leaves are never cut"
-        );
         let count = len - index;
         let right = Self::new(page, self.prefix_len());
         // SAFETY: `index <= len`, so keys (with their inline keys) and values
@@ -1233,10 +1136,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     }
 
     unsafe fn steal_left_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
-        debug_assert!(
-            !NodePtr::<K, V, S>::is_in_store(),
-            "a store's leaves merge, and never steal"
-        );
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
@@ -1262,10 +1161,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
     }
 
     unsafe fn steal_right_unchecked(siblings: &Siblings<K, V, S, Self>, fill: Window) {
-        debug_assert!(
-            !NodePtr::<K, V, S>::is_in_store(),
-            "a store's leaves merge, and never steal"
-        );
         let (parent, index) = (siblings.parent(), siblings.index());
         let (left, right) = (siblings.left(), siblings.right());
         let (left_len, right_len) = (left.len(), right.len());
@@ -1288,13 +1183,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
         }
     }
 
-    unsafe fn append(
-        left: Self,
-        fill: Window,
-        separator: Separator<K, S>,
-        right: Self,
-        alloc: &impl PageAllocator,
-    ) {
+    unsafe fn append(left: Self, fill: Window, separator: Separator<K, S>, right: Self) {
         let (left_len, right_len) = (left.len(), right.len());
         // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
         // separator goes into key slot `left_len`, at the leaves' prefix
@@ -1324,13 +1213,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
             );
             left.set_len(left_len + 1 + right_len);
         }
-        // A store's records stay where they lie: `right`'s heap pages join
-        // `left`'s chain.
-        #[cfg(feature = "store")]
-        if NodePtr::<K, V, S>::is_in_store() {
-            left.take_heap_of(right, alloc);
-        }
-        let _ = alloc;
+        left.merge_annex(right);
     }
 
     fn key<'a>(self, index: usize) -> &'a K {

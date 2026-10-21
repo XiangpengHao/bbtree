@@ -1026,13 +1026,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         }
     }
 
-    unsafe fn append(
-        left: Self,
-        _fill: Window,
-        separator: Separator<K, S>,
-        right: Self,
-        _alloc: &impl PageAllocator,
-    ) {
+    unsafe fn append(left: Self, _fill: Window, separator: Separator<K, S>, right: Self) {
         let (left_len, right_len) = (left.len(), right.len());
         // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
         // separator goes into slot `left_len`, at the nodes' prefix length

@@ -18,6 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use crate::leaf_annex::LeafAnnex;
 use crate::proof::SearchBytes;
 
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
@@ -465,15 +466,25 @@ pub struct WithInlineKey;
 
 /// Which keys of a map with keys `K` have inline keys: [`Auto`] or
 /// [`WithInlineKey`], with the default [`NodeConfig`], or either of them
-/// with another, [`Configured`]. These are the only implementations.
+/// with another, [`Configured`]; and what its leaves keep besides,
+/// [`WithLeafAnnex`]. These are the only implementations.
 ///
 /// [`NodeConfig`]: crate::NodeConfig
 /// [`Configured`]: crate::Configured
-pub trait InlineKeyStrategy<K>: sealed::Sealed<K> {}
+/// [`WithLeafAnnex`]: crate::WithLeafAnnex
+pub trait InlineKeyStrategy<K>: sealed::Sealed<K> {
+    /// What each leaf keeps besides its entries ([`LeafAnnex`]): nothing,
+    /// `()`, but with [`WithLeafAnnex`](crate::WithLeafAnnex).
+    type LeafAnnex: LeafAnnex;
+}
 
-impl<K> InlineKeyStrategy<K> for Auto {}
+impl<K> InlineKeyStrategy<K> for Auto {
+    type LeafAnnex = ();
+}
 
-impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {}
+impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {
+    type LeafAnnex = ();
+}
 
 /// What a strategy tells the nodes, kept out of the public API.
 pub(crate) mod sealed {
@@ -521,12 +532,6 @@ pub(crate) mod sealed {
         /// their node's page rather than pointers (`tree/file.rs`): only
         /// the strategy a `FileMap` wraps its own in, never a public one.
         const IN_FILE: bool = false;
-
-        /// Whether the tree is a store's, whose leaves keep their entries'
-        /// records in heap pages of their own (`tree/store`): only the
-        /// strategy a store wraps its own in, never a public one. A latched
-        /// tree's strategy forwards it.
-        const IN_STORE: bool = false;
     }
 
     impl<K> Sealed<K> for Auto {

@@ -8,4 +8,7 @@ repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
 # Released with bbtree, at its version.
-bbtree = { path = "../bbtree", version = "0.1.4", features = ["store"] }
+bbtree = { path = "../bbtree", version = "0.1.4" }
+
+[dev-dependencies]
+mimalloc = "0.1"

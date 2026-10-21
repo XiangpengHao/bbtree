@@ -54,7 +54,9 @@ impl<K, S: InlineKeyStrategy<K>> Sealed<K> for InFile<S> {
     const IN_FILE: bool = true;
 }
 
-impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for InFile<S> {}
+impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for InFile<S> {
+    type LeafAnnex = S::LeafAnnex;
+}
 
 /// The pages of a file map of a tree with keys `K`, values `V` and strategy
 /// `S`: those of the unsync tree, whose layout a tree in a file map keeps.
