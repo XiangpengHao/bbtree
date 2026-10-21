@@ -1,8 +1,11 @@
 //! The post's "What it can do?" (design/14-blogpost.md): what a fast
-//! B-tree is for, an overview of two cases, and the cases as tabs: the
+//! B-tree is for, an overview of three cases, and the cases as tabs: the
 //! memtable of LSM-trees, with the end-to-end results again
-//! (`end-to-end.svg`, which `vis/figures/` writes), and an external index
-//! of Parquet files, with its results on ClickBench's `hits.parquet`.
+//! (`end-to-end.svg`); a map written to disk once and mapped back, with
+//! its time to the first answer against std's map rebuilt
+//! (`first-query.svg`), both of which `vis/figures/` writes; and an
+//! external index of Parquet files, with its results on ClickBench's
+//! `hits.parquet`.
 
 use dioxus::prelude::*;
 
@@ -13,8 +16,20 @@ use crate::post::Bbtree;
 use crate::rust_code::RustCode;
 
 const END_TO_END: Asset = asset!("/assets/figures/end-to-end.svg");
+const FIRST_QUERY: Asset = asset!("/assets/figures/first-query.svg");
 
 /// The post's code, as doc 14 gives it.
+const MMAP_CREATE: &str = r#"use bbtree::unsync::BBTreeMap;
+use bbtree_mmap::BBTreeMapFile;
+
+let names = BBTreeMap::from([(7_u64, String::from("ferris")), (42, String::from("corro"))]);
+BBTreeMapFile::<u64, String>::create("names.bbtree", &names)?;"#;
+
+const MMAP_OPEN: &str = r#"use bbtree_mmap::BBTreeMapFile;
+
+let names = unsafe { BBTreeMapFile::<u64, String>::mmap("names.bbtree").open()? };
+assert_eq!(names.get(&42), Some("corro"));"#;
+
 const PARQUET_INDEX: &str = r#"ParquetIndexBuilder::source("hits.parquet")
     .index(&["UserID"])
     .index(&["CounterID", "EventDate"])
@@ -34,13 +49,19 @@ pub(crate) fn UseCases() -> Element {
             Bbtree {}
             " benefits everything on top of it: agents memory, LLM training, RAG, KV store, state caching, vector search, and more."
         }
-        p { "Here we discuss two representative use cases:" }
+        p { "Here we discuss three representative use cases:" }
         ol {
             li {
                 strong { "Replace skiplist in LSM-trees." }
                 " In place of the skiplist of five systems, "
                 Bbtree {}
                 " is 1.16–6.83× faster."
+            }
+            li {
+                strong { "Mmap a bbtree from disk." }
+                " No rebuild after a restart: the first answer comes 160–2,500× sooner than std's "
+                code { "BTreeMap" }
+                "."
             }
             li {
                 strong { "External index for Parquet files." }
@@ -51,6 +72,7 @@ pub(crate) fn UseCases() -> Element {
         }
         PartTabList { tabs }
         SectionPanel { tabs, section: PostHeading::CaseLsmTrees, LsmTrees {} }
+        SectionPanel { tabs, section: PostHeading::CaseMmap, MmapFromDisk {} }
         SectionPanel { tabs, section: PostHeading::CaseParquetIndex, ParquetIndex {} }
     }
 }
@@ -122,6 +144,45 @@ fn LsmTrees() -> Element {
                 "The End to End card again: each system's own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with "
                 Bbtree {}
                 "; only the map changed."
+            },
+        }
+    }
+}
+
+#[component]
+fn MmapFromDisk() -> Element {
+    rsx! {
+        p {
+            a {
+                href: "https://crates.io/crates/bbtree-mmap",
+                target: "_blank",
+                rel: "noopener",
+                code { "bbtree-mmap" }
+            }
+            " allows you to build a bbtree and write it to disk once; when you need it, you can simply mmap it and use it instantly, without rebuilding anything."
+        }
+        pre {
+            code { "cargo add bbtree-mmap" }
+        }
+        p {
+            strong { "Build a bbtree and save to disk" }
+        }
+        RustCode { code: MMAP_CREATE }
+        p {
+            strong { "Mmap bbtree and query it immediately" }
+        }
+        RustCode { code: MMAP_OPEN }
+        SvgFigure {
+            src: FIRST_QUERY,
+            alt: "Time from a restart to the first answer: std's BTreeMap reads and rebuilds 10M entries in 45.1 ms with its file in the page cache and 101.5 ms from disk; bbtree-mmap answers in 18 µs and 618 µs.",
+            caption: rsx! {
+                "Time to the first answer after a restart, 10M "
+                code { "u64" }
+                " entries, Ryzen 9 9900X. std's "
+                code { "BTreeMap" }
+                " reads its file back and rebuilds; "
+                code { "bbtree-mmap" }
+                " maps its file and reads only the pages the lookup touches."
             },
         }
     }

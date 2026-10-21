@@ -7,7 +7,7 @@ use crate::how_it_works::{Note, NoteRef};
 use crate::outline::{PostHeading, SectionHeading};
 use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
-use crate::site::AUTHOR_PAGE;
+use crate::site::{AUTHOR_PAGE, REPOSITORY};
 
 #[component]
 pub(crate) fn HowWeMakeItCorrect() -> Element {
@@ -70,13 +70,21 @@ fn GuardTesting() -> Element {
                 Bbtree {}
                 " and std's "
                 code { "BTreeMap" }
-                " side by side, checks that every answer matches, and checks the whole tree's invariants after every operation."
+                " side by side, checks that every answer matches, and checks the whole tree's invariants after every operation: "
+                CodeLink { path: "tree/main/bbtree/fuzz/fuzz_targets", "8 targets" }
+                ", fuzzed weekly and before every release ("
+                CodeLink { path: "blob/main/.github/workflows/fuzz.yml", "CI" }
+                ")."
             }
             li {
                 strong { "Verification" }
                 " with Verus"
                 NoteRef { note: Note::Verus }
-                " proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves."
+                " proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves: "
+                CodeLink { path: "tree/main/bbtree/src/proof", "the proofs" }
+                ", checked on every pull request ("
+                CodeLink { path: "blob/main/.github/workflows/verus.yml", "CI" }
+                ")."
             }
             li {
                 strong { "DSTs" }
@@ -84,8 +92,27 @@ fn GuardTesting() -> Element {
                 NoteRef { note: Note::Shuttle }
                 " and ffs"
                 NoteRef { note: Note::Ffs }
-                " test concurrent behavior in a deterministic and principled way."
+                " test concurrent behavior in a deterministic and principled way: Shuttle runs "
+                CodeLink { path: "blob/main/bbtree/src/map/shuttle_tests.rs", "each test" }
+                " under thousands of thread schedules on every pull request ("
+                CodeLink { path: "blob/main/.github/workflows/shuttle.yml", "CI" }
+                "); ffs, run by its author, found a race Shuttle had missed ("
+                CodeLink { path: "issues/9", "issue #9" }
+                "), now fixed and tested."
             }
+        }
+    }
+}
+
+/// A link to `path` in bbtree's repository: code, CI, or an issue.
+#[component]
+fn CodeLink(path: &'static str, children: Element) -> Element {
+    rsx! {
+        a {
+            href: "{REPOSITORY}/{path}",
+            target: "_blank",
+            rel: "noopener",
+            {children}
         }
     }
 }

@@ -12,6 +12,7 @@
 mod batch_lanes;
 mod concurrent_gets;
 mod end_to_end;
+mod first_query;
 mod integer_keys;
 mod key_count;
 mod lookup_counts;
@@ -30,6 +31,7 @@ use bbtree::unsync::BBTreeMap;
 use crate::batch_lanes::BatchLanes;
 use crate::concurrent_gets::ConcurrentGets;
 use crate::end_to_end::EndToEnd;
+use crate::first_query::FirstQuery;
 use crate::integer_keys::IntegerLeaf;
 use crate::key_count::KeyCount;
 use crate::lookup_counts::{LookupCount, LookupCounts};
@@ -81,6 +83,10 @@ impl PostFigures {
             (
                 "end-to-end",
                 EndToEnd::read(&self.data.join("9900x-20261017/integrations.csv"))?.svg(),
+            ),
+            (
+                "first-query",
+                FirstQuery::read(&self.data.join("9900x-20261021/first-query.csv"))?.svg(),
             ),
             ("search-space", SearchSpace::new().svg()),
             ("string-keys", StringNode::plain().svg()),

@@ -13,6 +13,7 @@ use dioxus::prelude::*;
 pub(crate) enum PostHeading {
     UseCases,
     CaseLsmTrees,
+    CaseMmap,
     CaseParquetIndex,
     HowItWorks,
     CacheMisses,
@@ -37,9 +38,10 @@ pub(crate) enum PostHeading {
 }
 
 impl PostHeading {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::UseCases,
         Self::CaseLsmTrees,
+        Self::CaseMmap,
         Self::CaseParquetIndex,
         Self::HowItWorks,
         Self::CacheMisses,
@@ -69,6 +71,7 @@ impl PostHeading {
         match self {
             Self::UseCases | Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
             Self::CaseLsmTrees
+            | Self::CaseMmap
             | Self::CaseParquetIndex
             | Self::CacheMisses
             | Self::Instructions
@@ -86,6 +89,7 @@ impl PostHeading {
         match self {
             Self::UseCases => "what-it-can-do",
             Self::CaseLsmTrees => "case-lsm-trees",
+            Self::CaseMmap => "case-bbtree-mmap",
             Self::CaseParquetIndex => "case-parquet-index",
             Self::HowItWorks => "how-it-works",
             Self::CacheMisses => "minimize-cache-misses",
@@ -116,7 +120,8 @@ impl PostHeading {
         match self {
             Self::UseCases => "What it can do?",
             Self::CaseLsmTrees => "Case 1: replace skiplist in LSM-trees",
-            Self::CaseParquetIndex => "Case 2: external index for Parquet files",
+            Self::CaseMmap => "Case 2: bbtree-mmap",
+            Self::CaseParquetIndex => "Case 3: external index for Parquet files",
             Self::HowItWorks => "How it works?",
             Self::CacheMisses => "Minimize cache misses",
             Self::ThoughtExperiment => "Thought experiment: binary search vs linear search",
@@ -342,7 +347,11 @@ mod tests {
     fn a_part_has_its_sections() {
         assert_eq!(
             PostHeading::UseCases.sections().collect::<Vec<_>>(),
-            [PostHeading::CaseLsmTrees, PostHeading::CaseParquetIndex]
+            [
+                PostHeading::CaseLsmTrees,
+                PostHeading::CaseMmap,
+                PostHeading::CaseParquetIndex
+            ]
         );
         assert_eq!(
             PostHeading::HowItWorks.sections().collect::<Vec<_>>(),
