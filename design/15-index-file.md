@@ -151,9 +151,10 @@ leaf      | …
   file; a range scan reads it front to back. The cost is the zeros to the
   next leaf's alignment, half a KiB a leaf on average.
 - **Building.** `TreeBuilder` builds the compact tree in memory over
-  `ArenaBytes`: 8-byte pointers to length-prefixed bytes in an arena of
-  the writer's (`ByteArena`), which read their bytes alone, as inline keys
-  and prefixes need, and stay valid as entries move. They have the span's
+  record pointers (`RecordPtr`, which stores share, D60): 8-byte pointers
+  to length-prefixed bytes in an arena of the writer's (`ByteArena`),
+  which read their bytes alone, as inline keys and prefixes need, and
+  stay valid as entries move. They have the span's
   size, alignment and inline keys, so the same layout (checked as the
   writer starts): pages still copy byte for byte, and the writer rewrites
   each key and value slot, the head's included, into a span, as it
@@ -163,7 +164,7 @@ leaf      | …
   takes `String`, by its type (D18): its inline keys are windows of its
   bytes, its hash tag its length, as a heap string's, and a `&[u8]` looks
   it up, compared in place, as a `&str` does `String` keys. Its writer's
-  `ArenaBytes` is recognized alike, so the writer's pages have the
+  `RecordPtr` is recognized alike, so the writer's pages have the
   reader's inline keys. `WithInlineKey` works too, through `VarBytes`'s
   `InlineKey` impl, which reads its bytes as `String`'s does. Var-length
   keys need inline keys: without them internal nodes would keep keys,

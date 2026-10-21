@@ -43,10 +43,10 @@ Verus is optional but welcome.
 ## Nodes
 
 **D8. Own allocator trait, the map's last type parameter.** (2026-10-14)
-Every allocation is a node, counted, with a size known in advance; no runtime
-surprises. Two levels: an allocator hands out blocks by size and alignment
-alone, and the tree makes each block a node of its kind, a leaf, an internal
-node or the root page, with that kind's layout (D21).
+Every allocation is a page, counted, of a kind and a size known in advance;
+no runtime surprises. A map asks its allocator for each kind of page by a
+method of its own: internal nodes', leaves', the root page, and a store's
+heap pages (D60), every page of one kind with one layout (D21, D59).
 
 - **Trait:** `Allocator` (`allocator.rs`), public: the part of std's unstable
   `core::alloc::Allocator` a map needs, `allocate_zeroed(&self, Layout)` and
@@ -54,9 +54,20 @@ node or the root page, with that kind's layout (D21).
   `unsafe trait`; a clone is the same allocator), so it works on stable.
   `Global`, the global allocator, is the default; `&A` is an allocator too,
   to share one between maps.
+- **A method pair per kind** (2026-10-20): `allocate_internal`,
+  `allocate_leaf`, `allocate_root` and `allocate_heap`, each with its
+  `deallocate_*`, by default `allocate_zeroed`'s and `deallocate`'s. An
+  allocator that overrides them budgets, pools or places the kinds apart:
+  a pool of one page size per kind, index memory counted apart from a
+  store's records. Inside, the tree names a page's kind
+  (`PageType::KIND`, `PageKind`) wherever it allocates or frees one, so a
+  latched tree's page pool knows which pages it keeps, node pages, and
+  which it passes through, heap pages, without telling them apart by
+  layout.
 - **Zeroed pages:** every page comes zeroed, the allocator's job, which
-  some do for free (fresh memory from the OS). The latched tree needs it,
-  for latch words and the edges optimistic readers read (09-concurrency.md).
+  some do for free (fresh memory from the OS), but a store's heap pages,
+  which may hold anything. The latched tree needs it, for latch words and
+  the edges optimistic readers read (09-concurrency.md).
 - **Never unwinds:** part of the trait's safety contract, as for
   `GlobalAlloc`. The tree calls the allocator in the middle of splits, and
   promises nothing about an unwind there.
@@ -186,9 +197,10 @@ of K, align of its trailing slots).
 **D59. Node configs: what a map tunes about its nodes is defaulted constants of one trait, which its strategy carries.** (2026-10-20)
 
 - **What:** `NodeConfig` has `LEAF_PAGE_SIZE` (1024),
-  `INTERNAL_PAGE_SIZE` (512, internal nodes with inline keys, D49) and
+  `INTERNAL_PAGE_SIZE` (512, internal nodes with inline keys, D49),
   `PLAIN_INTERNAL_PAGE_SIZE` (1024, internal nodes that keep their keys,
-  D17), each with its default. `Sealed` has `type Config: NodeConfig`:
+  D17) and `HEAP_PAGE_SIZE` (the leaves', a store's heap pages, D60), each
+  with its default. `Sealed` has `type Config: NodeConfig`:
   `Auto` and `WithInlineKey` take the defaults, `Configured<S, C>` is
   `S`'s inline keys with config `C`, and `Latched<S>` and `InFile<S>`
   forward `S::Config`. `NodeLayout<K, V, C>` reads the page sizes;
@@ -205,10 +217,8 @@ of K, align of its trailing slots).
   raise it, and with it arrays that insert, remove and the latched page
   pool zero on every call); internal pages at least 64 B. A node's inline
   keys take at most max(1 KiB, page size) bytes, the 1 KiB cap of before
-  at the default sizes. A `BBTreeMap`'s leaf pages are larger than its
-  internal pages (`LatchedTree::pages`): `NodePages` tells a freed page's
-  kind by its layout, and the larger leaf alignment keeps the layouts
-  apart.
+  at the default sizes. Leaves and internal nodes may take pages of one
+  size: the page pool is told each page's kind (D8).
 - **Zero cost:** every default layout is unchanged. Get, insert and
   remove on default unsync (`u64`, `String`, keys without inline keys)
   and concurrent maps compile to the same machine code as before.
@@ -1411,14 +1421,44 @@ Design and measurements in 15-index-file.md.
   header alone and reads nothing else.
 - **Span offsets from the slot, not the node:** bbtree hands a key's `Ord`
   and `InlineKey` only `&K`; from the slot, that is all a span needs. The
-  writer builds over `ArenaBytes`, 8-byte pointers of the span's layout,
-  and rewrites them into spans as it copies each leaf.
+  writer builds over record pointers (`RecordPtr`, shared with stores,
+  D60), 8-byte pointers of the span's layout, and rewrites them into spans
+  as it copies each leaf.
 - **Fixed-size keys stay plain:** var-length, a 10M `u64` hit took 216 ns
   against 127, the file map 49 bytes an entry against 18.5.
 - **Names:** "file map" for the format; "file" alone for the operating
   system's; "tail", "span" and "var-length" for the bytes of any length,
   as "heap" already means the allocator's and "handle" a node's; "OS
   pages" for the operating system's, as "page" means a node's.
+
+**D60. Stores: byte strings in heap pages of their leaves, on the shared map's tree.** (2026-10-20)
+Design in 16-bbtree-store.md.
+
+- **What:** `bbtree::store::BBTreeStore`, behind the `store` feature, and
+  the `bbtree-store` crate, which re-exports it: a map of byte strings that
+  threads share, whose every byte lies in pages from its allocator. Each
+  leaf keeps its entries' records, key then value, each length first, in a
+  chain of heap pages of its own (`HEAP_PAGE_SIZE`, the leaves' page size by
+  default); its keys are record pointers (`RecordPtr`). Lookups, inserts,
+  removals, scans and copied ranges, as a map's.
+- **Why heap pages, not records in the leaf:** the leaf stays a
+  fixed-size leaf, its layout, search and latches the map's; bytes of any
+  length are sized apart from it.
+- **Why a heap page belongs to one leaf:** whatever moves a record holds
+  the one leaf that points to it, so one latch and one version cover a leaf
+  and its records.
+- **Removal marks; compaction is in place,** on a split, a merge, or an
+  insert whose record needs the garbage's room. Store leaves merge, and
+  never steal: the remove path allocates nothing.
+- **The tree is the map's:** strategy `InStore<S>` sets `IN_STORE`, which
+  `Latched` forwards; every store operation in the node code runs under it,
+  and folds away for maps.
+- **Heap pages come from the map's allocator, and go back to it at once:**
+  only their leaf's holder reads them, so they need none of a node page's
+  type-stable reuse. An operation that must not fail midway grows the
+  leaf's chain first.
+- **A spent budget refuses inserts** (`InsertError::Alloc`), the store
+  unchanged; what to free then is the cache's policy, not designed yet.
 
 ## Navigation
 

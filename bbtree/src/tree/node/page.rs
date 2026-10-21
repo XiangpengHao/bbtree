@@ -15,12 +15,14 @@ use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::latch::NodeLatch;
+#[cfg(feature = "store")]
+use super::layout::Header;
 use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
 use super::leaf::Leaf;
 use super::node_plan::NodePlan;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
-use crate::allocator::{AllocError, Allocator};
+use crate::allocator::{AllocError, Allocator, PageKind};
 use crate::inline_key::sealed::Sealed;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
@@ -33,6 +35,10 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 /// `page_layout` is the layout the code that uses pages of this type
 /// accesses them with.
 pub(crate) unsafe trait PageType: Sized {
+    /// What pages of this type are for: which of the allocator's methods
+    /// hands them out and takes them back.
+    const KIND: PageKind;
+
     /// The allocation layout of every page of this type (D21) and strategy
     /// (D18), from the layout constants: a node kind's own, or for the root
     /// page, both kinds' and the root area, folded after monomorphization.
@@ -121,42 +127,52 @@ impl<P> FreshPage<P> {
 
 /// Where the tree's operations take pages from and give them back to: the
 /// map's [`Allocator`], or, in a latched tree, the pages of one operation
-/// (`tree/latched/pages.rs`), which hands out pages it took beforehand. An
-/// operation has nothing to do about a failed allocation: the map's
-/// allocator ends the program, as std's collections do, and an operation
-/// of a latched tree that might fail takes its pages before it changes
-/// anything. The operations a latched tree runs take it; teardown, copies
-/// and bulk builds, which only the map's own allocator serves, take that.
+/// (`tree/latched/pages.rs`), which hands out node pages it took beforehand,
+/// and a store's heap pages from the map's allocator. Every call names the
+/// page's kind, which picks the allocator's method. An operation has
+/// nothing to do about a failed allocation of a node: the map's allocator
+/// ends the program, as std's collections do, and an operation of a latched
+/// tree that might fail takes its pages before it changes anything. The
+/// operations a latched tree runs take it; teardown, copies and bulk
+/// builds, which only the map's own allocator serves, take that.
 ///
 /// # Safety
 ///
-/// A page `allocate_page` returns is valid for reads and writes of
+/// A page `try_allocate_page` returns is valid for reads and writes of
 /// `layout.size()` bytes, aligned to `layout.align()`, and in no other use
-/// until it is given back to `deallocate_page`. Neither method unwinds.
+/// until it is given back to `deallocate_page`, with its kind. No method
+/// unwinds.
 pub(crate) unsafe trait PageAllocator {
-    /// A page for `layout`, of a non-zero size, with any contents.
-    fn allocate_page(&self, layout: Layout) -> NonNull<u8>;
+    /// A page of `kind` for `layout`, of a non-zero size, with any contents;
+    /// or [`AllocError`] if none is to be had.
+    fn try_allocate_page(&self, kind: PageKind, layout: Layout) -> Result<NonNull<u8>, AllocError>;
 
-    /// Takes back the page at `page`.
-    ///
-    /// # Safety
-    ///
-    /// `page` was handed out by `allocate_page` of this allocator for
-    /// `layout`, and not given back since.
-    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout);
-}
-
-// SAFETY: the allocator's blocks are valid and apart until given back, and
-// it doesn't unwind (its contract); a failed allocation doesn't return.
-unsafe impl<A: Allocator + ?Sized> PageAllocator for A {
-    fn allocate_page(&self, layout: Layout) -> NonNull<u8> {
-        self.allocate_zeroed(layout)
+    /// [`Self::try_allocate_page`], ending the program as std's collections
+    /// do if no page is to be had.
+    fn allocate_page(&self, kind: PageKind, layout: Layout) -> NonNull<u8> {
+        self.try_allocate_page(kind, layout)
             .unwrap_or_else(|AllocError| handle_alloc_error(layout))
     }
 
-    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout) {
+    /// Takes back the page at `page`, of `kind`.
+    ///
+    /// # Safety
+    ///
+    /// `page` was handed out by `try_allocate_page` of this allocator for
+    /// `kind` and `layout`, and not given back since.
+    unsafe fn deallocate_page(&self, kind: PageKind, page: NonNull<u8>, layout: Layout);
+}
+
+// SAFETY: the allocator's pages are valid and apart until given back, and
+// it doesn't unwind (its contract), kind by kind.
+unsafe impl<A: Allocator + ?Sized> PageAllocator for A {
+    fn try_allocate_page(&self, kind: PageKind, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+        kind.allocate(self, layout)
+    }
+
+    unsafe fn deallocate_page(&self, kind: PageKind, page: NonNull<u8>, layout: Layout) {
         // SAFETY: the caller's contract, which is the allocator's.
-        unsafe { self.deallocate(page, layout) }
+        unsafe { kind.deallocate(self, page, layout) }
     }
 }
 
@@ -171,17 +187,19 @@ impl<P: PageType> FreshPage<P> {
     /// A page from `alloc`.
     pub(crate) fn allocate(alloc: &impl PageAllocator) -> Self {
         // The layout has a non-zero size: nodes are at least 64 B.
-        let page = alloc.allocate_page(P::page_layout());
+        let page = alloc.allocate_page(P::KIND, P::page_layout());
         // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
         unsafe { Self::from_raw(page) }
     }
 
-    /// A page from `alloc`, the map's allocator; or, if it has none to
-    /// give, the layout it was asked for.
-    pub(crate) fn try_allocate(alloc: &impl Allocator) -> Result<Self, Layout> {
+    /// A page from `alloc`; or, if it has none to give, the layout it was
+    /// asked for.
+    pub(crate) fn try_allocate(alloc: &impl PageAllocator) -> Result<Self, Layout> {
         let layout = P::page_layout();
-        let page = alloc.allocate_zeroed(layout).map_err(|AllocError| layout)?;
+        let page = alloc
+            .try_allocate_page(P::KIND, layout)
+            .map_err(|AllocError| layout)?;
         // SAFETY: as in `allocate`.
         Ok(unsafe { Self::from_raw(page) })
     }
@@ -193,7 +211,7 @@ impl<P: PageType> FreshPage<P> {
         // `P::page_layout()`, the same every time for this type, and is used
         // by nothing else (type invariant); consuming `self` gives up the last
         // use of it.
-        unsafe { alloc.deallocate_page(page, P::page_layout()) }
+        unsafe { alloc.deallocate_page(P::KIND, page, P::page_layout()) }
     }
 }
 
@@ -267,6 +285,30 @@ impl NodeHeader {
 
     /// The header's padding, which no write initializes.
     const PADDING: Range<usize> = Self::HAS_HEAD_OFFSET + size_of::<bool>()..size_of::<Self>();
+}
+
+/// What a store's leaf keeps right after its node header: the chain of its
+/// heap pages, which hold its entries' records (`tree/store`,
+/// `design/16-bbtree-store.md`). Only a store's leaves have it.
+#[repr(C)]
+pub(in crate::tree) struct HeapChain {
+    /// The newest heap page, where a record goes; null without one. Each
+    /// heap page links to the one before it.
+    pub(in crate::tree) newest: *mut u8,
+    /// The bytes of the chain's records that no entry points to.
+    pub(in crate::tree) garbage: u32,
+    /// How many heap pages the chain holds.
+    pub(in crate::tree) pages: u32,
+}
+
+#[cfg(feature = "store")]
+impl HeapChain {
+    /// A chain of no heap page: a new leaf's.
+    pub(in crate::tree) const EMPTY: Self = Self {
+        newest: core::ptr::null_mut(),
+        garbage: 0,
+        pages: 0,
+    };
 }
 
 impl InlineKeyNodeHeader {
@@ -483,6 +525,20 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         <S as Sealed<K>>::IN_FILE
     }
 
+    /// Whether the tree is a store's, whose leaves keep their entries'
+    /// records in heap pages (`store.rs`).
+    #[inline(always)]
+    pub(in crate::tree) fn is_in_store() -> bool {
+        <S as Sealed<K>>::IN_STORE
+    }
+
+    /// Where a store's leaf keeps its heap chain: after its node header
+    /// (`layout.rs`, `Header`).
+    #[cfg(feature = "store")]
+    pub(super) fn heap_chain_offset() -> usize {
+        Header::heap_chain_offset(Self::is_latched())
+    }
+
     /// The node's latch word, in a latched tree, for as long as the caller
     /// picks: the node's page is never freed while threads share the tree
     /// (`latch.rs`).
@@ -567,6 +623,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
         let plan = NodePlan::of::<S, Leaf<K, V, S>>();
+        #[cfg(feature = "store")]
+        if Self::is_in_store() {
+            return NodeLayout::<K, V, S::Config>::store_leaf(
+                plan.inline_width(),
+                plan.has_hash_tags(),
+                Self::is_latched(),
+            );
+        }
         NodeLayout::<K, V, S::Config>::leaf(
             plan.inline_width(),
             plan.has_hash_tags(),
@@ -646,6 +710,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                     });
             } else {
                 page.cast::<NodeHeader>().write(header);
+            }
+            #[cfg(feature = "store")]
+            if Kind::IS_LEAF && Self::is_in_store() {
+                // A store's leaf starts with no heap page, its chain right
+                // after its header, in its layout.
+                page.byte_add(Self::heap_chain_offset())
+                    .cast::<HeapChain>()
+                    .write(HeapChain::EMPTY);
             }
             node.key_columns::<Kind>().initialize();
         }
@@ -1007,7 +1079,7 @@ mod test_pages {
     use std::vec::Vec;
 
     use super::{FreshPage, PageByType, PageType};
-    use crate::allocator::{AllocError, Allocator, Global};
+    use crate::allocator::{AllocError, Allocator, Global, PageKind};
     use crate::inline_key::{Auto, InlineKeyStrategy};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
@@ -1020,7 +1092,9 @@ mod test_pages {
     /// It keeps each block's layout: a block given back is handed out again
     /// only for the same layout, and giving one back with another layout
     /// than it was allocated for panics, as does giving back a block twice,
-    /// or one from elsewhere.
+    /// or one from elsewhere. It keeps each page's kind too: a page given
+    /// back to another kind's method than it came from panics, as does a
+    /// kind asked for with two layouts.
     ///
     /// Blocks still out when it is dropped (owned by a leaked node) are
     /// never freed, so nothing can dangle; tests check
@@ -1035,6 +1109,12 @@ mod test_pages {
         released: RefCell<Vec<(NonNull<u8>, Layout)>>,
         /// How many more blocks it hands out; `None` for as many as asked.
         budget: Cell<Option<usize>>,
+        /// How many blocks it has out at most at once; `None` for any number.
+        in_use_limit: Cell<Option<usize>>,
+        /// The pages out, each with its kind.
+        kinds: RefCell<Vec<(NonNull<u8>, PageKind)>>,
+        /// The layout each kind was asked for with, once it was.
+        kind_layouts: RefCell<Vec<(PageKind, Layout)>>,
         _marker: PhantomData<fn() -> (K, V)>,
         _strategy: PhantomData<fn() -> S>,
     }
@@ -1045,6 +1125,9 @@ mod test_pages {
                 allocated: RefCell::new(Vec::new()),
                 released: RefCell::new(Vec::new()),
                 budget: Cell::new(None),
+                in_use_limit: Cell::new(None),
+                kinds: RefCell::new(Vec::new()),
+                kind_layouts: RefCell::new(Vec::new()),
                 _marker: PhantomData,
                 _strategy: PhantomData,
             }
@@ -1054,6 +1137,19 @@ mod test_pages {
         /// one; with `None`, as many as asked, as when new.
         pub(crate) fn set_budget(&self, budget: Option<usize>) {
             self.budget.set(budget);
+        }
+
+        /// Makes it refuse a block while `limit` are out, as a memory budget
+        /// does; with `None`, any number, as when new.
+        pub(crate) fn set_in_use_limit(&self, limit: Option<usize>) {
+            self.in_use_limit.set(limit);
+        }
+
+        /// How many pages of `kind` are out.
+        pub(crate) fn in_use_of(&self, kind: PageKind) -> usize {
+            (self.kinds.borrow().iter())
+                .filter(|&&(_, page_kind)| page_kind == kind)
+                .count()
         }
 
         /// A page of type `P`, reusing the block given back last for that
@@ -1103,6 +1199,10 @@ mod test_pages {
     // panics only on a block given back wrongly, which a map never does.
     unsafe impl<K, V, S> Allocator for TestPages<K, V, S> {
         fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            let in_use = self.allocated.borrow().len() - self.released.borrow().len();
+            if (self.in_use_limit.get()).is_some_and(|limit| in_use >= limit) {
+                return Err(AllocError);
+            }
             match self.budget.get() {
                 Some(0) => return Err(AllocError),
                 Some(left) => self.budget.set(Some(left - 1)),
@@ -1142,6 +1242,88 @@ mod test_pages {
             // is given back by its only user.
             unsafe { ptr.write_bytes(0xA5, layout.size()) };
             self.released.borrow_mut().push((ptr, layout));
+        }
+
+        fn allocate_internal(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Internal, layout)
+        }
+
+        unsafe fn deallocate_internal(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Internal, page, layout) }
+        }
+
+        fn allocate_leaf(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Leaf, layout)
+        }
+
+        unsafe fn deallocate_leaf(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Leaf, page, layout) }
+        }
+
+        fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Root, layout)
+        }
+
+        unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Root, page, layout) }
+        }
+
+        fn allocate_heap(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Heap, layout)
+        }
+
+        unsafe fn deallocate_heap(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Heap, page, layout) }
+        }
+    }
+
+    impl<K, V, S> TestPages<K, V, S> {
+        /// A page of `kind`, from `allocate_zeroed`, kept with its kind.
+        ///
+        /// # Panics
+        ///
+        /// If `kind` was asked for with another layout before.
+        fn allocate_page_of(
+            &self,
+            kind: PageKind,
+            layout: Layout,
+        ) -> Result<NonNull<u8>, AllocError> {
+            let mut kind_layouts = self.kind_layouts.borrow_mut();
+            match kind_layouts.iter().find(|&&(asked, _)| asked == kind) {
+                Some(&(_, first)) => assert_eq!(first, layout, "a kind's pages have one layout"),
+                None => kind_layouts.push((kind, layout)),
+            }
+            let page = self.allocate_zeroed(layout)?;
+            self.kinds.borrow_mut().push((page, kind));
+            Ok(page)
+        }
+
+        /// Takes back `page`, of `kind`.
+        ///
+        /// # Panics
+        ///
+        /// If the page is out as another kind, or not out.
+        ///
+        /// # Safety
+        ///
+        /// As for `deallocate`.
+        unsafe fn deallocate_page_of(&self, kind: PageKind, page: NonNull<u8>, layout: Layout) {
+            let mut kinds = self.kinds.borrow_mut();
+            let index = (kinds.iter())
+                .position(|&(out, _)| out == page)
+                .expect("a page given back is out");
+            assert_eq!(
+                kinds.swap_remove(index).1,
+                kind,
+                "a page goes back as its kind"
+            );
+            drop(kinds);
+            // SAFETY: forwarded.
+            unsafe { self.deallocate(page, layout) }
         }
     }
 

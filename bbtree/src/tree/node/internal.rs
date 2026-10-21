@@ -26,6 +26,7 @@ use super::page::{FreshPage, NodeKind, NodePtr, PageAllocator, PageByType, PageT
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
+use crate::allocator::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// An internal node, by its page.
@@ -43,6 +44,8 @@ impl<K, V, S> Copy for Internal<K, V, S> {}
 
 // SAFETY: internal nodes have the internal layout.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
+    const KIND: PageKind = PageKind::Internal;
+
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::internal_layout().page
     }
@@ -1023,7 +1026,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Internal<K, V, S> {
         }
     }
 
-    unsafe fn append(left: Self, _fill: Window, separator: Separator<K, S>, right: Self) {
+    unsafe fn append(
+        left: Self,
+        _fill: Window,
+        separator: Separator<K, S>,
+        right: Self,
+        _alloc: &impl PageAllocator,
+    ) {
         let (left_len, right_len) = (left.len(), right.len());
         // SAFETY: `left_len + 1 + right_len <= capacity` (caller). The
         // separator goes into slot `left_len`, at the nodes' prefix length

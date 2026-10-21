@@ -521,6 +521,12 @@ pub(crate) mod sealed {
         /// their node's page rather than pointers (`tree/file.rs`): only
         /// the strategy a `FileMap` wraps its own in, never a public one.
         const IN_FILE: bool = false;
+
+        /// Whether the tree is a store's, whose leaves keep their entries'
+        /// records in heap pages of their own (`tree/store`): only the
+        /// strategy a store wraps its own in, never a public one. A latched
+        /// tree's strategy forwards it.
+        const IN_STORE: bool = false;
     }
 
     impl<K> Sealed<K> for Auto {

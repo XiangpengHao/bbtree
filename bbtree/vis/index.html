@@ -22,6 +22,17 @@
         } catch (_) {}
       }
     </script>
+    <script>
+      // Cloudflare Web Analytics, on the published site only, not under
+      // dx serve.
+      if (location.hostname === "bbtree.xiangpeng.systems") {
+        const beacon = document.createElement("script");
+        beacon.type = "module";
+        beacon.src = "https://static.cloudflareinsights.com/beacon.min.js";
+        beacon.dataset.cfBeacon = JSON.stringify({ token: "c8a164c69ee04ca0a162735f4d9f222f" });
+        document.head.append(beacon);
+      }
+    </script>
   </head>
   <body>
     <!-- Shown until the app draws into #main (main.css hides it then):

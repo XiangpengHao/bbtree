@@ -45,6 +45,7 @@
 
 mod append;
 mod batch;
+mod copied_range;
 mod descent;
 mod held;
 mod insert;
@@ -55,8 +56,8 @@ mod remove;
 mod scan;
 mod shared_prefix;
 
+pub(crate) use self::copied_range::CopiedRange;
 pub(crate) use self::insert::{ReadOrInsert, UpdateOrInsert};
-pub(crate) use self::scan::{LeafStamp, ScanResume};
 
 use core::alloc::Layout;
 use core::borrow::Borrow;
@@ -78,7 +79,6 @@ use super::node::root_page::RootPage;
 use super::root::Tree;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
-use crate::node_config::NodeConfig;
 
 /// A tree that threads share, by an atomic pointer to its root page, tagged
 /// with the root's kind; null until the first insert makes one. Its nodes'
@@ -157,17 +157,6 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// ([`NodePages`]).
     #[inline(always)]
     fn pages<'t, A: Allocator>(&'t self, alloc: &'t A) -> NodePages<'t, A> {
-        // `NodePages` tells a freed page's kind by its layout. A leaf is
-        // aligned to its page size or more, and an internal node, which keeps
-        // no keys (`new`), to its own page size: a leaf page size larger than
-        // the internal one keeps the layouts apart.
-        const {
-            assert!(
-                <S::Config as NodeConfig>::LEAF_PAGE_SIZE
-                    > <S::Config as NodeConfig>::INTERNAL_PAGE_SIZE,
-                "a BBTreeMap's leaf pages are larger than its internal pages"
-            );
-        }
         NodePages::new(
             &self.free,
             alloc,

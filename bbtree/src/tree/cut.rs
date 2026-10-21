@@ -232,7 +232,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         if border_len(&self) < target {
             if self.can_merge() {
                 let merged = self.left();
-                self.merge().deallocate(alloc);
+                self.merge(alloc).deallocate(alloc);
                 return merged;
             }
             while border_len(&self) < target {

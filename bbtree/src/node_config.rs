@@ -54,32 +54,26 @@ use crate::inline_key::sealed::{InlineKeySource, Sealed};
 /// map.insert(1, 2);
 /// ```
 ///
-/// ```compile_fail,E0080
-/// use bbtree::{Auto, BBTreeMap, Configured, NodeConfig};
 ///
-/// struct EvenPages;
-///
-/// impl NodeConfig for EvenPages {
-///     const INTERNAL_PAGE_SIZE: usize = 1024;
-/// }
-///
-/// let map = BBTreeMap::<u64, u64, Configured<Auto, EvenPages>>::with_strategy(Configured::new());
-/// map.insert(1, 2).unwrap();
-/// ```
+/// Every page of one kind in a map has one layout: an allocator that pools
+/// pages by kind ([`Allocator`](crate::Allocator)) pools pages of one size.
 pub trait NodeConfig {
     /// The page size of leaves: at least 1024. Larger leaves are fewer,
     /// but an insert or a remove shifts more of a leaf's bytes.
     const LEAF_PAGE_SIZE: usize = 1024;
 
     /// The page size of internal nodes of keys with inline keys, which keep
-    /// only the inline keys and their children: at least 64. In a
-    /// [`BBTreeMap`](crate::BBTreeMap), smaller than
-    /// [`Self::LEAF_PAGE_SIZE`].
+    /// only the inline keys and their children: at least 64.
     const INTERNAL_PAGE_SIZE: usize = 512;
 
     /// The page size of internal nodes of keys without inline keys, which
     /// keep their keys: at least 64.
     const PLAIN_INTERNAL_PAGE_SIZE: usize = 1024;
+
+    /// The page size of a store's heap pages, which hold its leaves' records
+    /// (`design/16-bbtree-store.md`): the leaves' by default, at least 1024.
+    /// A record larger than a heap page is refused. Only a store reads it.
+    const HEAP_PAGE_SIZE: usize = Self::LEAF_PAGE_SIZE;
 }
 
 /// The config of [`Auto`](crate::Auto) and

@@ -385,7 +385,7 @@ fn steals_and_merges_of_leaves() {
     drop((key, value));
     let siblings = root.siblings::<BulkyLeaf<'_>>(0);
     assert!(siblings.can_merge(), "6 + 1 + 5 entries fit in one leaf");
-    pages.release(siblings.merge());
+    pages.release(siblings.merge(&pages));
     assert_eq!(root.len(), 0);
     let merged_leaf = root.leaf_child(0);
     assert_eq!(merged_leaf.len(), 12);
@@ -474,7 +474,7 @@ fn steals_and_merges_of_internal_nodes() {
         grandchild.destroy(&pages);
     }
     let siblings = root.siblings::<BulkyInternal<'_>>(0);
-    pages.release(siblings.merge());
+    pages.release(siblings.merge(&pages));
     assert!(matches!(root.child(0), Node::Internal(child) if child.has_leaf_children()));
     tree.lower_while_root_empty();
     assert_eq!(entry_ids(&tree), model);
@@ -599,7 +599,7 @@ fn balance_randomly<
     pages: &TestPages<K, Tracked<'l>, S>,
 ) -> Balanced {
     if siblings.can_merge() && rng.below(2) == 0 {
-        pages.release(siblings.merge());
+        pages.release(siblings.merge(&pages));
         return Balanced::Merged;
     }
     let (left_len, right_len) = (siblings.left_len(), siblings.right_len());

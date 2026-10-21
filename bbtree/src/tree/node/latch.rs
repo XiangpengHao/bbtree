@@ -45,6 +45,7 @@ impl<K, S: InlineKeyStrategy<K>> Sealed<K> for Latched<S> {
     const SOURCE: InlineKeySource<K> = S::SOURCE;
     type Config = S::Config;
     const LATCHED: bool = true;
+    const IN_STORE: bool = S::IN_STORE;
 }
 
 impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for Latched<S> {}

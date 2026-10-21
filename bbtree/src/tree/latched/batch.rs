@@ -285,7 +285,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
         let mut entries = entries.into_iter();
         let (key, value) = entries.next().expect("N >= 2");
-        let first = match self.append(key, value, UpdateOrInsert(&mut f)) {
+        let first = match self.append(key, value, UpdateOrInsert(&mut f), alloc) {
             Ok(first) => {
                 // Ascending keys: the rest most likely append too, which the
                 // single-key insert does without a descent.

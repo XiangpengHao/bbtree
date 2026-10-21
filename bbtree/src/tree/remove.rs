@@ -32,7 +32,7 @@ use core::borrow::Borrow;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::PageAllocator;
+use super::node::page::{NodePtr, PageAllocator};
 use super::node::{Child, Node};
 use super::node_stack::{FirstEdge, MAX_DEPTH, NodeStackMut};
 use super::root::Tree;
@@ -396,12 +396,18 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         let mut siblings = self.siblings::<C>(separator_index);
         let left_len = siblings.left_len();
         if siblings.can_merge() {
-            siblings.merge().deallocate(alloc);
+            siblings.merge(alloc).deallocate(alloc);
             return if child_is_right {
                 ChildFix::MergedIntoLeft { left_len }
             } else {
                 ChildFix::MergedRightIn
             };
+        }
+        if C::IS_LEAF && NodePtr::<K, V, S>::is_in_store() {
+            // A store's leaves merge, and never steal: the entry would bring
+            // its record into a heap that may lack room (`node/store.rs`). The
+            // leaf stays below its minimum until it can merge.
+            return ChildFix::Nothing;
         }
         let stolen = if child_is_right {
             siblings.steal_left()

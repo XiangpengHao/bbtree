@@ -23,7 +23,7 @@ use super::super::interleaving::Interleaving;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
-use super::super::node::page::NodePtr;
+use super::super::node::page::{NodePtr, PageAllocator};
 use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf};
@@ -33,14 +33,17 @@ use crate::inline_key::InlineKeyStrategy;
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Appends `key` and `value` to the last leaf, and returns what `policy`
     /// returns of a new entry. That takes a leaf with room, `key` greater
-    /// than its last key, and `key` sharing what every key shares. Otherwise
-    /// gives all back, for the ordinary insert.
+    /// than its last key, and `key` sharing what every key shares; in a
+    /// store, room for the record in the leaf's heap, from `alloc` if it
+    /// chains a page (`node/store.rs`). Otherwise gives all back, for the
+    /// ordinary insert.
     #[inline(always)]
     pub(super) fn append<P: InsertPolicy<K, V>>(
         &self,
         key: K,
         value: V,
         policy: P,
+        alloc: &impl PageAllocator,
     ) -> Result<P::Output, (K, V, P)>
     where
         K: Ord,
@@ -73,6 +76,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // A key that shares less shrinks the shared prefix first.
             Err(key) => return Err((key, value, policy)),
         };
+        // A heap that has no page to give fails the ordinary insert.
+        if leaf.make_room_for(key.key(), alloc).is_err() {
+            return Err((key.into_key(), value, policy));
+        }
         let output = policy.vacant(key.key(), &value);
         leaf.insert_fit(len, key.window_at(leaf.prefix_len()), value);
         drop(held);

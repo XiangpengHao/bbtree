@@ -16,6 +16,10 @@ mod inline_key;
 mod map;
 mod node_config;
 mod proof;
+#[cfg(any(feature = "file", feature = "store"))]
+mod record_ptr;
+#[cfg(feature = "store")]
+pub mod store;
 mod tree;
 pub mod unsync;
 

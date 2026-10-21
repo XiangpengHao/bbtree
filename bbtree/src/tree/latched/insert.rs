@@ -35,13 +35,19 @@ use super::super::node::inline_keys::SearchKey;
 use super::super::node::internal::Internal;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
+#[cfg(feature = "store")]
+use super::super::node::page::NodePtr;
 use super::super::node::page::PageAllocator;
+#[cfg(feature = "store")]
+use super::super::node::{Child, InsertionSide};
 use super::super::node_stack::LastEdge;
 use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf, TreePath};
 use super::held::HeldNodes;
 use super::pages::NodePages;
+use core::alloc::Layout;
+
 use crate::allocator::{Allocator, InsertError};
 use crate::inline_key::InlineKeyStrategy;
 
@@ -100,6 +106,15 @@ impl<K, V, R, F: FnOnce(&K, &V) -> R> InsertPolicy<K, V> for ReadOrInsert<F> {
     }
 }
 
+/// Why [`LatchedTree::insert_into`] gave an entry back.
+pub(super) enum Refused {
+    /// The leaf is full: the key goes at this edge, once it splits.
+    Full(usize),
+    /// A store's leaf needed a heap page for the entry's record, and the
+    /// allocator had none to give, of this layout.
+    NoPage(Layout),
+}
+
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Inserts `key` and `value`, or, if an equal key is there, keeps it and
     /// does what `policy` does; returns what `policy` returns. Pages come
@@ -121,7 +136,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         {
             return Err(InsertError::new(key, value, layout));
         }
-        let (mut key, value, policy) = match self.append(key, value, policy) {
+        let (mut key, value, policy) = match self.append(key, value, policy, alloc) {
             Ok(output) => return Ok(output),
             Err(entry) => entry,
         };
@@ -134,7 +149,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             };
             return match self.insert_into(&held, at_separator, key, value, policy, alloc) {
                 Ok(output) => Ok(output),
-                Err((key, value, policy, _)) => {
+                Err((key, value, _, Refused::NoPage(layout))) => {
+                    Err(InsertError::new(key, value, layout))
+                }
+                Err((key, value, policy, Refused::Full(_))) => {
                     drop(held);
                     self.insert_splitting(key, value, policy, alloc)
                 }
@@ -143,8 +161,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Inserts into `held`, the leaf where `key` belongs, as [`Self::insert`]
-    /// does, if it holds `key` or has room; or gives all back, with the edge
-    /// where `key` goes in the full leaf.
+    /// does, if it holds `key` or has an entry free; or gives all back, and
+    /// why ([`Refused`]). In a store, the entry, new or held, takes `key`'s
+    /// record into the leaf's heap, which chains a page from `alloc` if it
+    /// lacks room (`node/store.rs`).
     #[inline(always)]
     pub(super) fn insert_into<P: InsertPolicy<K, V>>(
         &self,
@@ -154,23 +174,34 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         value: V,
         policy: P,
         alloc: &impl PageAllocator,
-    ) -> Result<P::Output, (K, V, P, usize)>
+    ) -> Result<P::Output, (K, V, P, Refused)>
     where
         K: Ord,
     {
         let leaf = held.leaf();
         if at_separator {
+            if let Err(layout) = leaf.replace_record(None, &key, alloc) {
+                return Err((key, value, policy, Refused::NoPage(layout)));
+            }
             return Ok(policy.occupied(key, value, leaf.head_key(), leaf.head_value_mut()));
         }
         match leaf.search_always_inlined(&SearchKey::new(&key)) {
-            Ok(index) => Ok(policy.occupied(key, value, leaf.key(index), leaf.value_mut(index))),
+            Ok(index) => {
+                if let Err(layout) = leaf.replace_record(Some(index), &key, alloc) {
+                    return Err((key, value, policy, Refused::NoPage(layout)));
+                }
+                Ok(policy.occupied(key, value, leaf.key(index), leaf.value_mut(index)))
+            }
             Err(edge) if leaf.len() < Leaf::<K, V, Latched<S>>::capacity() => {
+                if let Err(layout) = leaf.make_room_for(&key, alloc) {
+                    return Err((key, value, policy, Refused::NoPage(layout)));
+                }
                 let key = self.prefixed(key, leaf, alloc);
                 let output = policy.vacant(key.key(), &value);
                 leaf.insert_fit(edge, key.window_at(leaf.prefix_len()), value);
                 Ok(output)
             }
-            Err(edge) => Err((key, value, policy, edge)),
+            Err(edge) => Err((key, value, policy, Refused::Full(edge))),
         }
     }
 
@@ -226,7 +257,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             (key, value, policy, edge) =
                 match self.insert_into(&held, at_separator, key, value, policy, alloc) {
                     Ok(output) => return Ok(output),
-                    Err(full) => full,
+                    Err((key, value, _, Refused::NoPage(layout))) => {
+                        return Err(InsertError::new(key, value, layout));
+                    }
+                    Err((key, value, policy, Refused::Full(edge))) => (key, value, policy, edge),
                 };
             match self.split(&path, &held, edge, key, value, policy, &pages) {
                 Ok(inserted) => return inserted,
@@ -286,10 +320,32 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             (None, _) => (1, splits + 1),
             (Some(_), _) => (1, splits),
         };
+        let leaf = held.leaf();
+        // A store's split also takes the heap pages of the records that move,
+        // and of the new one: empty pages in front of the leaf's heap, which
+        // the split hands to its new leaf (`node/store.rs`).
+        #[cfg(feature = "store")]
+        let in_store = NodePtr::<K, V, Latched<S>>::is_in_store();
+        #[cfg(feature = "store")]
+        if in_store {
+            let separator_index = InsertionSide::of_split(
+                Leaf::<K, V, Latched<S>>::capacity(),
+                edge,
+                Leaf::<K, V, Latched<S>>::min_len(),
+            )
+            .0;
+            let count = leaf.heap_pages_for_split(separator_index);
+            if let Err(layout) = leaf.grow_heap_by(count, pages) {
+                return Ok(Err(InsertError::new(key, value, layout)));
+            }
+        }
         if let Err(layout) = pages.reserve(leaves, internals) {
+            #[cfg(feature = "store")]
+            if in_store {
+                leaf.free_spare_heap_pages(pages);
+            }
             return Ok(Err(InsertError::new(key, value, layout)));
         }
-        let leaf = held.leaf();
         let was_last_leaf = self.is_rightmost_leaf(leaf);
         let key = self.prefixed(key, leaf, pages);
         let output = policy.vacant(key.key(), &value);

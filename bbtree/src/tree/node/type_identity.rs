@@ -18,9 +18,9 @@ use core::{mem, ptr, slice};
 
 #[cfg(feature = "file")]
 use crate::file::VarBytes;
-#[cfg(feature = "file")]
-use crate::file::storage::ArenaBytes;
 use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
+#[cfg(any(feature = "file", feature = "store"))]
+use crate::record_ptr::RecordPtr;
 
 /// A type's identity with its lifetimes erased: `&'a str` and
 /// `&'static str` have the same one. `TypeId::of` needs `'static` types,
@@ -72,10 +72,11 @@ impl ErasedTypeId {
 }
 
 /// Proof that `T` is one of the byte-string types that [`Auto`] gives
-/// inline keys, lifetimes aside, and how it holds its bytes: std's, and
-/// with the `file` feature, a file map's spans ([`VarBytes`]) and what its
-/// writer builds them from (`ArenaBytes`). Every one of them orders like its
-/// bytes.
+/// inline keys, lifetimes aside, and how it holds its bytes: std's; with
+/// the `file` feature, a file map's spans ([`VarBytes`]); and with the
+/// `file` or `store` feature, pointers to records ([`RecordPtr`]), which a
+/// file map's writer builds spans from, and a store's leaves hold. Every
+/// one of them orders like its bytes.
 ///
 /// [`Auto`]: crate::Auto
 pub(in crate::tree) struct ByteString<T: ?Sized> {
@@ -108,16 +109,16 @@ enum ByteRepresentation {
     /// A file map's span, its bytes in its leaf's tail.
     #[cfg(feature = "file")]
     Span,
-    /// A file map writer's pointer to bytes in its arena, a span's stand-in
-    /// while the writer builds.
-    #[cfg(feature = "file")]
-    ArenaRecord,
+    /// A pointer to a record, its bytes in a file map writer's arena or a
+    /// store's heap page.
+    #[cfg(any(feature = "file", feature = "store"))]
+    Record,
 }
 
 impl<T: ?Sized> ByteString<T> {
     /// The proof, if `T` is `String`, `str`, `Vec<u8>`, `[u8]`,
     /// `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`, `[u8; 20]`
-    /// or `[u8; 32]`, lifetimes aside, or `VarBytes` or `ArenaBytes`. Folds
+    /// or `[u8; 32]`, lifetimes aside, or `VarBytes` or `RecordPtr`. Folds
     /// to a constant after monomorphization.
     ///
     /// Unoptimized builds compare type identities at run time, on every
@@ -155,7 +156,7 @@ impl<T: ?Sized> ByteString<T> {
         } else if ErasedTypeId::is::<T, &[u8]>() {
             ByteRepresentation::BytesRef
         } else {
-            Self::file_representation()?
+            Self::record_representation()?
         };
         Some(Self {
             representation,
@@ -163,23 +164,18 @@ impl<T: ?Sized> ByteString<T> {
         })
     }
 
-    /// How a file map's types hold their bytes, if `T` is one: a span
-    /// ([`VarBytes`]), or its writer's stand-in (`ArenaBytes`).
-    #[cfg(feature = "file")]
+    /// How the types of file maps and stores hold their bytes, if `T` is
+    /// one: a span ([`VarBytes`]), or a pointer to a record ([`RecordPtr`]).
     #[inline(always)]
-    fn file_representation() -> Option<ByteRepresentation> {
+    fn record_representation() -> Option<ByteRepresentation> {
+        #[cfg(feature = "file")]
         if ErasedTypeId::is::<T, VarBytes>() {
-            Some(ByteRepresentation::Span)
-        } else if ErasedTypeId::is::<T, ArenaBytes>() {
-            Some(ByteRepresentation::ArenaRecord)
-        } else {
-            None
+            return Some(ByteRepresentation::Span);
         }
-    }
-
-    #[cfg(not(feature = "file"))]
-    #[inline(always)]
-    fn file_representation() -> Option<ByteRepresentation> {
+        #[cfg(any(feature = "file", feature = "store"))]
+        if ErasedTypeId::is::<T, RecordPtr>() {
+            return Some(ByteRepresentation::Record);
+        }
         None
     }
 
@@ -197,7 +193,9 @@ impl<T: ?Sized> ByteString<T> {
             | ByteRepresentation::StrRef
             | ByteRepresentation::BytesRef => false,
             #[cfg(feature = "file")]
-            ByteRepresentation::Span | ByteRepresentation::ArenaRecord => false,
+            ByteRepresentation::Span => false,
+            #[cfg(any(feature = "file", feature = "store"))]
+            ByteRepresentation::Record => false,
         }
     }
 
@@ -227,12 +225,12 @@ impl<T: ?Sized> ByteString<T> {
                 ByteRepresentation::StrRef => (*value.cast::<&'v str>()).as_bytes(),
                 ByteRepresentation::BytesRef => *value.cast::<&'v [u8]>(),
                 // A span reached by reference, in a file map or a query
-                // buffer, has its bytes past it; a writer's record points
-                // into its arena.
+                // buffer, has its bytes past it; a record pointer points
+                // into a writer's arena or a store's heap page.
                 #[cfg(feature = "file")]
                 ByteRepresentation::Span => (&*value.cast::<VarBytes>()).bytes(),
-                #[cfg(feature = "file")]
-                ByteRepresentation::ArenaRecord => (&*value.cast::<ArenaBytes>()).bytes(),
+                #[cfg(any(feature = "file", feature = "store"))]
+                ByteRepresentation::Record => (&*value.cast::<RecordPtr>()).bytes(),
             }
         }
     }

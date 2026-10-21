@@ -1023,7 +1023,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
         self.walk.next_leaving(&mut |node| {
             // SAFETY: the walk is done with every node it leaves (module
             // safety argument), so each is freed once.
-            unsafe { node.free() }.deallocate(alloc);
+            unsafe { Self::release(node, alloc) };
         })
     }
 
@@ -1032,7 +1032,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
         let alloc = &self.alloc;
         self.walk.next_back_leaving(&mut |node| {
             // SAFETY: as for `next`.
-            unsafe { node.free() }.deallocate(alloc);
+            unsafe { Self::release(node, alloc) };
         })
     }
 
@@ -1057,7 +1057,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
             let alloc = &self.alloc;
             let mut leave = |node: Node<K, V, S>| {
                 // SAFETY: as for `next`.
-                unsafe { node.free() }.deallocate(alloc);
+                unsafe { Self::release(node, alloc) };
             };
             while ends.front.skip_to_next_leaf(ends.top, &mut leave) {}
             self.walk.length = 0;
@@ -1067,6 +1067,31 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
             }
         }
         self.free_remaining();
+    }
+
+    /// Gives `node`'s page back to `alloc`, and a store's leaf's heap pages
+    /// with it (`node/store.rs`).
+    ///
+    /// # Safety
+    ///
+    /// As for [`Node::free`]: the node is on a page of its kind, and nothing
+    /// uses it again.
+    unsafe fn release(node: Node<K, V, S>, alloc: &A) {
+        Self::release_heap(node, alloc);
+        // SAFETY: as the caller promises.
+        unsafe { node.free() }.deallocate(alloc);
+    }
+
+    /// Gives a store's leaf's heap pages back to `alloc`, as the leaf goes;
+    /// nothing for other nodes.
+    fn release_heap(node: Node<K, V, S>, alloc: &A) {
+        #[cfg(feature = "store")]
+        if let Node::Leaf(leaf) = node
+            && NodePtr::<K, V, S>::is_in_store()
+        {
+            leaf.free_heap(alloc);
+        }
+        let _ = (node, alloc);
     }
 
     /// Frees the nodes the walk has not freed, once no entry is left between
@@ -1090,9 +1115,10 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> DyingWalk<K, V, S, A> {
             // node stack is freed, and every entry on it moved out or skipped
             // for having no drop glue (module safety argument). Each node here
             // is freed once, after its children.
-            unsafe { stack.node_at(depth).free() }.deallocate(&self.alloc);
+            unsafe { Self::release(stack.node_at(depth), &self.alloc) };
         }
         let top = stack.node_at(0);
+        Self::release_heap(top, &self.alloc);
         // SAFETY: as for the nodes below; the top goes last, in its root page
         // if it has one, which nothing reaches anymore.
         let top_page: PageByType<K, V, S> = unsafe {

@@ -24,7 +24,7 @@ pub use self::range::RangeCloned;
 use core::borrow::Borrow;
 use core::fmt;
 use core::mem;
-use core::ops::{Bound, ControlFlow, RangeBounds};
+use core::ops::{ControlFlow, RangeBounds};
 
 use crate::allocator::{Allocator, Global, InsertError};
 use crate::inline_key::{Auto, InlineKeyStrategy};
@@ -223,7 +223,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let (start, end) = Self::checked_bounds(&range);
+        let (start, end) = LatchedTree::<K, V, S>::checked_bounds(&range);
         self.tree
             .scan(start, end, None, |key, value, _| f(key, value))
     }
@@ -244,7 +244,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let (start, end) = Self::checked_bounds(&range);
+        let (start, end) = LatchedTree::<K, V, S>::checked_bounds(&range);
         self.tree
             .scan_rev(start, end, None, |key, value, _| f(key, value))
     }
@@ -268,32 +268,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         Q: Ord + ?Sized,
         R: RangeBounds<Q>,
     {
-        Self::checked_bounds(&range);
+        LatchedTree::<K, V, S>::checked_bounds(&range);
         RangeCloned::new(self, range)
-    }
-
-    /// `range`'s bounds.
-    ///
-    /// # Panics
-    ///
-    /// As std's `BTreeMap::range`: if `range` starts after it ends, or
-    /// starts and ends at the same key, both excluded.
-    fn checked_bounds<Q>(range: &impl RangeBounds<Q>) -> (Bound<&Q>, Bound<&Q>)
-    where
-        Q: Ord + ?Sized,
-    {
-        let (start, end) = (range.start_bound(), range.end_bound());
-        match (start, end) {
-            (Bound::Excluded(start), Bound::Excluded(end)) if start == end => {
-                panic!("range start and end are equal and excluded in BBTreeMap")
-            }
-            (
-                Bound::Included(start) | Bound::Excluded(start),
-                Bound::Included(end) | Bound::Excluded(end),
-            ) if start > end => panic!("range start is greater than range end in BBTreeMap"),
-            _ => {}
-        }
-        (start, end)
     }
 
     /// Inserts `key` and `value`, and returns `None`; or, if the map holds

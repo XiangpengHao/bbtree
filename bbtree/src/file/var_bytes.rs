@@ -11,8 +11,8 @@
 //! - [`VarBytesBuf`] holds a span and its bytes side by side: a key to look
 //!   a file map up with, which compares as the file map's own keys do, for
 //!   a file map searched with [`WithInlineKey`](crate::WithInlineKey).
-//! - [`ArenaBytes`] is what a writer's tree holds instead while it builds:
-//!   a pointer to the bytes, length first, in a [`ByteArena`]. It has the
+//! - A writer's tree holds a [`RecordPtr`] instead while it builds: a
+//!   pointer to the bytes, length first, in a [`ByteArena`]. It has the
 //!   span's size, alignment and inline keys, so the tree's pages are a file
 //!   map's but for those slots, which the writer rewrites into spans as it
 //!   copies them.
@@ -29,6 +29,7 @@ use core::ptr::NonNull;
 
 use super::storage::Storage;
 use crate::inline_key::{InlineKey, InlineWord};
+use crate::record_ptr::RecordPtr;
 
 /// A key or a value of any length, as a file map keeps it: a span in its
 /// leaf, `{len, offset}`, to its bytes, which lie `offset` bytes past the
@@ -155,20 +156,20 @@ impl InlineKey for VarBytes {
 }
 
 // SAFETY: a `VarBytes` is built from its bytes, which the writer keeps in
-// its arena, its tree holding an `ArenaBytes` for each: a pointer, with
+// its arena, its tree holding a `RecordPtr` for each: a pointer, with
 // explicit zeros on targets whose pointers are narrower, 8 bytes aligned
 // to 8 with no padding, as a span is. The writer writes a span in its
 // place.
 unsafe impl Storage for VarBytes {
     type Input<'a> = Cow<'a, [u8]>;
-    type InWriter = ArenaBytes;
+    type InWriter = RecordPtr;
     const VAR_LEN: bool = true;
 
-    fn in_writer(input: Cow<'_, [u8]>, arena: &mut ByteArena) -> ArenaBytes {
+    fn in_writer(input: Cow<'_, [u8]>, arena: &mut ByteArena) -> RecordPtr {
         arena.push(&input)
     }
 
-    fn tail_bytes(in_writer: &ArenaBytes) -> &[u8] {
+    fn tail_bytes(in_writer: &RecordPtr) -> &[u8] {
         in_writer.bytes()
     }
 }
@@ -313,87 +314,6 @@ impl fmt::Debug for VarBytesBuf {
     }
 }
 
-/// What a writer's tree holds for [`VarBytes`] while it builds: a pointer
-/// to the bytes in its [`ByteArena`], their length first. Public only to
-/// the crate's sealed `Storage`: nothing outside the crate names it.
-#[repr(C, align(8))]
-#[derive(Clone, Copy)]
-pub struct ArenaBytes {
-    record: NonNull<u8>,
-    /// Zeros, written, where a pointer is narrower than a span.
-    zeros: [u8; 8 - size_of::<NonNull<u8>>()],
-}
-
-// SAFETY: the bytes it points to are the arena's, which a writer holds and
-// never changes once written.
-unsafe impl Send for ArenaBytes {}
-
-// SAFETY: as for `Send`: shared, the bytes are only read.
-unsafe impl Sync for ArenaBytes {}
-
-impl ArenaBytes {
-    /// The bytes it points to: what `Auto`'s inline keys and comparisons
-    /// read, as a span's.
-    #[inline]
-    pub(crate) fn bytes(&self) -> &[u8] {
-        // SAFETY: the record is a length and that many bytes after it, in a
-        // chunk of the arena, which outlives every `ArenaBytes` it handed
-        // out (`ByteArena::push`) and never changes them.
-        unsafe {
-            let len = self.record.cast::<u32>().read_unaligned() as usize;
-            core::slice::from_raw_parts(self.record.as_ptr().add(size_of::<u32>()), len)
-        }
-    }
-}
-
-impl PartialEq for ArenaBytes {
-    fn eq(&self, other: &Self) -> bool {
-        self.bytes() == other.bytes()
-    }
-}
-
-impl Eq for ArenaBytes {}
-
-impl PartialOrd for ArenaBytes {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ArenaBytes {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.bytes().cmp(other.bytes())
-    }
-}
-
-/// [`VarBytes`]'s, so that the tree a writer builds has a file map's inline
-/// keys, hash tags and layout.
-impl InlineKey for ArenaBytes {
-    const HAS_HASH_TAG: bool = VarBytes::HAS_HASH_TAG;
-    const HAS_CMP_FROM: bool = VarBytes::HAS_CMP_FROM;
-    const WIDTH: crate::InlineWidth = VarBytes::WIDTH;
-
-    #[inline]
-    fn inline_key_at(&self, offset: usize) -> InlineWord {
-        self.bytes().inline_key_at(offset)
-    }
-
-    #[inline]
-    fn hash_tag(&self) -> u8 {
-        self.bytes().hash_tag()
-    }
-
-    #[inline]
-    fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
-        self.bytes().cmp_from(other.bytes(), equal_len)
-    }
-
-    #[inline]
-    fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
-        self.bytes().cmp_prefix(prefix)
-    }
-}
-
 /// Where a writer keeps the bytes of its keys and values while it builds:
 /// chunks that never move, each byte string its length, then its bytes.
 /// Public only to the crate's sealed `Storage`.
@@ -422,9 +342,11 @@ impl ByteArena {
     ///
     /// # Panics
     ///
-    /// If there are more than `u32::MAX` bytes.
-    pub(crate) fn push(&mut self, bytes: &[u8]) -> ArenaBytes {
-        let len = u32::try_from(bytes.len()).expect("a key or value of at most 4 GiB");
+    /// If there are `u32::MAX` bytes or more.
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> RecordPtr {
+        let len = (u32::try_from(bytes.len()).ok())
+            .filter(|&len| len < u32::MAX)
+            .expect("a key or value under 4 GiB");
         let size = size_of::<u32>() + bytes.len();
         let room = self
             .chunks
@@ -447,10 +369,9 @@ impl ByteArena {
             record
         };
         self.used += size;
-        ArenaBytes {
-            record,
-            zeros: [0; 8 - size_of::<NonNull<u8>>()],
-        }
+        // SAFETY: the record is a length and that many bytes, in a chunk the
+        // arena keeps, unchanged, until it is dropped.
+        unsafe { RecordPtr::new(record) }
     }
 }
 

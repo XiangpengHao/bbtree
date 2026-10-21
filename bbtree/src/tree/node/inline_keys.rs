@@ -469,6 +469,11 @@ impl<K, S> WindowedKey<K, S> {
     pub(in crate::tree) fn into_key(self) -> K {
         self.key
     }
+
+    /// The key, by reference.
+    pub(super) fn key_ref(&self) -> &K {
+        &self.key
+    }
 }
 
 /// A separator outside its internal node (D17): on its way up from a split,

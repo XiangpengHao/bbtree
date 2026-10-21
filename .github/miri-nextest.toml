@@ -49,4 +49,9 @@ default-filter = """
   | test(=unsync::map::tests::batch::replaced_and_stored_values_drop_once)
   | test(=map::tests::a_small_map_matches_std)
   | test(=map::tests::refused_pages_fail_their_own_entries)
+  | test(=store::tests::inserts_reads_replaces_and_removes)
+  | test(=store::tests::matches_a_btree_map)
+  | test(=store::tests::a_spent_budget_refuses_inserts_and_changes_nothing)
+  | test(=store::tests::ranges_match_a_btree_map)
+  | test(=store::tests::heap_pages_go_back_when_emptied_and_node_pages_when_dropped)
 """

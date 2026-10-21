@@ -6,7 +6,7 @@
 
 use super::Child;
 use super::internal::Internal;
-use super::page::PageByType;
+use super::page::{PageAllocator, PageByType};
 use crate::inline_key::InlineKeyStrategy;
 
 /// Separator `index` of `parent` and the children on either side of it, of
@@ -92,8 +92,10 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
     /// separator's window (05-fence-key.md). Both children's inline keys move
     /// back to it, filled from the separator's window, a fence of both,
     /// without reading a key. The caller fits the merged child's prefix to
-    /// its fences, which reads keys, as for [`Self::steal_left`].
-    pub(in crate::tree) fn merge(self) -> PageByType<K, V, S> {
+    /// its fences, which reads keys, as for [`Self::steal_left`]. A store's
+    /// merged leaf gives the heap pages it no longer needs back to `alloc`
+    /// (`store.rs`).
+    pub(in crate::tree) fn merge(self, alloc: &impl PageAllocator) -> PageByType<K, V, S> {
         assert!(
             self.can_merge(),
             "the children don't fit in one node with their separator"
@@ -110,7 +112,7 @@ impl<K, V, S: InlineKeyStrategy<K>, C: Child<K, V, S>> Siblings<K, V, S, C> {
         // separator's window is at the parent's prefix length, `fill`'s, which
         // is at most either child's; both children are at it now.
         unsafe {
-            C::append(self.left, fill, separator, self.right);
+            C::append(self.left, fill, separator, self.right, alloc);
             self.right.free_page()
         }
     }

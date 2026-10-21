@@ -205,7 +205,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         // of a split keep: the last `InlineKey` call before the first change.
         // The leaf is full: `NodeStackMut::insert` comes here only then.
         let key = key.window_at(leaf.prefix_len());
-        let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc));
+        let split = leaf.split_insert(index, key, value, FreshPage::allocate(alloc), alloc);
         // Both arrays are indexed by how many levels the split has climbed
         // from the leaf, which a new root above doesn't change. Here, in each
         // node that split, the index leading to the new entry in the half
