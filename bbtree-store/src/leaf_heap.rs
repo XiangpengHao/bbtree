@@ -24,6 +24,11 @@
 //!   the records of leaves further and further off. One generation behind,
 //!   it shares a page with a neighbour's.
 //!
+//! - **A value too long for its record** goes into overflow pages
+//!   (`overflow.rs`), written before its leaf is held, which its record
+//!   links: a record that moves takes the link along, and one that dies
+//!   gives the pages back.
+//!
 //! Only a thread holding a leaf exclusively moves, changes or kills its
 //! records, and reads or changes its chain: a record's own leaf, that is,
 //! the leaf of the key that points to it, which may lie in another leaf's
@@ -31,7 +36,7 @@
 
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bbtree::{
     AllocError, Allocator, AnnexedLeaf, Configured, LeafAnnex, NodeConfig, WithInlineKey,
@@ -39,6 +44,7 @@ use bbtree::{
 };
 
 use crate::heap_page::HeapPage;
+use crate::overflow::Overflow;
 use crate::record::{Record, StoreKey};
 
 /// The strategy of a store's map: byte strings' inline keys, the node
@@ -191,6 +197,8 @@ pub(crate) struct RecordHeap<A, C> {
     alloc: A,
     /// How many orphans hold live records (`heap_page.rs`).
     orphans: AtomicUsize,
+    /// Whether a value took overflow pages since the store was made.
+    overflowed: AtomicBool,
     _config: PhantomData<fn() -> C>,
 }
 
@@ -199,17 +207,49 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
         Self {
             alloc,
             orphans: AtomicUsize::new(0),
+            overflowed: AtomicBool::new(false),
             _config: PhantomData,
         }
     }
 
-    /// Whether some orphan holds a live record, which only killing it frees.
-    pub(crate) fn has_orphans(&self) -> bool {
-        self.orphans.load(Ordering::Acquire) > 0
+    /// Whether dropping the store must kill its records, for pages outside
+    /// the chains to go back: orphans that hold live records, or overflow
+    /// pages, once any value took some.
+    pub(crate) fn kills_at_drop(&self) -> bool {
+        self.orphans.load(Ordering::Acquire) > 0 || self.overflowed.load(Ordering::Relaxed)
     }
 
-    /// Writes the record of `key` and `value` into `leaf`'s heap, for a key
-    /// of `leaf` to point to; or [`AllocError`] if a page it needs is not to
+    /// The overflow pages of the record of a key of `key_len` and `value`,
+    /// written, for [`Self::write`]: the value's bytes the record doesn't
+    /// keep; `None` if it keeps them all; or [`AllocError`] if a page is
+    /// not to be had.
+    pub(crate) fn write_overflow(
+        &self,
+        key_len: usize,
+        value: &[u8],
+    ) -> Result<Option<Overflow<C>>, AllocError> {
+        let kept = Record::<C>::kept_len(key_len, value.len());
+        if kept == value.len() {
+            return Ok(None);
+        }
+        let overflow = Overflow::write(&value[kept..], &self.alloc)?;
+        if !self.overflowed.load(Ordering::Relaxed) {
+            self.overflowed.store(true, Ordering::Relaxed);
+        }
+        Ok(Some(overflow))
+    }
+
+    /// Gives back the overflow pages of a record that never went in.
+    pub(crate) fn free_overflow(&self, overflow: Option<Overflow<C>>) {
+        if let Some(overflow) = overflow {
+            // SAFETY: no record links the pages, and no thread reads them.
+            unsafe { overflow.free(&self.alloc) };
+        }
+    }
+
+    /// Writes the record of `key` and `value`, whose overflow pages
+    /// [`Self::write_overflow`] wrote, into `leaf`'s heap, for a key of
+    /// `leaf` to point to; or [`AllocError`] if a page it needs is not to
     /// be had. The leaf's records may move first, for room, or to their own
     /// leaf (module documentation).
     pub(crate) fn write(
@@ -217,34 +257,36 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
         leaf: &mut StoreLeaf<'_, C>,
         key: &[u8],
         value: &[u8],
-    ) -> Result<Record, AllocError> {
+        overflow: Option<Overflow<C>>,
+    ) -> Result<Record<C>, AllocError> {
         self.pull_stale(leaf);
-        let at = self.room_for(leaf, Record::size_of(key.len(), value.len()))?;
+        let at = self.room_for(leaf, Record::<C>::size_of(key.len(), value.len()))?;
         let generation = leaf.annex().generation;
         // SAFETY: the room is the record's size, in a page of the leaf's,
         // apart from `key` and `value`, which the caller has.
-        Ok(unsafe { Record::write(at, key, value, generation) })
+        Ok(unsafe { Record::write(at, key, value, overflow, generation) })
     }
 
     /// Gives `stored`, a key of `leaf`, whose bytes are `key`, `value` in
-    /// place of its own: in its record if the new value is no longer, else
-    /// in a new record ([`Self::write`]).
+    /// place of its own: in its record if it keeps its value whole and the
+    /// new one is no longer, else in a new record ([`Self::write`]).
     pub(crate) fn overwrite(
         &self,
         leaf: &mut StoreLeaf<'_, C>,
         stored: &StoreKey,
         key: &[u8],
         value: &[u8],
+        overflow: Option<Overflow<C>>,
     ) -> Result<(), AllocError> {
-        let record = stored.record();
-        if value.len() <= record.value().len() {
+        let record = stored.record::<C>();
+        if record.overflow().is_none() && value.len() <= record.value().len() {
             let size = record.size();
             // SAFETY: the map holds the record's leaf exclusively.
             unsafe { record.overwrite_value(value) };
             self.kill_in(HeapPage::of_record(record.addr()), size - record.size());
             return Ok(());
         }
-        let new = self.write(leaf, key, value)?;
+        let new = self.write(leaf, key, value, overflow)?;
         // SAFETY: the new record has the key's bytes, and the map holds its
         // leaf exclusively.
         let old = unsafe { stored.replace(new) };
@@ -256,10 +298,10 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
     /// the leaf's chain, and the page, and the chain, are half holes once it
     /// dies, the leaf compacts, the record left as it is: the map reads the
     /// key until the removal returns, and the record dies only then
-    /// ([`Self::kill_removed`]). Its page counts it live meanwhile, so no
+    /// ([`Self::kill_record`]). Its page counts it live meanwhile, so no
     /// compaction slides over it or frees it.
     pub(crate) fn before_removal(&self, leaf: &mut StoreLeaf<'_, C>, removed: &StoreKey) {
-        let record = removed.record();
+        let record = removed.record::<C>();
         let (page, size) = (HeapPage::<C>::of_record(record.addr()), record.size());
         let annex = leaf.annex();
         if !annex.holds(page) || (page.live() - size) * 2 > page.used() {
@@ -275,20 +317,28 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
         }
     }
 
-    /// The record of a key whose removal returned dies: no key points to it,
-    /// and no thread reads it. Its page may be any leaf's then, or an orphan.
-    pub(crate) fn kill_removed(&self, record: Record) {
-        self.kill_in(HeapPage::of_record(record.addr()), record.size());
+    /// `record` dies, which no key the store reads again points to, and no
+    /// thread reads: of a key whose removal returned, or of a store that
+    /// drops. Its overflow pages go back, and its bytes die in its page,
+    /// which may be any leaf's then, or an orphan; whether that was an
+    /// orphan they emptied, which went back too.
+    pub(crate) fn kill_record(&self, record: Record<C>) -> bool {
+        let (page, size) = (HeapPage::of_record(record.addr()), record.size());
+        if let Some(overflow) = record.overflow() {
+            // SAFETY: the record dies, and no thread reads it (caller).
+            unsafe { overflow.free(&self.alloc) };
+        }
+        self.kill_in(page, size)
     }
 
-    /// `record`, of a key of `leaf` that points elsewhere now, dies. If it
-    /// lay in the leaf's own chain, the leaf compacts once half the page,
-    /// and half the chain, are holes.
-    fn kill(&self, leaf: &mut StoreLeaf<'_, C>, record: Record) {
+    /// `record`, of a key of `leaf` that points elsewhere now, dies
+    /// ([`Self::kill_record`]). If it lay in the leaf's own chain, the leaf
+    /// compacts once half the page, and half the chain, are holes.
+    fn kill(&self, leaf: &mut StoreLeaf<'_, C>, record: Record<C>) {
         let page = HeapPage::<C>::of_record(record.addr());
         // Before the kill: once it is done, another leaf's page may go.
         let own = leaf.annex().holds(page);
-        if self.kill_in(page, record.size()) || !own {
+        if self.kill_record(record) || !own {
             return;
         }
         if page.live() * 2 <= page.used() && leaf.annex().chain_use().is_half_holes() {
@@ -359,9 +409,9 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
             page = this.next();
         }
         // The leaf's records in its chain, by address: each page's together.
-        let mut own: Vec<(Record, &StoreKey)> = (leaf.keys())
+        let mut own: Vec<(Record<C>, &StoreKey)> = (leaf.keys())
             .filter(|&key| gone.is_none_or(|gone| !ptr::eq(key, gone)))
-            .map(|key| (key.record(), key))
+            .map(|key| (key.record::<C>(), key))
             .filter(|&(record, _)| chain.contains(&HeapPage::of_record(record.addr())))
             .collect();
         own.sort_unstable_by_key(|&(record, _)| record.addr());
@@ -406,7 +456,7 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
                 unsafe {
                     let at = to.records_start().add(used);
                     ptr::copy(record.addr().as_ptr(), at.as_ptr(), size);
-                    key.replace(Record::at(at));
+                    key.replace(Record::<C>::at(at));
                 }
                 from_page.move_live(to, size);
                 used += size;
@@ -431,7 +481,7 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
             }
         }
         for key in leaf.keys() {
-            let record = key.record();
+            let record = key.record::<C>();
             let elsewhere = !chain.contains(&HeapPage::of_record(record.addr()));
             if elsewhere && gone.is_none_or(|gone| !ptr::eq(key, gone)) && !self.pull(leaf, key) {
                 return;
@@ -466,7 +516,7 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
         for key in leaf.keys() {
             // The chain first, from the record's address: only a record
             // elsewhere is read.
-            let record = key.record();
+            let record = key.record::<C>();
             if leaf.annex().holds(HeapPage::of_record(record.addr()))
                 || generation.wrapping_sub(record.generation()) < 2
             {
@@ -483,7 +533,7 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
     /// page, into a page of `leaf`'s chain with room, or a new one; `false`
     /// if no page is to be had.
     fn pull(&self, leaf: &mut StoreLeaf<'_, C>, key: &StoreKey) -> bool {
-        let record = key.record();
+        let record = key.record::<C>();
         let size = record.size();
         let annex = leaf.annex();
         let at = match annex.room(size) {
@@ -497,14 +547,8 @@ impl<A: Allocator, C: NodeConfig> RecordHeap<A, C> {
         // SAFETY: the room is the record's size, in a page of the leaf's;
         // the map holds the key's leaf exclusively.
         unsafe { key.replace(record.copy_to(at, generation)) };
+        // Its bytes die where they were; its overflow pages are the copy's.
         self.kill_in(HeapPage::of_record(record.addr()), size);
         true
-    }
-
-    /// Kills every record of the map the store is dropping, so that the
-    /// orphans that hold some go back: the chains go with their leaves
-    /// ([`LeafHeap::release`]).
-    pub(crate) fn kill_at_drop(&self, record: Record) {
-        self.kill_in(HeapPage::of_record(record.addr()), record.size());
     }
 }

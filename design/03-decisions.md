@@ -1480,6 +1480,11 @@ Design in 16-bbtree-store.md.
   them.
 - **A removed record dies after the removal returns:** the map reads the
   removed key until then (a separator's, to refit prefixes).
+- **Values of any length, in overflow pages:** heap pages a record links,
+  all full, the record keeping what is left over if it fits (SQLite's
+  rule), so that no record outgrows a page's room and chains and
+  compaction stay as they are. A record moves without its pages, which go
+  when it dies. Keys stay capped at a quarter page.
 - **A spent budget refuses inserts** (`InsertError::Alloc`), the store
   holding what it held; what to free then is the cache's policy, not
   designed yet.

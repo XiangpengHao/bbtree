@@ -1,7 +1,7 @@
 //! A store's insert, get and scan times at one thread, inserts and gets at
 //! eight, and the bytes its pages take, by kind; then the heap's bytes
-//! under churn, as values change size and entries go and come back. One
-//! store at a time.
+//! under churn, as values change size and entries go and come back; then
+//! values too long for a record, in overflow pages. One store at a time.
 //!
 //! `cargo run --release -p bbtree-store --example bench -- [entries]`
 
@@ -189,6 +189,33 @@ fn threads(entries: u64) {
     println!("8 threads: insert {insert:.0} ns, get {get:.0} ns an entry, wall time");
 }
 
+/// A sixteenth as many entries, of 4,000-byte values: three overflow
+/// pages each, and 952 bytes in the record.
+fn long_values(entries: u64) {
+    const LEN: usize = 4_000;
+    let entries = entries / 16;
+    let counting: &'static Counting = Box::leak(Box::default());
+    let store = Store::new_in(counting);
+    let start = Instant::now();
+    for i in 0..entries {
+        store.insert(&key(i), &[i as u8; LEN]).expect("no budget");
+    }
+    let insert = ns_per(start, entries);
+    let mut buf = Vec::new();
+    let start = Instant::now();
+    for i in 0..entries {
+        buf.clear();
+        let key = key(i.wrapping_mul(7919) % entries);
+        assert_eq!(store.get_into(&key, &mut buf), Some(LEN));
+    }
+    let get = ns_per(start, entries);
+    let heap = counting.heap.load(Ordering::Relaxed) as f64 / (entries * LEN as u64) as f64;
+    println!(
+        "{entries} entries of {LEN}-byte values: insert {insert:.0} ns, get {get:.0} ns; \
+         heap {heap:.3} bytes a value byte"
+    );
+}
+
 fn main() {
     let entries: u64 = std::env::args()
         .nth(1)
@@ -200,4 +227,5 @@ fn main() {
     churn(&store, counting, entries);
     drop(store);
     threads(entries);
+    long_values(entries);
 }

@@ -102,6 +102,9 @@ unsafe impl Allocator for Counting {
     }
 }
 
+/// The default node config's heap page size, the leaves'.
+const PAGE: usize = 1024;
+
 /// The key numbered `n`: how many bytes `n` takes, then those bytes, then
 /// filler, from 2 to 35 bytes, some within an 8-byte inline key and some
 /// not. No two numbers share a key.
@@ -158,49 +161,122 @@ fn inserts_reads_replaces_and_removes() {
     assert_eq!(store.get(b"").as_deref(), Some(&b""[..]));
 }
 
+/// Keys longer than a quarter page are refused; values of any length go
+/// in, those too long for their record to fit in a page's room into
+/// overflow pages of their own, all full but for what is left over, which
+/// the record keeps if it fits, else a last page. Long values are replaced
+/// and removed, and the store drops holding some.
 #[test]
-fn refuses_keys_and_records_too_large() {
+fn refuses_long_keys_and_takes_values_of_any_length() {
     let store = BBTreeStore::new();
-    let (max_key, max_record) = (store.max_key_len(), store.max_record_size());
+    let max_key = store.max_key_len();
     assert_eq!(
         store.insert(&vec![1; max_key + 1], b""),
         Err(InsertError::KeyTooLong)
     );
-    // Nine bytes of lengths and generation.
-    let largest_value = max_record - 9 - max_key;
-    assert_eq!(
-        store.insert(&vec![1; max_key], &vec![2; largest_value]),
-        Ok(false)
-    );
-    assert_eq!(
-        store.insert(&vec![1; max_key], &vec![2; largest_value + 1]),
-        Err(InsertError::RecordTooLarge)
-    );
-    assert_eq!(
-        store.get(&vec![1; max_key]).map(|value| value.len()),
-        Some(largest_value)
-    );
+    // A page's room, 1,008 bytes, holds a record of nine bytes of lengths
+    // and generation, the key, and an 8-byte link before what the record
+    // keeps of a long value; an overflow page's, 1,016 bytes of the value.
+    let (room, overflow_room) = (PAGE - 16, PAGE - 8);
+    for (key_len, value_len, overflow_pages) in [
+        (20, 0, 0),
+        (20, room - 9 - 20, 0),
+        // Left over: all of it, which doesn't fit with the link.
+        (20, room - 9 - 20 + 1, 1),
+        (20, overflow_room, 1),
+        (20, overflow_room + room - 9 - 20 - 8, 1),
+        (20, overflow_room + room - 9 - 20 - 8 + 1, 2),
+        (20, 10 * overflow_room + 500, 10),
+        (max_key, room - 9 - max_key, 0),
+        (max_key, room - 9 - max_key + 1, 1),
+        (max_key, 3 * overflow_room + room - 9 - max_key - 8, 3),
+    ] {
+        let pages = Counting::default();
+        let store = BBTreeStore::new_in(&pages);
+        let (key, value) = (vec![1; key_len], value(key_len, value_len, value_len));
+        assert_eq!(store.insert(&key, &value), Ok(false));
+        assert_eq!(
+            pages.heap.load(Ordering::Relaxed),
+            1 + overflow_pages,
+            "a {key_len}-byte key's {value_len}-byte value"
+        );
+        assert_eq!(store.get(&key), Some(value.clone()));
+        let mut scanned = Vec::new();
+        store.scan::<[u8], ()>(.., |_, found| {
+            scanned.push(found.to_vec());
+            ControlFlow::Continue(())
+        });
+        assert_eq!(scanned, [value]);
+        drop(store);
+        assert_eq!(pages.out(), 0, "every page goes back");
+    }
+    let pages = Counting::default();
+    let store = BBTreeStore::new_in(&pages);
+    for n in 0..64 {
+        let len = [5_000, 10, 3 * PAGE][n % 3];
+        assert_eq!(store.insert(&key(n), &value(n, 0, len)), Ok(false));
+    }
+    for n in 0..64 {
+        let len = [10, 4 * PAGE, 0][n % 3];
+        assert_eq!(store.insert(&key(n), &value(n, 1, len)), Ok(true));
+        if n % 5 == 0 {
+            assert!(store.remove(&key(n)));
+        }
+    }
+    for n in 0..64 {
+        let len = [10, 4 * PAGE, 0][n % 3];
+        assert_eq!(store.get(&key(n)), (n % 5 != 0).then(|| value(n, 1, len)));
+    }
+    drop(store);
+    assert_eq!(pages.out(), 0, "every page goes back");
+}
+
+/// A long value whose overflow pages the allocator refuses partway goes
+/// in nowhere, with the pages it took given back, the store as it was.
+#[test]
+fn a_long_value_past_the_budget_takes_no_page() {
+    let pages = Counting::default();
+    let store = BBTreeStore::new_in(&pages);
+    store.insert(b"apple", b"red").expect("no limit");
+    store
+        .insert(b"banana", &value(0, 0, 2 * PAGE))
+        .expect("no limit");
+    let out = pages.out();
+    pages.limit.store(out + 3, Ordering::Relaxed);
+    for key in [&b"apple"[..], b"banana", b"cherry"] {
+        assert_eq!(
+            store.insert(key, &value(1, 1, 8 * PAGE)),
+            Err(InsertError::Alloc(AllocError))
+        );
+        assert_eq!(pages.out(), out);
+    }
+    assert_eq!(store.get(b"apple").as_deref(), Some(&b"red"[..]));
+    assert_eq!(store.get(b"banana"), Some(value(0, 0, 2 * PAGE)));
+    assert_eq!(store.get(b"cherry"), None);
+    drop(store);
+    assert_eq!(pages.out(), 0, "every page goes back");
 }
 
 /// Random inserts, replacements and removals, against std's `BTreeMap`,
-/// with values from empty to most of a heap page: leaves split, merge and
-/// compact, and their records move between leaves' chains.
+/// with values from empty to a few heap pages: leaves split, merge and
+/// compact, their records move between leaves' chains, and long values'
+/// overflow pages move with their records.
 #[test]
 fn matches_a_btree_map() {
     let pages = Counting::default();
     let store = BBTreeStore::new_in(&pages);
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let max_value = store.max_record_size() - 9 - 40;
     let steps = if cfg!(miri) { 2_000 } else { 60_000 };
     for step in 0..steps {
         let n = rng.below(3_000);
         let entry_key = key(n);
         match rng.below(10) {
             0..=5 => {
-                let len = match rng.below(8) {
-                    0 => rng.below(max_value + 1),
-                    1 => 0,
+                let len = match rng.below(16) {
+                    0 | 1 => rng.below(PAGE),
+                    2 => rng.below(4 * PAGE),
+                    3 => 0,
                     _ => rng.below(64),
                 };
                 let value = value(n, step, len);
@@ -329,7 +405,6 @@ fn a_spent_budget_refuses_inserts_and_changes_nothing() {
 fn holes_go_back_under_churn() {
     let pages = Counting::default();
     let store = BBTreeStore::new_in(&pages);
-    let page_size = store.max_record_size() + 16;
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     let mut rng = Rng(0x1234_5678_9ABC_DEF1);
     let entry_bytes = |model: &BTreeMap<Vec<u8>, Vec<u8>>| -> usize {
@@ -351,7 +426,7 @@ fn holes_go_back_under_churn() {
                 model.insert(entry_key, value);
             }
         }
-        let ratio = heap_per_entry_byte(&pages, page_size, entry_bytes(&model));
+        let ratio = heap_per_entry_byte(&pages, PAGE, entry_bytes(&model));
         assert!(
             ratio < 2.0,
             "round {round}: {ratio:.2} heap bytes a record byte"
@@ -364,9 +439,18 @@ fn holes_go_back_under_churn() {
     assert_eq!(pages.out(), 0, "every page goes back");
 }
 
+/// Threads insert, read and remove entries apart, some of whose values
+/// take overflow pages.
 #[test]
 fn threads_share_a_store() {
     let (threads, per_thread) = (4, 5_000);
+    let value_len = |n: usize| {
+        if n.is_multiple_of(16) {
+            PAGE + n % (3 * PAGE)
+        } else {
+            n % 200
+        }
+    };
     let store = Arc::new(BBTreeStore::new());
     let handles: Vec<_> = (0..threads)
         .map(|thread| {
@@ -374,7 +458,7 @@ fn threads_share_a_store() {
             thread::spawn(move || {
                 for i in 0..per_thread {
                     let n = i * threads + thread;
-                    let (key, value) = (key(n), value(n, 0, n % 200));
+                    let (key, value) = (key(n), value(n, 0, value_len(n)));
                     store.insert(&key, &value).expect("no limit");
                     assert_eq!(store.get(&key), Some(value));
                     if i % 3 == 0 {
@@ -389,6 +473,9 @@ fn threads_share_a_store() {
     }
     for n in 0..threads * per_thread {
         let present = (n / threads) % 3 != 0;
-        assert_eq!(store.get(&key(n)), present.then(|| value(n, 0, n % 200)));
+        assert_eq!(
+            store.get(&key(n)),
+            present.then(|| value(n, 0, value_len(n)))
+        );
     }
 }

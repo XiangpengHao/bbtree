@@ -70,9 +70,11 @@ pub trait NodeConfig {
     /// keep their keys: at least 64.
     const PLAIN_INTERNAL_PAGE_SIZE: usize = 1024;
 
-    /// The page size of a store's heap pages, which hold its leaves' records
-    /// (`design/16-bbtree-store.md`): the leaves' by default, at least 1024.
-    /// A record larger than a heap page is refused. Only a store reads it.
+    /// The page size of heap pages, which hold the bytes a map's leaves
+    /// point to: a store's records and its long values' overflow pages
+    /// (`design/16-bbtree-store.md`), and what a file map keeps after each
+    /// leaf (`design/15-index-file.md`). The leaves' by default, at least
+    /// 1024; a store's a power of two. Maps don't read it.
     const HEAP_PAGE_SIZE: usize = Self::LEAF_PAGE_SIZE;
 }
 

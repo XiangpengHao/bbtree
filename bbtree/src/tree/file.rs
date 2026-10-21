@@ -692,7 +692,14 @@ where
     /// The size of the heap pages of the map's node config
     /// (`NodeConfig::HEAP_PAGE_SIZE`), for bytes that follow the leaf.
     pub fn heap_page_size(&self) -> usize {
-        <<S as Sealed<K::InWriter>>::Config as NodeConfig>::HEAP_PAGE_SIZE
+        const {
+            let size = <<S as Sealed<K::InWriter>>::Config as NodeConfig>::HEAP_PAGE_SIZE;
+            assert!(
+                size >= 1024,
+                "a NodeConfig's HEAP_PAGE_SIZE is at least 1024"
+            );
+            size
+        }
     }
 }
 

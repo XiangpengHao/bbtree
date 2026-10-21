@@ -1,8 +1,8 @@
 # 16 — bbtree-store: keys and values of any length, in heap pages
 
-Status: milestone 1 built (2026-10-21): a map from byte strings to byte
-strings that threads share, whose every byte lies in pages from its
-allocator, so that a cache can stay within a memory budget.
+Status: built (2026-10-21): a map from byte strings to byte strings that
+threads share, whose every byte lies in pages from its allocator, so that
+a cache can stay within a memory budget.
 
 - **bbtree** gives a map's leaves an annex (D60): data of the caller's in
   each leaf, which the map keeps with its leaf as it splits, merges and
@@ -14,13 +14,13 @@ allocator, so that a cache can stay within a memory budget.
 - **bbtree-store** (`bbtree-store/`) is the rest: the store
   (`store.rs`), records and the keys that point to them (`record.rs`), heap
   pages (`heap_page.rs`), each leaf's chain of them, its annex
-  (`leaf_heap.rs`), and copied ranges (`range.rs`). A budget is the
-  caller's allocator, which refuses pages past it.
-- **Milestone 1** (built): each leaf's records in its chain of heap pages,
-  records of other leaves among them after splits; a record larger than a
-  heap page is refused; lookups, inserts, removals, scans and copied
-  ranges.
-- **Milestone 2:** overflow chains, for values larger than a heap page.
+  (`leaf_heap.rs`), long values' overflow pages (`overflow.rs`), and
+  copied ranges (`range.rs`). A budget is the caller's allocator, which
+  refuses pages past it.
+- **Built:** each leaf's records in its chain of heap pages, records of
+  other leaves among them after splits; values of any length, those too
+  long for a record in overflow pages; lookups, inserts, removals, scans
+  and copied ranges.
 
 ## Problem
 
@@ -47,7 +47,8 @@ bytes of any length.
 
 - **Store:** a `bbtree-store` map. Its keys and values are byte strings.
 - **Record:** one entry's key and value, with their lengths and a
-  generation, in a heap page.
+  generation, in a heap page; for a long value, a link to its overflow
+  pages and the value's start.
 - **Heap page:** a page of records, from the allocator's heap method.
 - **Chain:** a leaf's heap pages, its annex pointing to the newest, the
   head, each linked to the one before.
@@ -55,6 +56,8 @@ bytes of any length.
   lie in another leaf's chain: a stray.
 - **Hole:** the bytes of a record no key points to.
 - **Orphan:** a heap page no chain holds, where other leaves' records live.
+- **Overflow pages:** heap pages of a value too long for its record,
+  each linking the next, which only the record links.
 - **Compaction:** sliding a leaf's records together, in place, over the
   holes.
 - **Generation:** a leaf's count of splits, its own and the leaves' it
@@ -72,8 +75,10 @@ search and latches are the map's, its annex 16 bytes after its header.
 ### Keys and records
 
 ```text
-heap page | next | top | live | record | record | … | room |
-record    | key length | value length | generation | key | value |
+heap page     | next | top | live | record | record | … | room |
+record        | key length | value length | generation | key | value |
+long record   | key length | value length | generation | key | link | start |
+overflow page | next | value bytes … |
 ```
 
 - **A key (`StoreKey`) is an atomic pointer to its record.** It orders,
@@ -87,6 +92,9 @@ record    | key length | value length | generation | key | value |
 - **A record** is both lengths, `u32`s, then its generation, a byte, then
   the key and the value, unaligned. A hit reads the leaf, then the record,
   whose first line holds the key and, for short keys, the value's start.
+  A value too long for its record to fit in a page's room goes into
+  overflow pages ("Longer than a heap page"); the lengths tell which a
+  record is.
 - **A heap page** is aligned to its size (`HEAP_PAGE_SIZE`, a node config
   constant, D59, the leaves' by default), so a record's page is its
   address rounded down. Its header holds `next`, the chain's link, and
@@ -113,7 +121,8 @@ record    | key length | value length | generation | key | value |
   that compacts takes all its strays in.
 - **Dropping the store** frees the chains with their leaves
   (`LeafAnnex::release`), and kills every record first while orphans are
-  out, which free themselves as they empty.
+  out, which free themselves as they empty, or once any value took
+  overflow pages, which go as their records die.
 
 ### Holes
 
@@ -143,7 +152,7 @@ record    | key length | value length | generation | key | value |
   record's page counts it live meanwhile, so no compaction slides over it
   or frees it.
 
-### Larger than a heap page
+### Longer than a heap page
 
 - **Keys are capped** at a quarter of a heap page: a key's bytes must lie
   together, as inline keys are windows at any offset (D26) and ties
@@ -163,13 +172,30 @@ record    | key length | value length | generation | key | value |
   | Bigtable | 4 KiB (Cloud Bigtable); 64 KB in the paper |
   | memcached | 250 B |
 
-- **A record larger than a heap page is refused,** until milestone 2:
-  overflow chains, pages of the heap page's size each holding the next
-  page, then value bytes, the record keeping the key, the value's length,
-  the part that doesn't fill a whole page (SQLite's rule) and the chain's
-  ends. A chain, not a list of pages: a list that outgrows its record
-  needs an indirect page, a chain has no limit but the budget, and a store
-  reads and writes values whole.
+- **A value too long for its record goes into overflow pages:** heap
+  pages of its own, each linking the next, then holding value bytes, all
+  full. The record keeps the key, the value's length, a link to the first
+  page, and the value's start, what is left over once the pages are full,
+  if it fits in a page's room; else none of the value, and a last page
+  holds what is left (SQLite's rule, `Record::kept_len`). So no record
+  outgrows a page's room: chains, compaction and strays work as for
+  short values, and a long value wastes at most a page's room less the
+  record. At 1 KiB pages and 20-byte keys, a 4,000-byte value takes three
+  full pages and keeps 952 bytes in its record.
+- **The pages are the record's.** A record that moves, as a stray comes
+  home or a leaf compacts, carries its link and leaves its pages where
+  they are; a record that dies, removed, replaced or dropped with the
+  store, gives them back. They lie in no chain: compaction and the live
+  counts see only the record.
+- **An insert writes them before it holds the leaf,** copying the value
+  and taking the pages with no latch, and gives them back if the insert
+  then fails. A value replaces one in place only if neither has overflow
+  pages.
+- **A chain, not a list of pages:** a list that outgrows its record needs
+  an indirect page, a chain has no limit but the budget and the value's
+  `u32` length, and a store reads and writes values whole. Each page is a
+  dependent read: a 4,000-byte value's get takes about twice a short
+  one's ("Measurements").
 
 ### When the allocator refuses
 
@@ -193,14 +219,17 @@ finding cold records, is the cache's policy, above the store.
 - **No page goes while a record lives in it,** so no record goes while a
   thread reads it: a chain's page goes by its leaf, once none of its
   records live; an orphan by the thread that empties it.
+- **Overflow pages are read as their record is,** holding its leaf, and
+  go only as it dies, by a thread holding its leaf exclusively, or once
+  its key's removal returned, when no thread can reach it.
 
 ### API
 
 ```rust
 impl<A: Allocator + Clone, C: NodeConfig> BBTreeStore<A, C> {
     fn with_config_in(config: C, alloc: A) -> Self;
-    fn max_key_len(&self) -> usize;      // a quarter of a heap page
-    fn max_record_size(&self) -> usize;  // a heap page, less its header
+    fn max_key_len(&self) -> usize;    // a quarter of a heap page
+    fn max_value_len(&self) -> usize;  // u32::MAX
     /// Appends the value to `buf`, as `Read::read_to_end` does; returns its length.
     fn get_into(&self, key: &[u8], buf: &mut Vec<u8>) -> Option<usize>;
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
@@ -218,11 +247,13 @@ impl<A: Allocator + Clone, C: NodeConfig> BBTreeStore<A, C> {
 - **Values are copied out,** appended to the caller's `Vec`: there is no
   `&V`, as compaction moves records. The value's length is known only once
   its record is read, so the buffer grows within the one read.
-- **Inserts take `&[u8]`, and copy it once,** into the record. They return
-  whether a value was replaced, and fail on a key over the cap, a record
-  over a heap page, or the allocator's refusal (`InsertError`).
+- **Inserts take `&[u8]`, and copy it once,** into the record and its
+  overflow pages. They return whether a value was replaced, and fail on a
+  key over the cap, a value over `u32::MAX` bytes, or the allocator's
+  refusal (`InsertError`).
 - **Ranges:** `scan` and `scan_rev` run a closure on each entry's bytes
-  under its leaf's shared latch; `range` hands out copies, key and value,
+  under its leaf's shared latch, a value with overflow pages copied into
+  a buffer the scan keeps first, so that the closure sees it in one piece; `range` hands out copies, key and value,
   from either end, sixteen at a time, by scans that start past what each
   end handed out last, holding no latch between them.
 
@@ -265,7 +296,7 @@ machine code.
 order is unrelated to key order, mimalloc, 1 KiB leaves and heap pages
 (`bbtree-store/examples/bench.rs`, 2026-10-21), against the designs this
 one replaced: a store with every record in its own leaf's chain, records
-moved at every split (the first milestone 1), and a store on the map whose
+moved at every split (the first design), and a store on the map whose
 records went into size classes shared by all leaves (a prototype).
 
 | | this store | records in own leaf | size classes |
@@ -281,6 +312,14 @@ records went into size classes shared by all leaves (a prototype).
   quarter of the entries removed and put back, the heap holds 1.54 bytes a
   live record byte once steady, 1.85 when a leaf compacted only at half
   holes.
+- **Long values,** 625,000 of 4,000 bytes with 20-byte keys: a get takes
+  629 ns, about twice a short value's, three dependent overflow pages
+  after the record; the heap holds 1.029 bytes a value byte. An insert
+  takes 3.9 µs with memory free, up to 5.5 while the kernel reclaims page
+  cache for its 4 KiB of fresh memory. Overflow pages cost short values nothing: 420 ns an insert,
+  339 a get, 16.0 ns an entry scanned and 694 under churn, against 428,
+  343, 17.5 and 697 before them (2026-10-21, a control run of the old
+  build first, as the slow mode of 10M gets follows a release build).
 - **Strays two generations behind coming home** cost, at 5M inserts, 38 ns
   an insert (394 against 356) and a quarter more heap pages (0.095 a
   record against 0.075, as moved records leave holes), for scans 11%
@@ -295,3 +334,7 @@ records went into size classes shared by all leaves (a prototype).
   taken, half on a removal; and whether strays should come home two
   generations on, or only as their leaf compacts.
 - **The budget's policy** ("When the allocator refuses").
+- **Long values' reads:** a chain makes each overflow page a dependent
+  read, and a scan copies each long value whole before its closure sees
+  it, read or not; a record listing its pages, up to some count, would
+  let a get read them at once.
