@@ -448,8 +448,8 @@ pub struct FileMap<'a, K, V, S = Auto> {
 impl<'a, K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileMap<'a, K, V, S> {
     /// What a file map's first byte must be aligned to, for this map's key
     /// and value types and strategy: the largest alignment of its pages,
-    /// 1 KiB or more, and at most 4 KiB for keys and values aligned to no
-    /// more than that.
+    /// 1 KiB or more. With the default [`NodeConfig`](crate::NodeConfig), it
+    /// is at most 4 KiB for keys and values aligned to no more than that.
     #[must_use]
     pub fn alignment() -> usize {
         FileFormat::<K, V, S>::alignment()

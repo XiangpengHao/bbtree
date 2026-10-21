@@ -1,15 +1,16 @@
-//! The post's "How it works" (design/14-blogpost.md): three principles, in
-//! order: minimize cache misses, then instructions, then cache coherence
-//! traffic; and how bbtree is kept correct. Its figures are SVG files
-//! (`vis/figures/` writes them into `assets/figures/`), each embedded as an
-//! image, so that the same files can go into any other page; each plays
-//! its own CSS animation, which starts as its image loads near the reader.
-//! The footnotes the section cites close the post.
+//! The post's "How it works" (design/14-blogpost.md): the cost model's
+//! three principles, in order, then the principles as tabs: minimize cache
+//! misses, then instructions, then cache coherence traffic. Its figures are SVG files (`vis/figures/` writes them into
+//! `assets/figures/`), each embedded as an image, so that the same files
+//! can go into any other page; each plays its own CSS animation, which
+//! starts as its image loads near the reader. The footnotes the post cites
+//! close it.
 
 use dioxus::prelude::*;
 
 use crate::icons::{Icon, IconGlyph};
 use crate::outline::{PostHeading, SectionHeading};
+use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
 use crate::rust_code::RustCode;
 use crate::theme::PostTheme;
@@ -81,56 +82,42 @@ const CHILD_INDEX: &str = r"fn child_index(inline_keys: &[u16; 32], target: u16)
 
 #[component]
 pub(crate) fn HowItWorks() -> Element {
+    let tabs = PartTabs::use_new(PostHeading::HowItWorks);
     rsx! {
         SectionHeading { heading: PostHeading::HowItWorks }
-        ThreePrinciples {}
-        MinimizeCacheMisses {}
-        MinimizeInstructions {}
-        MinimizeCoherenceTraffic {}
-        HowWeMakeItCorrect {}
-        Reviewers {}
-    }
-}
-
-#[component]
-fn Reviewers() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Reviewers }
-        p {
-            "TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here."
-        }
-    }
-}
-
-#[component]
-fn ThreePrinciples() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Principles }
         p { "Every performance optimization should be guided by a cost model." }
         p {
-            "B-tree optimizations are simple: we just need to remember three principles, in order: 1. the number of "
-            strong { "chained cache lines" }
-            " touched, 2. the number of "
-            strong { "instructions" }
-            " executed, 3. the amount of "
-            strong { "cache coherence traffic" }
-            " (especially important for concurrent access)."
+            "B-tree optimizations are simple, three easy pieces"
+            NoteRef { note: Note::Ostp }
+            ": we just need to remember three principles, in order:"
         }
-        p { "Before anything, let's remember these:" }
         ol {
-            li { "A cache miss costs about 100 ns." }
-            li { "An instruction costs about 0.5 ns." }
             li {
-                "Cache coherence traffic forces a cache miss, and costs a little more than 100 ns. But it only happens with concurrent access."
+                "The number of "
+                strong { "chained cache lines" }
+                " touched. A cache miss costs about 100 ns."
+            }
+            li {
+                "The number of "
+                strong { "instructions" }
+                " executed. An instruction costs about 0.5 ns."
+            }
+            li {
+                "The amount of "
+                strong { "cache coherence traffic" }
+                ", especially important for concurrent access. It forces a cache miss, and costs a little more than 100 ns."
             }
         }
+        PartTabList { tabs }
+        SectionPanel { tabs, section: PostHeading::CacheMisses, MinimizeCacheMisses {} }
+        SectionPanel { tabs, section: PostHeading::Instructions, MinimizeInstructions {} }
+        SectionPanel { tabs, section: PostHeading::Coherence, MinimizeCoherenceTraffic {} }
     }
 }
 
 #[component]
 fn MinimizeCacheMisses() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::CacheMisses }
         p {
             "With this cost model, it's clear that the most important optimization is to minimize the number of cache misses. To put it another way, for each cache miss, we want to narrow down the search space as much as we can."
         }
@@ -403,7 +390,6 @@ fn MinimizeCacheMisses() -> Element {
 #[component]
 fn MinimizeInstructions() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::Instructions }
         p {
             "In general, minimizing instructions means reducing CPU time, which means two things: 1. reducing the instruction count; 2. reducing branches."
         }
@@ -503,7 +489,6 @@ fn MinimizeInstructions() -> Element {
 #[component]
 fn MinimizeCoherenceTraffic() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::Coherence }
         p {
             "Cache coherence traffic happens when one core writes to a cache line that other cores hold. To make sure every core sees a consistent view of memory, CPU caches implement a cache coherence protocol"
             NoteRef { note: Note::Primer }
@@ -611,66 +596,6 @@ fn MinimizeCoherenceTraffic() -> Element {
             ", a "
             em { "hashtable" }
             "."
-        }
-    }
-}
-
-#[component]
-fn HowWeMakeItCorrect() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Correctness }
-        p {
-            "Performance optimization is easy: you simply ask Claude or Codex to make the code 10× faster on a workload. Speed is measurable, and LLMs can iterate on it relentlessly."
-        }
-        p {
-            "But making sure the code is correct is hard. Correctness is implicit: you can never list every DON'T in the prompt, you can never write enough tests to prove the code correct, and you can never enumerate every property you want to hold."
-        }
-        p {
-            Bbtree {}
-            " has three guards to approach correctness."
-        }
-        SectionHeading { heading: PostHeading::GuardHuman }
-        p {
-            "Xiangpeng is a real human behind "
-            Bbtree {}
-            ", and the front line guarding the correctness of its code. All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code."
-        }
-        p {
-            "He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree"
-            NoteRef { note: Note::BfTree }
-            "). Choosing "
-            Bbtree {}
-            " means offloading the attention to Xiangpeng."
-        }
-        SectionHeading { heading: PostHeading::GuardLlms }
-        p {
-            "No human can write better code than LLMs. All of the implementation is written by LLMs, and cross-checked by LLMs from different providers."
-        }
-        SectionHeading { heading: PostHeading::GuardTesting }
-        p { "Conventional approaches still apply here:" }
-        ol {
-            li {
-                strong { "Fuzzing" }
-                " runs random operations on "
-                Bbtree {}
-                " and std's "
-                code { "BTreeMap" }
-                " side by side, checks that every answer matches, and checks the whole tree's invariants after every operation."
-            }
-            li {
-                strong { "Verification" }
-                " with Verus"
-                NoteRef { note: Note::Verus }
-                " proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves."
-            }
-            li {
-                strong { "DSTs" }
-                " (deterministic simulation testing) with Shuttle"
-                NoteRef { note: Note::Shuttle }
-                " and ffs"
-                NoteRef { note: Note::Ffs }
-                " test concurrent behavior in a deterministic and principled way."
-            }
         }
     }
 }

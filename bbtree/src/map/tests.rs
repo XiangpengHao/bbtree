@@ -12,10 +12,11 @@ use std::vec::Vec;
 
 use super::{BBTreeMap, RangeCloned};
 use crate::allocator::{Global, InsertError};
-use crate::inline_key::Auto;
+use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::node_config::Configured;
 use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
-use crate::tree::test_support::{HashTagCase, TestRng};
+use crate::tree::test_support::{HashTagCase, LargePages, SmallInternalPages, TestRng};
 
 /// Inserts `keys` in order, each with its position as its value, into a
 /// `BBTreeMap` and a `BTreeMap`, and checks that they agree on every
@@ -198,14 +199,12 @@ fn byte_arrays_match_std() {
 /// inserted, the removals in another order, against a `BTreeMap`; checks
 /// every answer, every key's value, and the tree, every `check_every`
 /// operations; then removes the rest, and inserts all again.
-fn assert_removals_match_std<K: Ord + Clone + core::fmt::Debug>(
-    keys: &[K],
-    lag: usize,
-    check_every: usize,
-) where
-    BBTreeMap<K, usize>: Default,
+fn assert_removals_match_std<K, S>(keys: &[K], lag: usize, check_every: usize)
+where
+    K: Ord + Clone + core::fmt::Debug,
+    S: InlineKeyStrategy<K> + Default,
 {
-    let mut map = BBTreeMap::<K, usize>::default();
+    let mut map = BBTreeMap::<K, usize, S>::with_strategy(S::default());
     let mut std_map = BTreeMap::new();
     let rng = TestRng::new(97);
     let mut order: Vec<usize> = (0..keys.len()).collect();
@@ -250,9 +249,9 @@ fn assert_removals_match_std<K: Ord + Clone + core::fmt::Debug>(
 fn integer_removals_match_std() {
     let rng = TestRng::new(98);
     let keys = random_numbers(&rng, 30_000, 1 << 40);
-    assert_removals_match_std(&keys, 10_000, 997);
+    assert_removals_match_std::<_, Auto>(&keys, 10_000, 997);
     let ascending: Vec<u64> = (0..20_000).collect();
-    assert_removals_match_std(&ascending, 15_000, 991);
+    assert_removals_match_std::<_, Auto>(&ascending, 15_000, 991);
 }
 
 #[test]
@@ -263,7 +262,7 @@ fn string_and_array_removals_match_std() {
         .into_iter()
         .map(path)
         .collect();
-    assert_removals_match_std(&keys, 4_000, 499);
+    assert_removals_match_std::<_, Auto>(&keys, 4_000, 499);
     let array = |number: u64| {
         let mut key = [0_u8; 32];
         key[24..].copy_from_slice(&number.to_be_bytes());
@@ -273,7 +272,18 @@ fn string_and_array_removals_match_std() {
         .into_iter()
         .map(array)
         .collect();
-    assert_removals_match_std(&keys, 4_000, 499);
+    assert_removals_match_std::<_, Auto>(&keys, 4_000, 499);
+}
+
+/// A map whose node config (D59) sets other page sizes matches std through
+/// removals that merge nodes onto the free lists, and inserts that take
+/// their pages back.
+#[test]
+fn configured_page_sizes_match_std() {
+    let rng = TestRng::new(102);
+    let keys = random_numbers(&rng, 30_000, 1 << 40);
+    assert_removals_match_std::<_, Configured<Auto, SmallInternalPages>>(&keys, 10_000, 997);
+    assert_removals_match_std::<_, Configured<Auto, LargePages>>(&keys, 10_000, 997);
 }
 
 /// Pages that removals empty serve later splits: filling the map a second

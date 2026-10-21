@@ -43,6 +43,7 @@ pub(crate) struct Latched<S>(PhantomData<fn() -> S>);
 
 impl<K, S: InlineKeyStrategy<K>> Sealed<K> for Latched<S> {
     const SOURCE: InlineKeySource<K> = S::SOURCE;
+    type Config = S::Config;
     const LATCHED: bool = true;
 }
 

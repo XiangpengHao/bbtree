@@ -50,6 +50,7 @@ pub(crate) struct InFile<S>(PhantomData<fn() -> S>);
 
 impl<K, S: InlineKeyStrategy<K>> Sealed<K> for InFile<S> {
     const SOURCE: InlineKeySource<K> = S::SOURCE;
+    type Config = S::Config;
     const IN_FILE: bool = true;
 }
 

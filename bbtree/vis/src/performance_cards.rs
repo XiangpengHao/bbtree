@@ -15,6 +15,7 @@ use crate::measurements::Measurements;
 use crate::memory_chart::MemoryChart;
 use crate::single_thread_chart::SingleThreadChart;
 use crate::spotlight::Spotlight;
+use crate::tab_list::{Tab, TabList};
 
 /// One of the cards.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,6 +54,14 @@ impl PerformanceCard {
             Self::Memory => "memory",
             Self::Architectures => "architectures",
         }
+    }
+
+    fn tab_id(self, ids: ElementIds) -> String {
+        ids.id(&format!("tab-{}", self.slug()))
+    }
+
+    fn panel_id(self, ids: ElementIds) -> String {
+        ids.id(&format!("card-{}", self.slug()))
     }
 }
 
@@ -94,40 +103,21 @@ pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotli
                     seen.set(true);
                 });
             },
-            div { class: "card-tabs", role: "tablist", "aria-label": "Performance",
-                for card in PerformanceCard::ALL {
-                    button {
-                        id: ids.id(&format!("tab-{}", card.slug())),
-                        class: "card-tab",
-                        role: "tab",
-                        "aria-selected": if shown() == card { "true" } else { "false" },
-                        "aria-controls": ids.id(&format!("card-{}", card.slug())),
-                        tabindex: if shown() == card { "0" } else { "-1" },
-                        onclick: move |_| pick(card),
-                        onkeydown: move |evt| {
-                            let delta = match evt.key() {
-                                Key::ArrowRight => 1,
-                                Key::ArrowLeft => PerformanceCard::ALL.len() - 1,
-                                _ => return,
-                            };
-                            evt.prevent_default();
-                            let index = PerformanceCard::ALL.iter().position(|other| *other == card).unwrap_or(0);
-                            let next = PerformanceCard::ALL[(index + delta) % PerformanceCard::ALL.len()];
-                            pick(next);
-                            document::eval(&format!(
-                                "document.getElementById('{}')?.focus()",
-                                ids.id(&format!("tab-{}", next.slug()))
-                            ));
-                        },
-                        {card.label()}
-                    }
-                }
+            TabList {
+                name: "Performance",
+                class: "card-tabs",
+                tab_class: "card-tab",
+                tabs: PerformanceCard::ALL
+                    .map(|card| Tab::new(card.tab_id(ids), card.panel_id(ids), rsx! { {card.label()} }))
+                    .to_vec(),
+                shown: PerformanceCard::ALL.iter().position(|card| *card == shown()).unwrap_or(0),
+                onpick: move |index: usize| pick(PerformanceCard::ALL[index]),
             }
             div {
-                id: ids.id(&format!("card-{}", shown().slug())),
+                id: shown().panel_id(ids),
                 class: "card-body",
                 role: "tabpanel",
-                "aria-labelledby": ids.id(&format!("tab-{}", shown().slug())),
+                "aria-labelledby": shown().tab_id(ids),
                 match shown() {
                     PerformanceCard::SingleThread => rsx! {
                         SingleThreadChart { measurements: measurements.clone(), spotlight }

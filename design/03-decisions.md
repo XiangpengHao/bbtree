@@ -142,14 +142,15 @@ share, with no fence stored (D18, D26).
   time (`tree/node/layout.rs`).
 
 **D13. Every node holds at least 12 keys.** (2026-10-07)
-A node kind's size is the smallest multiple of 1 KB (D15) at which it holds
-≥ 12 keys, with a leaf's values and head or an internal node's edges (D21).
-A type aligned to more than 1 KB raises the node's alignment, and its size
-step, to its own.
+A node kind's size is the smallest multiple of its page size, by default
+1 KB (D15, D59), at which it holds ≥ 12 keys, with a leaf's values and head
+or an internal node's edges (D21). A type aligned to more than the page
+size raises the node's alignment, and its size step, to its own.
 
-**D15. Nodes are 1 KB, aligned to their own size.** (2026-10-07)
-A node is the smallest multiple of 1 KB at which it holds ≥ 12 keys (D13),
-and it is aligned to max(1 KB, align of K, align of its trailing slots).
+**D15. Nodes are 1 KB by default, aligned to their own size.** (2026-10-07)
+A node is the smallest multiple of its page size, by default 1 KB (D59), at
+which it holds ≥ 12 keys (D13), and it is aligned to max(page size, align
+of K, align of its trailing slots).
 
 - Why: a sweep at 10M u64→u64 entries (mimalloc, branchless search, append
   fast path) put 1 KB ahead of every other size, and ahead of std on all three
@@ -170,8 +171,8 @@ and it is aligned to max(1 KB, align of K, align of its trailing slots).
 - A self-aligned 1 KB node never crosses a 4 KB page: one TLB entry per
   node, and hardware prefetchers, which stop at page boundaries, can stream
   the whole node.
-- 1 KB alignment leaves 10 free low address bits, so node capacity is capped
-  at 1023.
+- Node capacity is capped at 1023, the 10 free low address bits of 1 KB
+  alignment, which also bounds a search's scan.
 - A leaf holds 12 entries in 1 KB while `K + V` ≤ ~76 B; larger entries get
   2 KB, 3 KB, … leaves (D21). u64→u64 without inline keys: leaf 63,
   internal 63.
@@ -181,6 +182,38 @@ and it is aligned to max(1 KB, align of K, align of its trailing slots).
   keys, as many as 1 KiB held with keys or more, and a search scans every
   inline key slot (06, lesson 1). In 1 KiB they held 100, 84 and 63, and
   10M `hash32` hits ran 232 ns against 160.
+
+**D59. Node configs: what a map tunes about its nodes is defaulted constants of one trait, which its strategy carries.** (2026-10-20)
+
+- **What:** `NodeConfig` has `LEAF_PAGE_SIZE` (1024),
+  `INTERNAL_PAGE_SIZE` (512, internal nodes with inline keys, D49) and
+  `PLAIN_INTERNAL_PAGE_SIZE` (1024, internal nodes that keep their keys,
+  D17), each with its default. `Sealed` has `type Config: NodeConfig`:
+  `Auto` and `WithInlineKey` take the defaults, `Configured<S, C>` is
+  `S`'s inline keys with config `C`, and `Latched<S>` and `InFile<S>`
+  forward `S::Config`. `NodeLayout<K, V, C>` reads the page sizes;
+  nothing else reads the config.
+- **Why one trait:** a public wrapper per knob (`PageSizes<S, L, I>`) makes
+  every knob a new type to nest, and every wrapper forward every other
+  knob, where a missed forward silently resets one to its default. One
+  associated type forwards every knob at once. A new knob is one more
+  defaulted constant, and configs written before keep compiling.
+- **Why not const generics on `Auto`:** defaults don't drive inference, so
+  `with_strategy(Auto)` stops compiling (E0284).
+- **Bounds, checked at compile time:** page sizes are powers of two;
+  leaves at least 1 KiB, which keeps `MAX_DEPTH` at 23 (smaller leaves
+  raise it, and with it arrays that insert, remove and the latched page
+  pool zero on every call); internal pages at least 64 B. A node's inline
+  keys take at most max(1 KiB, page size) bytes, the 1 KiB cap of before
+  at the default sizes. A `BBTreeMap`'s leaf pages are larger than its
+  internal pages (`LatchedTree::pages`): `NodePages` tells a freed page's
+  kind by its layout, and the larger leaf alignment keeps the layouts
+  apart.
+- **Zero cost:** every default layout is unchanged. Get, insert and
+  remove on default unsync (`u64`, `String`, keys without inline keys)
+  and concurrent maps compile to the same machine code as before.
+- **File maps:** the fingerprint covers page sizes and alignments, so a
+  file map read with other sizes is refused, `LayoutMismatch`.
 
 **D16. Leaves and internal nodes stay sorted.** (2026-10-07)
 Unsorted leaf storage, fully unsorted or as a sorted prefix plus an unsorted

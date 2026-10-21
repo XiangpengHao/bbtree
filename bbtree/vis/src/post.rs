@@ -1,15 +1,18 @@
 //! The post (design/14-blogpost.md, whose text it shows): what bbtree is, how
 //! fast, on one thread, on many, and in real systems
-//! (`performance_cards.rs`), what it can do (`use_cases.rs`), and how it
-//! works (`how_it_works.rs`), with the works it cites.
+//! (`performance_cards.rs`), what it can do (`use_cases.rs`), how it works
+//! (`how_it_works.rs`), and how it is kept correct (`correctness.rs`), each
+//! part an overview over its sections as tabs (`part_tabs.rs`), with the
+//! works it cites.
 
 use std::rc::Rc;
 
 use dioxus::prelude::*;
 
+use crate::correctness::HowWeMakeItCorrect;
 use crate::how_it_works::{HowItWorks, Note, NoteRef, Notes};
 use crate::measurements::Measurements;
-use crate::outline::PostOutline;
+use crate::outline::{PostHeading, PostOutline, SectionHeading};
 use crate::performance_cards::PerformanceCards;
 use crate::site::{AUTHOR_PAGE, Credit, SiteHeader, SitePage};
 use crate::spotlight::{HintLayer, PointerHint, Spotlight};
@@ -32,6 +35,29 @@ pub(crate) fn Post() -> Element {
     let charts = Spotlight::use_new(hint);
     let measurements = use_hook(|| Rc::new(Measurements::of_ryzen_9900x()));
     let theme = PostTheme::use_new();
+    use_hook(|| {
+        // The heading the address names in view, as the page loads and as
+        // the address changes: once drawn, as the tab that holds it may
+        // open first (`part_tabs.rs`). The browser can't, as the page
+        // draws after it loads.
+        document::eval(
+            r#"
+            const follow = () => {
+                const id = decodeURIComponent(location.hash.slice(1));
+                if (!id) return;
+                let frames = 10;
+                const bring = () => {
+                    const target = document.getElementById(id);
+                    if (target) target.scrollIntoView();
+                    else if (frames-- > 0) requestAnimationFrame(bring);
+                };
+                requestAnimationFrame(bring);
+            };
+            addEventListener('hashchange', follow);
+            follow();
+            "#,
+        );
+    });
     rsx! {
         document::Title { "bbtree: fastest ordered map" }
         div { class: "post-page",
@@ -105,12 +131,24 @@ pub(crate) fn Post() -> Element {
                     PostOutline {}
                     UseCases {}
                     HowItWorks {}
+                    HowWeMakeItCorrect {}
+                    Reviewers {}
                     Notes {}
                 }
             }
             }
             Credit {}
             HintLayer { hint }
+        }
+    }
+}
+
+#[component]
+fn Reviewers() -> Element {
+    rsx! {
+        SectionHeading { heading: PostHeading::Reviewers }
+        p {
+            "TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here."
         }
     }
 }

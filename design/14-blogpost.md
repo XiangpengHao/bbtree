@@ -3,14 +3,21 @@ The blog post that goes with the visualization.
 ## Blog content
 
 The post's text as the site shows it (`vis/src/post.rs`,
-`vis/src/how_it_works.rs`; its headings and their ids in
+`vis/src/use_cases.rs`, `vis/src/how_it_works.rs`,
+`vis/src/correctness.rs`; its headings and their ids in
 `vis/src/outline.rs`). Bracketed lines mark where a figure or the charts
 sit; each figure names its SVG file and its caption, as the site shows
 them. Keep this text and the site in step: a change to one is a change to
 the other. On the site, the citations sit beside
 their lines in the right margin and the outline in the left, as on the
-author's blog (Quarto's `reference-location: margin`); the three principles
-are numbered, since the post ranks them; and the post has a dark theme. The figures are SVG files that
+author's blog (Quarto's `reference-location: margin`); each part (`##`)
+opens with an overview, and its sections (`###`) are tabs under it, one
+open at a time, so that an impatient reader gets the part from its
+overview and opens only the section they want (`vis/src/part_tabs.rs`):
+the first is open until the reader picks another, a pick names its
+section in the address, a link to any heading in a section opens it, and
+an open section ends with a link to the next; the three principles are
+numbered, since the post ranks them; and the post has a dark theme. The figures are SVG files that
 `vis/figures/` writes into `vis/assets/figures/` (`cargo run --release
 --manifest-path vis/figures/Cargo.toml`), so that the same files go into
 any other page, such as a Quarto copy of the post: each plays its own CSS
@@ -36,6 +43,10 @@ site loads it lazily, so it starts as the reader nears it.
 ## What it can do? 
 
 B-trees are the most important data structure in big data systems, a fast b-tree like `bbtree` benefits everything on top of it: agents memory, LLM training, RAG, KV store, state caching, vector search, and more. 
+
+Here we discuss two representative use cases:
+1. **Replace skiplist in LSM-trees.** In place of the skiplist of five systems, `bbtree` is 1.16–6.83× faster.
+2. **External index for Parquet files.** Embedded at the end of an existing Parquet file, with `bbtree` it runs 1.7–263× faster.
 
 ### Case 1: replace skiplist in LSM-trees
 
@@ -89,16 +100,12 @@ On ClickBench's `hits.parquet`[^clickbench] (100M rows, 14.8 GB), with an index 
 
 ## How it works?
 
-### Three easy pieces [^ostp]
-
 Every performance optimization should be guided by a cost model.
 
-B-tree optimizations are simple: we just need to remember three principles, in order: 1. the number of **chained cache lines** touched, 2. the number of **instructions** executed, 3. the amount of **cache coherence traffic** (especially important for concurrent access).
-
-Before anything, let's remember these:
-1. A cache miss costs about 100 ns.
-2. An instruction costs about 0.5 ns.
-3. Cache coherence traffic forces a cache miss, and costs a little more than 100 ns. But it only happens with concurrent access.
+B-tree optimizations are simple, three easy pieces[^ostp]: we just need to remember three principles, in order:
+1. The number of **chained cache lines** touched. A cache miss costs about 100 ns. 
+2. The number of **instructions** executed. An instruction costs about 0.5 ns. 
+3. The amount of **cache coherence traffic**, especially important for concurrent access. It forces a cache miss, and costs a little more than 100 ns. 
 
 ### Minimize cache misses
 
@@ -357,9 +364,10 @@ But making sure the code is correct is hard. Correctness is implicit: you can ne
 
 `bbtree` has three guards to approach correctness.
 
-### Guard 1: [Xiangpeng Hao](https://xiangpeng.systems)
 
-Xiangpeng is a real human behind `bbtree`, and the front line guarding the correctness of its code.
+### Guard 1: Xiangpeng Hao
+
+[Xiangpeng](https://xiangpeng.systems) is a real human behind `bbtree`, and the front line guarding the correctness of its code.
 All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code.
 
 He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree[^bftree]). Choosing `bbtree` means offloading the attention to Xiangpeng.

@@ -1,7 +1,7 @@
 //! Internal nodes: the nodes that route. An internal node's page holds its
 //! children, one more than its separators (D12, D32), and no values (D17).
 //! With inline keys, it holds only its separators' inline keys (D18) and its
-//! edges, in a 512 B page. Each separator's key is then the head key of the
+//! edges, in a 512 B page by default. Each separator's key is then the head key of the
 //! leftmost leaf right of it, which a search reads only on a tie (D49).
 //! Without inline keys, the node keeps its separator keys.
 //!

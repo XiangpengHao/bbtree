@@ -16,6 +16,7 @@ mod hash_tag;
 mod inline_key;
 mod insert;
 mod iterator;
+mod node_config;
 mod prefix;
 mod type_properties;
 

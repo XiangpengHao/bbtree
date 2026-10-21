@@ -29,6 +29,7 @@ use super::node::page::{NodePtr, TestPages};
 use super::node_stack::FirstEdge;
 use super::root::Tree;
 use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
+use crate::node_config::NodeConfig;
 
 /// A deterministic xorshift64* generator; shared by reference.
 pub(crate) struct TestRng(Cell<u64>);
@@ -677,6 +678,26 @@ impl PageAligned {
     }
 }
 
+/// A node config (D59) of internal pages of the least size, 64 B: an
+/// internal node grows by them until it holds 12 keys, to a few hundred
+/// bytes, so that trees are deep for their entries. Leaves keep 1 KiB.
+pub(crate) struct SmallInternalPages;
+
+impl NodeConfig for SmallInternalPages {
+    const INTERNAL_PAGE_SIZE: usize = 64;
+    const PLAIN_INTERNAL_PAGE_SIZE: usize = 64;
+}
+
+/// A node config (D59) of 4 KiB leaves and 2 KiB internal nodes, with and
+/// without inline keys.
+pub(crate) struct LargePages;
+
+impl NodeConfig for LargePages {
+    const LEAF_PAGE_SIZE: usize = 4096;
+    const INTERNAL_PAGE_SIZE: usize = 2048;
+    const PLAIN_INTERNAL_PAGE_SIZE: usize = 2048;
+}
+
 /// A tree built through the node API with the map's insert (search down,
 /// insert into the leaf, and split full nodes on the way back up), over
 /// pages from a [`TestPages`] pool.
@@ -748,6 +769,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> TestTree<'_, K, V, S> {
 
 mod tests {
     use super::{Bulky, CacheLineAligned, PageAligned, Tracked};
+    use crate::node_config::DefaultNodeConfig;
     use crate::tree::node::layout::NodeLayout;
 
     #[test]
@@ -755,8 +777,8 @@ mod tests {
     fn bulky_key_nodes_hold_twelve_entries() {
         assert_eq!(size_of::<Tracked<'_>>(), 16);
         assert_eq!(size_of::<Bulky<'_>>(), 152);
-        let leaf = NodeLayout::<Bulky<'_>, Tracked<'_>>::PLAIN_LEAF;
-        let internal = NodeLayout::<Bulky<'_>, Tracked<'_>>::PLAIN_INTERNAL;
+        let leaf = NodeLayout::<Bulky<'_>, Tracked<'_>, DefaultNodeConfig>::PLAIN_LEAF;
+        let internal = NodeLayout::<Bulky<'_>, Tracked<'_>, DefaultNodeConfig>::PLAIN_INTERNAL;
         assert_eq!((leaf.keys.capacity, leaf.page.size()), (12, 2048));
         assert_eq!((internal.keys.capacity, internal.page.size()), (12, 2048));
     }
@@ -766,11 +788,15 @@ mod tests {
         assert_eq!(CacheLineAligned::new(7).get(), 7);
         assert_eq!(PageAligned::new(9).get(), 9);
         assert_eq!(
-            NodeLayout::<u64, PageAligned>::PLAIN_LEAF.page.align(),
+            NodeLayout::<u64, PageAligned, DefaultNodeConfig>::PLAIN_LEAF
+                .page
+                .align(),
             8192
         );
         assert_eq!(
-            NodeLayout::<u64, PageAligned>::PLAIN_INTERNAL.page.align(),
+            NodeLayout::<u64, PageAligned, DefaultNodeConfig>::PLAIN_INTERNAL
+                .page
+                .align(),
             1024
         );
     }

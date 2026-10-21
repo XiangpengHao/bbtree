@@ -2460,18 +2460,18 @@ html[data-page="post"][data-theme="dark"] {
   .post > .post-intro {
     grid-column: text;
   }
-  :is(.post-intro, .post-body) > p {
+  :is(.post-intro, .post-body, .section-panel) > p {
     margin: 0 0 22px;
   }
-  :is(.post-intro, .post-body) > ol {
+  :is(.post-intro, .post-body, .section-panel) > ol {
     margin: 0 0 26px;
     padding-left: 1.5em;
     list-style: decimal;
   }
-  :is(.post-intro, .post-body) > ol > li + li {
+  :is(.post-intro, .post-body, .section-panel) > ol > li + li {
     margin-top: 6px;
   }
-  :is(.post-intro, .post-body) > :is(p, ol) a,
+  :is(.post-intro, .post-body, .section-panel) > :is(p, ol) a,
   .post-quote a,
   .sidenote a,
   .post-notes a {
@@ -2480,7 +2480,7 @@ html[data-page="post"][data-theme="dark"] {
     text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent);
     text-underline-offset: 3px;
   }
-  :is(.post-intro, .post-body) > :is(p, ol) a:hover,
+  :is(.post-intro, .post-body, .section-panel) > :is(p, ol) a:hover,
   .post-quote a:hover,
   .sidenote a:hover,
   .post-notes a:hover {
@@ -2488,7 +2488,7 @@ html[data-page="post"][data-theme="dark"] {
   }
   /* bbtree, wherever the text names it (`post.rs`, `Bbtree`): on a
    * faint wash of the site's highlighter, bbtree's color in the charts. */
-  :is(.post-intro, .post-body) > :is(p, ol) .bbtree-name {
+  :is(.post-intro, .post-body, .section-panel) > :is(p, ol) .bbtree-name {
     background: color-mix(in srgb, var(--marker) 12%, transparent);
     border-radius: 3px;
     padding: 0.05em 0.25em;
@@ -2497,7 +2497,7 @@ html[data-page="post"][data-theme="dark"] {
   }
   /* Code in a sentence: set in the code face alone, no chip, so that a
    * paragraph naming bbtree, u64 or String reads as one line of text. */
-  :is(.post-intro, .post-body) > :is(p, ol) code,
+  :is(.post-intro, .post-body, .section-panel) > :is(p, ol) code,
   .figure-text code,
   .sidenote code,
   .post-notes code {
@@ -2545,10 +2545,10 @@ html[data-page="post"][data-theme="dark"] {
     border-top: 1px solid var(--rule);
   }
 
-  /* Headings: the post's two parts in the display face over a rule, as
-   * the author's blog sets them; the three principles numbered in the
-   * highlighter, since the post ranks them; then sections, then their
-   * parts. More room above each than below. */
+  /* Headings: the post's parts in the display face over a rule, as the
+   * author's blog sets them; then the headings within a section, whose
+   * own title is its tab (`.part-tabs`). More room above each than
+   * below. */
   .post-section {
     margin: 96px 0 28px;
     padding-bottom: 14px;
@@ -2565,31 +2565,6 @@ html[data-page="post"][data-theme="dark"] {
   .post-body > .post-section:first-of-type {
     margin-top: 72px;
   }
-  .post-subsection {
-    margin: 64px 0 16px;
-    font-size: 23px;
-    font-weight: 600;
-    line-height: 1.3;
-    letter-spacing: -0.005em;
-    text-wrap: balance;
-    scroll-margin-top: 24px;
-  }
-  .post-section + .post-subsection {
-    margin-top: 0;
-  }
-  .principle-number {
-    display: inline-grid;
-    place-items: center;
-    width: 1.45em;
-    height: 1.45em;
-    margin-right: 12px;
-    border-radius: 7px;
-    background: var(--marker);
-    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
-    color: var(--on-marker);
-    font: 600 0.72em var(--font-data);
-    vertical-align: 0.12em;
-  }
   .post-minor {
     margin: 44px 0 10px;
     font-size: 18.5px;
@@ -2597,9 +2572,6 @@ html[data-page="post"][data-theme="dark"] {
     line-height: 1.35;
     text-wrap: balance;
     scroll-margin-top: 24px;
-  }
-  .post-subsection + .post-minor {
-    margin-top: 20px;
   }
   .post-detail {
     margin: 36px 0 8px;
@@ -2613,12 +2585,7 @@ html[data-page="post"][data-theme="dark"] {
   .post-detail code {
     font: 0.88em var(--font-data);
   }
-  .post-minor a,
-  .post-subsection a {
-    color: var(--link);
-    text-underline-offset: 3px;
-  }
-  :is(.post-section, .post-subsection, .post-minor) code {
+  :is(.post-section, .post-minor) code {
     font: 0.88em var(--font-data);
   }
   @media (max-width: 640px) {
@@ -2626,13 +2593,121 @@ html[data-page="post"][data-theme="dark"] {
       margin-top: 72px;
       font-size: 23px;
     }
-    .post-subsection {
-      margin-top: 52px;
-      font-size: 20.5px;
-    }
     .post-minor {
       font-size: 17.5px;
     }
+  }
+
+  /* A part's sections as tabs, under its overview (`part_tabs.rs`): every
+   * title in view at once, side by side, wrapping as it needs; the open
+   * one lit as the outline lights the reader's section, the principles
+   * numbered in the highlighter, since the post ranks them. On a phone, a
+   * tab a row. */
+  .part-tabs {
+    display: flex;
+    gap: 4px;
+    margin: 36px 0 32px;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+  .part-tab {
+    flex: 1 1 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    min-width: 0;
+    padding: 11px 14px 13px;
+    border: 0;
+    border-radius: 8px 8px 0 0;
+    background: none;
+    color: var(--graphite);
+    font: 600 15px/1.4 var(--font-ui);
+    text-align: left;
+    text-wrap: balance;
+    cursor: pointer;
+    scroll-margin-top: 24px;
+    transition: color 120ms, background-color 120ms;
+  }
+  .part-tab:hover {
+    color: var(--ink);
+    background: var(--well);
+  }
+  .part-tab:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: -2px;
+  }
+  .part-tab[aria-selected="true"] {
+    color: var(--ink);
+    background: var(--marker-wash);
+    box-shadow: inset 0 -3px 0 var(--marker);
+  }
+  .principle-number {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 1.6em;
+    height: 1.6em;
+    margin-top: 1px;
+    border-radius: 6px;
+    background: var(--marker);
+    box-shadow: inset 0 0 0 1.5px var(--marker-strong);
+    color: var(--on-marker);
+    font: 600 12px var(--font-data);
+  }
+  .part-tab[aria-selected="false"] .principle-number {
+    background: var(--marker-soft);
+    box-shadow: none;
+    color: var(--marker-ink);
+  }
+  @media (max-width: 640px) {
+    .part-tabs {
+      flex-direction: column;
+      gap: 2px;
+      border-bottom: 0;
+      border-left: 1px solid var(--rule-strong);
+    }
+    .part-tab {
+      padding: 10px 12px;
+      border-radius: 0 8px 8px 0;
+    }
+    .part-tab[aria-selected="true"] {
+      box-shadow: inset 3px 0 0 var(--marker);
+    }
+  }
+  /* The end of an open section: a link to the part's next, so that a
+   * reader who reads on needn't climb back to the tabs. */
+  .next-section {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    width: fit-content;
+    max-width: 100%;
+    margin: 40px 0 0 auto;
+    padding: 12px 18px 13px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 10px;
+    color: var(--ink);
+    text-decoration: none;
+    transition: border-color 120ms, background-color 120ms;
+  }
+  .next-section:hover {
+    border-color: var(--marker-strong);
+    background: var(--marker-wash);
+  }
+  .next-section:focus-visible {
+    outline: 2px solid var(--link);
+    outline-offset: 2px;
+  }
+  .next-section-label {
+    font: 500 12.5px var(--font-ui);
+    color: var(--muted);
+  }
+  .next-section-title {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font: 600 15px/1.4 var(--font-ui);
+    text-align: right;
   }
 
   /* The outline, in the left margin, held in view as the sections pass;
@@ -2744,7 +2819,7 @@ html[data-page="post"][data-theme="dark"] {
 
   /* A table of results in the text: a row a query, its numbers right
    * aligned in the data face; on a phone it scrolls on its own. */
-  .post-body > .post-table {
+  :is(.post-body, .section-panel) > .post-table {
     margin: 4px 0 28px;
     overflow-x: auto;
   }
@@ -2784,7 +2859,7 @@ html[data-page="post"][data-theme="dark"] {
   /* A figure shows one idea, as wide as the text: an SVG file
    * (`vis/figures/`), in the page's theme, which plays its own CSS
    * animation. */
-  .post-body > .figure {
+  :is(.post-body, .section-panel) > .figure {
     margin: 20px 0 32px;
   }
   .figure {
@@ -2859,7 +2934,7 @@ html[data-page="post"][data-theme="dark"] {
   }
 
   /* The post's code. */
-  .post-body > pre {
+  :is(.post-body, .section-panel) > pre {
     margin: 4px 0 26px;
     padding: 14px 18px;
     overflow-x: auto;

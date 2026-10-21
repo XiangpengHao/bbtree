@@ -1,13 +1,14 @@
 //! The post's "What it can do?" (design/14-blogpost.md): what a fast
-//! B-tree is for, in two cases: the memtable of LSM-trees, with the
-//! end-to-end results again (`end-to-end.svg`, which `vis/figures/`
-//! writes), and an external index of Parquet files, with its results on
-//! ClickBench's `hits.parquet`.
+//! B-tree is for, an overview of two cases, and the cases as tabs: the
+//! memtable of LSM-trees, with the end-to-end results again
+//! (`end-to-end.svg`, which `vis/figures/` writes), and an external index
+//! of Parquet files, with its results on ClickBench's `hits.parquet`.
 
 use dioxus::prelude::*;
 
 use crate::how_it_works::{Note, NoteRef, SvgFigure};
 use crate::outline::{PostHeading, SectionHeading};
+use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
 use crate::rust_code::RustCode;
 
@@ -25,6 +26,7 @@ let state = SessionStateBuilder::new()
 
 #[component]
 pub(crate) fn UseCases() -> Element {
+    let tabs = PartTabs::use_new(PostHeading::UseCases);
     rsx! {
         SectionHeading { heading: PostHeading::UseCases }
         p {
@@ -32,15 +34,30 @@ pub(crate) fn UseCases() -> Element {
             Bbtree {}
             " benefits everything on top of it: agents memory, LLM training, RAG, KV store, state caching, vector search, and more."
         }
-        LsmTrees {}
-        ParquetIndex {}
+        p { "Here we discuss two representative use cases:" }
+        ol {
+            li {
+                strong { "Replace skiplist in LSM-trees." }
+                " In place of the skiplist of five systems, "
+                Bbtree {}
+                " is 1.16–6.83× faster."
+            }
+            li {
+                strong { "External index for Parquet files." }
+                " Embedded at the end of an existing Parquet file, with "
+                Bbtree {}
+                " it runs 1.7–263× faster."
+            }
+        }
+        PartTabList { tabs }
+        SectionPanel { tabs, section: PostHeading::CaseLsmTrees, LsmTrees {} }
+        SectionPanel { tabs, section: PostHeading::CaseParquetIndex, ParquetIndex {} }
     }
 }
 
 #[component]
 fn LsmTrees() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::CaseLsmTrees }
         p {
             "All LSM-trees use an ordered map to hold recent writes in memory, the memtable. In Rust, this ordered map is usually a skiplist, like "
             code { "crossbeam-skiplist" }
@@ -164,7 +181,6 @@ impl ParquetQuery {
 #[component]
 fn ParquetIndex() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::CaseParquetIndex }
         p {
             "Parquet already has advanced stats and bloom filters to prune the data to scan, "
             Bbtree {}

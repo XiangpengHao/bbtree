@@ -161,15 +161,16 @@ unsafe impl<A: Allocator + ?Sized> PageAllocator for A {
 }
 
 /// The allocation boundary (D8): one allocator call per page, for the
-/// page's layout. A node's page is a multiple of 1 KiB, or of 512 bytes for
-/// internal nodes that keep no keys (D49). It is aligned to that step
-/// (D15), or more if its keys or values need it, so the lowest bit of every
-/// node pointer is free for its kind's tag ([`NodePtr`]). A root page is
+/// page's layout. A node's page is a multiple of its kind's page size in
+/// the map's node config (D59): by default 1 KiB, or 512 bytes for internal
+/// nodes that keep no keys (D49). It is aligned to that page size (D15), or
+/// more if its keys or values need it, so the lowest bit of every node
+/// pointer is free for its kind's tag ([`NodePtr`]). A root page is
 /// aligned as the larger of the two kinds' (`root_page.rs`).
 impl<P: PageType> FreshPage<P> {
     /// A page from `alloc`.
     pub(crate) fn allocate(alloc: &impl PageAllocator) -> Self {
-        // The layout has a non-zero size: nodes are at least 512 B.
+        // The layout has a non-zero size: nodes are at least 64 B.
         let page = alloc.allocate_page(P::page_layout());
         // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
@@ -304,9 +305,9 @@ impl LatchedNodeHeader {
     }
 }
 
-/// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
-/// strategy `S`, whose lowest bit tells the node's kind. Every page leaves
-/// that bit 0, being aligned to at least 512 B (D15, D49). A leaf's pointer
+/// A pointer to an initialized node of `NodeLayout<K, V, S::Config>`, for a
+/// map with strategy `S`, whose lowest bit tells the node's kind. Every page
+/// leaves that bit 0, being aligned to at least 64 B (D15, D49, D59). A leaf's pointer
 /// carries the tag, so that a descent uses an internal node's as it is.
 ///
 /// Internal nodes store it as edges, node stacks and walks as the nodes on
@@ -559,14 +560,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// fit.
     #[inline(always)]
     pub(super) fn leaf_has_room_for_hash_tags(inline_width: InlineWidth) -> bool {
-        NodeLayout::<K, V>::leaf(Some(inline_width), true, Self::is_latched())
+        NodeLayout::<K, V, S::Config>::leaf(Some(inline_width), true, Self::is_latched())
             .hash_tags_offset
             .is_some()
     }
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
         let plan = NodePlan::of::<S, Leaf<K, V, S>>();
-        NodeLayout::<K, V>::leaf(
+        NodeLayout::<K, V, S::Config>::leaf(
             plan.inline_width(),
             plan.has_hash_tags(),
             Self::is_latched(),
@@ -574,7 +575,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 
     pub(in crate::tree) fn internal_layout() -> InternalLayout {
-        NodeLayout::<K, V>::internal(
+        NodeLayout::<K, V, S::Config>::internal(
             Self::inline_width::<Internal<K, V, S>>(),
             Self::is_latched(),
         )
@@ -1164,6 +1165,7 @@ mod tests {
 
     use super::{FreshPage, NodeHeader, NodeKind, NodePtr, TestPages};
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
+    use crate::node_config::DefaultNodeConfig;
     use crate::tree::node::internal::Internal;
     use crate::tree::node::layout::NodeLayout;
     use crate::tree::node::leaf::Leaf;
@@ -1401,11 +1403,11 @@ mod tests {
         assert!(!NodePtr::<[u64; 1], u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<[u64; 1], u64, Auto>::leaf_layout(),
-            NodeLayout::<[u64; 1], u64>::PLAIN_LEAF
+            NodeLayout::<[u64; 1], u64, DefaultNodeConfig>::PLAIN_LEAF
         );
         assert_eq!(
             NodePtr::<[u64; 1], u64, Auto>::internal_layout(),
-            NodeLayout::<[u64; 1], u64>::PLAIN_INTERNAL
+            NodeLayout::<[u64; 1], u64, DefaultNodeConfig>::PLAIN_INTERNAL
         );
         // 1 KB, 63 keys at offset 8, and the head, or the edges, right after
         // them, at 8 + 63·8 = 512.
@@ -1428,11 +1430,11 @@ mod tests {
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<String, u64, Auto>::leaf_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
+            NodeLayout::<String, u64, DefaultNodeConfig>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
         );
         assert_eq!(
             NodePtr::<Vec<u8>, u64, Auto>::internal_layout(),
-            NodeLayout::<Vec<u8>, u64>::FOUR_BYTE_INLINE_INTERNAL
+            NodeLayout::<Vec<u8>, u64, DefaultNodeConfig>::FOUR_BYTE_INLINE_INTERNAL
         );
         assert_eq!(
             NodePtr::<String, u64, Auto>::inline_width::<Leaf<String, u64, Auto>>(),
@@ -1444,7 +1446,7 @@ mod tests {
         );
         assert_eq!(
             NodePtr::<[u8; 32], u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<[u8; 32], u64>::EIGHT_BYTE_INLINE_INTERNAL
+            NodeLayout::<[u8; 32], u64, DefaultNodeConfig>::EIGHT_BYTE_INLINE_INTERNAL
         );
         assert!(NodePtr::<Tracked<'_>, u64, WithInlineKey>::has_inline_keys());
         assert!(!NodePtr::<Tracked<'_>, u64, Auto>::has_inline_keys());
@@ -1454,15 +1456,15 @@ mod tests {
         assert!(NodePtr::<i64, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<u64, u64, Auto>::leaf_layout(),
-            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
+            NodeLayout::<u64, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_LEAF
         );
         assert_eq!(
             NodePtr::<u64, u64, WithInlineKey>::leaf_layout(),
-            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
+            NodeLayout::<u64, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_LEAF
         );
         assert_eq!(
             NodePtr::<i128, u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<i128, u64>::TWO_BYTE_INLINE_INTERNAL
+            NodeLayout::<i128, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_INTERNAL
         );
     }
 

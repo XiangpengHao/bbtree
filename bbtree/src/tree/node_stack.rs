@@ -63,8 +63,9 @@ use crate::inline_key::InlineKeyStrategy;
 
 /// The deepest a leaf can be below the root. A non-root internal node has
 /// at least 5 children (D13, D22), the root at least 2, and a leaf takes at
-/// least 1 KB (D15). So leaves one level deeper would take at least 2·5^23
-/// KB, more than 2^64 bytes.
+/// least 1 KB (D15), the least leaf page size a node config may set (D59).
+/// So leaves one level deeper would take at least 2·5^23 KB, more than 2^64
+/// bytes.
 pub(in crate::tree) const MAX_DEPTH: usize = 23;
 
 /// Borrow type of a [`NodeStack`]: shared access for `'a` to the tree, like
