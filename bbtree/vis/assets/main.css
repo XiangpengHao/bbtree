@@ -3266,7 +3266,12 @@ html[data-page="post"][data-theme="dark"] {
   }
   .draws {
     stroke-dasharray: 1;
-    animation: line-draw 800ms var(--ease-out) both;
+    animation: line-draw 600ms var(--ease-out) both;
+  }
+  /* The ease-out has a line 97% drawn at half its time: its points and
+   * names arrive then, not after the last pixel. */
+  .line-chart {
+    --grow: 300ms;
   }
   .performance-cards:not(.seen) :is(.grow-x, .grow-y, .lands, .draws) {
     animation-play-state: paused;

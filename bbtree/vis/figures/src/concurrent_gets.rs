@@ -104,7 +104,9 @@ impl ConcurrentGets {
             340.0,
             "Gets of u64 keys at 10M entries as threads are added, on 96 cores: a line a map",
         );
-        let mut motion = Motion::once(1.0, 1.4);
+        // The lines draw as the Concurrent card's do: 0.6 s, easing out,
+        // and the names arrive at half that, when the lines look drawn.
+        let mut motion = Motion::once(1.0, 0.6);
         motion.animate(
             "draws",
             &[
@@ -112,7 +114,7 @@ impl ConcurrentGets {
                 (1.0, "stroke-dashoffset: 0".into()),
             ],
         );
-        motion.appear("lands", 0.9);
+        motion.appear("lands", 0.5);
         svg.style(
             ".grid { stroke: var(--rule); } \
              .axis { stroke: var(--rule-strong); } \
@@ -188,6 +190,7 @@ impl ConcurrentGets {
             );
         }
         svg.style(motion.css());
+        svg.style(".series.draws { animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1); }");
         svg
     }
 

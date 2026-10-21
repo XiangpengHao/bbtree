@@ -71,14 +71,14 @@ pub(crate) fn UseCases() -> Element {
             }
         }
         PartTabList { tabs }
-        SectionPanel { tabs, section: PostHeading::CaseLsmTrees, LsmTrees {} }
+        SectionPanel { tabs, section: PostHeading::CaseMemtable, Memtable {} }
         SectionPanel { tabs, section: PostHeading::CaseMmap, MmapFromDisk {} }
         SectionPanel { tabs, section: PostHeading::CaseParquetIndex, ParquetIndex {} }
     }
 }
 
 #[component]
-fn LsmTrees() -> Element {
+fn Memtable() -> Element {
     rsx! {
         p {
             "All LSM-trees use an ordered map to hold recent writes in memory, the memtable. In Rust, this ordered map is usually a skiplist, like "

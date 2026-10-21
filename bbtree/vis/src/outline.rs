@@ -12,7 +12,7 @@ use dioxus::prelude::*;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PostHeading {
     UseCases,
-    CaseLsmTrees,
+    CaseMemtable,
     CaseMmap,
     CaseParquetIndex,
     HowItWorks,
@@ -40,7 +40,7 @@ pub(crate) enum PostHeading {
 impl PostHeading {
     const ALL: [Self; 24] = [
         Self::UseCases,
-        Self::CaseLsmTrees,
+        Self::CaseMemtable,
         Self::CaseMmap,
         Self::CaseParquetIndex,
         Self::HowItWorks,
@@ -70,7 +70,7 @@ impl PostHeading {
     fn level(self) -> u8 {
         match self {
             Self::UseCases | Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
-            Self::CaseLsmTrees
+            Self::CaseMemtable
             | Self::CaseMmap
             | Self::CaseParquetIndex
             | Self::CacheMisses
@@ -88,7 +88,7 @@ impl PostHeading {
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::UseCases => "what-it-can-do",
-            Self::CaseLsmTrees => "case-lsm-trees",
+            Self::CaseMemtable => "case-memtable",
             Self::CaseMmap => "case-bbtree-mmap",
             Self::CaseParquetIndex => "case-parquet-index",
             Self::HowItWorks => "how-it-works",
@@ -119,9 +119,9 @@ impl PostHeading {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::UseCases => "What it can do?",
-            Self::CaseLsmTrees => "Case 1: replace skiplist in LSM-trees",
+            Self::CaseMemtable => "Case 1: faster memtable",
             Self::CaseMmap => "Case 2: bbtree-mmap",
-            Self::CaseParquetIndex => "Case 3: external index for Parquet files",
+            Self::CaseParquetIndex => "Case 3: Parquet index",
             Self::HowItWorks => "How it works?",
             Self::CacheMisses => "Minimize cache misses",
             Self::ThoughtExperiment => "Thought experiment: binary search vs linear search",
@@ -348,7 +348,7 @@ mod tests {
         assert_eq!(
             PostHeading::UseCases.sections().collect::<Vec<_>>(),
             [
-                PostHeading::CaseLsmTrees,
+                PostHeading::CaseMemtable,
                 PostHeading::CaseMmap,
                 PostHeading::CaseParquetIndex
             ]

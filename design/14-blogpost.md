@@ -49,7 +49,7 @@ Here we discuss three representative use cases:
 2. **Mmap a bbtree from disk.** No rebuild after a restart: the first answer comes 160–2,500× sooner than std's `BTreeMap`.
 3. **External index for Parquet files.** Embedded at the end of an existing Parquet file, with `bbtree` it runs 1.7–263× faster.
 
-### Case 1: replace skiplist in LSM-trees
+### Case 1: faster memtable 
 
 All LSM-trees use an ordered map to hold recent writes in memory, the memtable. In Rust, this ordered map is usually a skiplist, like `crossbeam-skiplist`.
 
@@ -98,7 +98,7 @@ assert_eq!(names.get(&42), Some("corro"));
 
 [the time to the first answer after a restart, std's `BTreeMap` rebuilt against `bbtree-mmap` mapped, with the file in the page cache and from disk: `first-query.svg`. Caption: Time to the first answer after a restart, 10M `u64` entries, Ryzen 9 9900X. std's `BTreeMap` reads its file back and rebuilds; `bbtree-mmap` maps its file and reads only the pages the lookup touches.]
 
-### Case 3: external index for Parquet files
+### Case 3: Parquet index
 
 Parquet already has advanced stats and bloom filters to prune the data to scan, `bbtree` pushes the pruning to its extreme: it directly pinpoints the rows to read.
 
