@@ -1,7 +1,7 @@
 //! Lifetime-erased type identity, and the views of a value that it proves
-//! sound. [`Auto`] uses them to recognize std byte strings, and a file
-//! map's spans, and read their bytes, and to recognize std integers and use
-//! their [`InlineKey`] impls (D18, D31). A key with an `InlineKey` impl,
+//! sound. [`Auto`] uses them to recognize std byte strings and read their
+//! bytes, and to recognize std integers and use their [`InlineKey`] impls
+//! (D18, D31). A key with an `InlineKey` impl,
 //! under either strategy, uses one to treat a lookup key as a key.
 //!
 //! [`Auto`]: crate::Auto
@@ -16,10 +16,6 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::{mem, ptr, slice};
 
-#[cfg(feature = "file")]
-use crate::file::VarBytes;
-#[cfg(feature = "file")]
-use crate::file::storage::ArenaBytes;
 use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
 
 /// A type's identity with its lifetimes erased: `&'a str` and
@@ -71,11 +67,9 @@ impl ErasedTypeId {
     }
 }
 
-/// Proof that `T` is one of the byte-string types that [`Auto`] gives
-/// inline keys, lifetimes aside, and how it holds its bytes: std's, and
-/// with the `file` feature, a file map's spans ([`VarBytes`]) and what its
-/// writer builds them from (`ArenaBytes`). Every one of them orders like its
-/// bytes.
+/// Proof that `T` is one of std's byte-string types that [`Auto`] gives
+/// inline keys, lifetimes aside, and how it holds its bytes. Every one of
+/// them orders like its bytes.
 ///
 /// [`Auto`]: crate::Auto
 pub(in crate::tree) struct ByteString<T: ?Sized> {
@@ -105,20 +99,13 @@ enum ByteRepresentation {
     BoxedBytes,
     StrRef,
     BytesRef,
-    /// A file map's span, its bytes in its leaf's tail.
-    #[cfg(feature = "file")]
-    Span,
-    /// A file map writer's pointer to bytes in its arena, a span's stand-in
-    /// while the writer builds.
-    #[cfg(feature = "file")]
-    ArenaRecord,
 }
 
 impl<T: ?Sized> ByteString<T> {
     /// The proof, if `T` is `String`, `str`, `Vec<u8>`, `[u8]`,
     /// `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`, `[u8; 20]`
-    /// or `[u8; 32]`, lifetimes aside, or `VarBytes` or `ArenaBytes`. Folds
-    /// to a constant after monomorphization.
+    /// or `[u8; 32]`, lifetimes aside. Folds to a constant after
+    /// monomorphization.
     ///
     /// Unoptimized builds compare type identities at run time, on every
     /// call. So the candidates are first narrowed by what needs no
@@ -155,32 +142,12 @@ impl<T: ?Sized> ByteString<T> {
         } else if ErasedTypeId::is::<T, &[u8]>() {
             ByteRepresentation::BytesRef
         } else {
-            Self::file_representation()?
+            return None;
         };
         Some(Self {
             representation,
             _type: PhantomData,
         })
-    }
-
-    /// How a file map's types hold their bytes, if `T` is one: a span
-    /// ([`VarBytes`]), or its writer's stand-in (`ArenaBytes`).
-    #[cfg(feature = "file")]
-    #[inline(always)]
-    fn file_representation() -> Option<ByteRepresentation> {
-        if ErasedTypeId::is::<T, VarBytes>() {
-            Some(ByteRepresentation::Span)
-        } else if ErasedTypeId::is::<T, ArenaBytes>() {
-            Some(ByteRepresentation::ArenaRecord)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(not(feature = "file"))]
-    #[inline(always)]
-    fn file_representation() -> Option<ByteRepresentation> {
-        None
     }
 
     /// Whether a value is its bytes, as an array is, rather than a
@@ -196,8 +163,6 @@ impl<T: ?Sized> ByteString<T> {
             | ByteRepresentation::BoxedBytes
             | ByteRepresentation::StrRef
             | ByteRepresentation::BytesRef => false,
-            #[cfg(feature = "file")]
-            ByteRepresentation::Span | ByteRepresentation::ArenaRecord => false,
         }
     }
 
@@ -226,13 +191,6 @@ impl<T: ?Sized> ByteString<T> {
                 ByteRepresentation::BoxedBytes => &*value.cast::<Box<[u8]>>(),
                 ByteRepresentation::StrRef => (*value.cast::<&'v str>()).as_bytes(),
                 ByteRepresentation::BytesRef => *value.cast::<&'v [u8]>(),
-                // A span reached by reference, in a file map or a query
-                // buffer, has its bytes past it; a writer's record points
-                // into its arena.
-                #[cfg(feature = "file")]
-                ByteRepresentation::Span => (&*value.cast::<VarBytes>()).bytes(),
-                #[cfg(feature = "file")]
-                ByteRepresentation::ArenaRecord => (&*value.cast::<ArenaBytes>()).bytes(),
             }
         }
     }

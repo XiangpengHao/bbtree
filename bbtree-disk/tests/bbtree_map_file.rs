@@ -71,7 +71,7 @@ fn text_maps_round_trip() {
 }
 
 /// Integers stay in their slots: a `u64` map's file takes little more than
-/// its 16 bytes an entry, where bytes in the leaves' tails took 49.
+/// its 16 bytes an entry, where var-length bytes in heap pages take 49.
 #[test]
 fn fixed_size_types_stay_in_their_slots() {
     let file = TestFile::new("plain");

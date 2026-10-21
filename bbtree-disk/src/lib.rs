@@ -5,8 +5,8 @@
 //! - [`BBTreeMapFile`] is the map in a file.
 //! - [`DiskType`] is what its keys and values may be, each kept as fits it:
 //!   integers and other plain types as they are, in their slots, text and
-//!   byte strings in the leaves' tails. [`plain_disk_type!`] makes a plain
-//!   type of the caller's one.
+//!   byte strings ([`VarBytes`]) in heap pages after their leaves.
+//!   [`plain_disk_type!`] makes a plain type of the caller's one.
 //! - [`DiskQuery`] and [`DiskInput`] are what it looks up with and is
 //!   written from.
 
@@ -16,8 +16,11 @@ pub use bbtree;
 
 mod bbtree_map_file;
 mod disk_type;
+mod heap_pages;
 mod mapped_file;
+mod var_bytes;
 
 pub use bbtree_map_file::{BBTreeMapFile, MmapOptions};
-pub use disk_type::{DiskInput, DiskQuery, DiskType};
+pub use disk_type::{DiskInput, DiskQuery, DiskStored, DiskType, Input};
 pub use mapped_file::OsPages;
+pub use var_bytes::{VarBytes, VarBytesQuery};

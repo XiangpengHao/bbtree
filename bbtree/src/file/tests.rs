@@ -3,8 +3,6 @@
 //! of tree; a writer refuses entries out of order; and a reader refuses
 //! bytes that are not a file map of its layout.
 
-mod var_bytes;
-
 use core::cmp::Ordering;
 use core::fmt::Debug;
 use core::ops::Bound;

@@ -11,15 +11,19 @@ use std::path::{Path, PathBuf};
 
 use bbtree::file::{FileWriter, InWriter};
 
+use crate::disk_type::DiskStored;
+use crate::disk_type::storage::DiskStorage;
+use crate::heap_pages::HeapPages;
 use crate::mapped_file::MappedFile;
+use crate::var_bytes::ByteArena;
 use crate::{DiskInput, DiskQuery, DiskType, OsPages};
 
 /// A map from `K` to `V` in a file: written once from a map's entries, then
 /// mapped into memory, or read into it, and looked up where it lies, with
 /// the map's own code. Integers and other plain types stay as they are, in
-/// their slots; text and byte strings keep their bytes in the leaves' tails
-/// ([`DiskType`]). Lookups hand back views of the file: `&u64`, `&str`,
-/// `&[u8]`.
+/// their slots; text and byte strings keep their bytes in heap pages after
+/// their leaves ([`DiskType`]). Lookups hand back views of the file: `&u64`,
+/// `&str`, `&[u8]`.
 ///
 /// It is read-only: a changed map is a new file.
 ///
@@ -83,11 +87,20 @@ where
     /// The compacted map of `entries`, in memory, ready to write.
     fn writer(
         entries: impl IntoIterator<Item = (impl DiskInput<K::Stored>, impl DiskInput<V::Stored>)>,
-    ) -> io::Result<FileWriter<K::Stored, V::Stored, K::Strategy>> {
-        let inputs =
-            (entries.into_iter()).map(|(key, value)| (key.into_input(), value.into_input()));
-        FileWriter::from_ascending(inputs)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    ) -> io::Result<DiskWriter<K::Stored, V::Stored, K::Strategy>> {
+        let mut arena = ByteArena::default();
+        let inputs = (entries.into_iter()).map(|(key, value)| {
+            (
+                K::Stored::in_writer(key.into_input(), &mut arena),
+                V::Stored::in_writer(value.into_input(), &mut arena),
+            )
+        });
+        let writer = FileWriter::from_ascending(inputs)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Ok(DiskWriter {
+            writer,
+            _arena: arena,
+        })
     }
 
     /// How to map the file at `path` into memory: the whole file, in small
@@ -133,10 +146,9 @@ where
     pub fn get<Q>(&self, key: &Q) -> Option<V::View<'_>>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
-        K::Stored: Borrow<Q::Query>,
+        Q: DiskQuery<Stored = K::Stored> + ?Sized,
     {
-        let value = self.file.map().get::<Q::Query>(key.query())?;
+        let value = self.file.map().get::<K::Stored>(&key.query())?;
         Some(V::view(value))
     }
 
@@ -144,10 +156,9 @@ where
     pub fn get_key_value<Q>(&self, key: &Q) -> Option<(K::View<'_>, V::View<'_>)>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
-        K::Stored: Borrow<Q::Query>,
+        Q: DiskQuery<Stored = K::Stored> + ?Sized,
     {
-        let (key, value) = self.file.map().get_key_value::<Q::Query>(key.query())?;
+        let (key, value) = self.file.map().get_key_value::<K::Stored>(&key.query())?;
         Some((K::view(key), V::view(value)))
     }
 
@@ -157,11 +168,11 @@ where
     pub fn get_many<Q, const N: usize>(&self, keys: [&Q; N]) -> [Option<V::View<'_>>; N]
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
-        K::Stored: Borrow<Q::Query>,
+        Q: DiskQuery<Stored = K::Stored> + ?Sized,
     {
-        let keys = keys.map(|key| key.query());
-        (self.file.map().get_many::<Q::Query, N>(keys)).map(|value| value.map(V::view))
+        let queries = keys.map(|key| key.query());
+        let keys = queries.each_ref().map(|query| &**query);
+        (self.file.map().get_many::<K::Stored, N>(keys)).map(|value| value.map(V::view))
     }
 
     /// The entries, in key order.
@@ -180,17 +191,35 @@ where
     ) -> impl DoubleEndedIterator<Item = (K::View<'_>, V::View<'_>)>
     where
         K: Borrow<Q>,
-        Q: DiskQuery<Stored = K::Stored, Query: Ord> + ?Sized,
-        K::Stored: Borrow<Q::Query>,
+        Q: DiskQuery<Stored = K::Stored> + ?Sized,
         R: RangeBounds<Q>,
     {
-        let bounds = (
+        let (start, end) = (
             range.start_bound().map(|key| key.query()),
             range.end_bound().map(|key| key.query()),
         );
-        (self.file.map().range::<Q::Query, _>(bounds))
+        // The range finds both ends as it is made, and keeps no borrow of
+        // the queries.
+        let bounds = (
+            start.as_ref().map(|query| &**query),
+            end.as_ref().map(|query| &**query),
+        );
+        (self.file.map().range::<K::Stored, _>(bounds))
             .map(|(key, value)| (K::view(key), V::view(value)))
     }
+}
+
+/// The compacted map of a `BBTreeMapFile`, ready to write: a file map's
+/// writer, its leaves followed by heap pages, and the arena its tree's byte
+/// strings point into, which outlives it.
+pub(crate) struct DiskWriter<
+    K: DiskStored,
+    V: DiskStored,
+    S: bbtree::InlineKeyStrategy<K::InWriter>,
+> {
+    /// Dropped first, before the bytes its tree points into.
+    pub(crate) writer: FileWriter<K, V, S, HeapPages>,
+    _arena: ByteArena,
 }
 
 /// How [`BBTreeMapFile::mmap`] maps a file into memory: the whole file or

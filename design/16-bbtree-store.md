@@ -31,10 +31,11 @@ bbtree keeps keys and values in two ways, and handles only the first:
   it is 24 bytes. Its bytes come from the global allocator, which the map
   neither sees nor counts.
 - **Variable length:** bytes whose length is known only at run time.
-  bbtree has no story for them. File maps keep them in each leaf's tail
-  (15-index-file.md, "Keys and values of any length"), which is a hack:
-  the tail lies outside the leaf's page and its layout, and works only
-  because a file map is written once.
+  bbtree had no story for them; file maps kept them in each leaf's tail,
+  outside the leaf's page and its layout. Now both the store and file
+  maps keep them in heap pages beside their leaves, bbtree knowing only
+  the hooks that let them (the leaf annex here; for file maps, a slot
+  type's check and what follows a leaf, 15-index-file.md).
 
 The use case is a cache with a memory budget: items are inserted, and the
 memory they take must be counted in full. A map's own pages already come
@@ -293,6 +294,4 @@ records went into size classes shared by all leaves (a prototype).
 - **The two thresholds:** a quarter of the chain holes before a page is
   taken, half on a removal; and whether strays should come home two
   generations on, or only as their leaf compacts.
-- **File maps:** whether variable-length file maps keep their tails, or
-  take heap pages.
 - **The budget's policy** ("When the allocator refuses").

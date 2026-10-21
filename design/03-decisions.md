@@ -1393,12 +1393,13 @@ Design and measurements in 15-index-file.md.
   file map in place, a tree of strategy `InFile<S>`, which only sets
   `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
   address, for `get` and the batch lanes (D53) alike. Keys and values are
-  `PlainBytes`, kept in their slots, or `VarBytes`, of any length, kept in
-  each leaf's tail, the slot holding a span, `{len, offset}` from the slot
-  itself. `Auto` takes `VarBytes` for a byte string, as it does `String`:
-  a `&[u8]` looks a key up, compared in place. bbtree-disk writes, maps
-  and reads typed maps in files (`BBTreeMapFile`), each key and value type
-  picking plain or `VarBytes` storage (`DiskType`);
+  `Storable`: `PlainBytes`, kept in their slots, or a type whose slot
+  points to bytes right after its leaf, which a writer's `LeafBytes` lays
+  out and the type's `check` checks. bbtree-disk's `VarBytes` is one: a
+  span, `{len, offset}` from the slot itself, to bytes of any length in
+  heap pages after the leaf, searched with `WithInlineKey`. bbtree-disk
+  writes, maps and reads typed maps in files (`BBTreeMapFile`), each key
+  and value type picking plain or `VarBytes` storage (`DiskType`);
   bbtree-datafusion-parquet embeds indexes of one or more columns in a
   Parquet file, one entry per distinct key, and DataFusion's Parquet scans
   look their predicates' rows up in them.
@@ -1422,13 +1423,28 @@ Design and measurements in 15-index-file.md.
 - **Span offsets from the slot, not the node:** bbtree hands a key's `Ord`
   and `InlineKey` only `&K`; from the slot, that is all a span needs. The
   writer builds over `ArenaBytes`, 8-byte pointers of the span's layout,
-  and rewrites them into spans as it copies each leaf.
+  and rewrites them into spans as it lays each leaf's bytes out.
+- **The bytes after a leaf are bbtree-disk's** (2026-10-21): bbtree knows
+  two hooks, a slot type's check (`Storable::check`) and what follows a
+  leaf (`LeafBytes`), and nothing of spans. bbtree-disk lays each leaf's
+  bytes out as a store's leaf keeps its records (D60): heap pages of
+  `HEAP_PAGE_SIZE` right after the leaf, records in key order, a key's
+  bytes then its value's, each in one page but those larger than a page,
+  which start one. After the leaf, not after every leaf: a cold lookup
+  reads one place of the file. At 10M entries the pages took what the
+  tails did, 49.06 bytes a var-length `u64` entry, 73.42 a text one, and
+  the same time.
+- **Queries point to the caller's bytes:** a `VarBytesQuery` is a span
+  marked by a length no span has, then the bytes' address, as a store's
+  lookup key is (D60): a lookup compares with inline keys and copies
+  nothing, under `WithInlineKey`, with no type `Auto` must know.
 - **Fixed-size keys stay plain:** var-length, a 10M `u64` hit took 216 ns
   against 127, the file map 49 bytes an entry against 18.5.
 - **Names:** "file map" for the format; "file" alone for the operating
-  system's; "tail", "span" and "var-length" for the bytes of any length,
-  as "heap" already means the allocator's and "handle" a node's; "OS
-  pages" for the operating system's, as "page" means a node's.
+  system's; "span" and "var-length" for the bytes of any length, "heap
+  pages" for where they lie, as a store's records do; "handle" means a
+  node's; "OS pages" for the operating system's, as "page" means a
+  node's.
 
 **D60. Stores: byte strings in heap pages chained by each leaf's annex, on the shared map.** (2026-10-21)
 Design in 16-bbtree-store.md.

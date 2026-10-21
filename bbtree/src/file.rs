@@ -9,8 +9,10 @@
 //! - [`FileMap`] reads a file map: lookups, ranges and iteration, by shared
 //!   reference.
 //! - [`Storable`] is what keys and values may be: [`PlainBytes`], kept in
-//!   the leaves as they are, or [`VarBytes`], bytes of any length, kept in
-//!   the leaf's tail, the leaf holding a span to them.
+//!   the leaves as they are; or a type whose slot points to bytes that lie
+//!   right after its leaf ([`LeafBytes`]), which the code that keeps them
+//!   lays out and checks: bbtree-disk's `VarBytes`, bytes of any length in
+//!   heap pages.
 //! - [`FileBuf`] holds a file map in memory, aligned for a reader.
 //!
 //! A file map is for one layout: this format of bbtree's, the same key and
@@ -44,9 +46,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut, RangeBounds};
 use core::ptr::NonNull;
 
-mod var_bytes;
-
-pub use var_bytes::{VarBytes, VarBytesBuf};
+pub use crate::tree::file::{WriterEntry, WriterLeaf};
 
 use crate::allocator::Global;
 use crate::inline_key::{Auto, InlineKeyStrategy};
@@ -103,98 +103,136 @@ plain_bytes!(
 // them, as each element's size is a multiple of its alignment.
 unsafe impl<T: PlainBytes, const N: usize> PlainBytes for [T; N] {}
 
-/// What a file map's keys and values may be, and how it keeps them: a
-/// [`PlainBytes`] type as it is, in its leaf's slot, or [`VarBytes`],
-/// bytes of any length, in its leaf's tail, the slot holding a span. Only
-/// those implement it.
-pub trait Storable: storage::Storage {}
+/// What a file map's keys and values may be: a type a reader takes from
+/// the file map's bytes where they lie, in its leaf's slot. A
+/// [`PlainBytes`] type is one, holding nothing beyond its slot. A type
+/// whose slot points to bytes beyond it (`HAS_BYTES`) has them written
+/// right after its leaf by a writer's [`LeafBytes`], and checked by
+/// [`Self::check`]: bbtree-disk's `VarBytes`, a span to bytes of any length
+/// in heap pages.
+///
+/// # Safety
+///
+/// - `InWriter` has `Self`'s size and alignment, no padding, and, under the
+///   map's strategy, the same inline keys: a writer builds its tree of
+///   `InWriter`, copies the pages, and, where `HAS_BYTES`, its `LeafBytes`
+///   writes a `Self` in place of each `InWriter`.
+/// - A `Self` read from a slot whose `check` passed, or that a writer
+///   wrote, reads nothing outside the file map it lies in, whatever the
+///   other bytes of the file map: a reader runs its `Ord` and `InlineKey`
+///   on it.
+pub unsafe trait Storable: Sized {
+    /// What a writer's tree holds in its place while it builds: `Self` for
+    /// a plain type; for one with bytes, a pointer to them.
+    type InWriter: Copy;
 
-impl<T: storage::Storage> Storable for T {}
+    /// Whether the slot points to bytes beyond it, after its leaf.
+    const HAS_BYTES: bool;
 
-/// What a [`FileWriter`] takes for a key or value of type `T`: the value,
-/// for a [`PlainBytes`] type; its bytes, borrowed or owned (`Cow`), for
-/// [`VarBytes`]. For code generic over the stored type, which can't name
-/// it otherwise.
-pub type Input<'a, T> = <T as storage::Storage>::Input<'a>;
+    /// What the slot holds, as a number in a file map's fingerprint: 0 for a
+    /// plain type; another for each kind of slot with bytes, so that a
+    /// file map of one is never read as of another.
+    const FORMAT: u64;
+
+    /// Checks the slot at `slot` of `file_bytes`, a file map, which a
+    /// reader is about to trust: that the bytes it points to lie in
+    /// `file_bytes`, as its reads need. Nothing to check for a plain type.
+    ///
+    /// # Errors
+    ///
+    /// [`FileError::Corrupt`], if they don't.
+    fn check(file_bytes: &[u8], slot: usize) -> Result<(), FileError>;
+}
+
+// SAFETY: a plain value is built and kept as itself, and is valid
+// whatever its bytes.
+unsafe impl<T: PlainBytes> Storable for T {
+    type InWriter = T;
+    const HAS_BYTES: bool = false;
+    const FORMAT: u64 = 0;
+
+    fn check(_file_bytes: &[u8], _slot: usize) -> Result<(), FileError> {
+        Ok(())
+    }
+}
 
 /// What a [`FileWriter`]'s tree holds for a key or value of type `T` while
-/// it builds: `T` itself, for a [`PlainBytes`] type; a pointer to its bytes
-/// in the writer's arena, with the same inline keys and order, for
-/// [`VarBytes`]. A writer's strategy and order bounds name it.
-pub type InWriter<T> = <T as storage::Storage>::InWriter;
+/// it builds: `T` itself, for a [`PlainBytes`] type; a pointer to its
+/// bytes, with the same inline keys and order, for one with bytes.
+pub type InWriter<T> = <T as Storable>::InWriter;
 
-/// What [`Storable`] tells a writer, kept out of the public API.
-pub(crate) mod storage {
-    pub use super::var_bytes::{ArenaBytes, ByteArena};
+/// What a file map keeps right after each leaf: the bytes of the leaf's
+/// keys and values whose slots point beyond themselves ([`Storable`]),
+/// which the code that keeps them lays out: bbtree-disk's heap pages.
+/// Nothing for plain keys and values ([`NoLeafBytes`]).
+///
+/// # Safety
+///
+/// `write` writes into every slot of the leaf's page whose type
+/// `HAS_BYTES` a value that points into the bytes it wrote, so that
+/// [`Storable::check`] passes; and `len` is how many it writes.
+pub unsafe trait LeafBytes<K: Storable, V: Storable> {
+    /// How many bytes follow `leaf` in the file map.
+    fn len<S: InlineKeyStrategy<K::InWriter>>(leaf: &WriterLeaf<'_, K, V, S>) -> usize;
 
-    /// How a file map keeps a key or a value of this type, and what its
-    /// writer builds it from.
-    ///
-    /// # Safety
-    ///
-    /// `InWriter` has `Self`'s size and alignment, no padding, and the same
-    /// inline keys: the writer builds its tree of `InWriter`, copies the
-    /// pages, and writes `Self`'s bytes in place of each `InWriter`'s, a
-    /// span to its tail bytes where `VAR_LEN`, the same bytes otherwise.
-    pub unsafe trait Storage: Sized {
-        /// What a writer takes for one: the value, or its bytes.
-        type Input<'a>;
-        /// What the writer's tree holds for one while it builds.
-        type InWriter: Copy;
-        /// Whether its bytes lie in the leaf's tail: true of `VarBytes`
-        /// alone.
-        const VAR_LEN: bool;
+    /// Writes into `bytes`, [`Self::len`] of them, zeroed, what follows
+    /// `leaf`, right after its page; and into `page`, the leaf's page as the
+    /// file map keeps it, a `K` or `V` in each slot of an entry whose type
+    /// `HAS_BYTES` ([`WriterEntry`]). The slots past the entries are zeros.
+    fn write<S: InlineKeyStrategy<K::InWriter>>(
+        leaf: &WriterLeaf<'_, K, V, S>,
+        page: &mut [u8],
+        bytes: &mut [u8],
+    );
+}
 
-        /// What the writer's tree holds for `input`, whose bytes, if it
-        /// keeps them in the tail, go into `arena`.
-        fn in_writer(input: Self::Input<'_>, arena: &mut ByteArena) -> Self::InWriter;
+/// Nothing after a leaf: what a file map of plain keys and values keeps.
+pub struct NoLeafBytes;
 
-        /// The bytes `in_writer` keeps in the tail; nothing if `!VAR_LEN`.
-        fn tail_bytes(in_writer: &Self::InWriter) -> &[u8];
+// SAFETY: no slot of a plain type has bytes, and nothing follows a leaf.
+unsafe impl<K: PlainBytes, V: PlainBytes> LeafBytes<K, V> for NoLeafBytes {
+    fn len<S: InlineKeyStrategy<K>>(_leaf: &WriterLeaf<'_, K, V, S>) -> usize {
+        0
     }
 
-    // SAFETY: a plain value is built as itself, and kept as itself.
-    unsafe impl<T: super::PlainBytes> Storage for T {
-        type Input<'a> = T;
-        type InWriter = T;
-        const VAR_LEN: bool = false;
-
-        fn in_writer(input: T, _arena: &mut ByteArena) -> T {
-            input
-        }
-
-        fn tail_bytes(_in_writer: &T) -> &[u8] {
-            &[]
-        }
+    fn write<S: InlineKeyStrategy<K>>(
+        _leaf: &WriterLeaf<'_, K, V, S>,
+        _page: &mut [u8],
+        _bytes: &mut [u8],
+    ) {
     }
 }
 
 /// A map compacted for a file: its entries, in key order, in nodes that
 /// are full but along the right border, ready to be written out
-/// ([`Self::write`]).
+/// ([`Self::write`]), each leaf followed by what `L` keeps after it
+/// ([`LeafBytes`]).
 ///
 /// Made from a map of plain keys and values ([`From`]), or from entries in
-/// ascending key order ([`Self::from_ascending`]), which it copies. It
-/// allocates the compacted map's nodes from the global allocator, keeps
-/// the bytes of [`VarBytes`] keys and values in an arena of its own, and
-/// frees both when dropped.
-pub struct FileWriter<K: Storable, V: Storable, S: InlineKeyStrategy<K::InWriter> = Auto> {
+/// ascending key order ([`Self::from_ascending`]), which it copies: what
+/// its tree holds for each ([`InWriter`]), the values themselves for plain
+/// types. It allocates the compacted map's nodes from the global
+/// allocator, and frees them when dropped.
+pub struct FileWriter<
+    K: Storable,
+    V: Storable,
+    S: InlineKeyStrategy<K::InWriter> = Auto,
+    L: LeafBytes<K, V> = NoLeafBytes,
+> {
     tree: Tree<K::InWriter, V::InWriter, S>,
     length: usize,
-    /// The bytes of the tree's `VarBytes` keys and values, which the
-    /// tree points into: kept, never read but through the tree.
-    _arena: storage::ByteArena,
+    _leaf_bytes: PhantomData<fn() -> L>,
 }
 
-impl<K, V, S> FileWriter<K, V, S>
+impl<K, V, S, L> FileWriter<K, V, S, L>
 where
     K: Storable<InWriter: Ord>,
     V: Storable,
     S: InlineKeyStrategy<K::InWriter>,
+    L: LeafBytes<K, V>,
 {
     /// The compacted map of `entries`, whose keys must ascend strictly;
-    /// [`NotAscending`] at the first that doesn't. A [`VarBytes`] key or
-    /// value is given as its bytes, borrowed or owned (`Cow`).
+    /// [`NotAscending`] at the first that doesn't.
     ///
     /// # Examples
     ///
@@ -206,53 +244,45 @@ where
     /// assert!(FileWriter::<u64, u32>::from_ascending([(2, 0), (1, 0)]).is_err());
     /// # Ok::<(), bbtree::file::NotAscending>(())
     /// ```
-    pub fn from_ascending<'a>(
-        entries: impl IntoIterator<Item = (K::Input<'a>, V::Input<'a>)>,
+    pub fn from_ascending(
+        entries: impl IntoIterator<Item = (K::InWriter, V::InWriter)>,
     ) -> Result<Self, NotAscending> {
-        let mut arena = storage::ByteArena::default();
-        let built = (entries.into_iter()).map(|(key, value)| {
-            (
-                K::in_writer(key, &mut arena),
-                V::in_writer(value, &mut arena),
-            )
-        });
         let mut entries = AscendingEntries {
-            entries: built,
+            entries: entries.into_iter(),
             previous: None,
             count: 0,
             out_of_order: false,
         };
-        let (tree, length) = Self::build(&mut entries);
-        let out_of_order = entries.out_of_order;
-        let count = entries.count;
-        let writer = Self {
-            tree,
-            length,
-            _arena: arena,
-        };
-        if out_of_order {
-            return Err(NotAscending { index: count });
+        let writer = Self::build(&mut entries);
+        if entries.out_of_order {
+            return Err(NotAscending {
+                index: entries.count,
+            });
         }
         Ok(writer)
     }
 
     /// The compacted tree of `entries`, which must be in ascending key
-    /// order: out of order, the file map's lookups give wrong answers, but stay
-    /// memory-safe; and its number of entries.
-    fn build(
-        entries: impl Iterator<Item = (K::InWriter, V::InWriter)>,
-    ) -> (Tree<K::InWriter, V::InWriter, S>, usize) {
+    /// order: out of order, the file map's lookups give wrong answers, but
+    /// stay memory-safe.
+    fn build(entries: impl Iterator<Item = (K::InWriter, V::InWriter)>) -> Self {
         let mut builder = TreeBuilder::<K::InWriter, V::InWriter, S, Global>::new(Global);
         builder.extend(entries);
-        builder.finish()
+        let (tree, length) = builder.finish();
+        Self {
+            tree,
+            length,
+            _leaf_bytes: PhantomData,
+        }
     }
 }
 
-impl<K, V, S> FileWriter<K, V, S>
+impl<K, V, S, L> FileWriter<K, V, S, L>
 where
     K: Storable,
     V: Storable,
     S: InlineKeyStrategy<K> + InlineKeyStrategy<K::InWriter>,
+    L: LeafBytes<K, V>,
 {
     /// The number of entries.
     #[must_use]
@@ -269,12 +299,13 @@ where
     /// The file map's size in bytes: how many [`Self::write`] hands out.
     #[must_use]
     pub fn byte_len(&self) -> usize {
-        FilePages::<K, V, S>::of(&self.tree, self.length).byte_len()
+        FilePages::<K, V, S, L>::of(&self.tree, self.length).byte_len()
     }
 
-    /// Hands the file map to `write`, in order, a header, a page, a leaf's
-    /// tail, or the zeros between them at a time: [`Self::byte_len`] bytes
-    /// in all. Stops at the first error `write` returns, and returns it.
+    /// Hands the file map to `write`, in order, a header, a page, the bytes
+    /// after a leaf, or the zeros between them at a time:
+    /// [`Self::byte_len`] bytes in all. Stops at the first error `write`
+    /// returns, and returns it.
     ///
     /// # Examples
     ///
@@ -291,13 +322,13 @@ where
     /// # Ok::<(), bbtree::file::NotAscending>(())
     /// ```
     pub fn write<E>(&self, mut write: impl FnMut(&[u8]) -> Result<(), E>) -> Result<(), E> {
-        FilePages::<K, V, S>::of(&self.tree, self.length).write(&mut write)
+        FilePages::<K, V, S, L>::of(&self.tree, self.length).write(&mut write)
     }
 
     /// The file map, in memory, aligned for [`FileMap::open`].
     #[must_use]
     pub fn to_buf(&self) -> FileBuf {
-        let file_bytes = FilePages::<K, V, S>::of(&self.tree, self.length);
+        let file_bytes = FilePages::<K, V, S, L>::of(&self.tree, self.length);
         let mut buffer = FileBuf::zeroed(file_bytes.byte_len(), FileFormat::<K, V, S>::alignment());
         let mut written = 0;
         file_bytes
@@ -315,12 +346,7 @@ impl<K: PlainBytes + Ord, V: PlainBytes, S: InlineKeyStrategy<K>> FileWriter<K, 
     /// The compacted map of a map's entries, in key order: copies of
     /// them in full nodes.
     fn of_map_entries(entries: impl Iterator<Item = (K, V)>) -> Self {
-        let (tree, length) = Self::build(entries);
-        Self {
-            tree,
-            length,
-            _arena: storage::ByteArena::default(),
-        }
+        Self::build(entries)
     }
 }
 
@@ -353,9 +379,15 @@ where
     }
 }
 
-impl<K: Storable, V: Storable, S: InlineKeyStrategy<K::InWriter>> Drop for FileWriter<K, V, S> {
-    /// Takes the tree apart before the arena its keys and values point
-    /// into goes.
+impl<K, V, S, L> Drop for FileWriter<K, V, S, L>
+where
+    K: Storable,
+    V: Storable,
+    S: InlineKeyStrategy<K::InWriter>,
+    L: LeafBytes<K, V>,
+{
+    /// Takes the tree apart, before whatever its keys and values point into
+    /// goes.
     fn drop(&mut self) {
         self.tree.take().destroy(&Global);
     }

@@ -1,15 +1,19 @@
 # 15 — File maps: a map in a file
 
 Status: built (2026-10-19), D58: fixed-size keys and values in the
-leaves, and keys and values of any length in each leaf's tail.
+leaves, and keys and values of any length in heap pages after each leaf
+(2026-10-21).
 
 - **bbtree**, behind the `file` feature: the file map, its header and its
   check in `bbtree/src/tree/file.rs`; the API (`FileWriter`, `FileMap`,
-  `Storable`, `PlainBytes`, `FileBuf`) in `bbtree/src/file.rs`; var-length keys
-  and values (`VarBytes`, `VarBytesBuf`) in `bbtree/src/file/var_bytes.rs`.
+  `Storable`, `PlainBytes`, `LeafBytes`, `FileBuf`) in `bbtree/src/file.rs`.
+  It knows nothing of bytes of any length but two hooks: a slot type's
+  check, and what a writer writes after each leaf.
 - **bbtree-disk** (`bbtree-disk/`), generic: `BBTreeMapFile`, a typed map in a
   file, each key and value type keeping its own storage (`DiskType`);
-  written, mapped or read, whole or as a range of a larger file.
+  written, mapped or read, whole or as a range of a larger file. Var-length
+  keys and values are its own: spans and queries (`VarBytes`,
+  `VarBytesQuery`, `var_bytes.rs`) and their heap pages (`heap_pages.rs`).
 - **bbtree-datafusion-parquet** (`bbtree-datafusion-parquet/`), bbtree-disk as
   indexes of Parquet files (`ParquetIndexBuilder`), which DataFusion's
   Parquet scans look their predicates' rows up in (`with_parquet_index`). The
@@ -18,9 +22,9 @@ leaves, and keys and values of any length in each leaf's tail.
 Terms: a **file map** is a map compacted into one byte string, which a
 reader uses where it lies; a **file** alone is the operating system's. A
 key or value is **plain** (`PlainBytes`), kept in its slot, or
-**var-length** (`VarBytes`), kept in the **tail** of its leaf, the bytes
-after it, its slot holding a **span**, `{len, offset}`. **OS pages** are
-the operating system's, 4 KiB or 2 MiB, never a node's page.
+**var-length** (`VarBytes`), kept in the **heap pages** after its leaf,
+its slot holding a **span**, `{len, offset}`. **OS pages** are the
+operating system's, 4 KiB or 2 MiB, never a node's page.
 
 ## Problem
 
@@ -47,7 +51,7 @@ offset 0      header: magic, version, layout fingerprint, entries, root
               root page            (root node and root area, D50, D52)
               internal nodes       level 1, left to right
               internal nodes       level 2 ...
-              leaves               in key order, each followed by its tail
+              leaves               in key order, each followed by its heap pages
 ```
 
 - **The tree's own pages.** Each page is copied byte for byte
@@ -76,8 +80,9 @@ offset 0      header: magic, version, layout fingerprint, entries, root
   on that constant. Maps never see the branch: their machine code is
   unchanged (Measurements).
 - **Keys and values are storable** (`Storable`): a `PlainBytes` type,
-  kept in its slot as it is, or `VarBytes`, bytes of any length kept in
-  the leaf's tail ("Keys and values of any length"). A plain type has no
+  kept in its slot as it is, or bbtree-disk's `VarBytes`, bytes of any
+  length kept in heap pages after the leaf ("Keys and values of any
+  length"). A plain type has no
   pointers and no padding, and every bit pattern is a value: the integers,
   floats, `()` and arrays of them. Either way the file map holds the whole
   map, and a reader may take whatever bytes it finds.
@@ -124,18 +129,26 @@ offset 0      header: magic, version, layout fingerprint, entries, root
 
 ## Keys and values of any length
 
-`VarBytes`: each leaf keeps an 8-byte span for each, and their bytes lie in
-the leaf's tail, right after the leaf.
+`VarBytes`, bbtree-disk's: each leaf keeps an 8-byte span for each, and
+their bytes lie in heap pages right after the leaf, as a store's leaf
+keeps its records (16-bbtree-store.md).
 
 ```text
 leaf      | header | inline keys | hash tags | (key span, value span) … |
-tail      | key 0's bytes, value 0's bytes, key 1's bytes, value 1's bytes, … |
-          zeros to the next leaf's alignment
+heap page | key 0's bytes, value 0's bytes | key 1's bytes, value 1's bytes | … | room |
+heap page | …
 leaf      | …
 ```
 
-- **Spans** are `{len: u32, offset: u32}`, aligned to 8: a key or value of
-  at most 4 GiB.
+- **bbtree knows two hooks, and no span.** A slot type is `Storable`: what
+  the writer's tree holds in its place, whether it points beyond itself,
+  a number for the fingerprint, and a check that what it points to lies in
+  the file map, which `FileMap::open` runs on every such slot. A writer's
+  `LeafBytes` writes what follows each leaf, and the slots that point
+  there, given the leaf's entries and their slots (`WriterLeaf`). Plain
+  types need neither (`NoLeafBytes`).
+- **Spans** are `{len: u32, offset: u32}`, aligned to 8: a key or value
+  under 4 GiB.
 - **Offsets count from the span's own slot.** Edges count from their node
   because node code follows them: `edge_unchecked` holds the node's
   address. Keys are followed by `K`'s own `Ord` and `InlineKey`, which
@@ -145,44 +158,38 @@ leaf      | …
   the page passed in, through the search's hot path. A span's bytes lie
   outside the span itself, which a reference may reach under Tree
   Borrows, which Miri checks, and not under Stacked Borrows.
-- **Each leaf's tail lies right after it**, entry by entry in key order,
-  the head's first, each key's bytes beside its value's. A hit reads the
-  leaf and one line of its tail; a cold lookup reads one place of the
-  file; a range scan reads it front to back. The cost is the zeros to the
-  next leaf's alignment, half a KiB a leaf on average.
-- **Building.** `TreeBuilder` builds the compact tree in memory over
+- **Heap pages** (`HeapPages`) are the map's node config's
+  (`HEAP_PAGE_SIZE`, the leaves' size by default), right after their
+  leaf: a hit reads the leaf and one line of its pages; a cold lookup
+  reads one place of the file; a range scan reads it front to back. A
+  record is an entry's key's bytes, then its value's, whichever a span
+  keeps, in key order, the head's first. It stays in one page, starting
+  the next if it doesn't fit in what is left of one; one larger than a
+  page starts on a page and runs on over the next. The leaf's last page
+  ends where the next leaf may start, as the leaves' alignment is the heap
+  pages' size.
+- **Building.** bbtree-disk builds the compact tree in memory over
   `ArenaBytes`: 8-byte pointers to length-prefixed bytes in an arena of
   the writer's (`ByteArena`), which read their bytes alone, as inline keys
   and prefixes need, and stay valid as entries move. They have the span's
   size, alignment and inline keys, so the same layout (checked as the
-  writer starts): pages still copy byte for byte, and the writer rewrites
-  each key and value slot, the head's included, into a span, as it
-  rewrites edges, writing the bytes into the leaf's tail. Slots past a
-  leaf's entries become zeros, not stale pointers.
-- **Strategy: `Auto`**, which takes `VarBytes` for a byte string, as it
-  takes `String`, by its type (D18): its inline keys are windows of its
-  bytes, its hash tag its length, as a heap string's, and a `&[u8]` looks
-  it up, compared in place, as a `&str` does `String` keys. Its writer's
-  `ArenaBytes` is recognized alike, so the writer's pages have the
-  reader's inline keys. `WithInlineKey` works too, through `VarBytes`'s
-  `InlineKey` impl, which reads its bytes as `String`'s does. Var-length
-  keys need inline keys: without them internal nodes would keep keys,
-  which no tail backs. Both strategies give them, and the fingerprint
-  tells their file maps apart, and plain from var-length slots of one size.
-- **Queries under `WithInlineKey` are spans** (`VarBytesBuf`): a lookup
-  uses inline keys only when it looks up with `K` itself. A query
-  buffer holds a span and the bytes after it, keys of up to 64 bytes in
-  place. Written right before the lookup, it must not move: a moved
-  buffer is read back by wide loads that can't take their data from the
-  narrow stores that wrote it, and wait for them to retire, and with them
-  for the previous lookup's cache misses. Lookups then no longer overlap:
-  var-length `u64` keys, a buffer a lookup, took 347 ns a hit so, 264 ns
-  written in place (`VarBytesBuf::empty`, then `set`).
-- **Spans aren't `Copy`.** A copy would follow its offset from wherever it
-  was copied to. Their fields are private, and nothing hands one out by
-  value. `Storable`, sealed, takes `PlainBytes` and `VarBytes` alone.
+  writer starts): pages still copy byte for byte, and `HeapPages` rewrites
+  each key and value slot, the head's included, into a span, as it lays
+  the bytes out. Slots past a leaf's entries become zeros, not stale
+  pointers.
+- **Strategy: `WithInlineKey`**, through `VarBytes`'s `InlineKey` impl,
+  which reads its bytes as `String`'s does: 8-byte windows in leaves, 4 in
+  internal nodes, its length as its hash tag, as `Auto` gives heap byte
+  strings. Var-length keys need inline keys: without them internal nodes
+  would keep keys, which no bytes back.
+- **Queries point to the caller's bytes** (`VarBytesQuery`): a span whose
+  length is one no span has, `u32::MAX`, then the bytes' address, as a
+  store's lookup key is. The search compares it as a span of those bytes,
+  inline keys and all, and copies nothing. Spans aren't `Copy`, so a
+  query lends itself only by reference, from its whole bytes.
 - **Checking.** `FileMap::open` also checks that the bytes of each live
-  span lie in the file map: it reads every leaf, and no tail.
+  span lie in the file map, and that no span carries a query's mark: it
+  reads every leaf, and no heap page.
 - **Fixed-size keys stay plain.** Var-length, a `u64` hit reads one more
   line, the key's bytes, and the file map takes 49 bytes an entry against
   18.5: 216 ns against 127 a hit at 10M (Measurements).
@@ -200,15 +207,17 @@ leaf      | …
   `VarBytes`; its keys' strategy; and its view. Integers, floats and byte
   arrays are plain, in their slots, under `Auto`, so a `u64` map in a file
   is the plain file map, at a map's speed. `String` and `Vec<u8>` are
-  `VarBytes`, under `Auto` too, and come back as `&str` and `&[u8]`.
+  `VarBytes`, under `WithInlineKey`, and come back as `&str` and `&[u8]`.
   `plain_disk_type!` makes a caller's `PlainBytes` type one, under `Auto`
   or, with its own `InlineKey` impl, `WithInlineKey`. Rust's coherence rules
   forbid a blanket impl over `PlainBytes` beside `String`'s, so each plain
   type opts in.
 - **Why not one layout of bytes for every type:** integers as `VarBytes`
-  read the tail on every hit and take 2.6 times the bytes (Measurements).
-- **Queries** (`DiskQuery`) are the key itself for a plain type, and its
-  bytes for text and bytes, `&[u8]`: neither is copied.
+  read a heap page on every hit and take 2.6 times the bytes
+  (Measurements).
+- **Queries** (`DiskQuery`) are of the stored type: a reference to the key
+  itself for a plain type, a `VarBytesQuery` of its bytes for text and
+  bytes: neither is copied, and both search with inline keys.
 - **Inputs** (`DiskInput`): what the writer takes, owned or borrowed:
   `&map` of a map, `&mut map` of the shared map, by its owner,
   `range_cloned(..)` of one threads still change, and `Cow` bytes, which
@@ -233,7 +242,8 @@ leaf      | …
   back; a crash meanwhile can leave the file without one.
 - **One entry per distinct key**: its value the rows that hold it
   (`RowIds`, a disk type of the crate's own), in order, each a `u32`,
-  little-endian, in the leaf's tail; files of more rows are refused. Read
+  little-endian, in the heap pages after its leaf; files of more rows are
+  refused. Read
   in file order, each key's rows come out in order: nothing is sorted. A
   key of many rows takes little more than its rows; a lookup is one
   search, and the rows lie together. Rows whose first column is null are
@@ -314,26 +324,28 @@ and `huge_pages.rs` for the mapped rows, mapped from disk; the file map
 | file map, mapped, huge pages | 126.4 ns | 91.2 ns |
 
 **Lookups of var-length keys and values at 10M entries**
-(`bbtree-disk/examples/var_bytes_lookups.rs`; read into memory; queries
-written in place). One run, pinned, while the machine ran about 1.6 times
-slower than for the table above (its map took 204 ns a hit, against
-125.4): compare rows within this table only.
+(`bbtree-disk/examples/var_bytes_lookups.rs`; read into memory). One run
+each, unpinned, 2026-10-21, while the machine ran about 1.6 times slower
+than for the table above (its map took 202–213 ns a hit, against 125.4):
+compare rows within this table only. Before: each leaf's bytes in its
+tail, queries `&[u8]` under `Auto`; after: in heap pages,
+`VarBytesQuery`s under `WithInlineKey`.
 
 | | get hit | get miss | bytes an entry |
 |---|--:|--:|--:|
-| `u64`: map | 203.9 ns | 138.7 ns | |
-| `u64`: `BBTreeMapFile<u64, u64>`, in slots | 204.9 ns | 139.9 ns | 18.5 |
-| `u64`: file map, var-length, `&[u8]` queries | 326.9 ns | 225.1 ns | 49.1 |
-| text, 13 to 45 bytes: map of `String` | 352.6 ns | 347.2 ns | |
-| text: `BBTreeMapFile<String, u64>` | 320.7 ns | 317.2 ns | 73.4 |
+| `u64`: map | 212.9 ns | 143.2 ns | |
+| `u64`: `BBTreeMapFile<u64, u64>`, in slots | 203.5 ns | 143.6 ns | 18.47 |
+| `u64`: var-length, tails (before) | 329.2 ns | 225.4 ns | 49.06 |
+| `u64`: var-length, heap pages | 327.0 ns | 210.7 ns | 49.06 |
+| text, 13 to 45 bytes: map of `String` | 351.8 ns | 350.1 ns | |
+| text: `BBTreeMapFile<String, u64>`, tails (before) | 322.4 ns | 321.6 ns | 73.42 |
+| text: `BBTreeMapFile<String, u64>`, heap pages | 322.4 ns | 319.7 ns | 73.42 |
 
-Text keys under `Auto`, compared in place, took 316.9 ns a hit against
-333.8 ns copied into a `VarBytesBuf` under `WithInlineKey`, in two runs of
-that day.
-
-The text map's `u64` values in their slots take no fewer bytes than in
-the tail did: each leaf's tail still rounds up to the same 1 KiB step. At
-1M keys of about 21 bytes, they take 49.1 bytes an entry against 73.4.
+Heap pages take what tails took: these leaves' bytes fit in their first
+page, so no record started a page early, and both round up to the same
+1 KiB step. The text map's `u64` values in their slots take no fewer
+bytes for the same reason. At 1M keys of about 21 bytes, they take 49.1
+bytes an entry against 73.4.
 
 **ClickBench `hits_99_zstd.parquet`, 997,497 rows, 109 MB**
 (`bbtree-datafusion-parquet/examples/parquet_lookups.rs`; one run each, not

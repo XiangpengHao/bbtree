@@ -19,9 +19,8 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use bbtree::Auto;
-use bbtree::file::{Input, VarBytes};
-use bbtree_disk::{BBTreeMapFile, DiskQuery, DiskType};
+use bbtree::WithInlineKey;
+use bbtree_disk::{BBTreeMapFile, DiskQuery, DiskType, Input, VarBytes, VarBytesQuery};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::parquet::arrow::arrow_reader::RowSelection;
 use datafusion::parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData};
@@ -43,7 +42,7 @@ impl ParquetIndexes {
     /// The footer's key-value entry that lists a file's indexes.
     const ENTRY_KEY: &str = "bbtree.indexes";
     /// The version of the entry, and of the indexes it lists.
-    const VERSION: u32 = 2;
+    const VERSION: u32 = 3;
 
     /// The indexes listed in `metadata`, the footer of the Parquet file at
     /// `path`.
@@ -228,10 +227,10 @@ impl RowIds {
 
 impl DiskQuery for RowIds {
     type Stored = VarBytes;
-    type Query = [u8];
+    type Query<'a> = VarBytesQuery<'a>;
 
-    fn query(&self) -> &[u8] {
-        &self.bytes
+    fn query(&self) -> VarBytesQuery<'_> {
+        VarBytesQuery::new(&self.bytes)
     }
 
     fn input(&self) -> Input<'_, VarBytes> {
@@ -239,9 +238,9 @@ impl DiskQuery for RowIds {
     }
 }
 
-/// Kept in the leaf's tail, as `Vec<u8>` is.
+/// Kept in the heap pages after its leaf, as `Vec<u8>` is.
 impl DiskType for RowIds {
-    type Strategy = Auto;
+    type Strategy = WithInlineKey;
     type View<'a> = RowIdsView<'a>;
 
     fn view(stored: &VarBytes) -> RowIdsView<'_> {
