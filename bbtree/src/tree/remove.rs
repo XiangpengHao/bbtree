@@ -13,8 +13,9 @@
 //! becomes the head's key, and only its window goes up (D49).
 //!
 //! Prefixes (`prefix.rs`): the fixing reads no key, and gives the nodes it
-//! changes their parent's prefix. Once the entry is out and counted, the
-//! nodes whose fences changed are fit to them:
+//! changes their parent's prefix. Once the entry is out and counted, and the
+//! tree lowered if its root lost its last separator, the nodes whose fences
+//! changed are fit to them:
 //!
 //! - at each node fixed, the child the node stack leads to, and the sibling
 //!   that gave it an entry, if one did;
@@ -118,9 +119,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     ///
     /// If the node stack ends at no key.
     pub(crate) fn remove(&mut self, alloc: &impl PageAllocator, length: &mut usize) -> (K, V) {
-        let (entry, changed) = self.take_out(alloc, length);
-        self.refit_changed_fences(&changed);
-        self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
+        let (entry, mut changed) = self.take_out(alloc, length);
+        self.lower_and_refit_changed_fences(&mut changed, alloc);
+        self.detach();
         entry
     }
 
@@ -132,16 +133,14 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> (K, V) {
-        let (entry, changed) = self.take_out(alloc, length);
-        self.refit_changed_fences(&changed);
+        let (entry, mut changed) = self.take_out(alloc, length);
         // The way down to the next entry: as the node stack leads above the
         // nodes the fixing changed, and as the fixing tracked it from there.
-        let mut path = changed.indexes;
-        for (depth, edge) in path.iter_mut().enumerate().take(self.depth()) {
+        for (depth, edge) in changed.indexes.iter_mut().enumerate().take(self.depth()) {
             *edge = self.index_at(depth);
         }
-        let lowered = self.detach_lowering_an_emptied_root(changed.reached_root(), alloc);
-        let (slot, edges) = path[usize::from(lowered)..=changed.leaf_depth]
+        self.lower_and_refit_changed_fences(&mut changed, alloc);
+        let (slot, edges) = changed.indexes[..=changed.leaf_depth]
             .split_last()
             .expect("the way down ends at the leaf");
         self.start_at_root();
@@ -244,11 +243,21 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         changed
     }
 
-    /// Fits the prefixes of the nodes whose fences a removal changed, from
+    /// Lowers the tree if the fixing took the root's last separator, then
+    /// fits the prefixes of the nodes whose fences a removal changed, from
     /// the bottom up, as `changed` tells. The node stack ends where the
     /// fixing stopped, and afterwards at `changed`'s top depth. Calls
-    /// `InlineKey`.
-    fn refit_changed_fences(&mut self, changed: &ChangedFences) {
+    /// `InlineKey`, once the tree has lowered: a panic there leaves no
+    /// internal node without a separator, which the next removal through it
+    /// would fix the child of (D48).
+    fn lower_and_refit_changed_fences(
+        &mut self,
+        changed: &mut ChangedFences,
+        alloc: &impl PageAllocator,
+    ) {
+        if self.lower_an_emptied_root(changed.reached_root(), alloc) {
+            changed.lower();
+        }
         let Some(top_depth) = changed.top_depth else {
             return;
         };
@@ -298,8 +307,8 @@ struct ChangedFences {
     /// At each depth, the edge to the sibling that gave the child an entry,
     /// if one did.
     donors: [Option<usize>; MAX_DEPTH + 1],
-    /// The depth of the leaf the fixing went up from, which it doesn't
-    /// change: the root lowers only once it is done.
+    /// The depth of the leaf the fixing went up from; one less once the
+    /// tree lowers ([`Self::lower`]).
     leaf_depth: usize,
     /// The child of every node from depth `top_depth` down to the leaf's parent
     /// has new fences; none does if `None`.
@@ -311,6 +320,17 @@ impl ChangedFences {
     /// have taken the root's last separator.
     fn reached_root(&self) -> bool {
         self.top_depth == Some(0)
+    }
+
+    /// The tree lowered, its root's only child moving up into the root:
+    /// each node is a depth higher. That child took the root's prefix when
+    /// it merged (`Siblings::merge`), what every key shares (D50), so it is
+    /// fit as the root; the nodes below it are fit as before.
+    fn lower(&mut self) {
+        self.indexes.copy_within(1.., 0);
+        self.donors.copy_within(1.., 0);
+        self.leaf_depth -= 1;
+        self.top_depth = (self.leaf_depth > 0).then_some(0);
     }
 
     /// Nothing fixed yet, up from a leaf at `leaf_depth`, whose entry after the

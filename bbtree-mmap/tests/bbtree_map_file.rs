@@ -9,14 +9,14 @@ use std::path::PathBuf;
 
 use bbtree::file::PlainBytes;
 use bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
-use bbtree_disk::{BBTreeMapFile, plain_disk_type};
+use bbtree_mmap::{BBTreeMapFile, plain_disk_type};
 
 /// A file of its own for a test, removed when dropped.
 struct TestFile(PathBuf);
 
 impl TestFile {
     fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("bbtree-disk-{name}-{}", std::process::id())))
+        Self(std::env::temp_dir().join(format!("bbtree-mmap-{name}-{}", std::process::id())))
     }
 
     fn len(&self) -> u64 {
@@ -71,7 +71,7 @@ fn text_maps_round_trip() {
 }
 
 /// Integers stay in their slots: a `u64` map's file takes little more than
-/// its 16 bytes an entry, where bytes in the leaves' tails took 49.
+/// its 16 bytes an entry, where var-length bytes in heap pages take 49.
 #[test]
 fn fixed_size_types_stay_in_their_slots() {
     let file = TestFile::new("plain");

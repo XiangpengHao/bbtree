@@ -1,7 +1,7 @@
 //! Internal nodes: the nodes that route. An internal node's page holds its
 //! children, one more than its separators (D12, D32), and no values (D17).
 //! With inline keys, it holds only its separators' inline keys (D18) and its
-//! edges, in a 512 B page. Each separator's key is then the head key of the
+//! edges, in a 512 B page by default. Each separator's key is then the head key of the
 //! leftmost leaf right of it, which a search reads only on a tie (D49).
 //! Without inline keys, the node keeps its separator keys.
 //!
@@ -26,6 +26,7 @@ use super::page::{FreshPage, NodeKind, NodePtr, PageAllocator, PageByType, PageT
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
+use crate::allocator::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// An internal node, by its page.
@@ -43,6 +44,8 @@ impl<K, V, S> Copy for Internal<K, V, S> {}
 
 // SAFETY: internal nodes have the internal layout.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
+    const KIND: PageKind = PageKind::Internal;
+
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::internal_layout().page
     }

@@ -1,7 +1,7 @@
 //! What a [`BBTreeMapFile`](crate::BBTreeMapFile) keeps of the caller's types, and how: each type picks
 //! its own storage. A plain type stays as it is, in its leaf's slot, as a
 //! map's keys and values do; text and byte strings are [`VarBytes`], their
-//! bytes in the leaf's tail (`design/15-index-file.md`).
+//! bytes in the heap pages after the leaf (`design/15-index-file.md`).
 //!
 //! - [`DiskType`] is a type a `BBTreeMapFile`'s keys or values are: what the file
 //!   keeps for it, how its keys are searched, and what lookups hand back.
@@ -9,23 +9,85 @@
 //!   it, as `str` is of `String`.
 //! - [`DiskInput`] is what a `BBTreeMapFile` is written from: the type, owned or
 //!   borrowed, or another form with its bytes, as `Cow<[u8]>`.
+//! - [`DiskStored`] is what the file keeps: a plain type, or [`VarBytes`].
 //! - [`plain_disk_type!`](crate::plain_disk_type) makes a plain type of
 //!   the caller's a disk type, as the integers are.
 
 use std::borrow::Cow;
+use std::ops::Deref;
 
-use bbtree::file::{InWriter, Input, Storable, VarBytes};
-use bbtree::{Auto, InlineKeyStrategy};
+use bbtree::file::InWriter;
+use bbtree::{Auto, InlineKeyStrategy, WithInlineKey};
+
+use crate::var_bytes::{VarBytes, VarBytesQuery};
+
+/// What a `BBTreeMapFile` keeps for a key or value: a plain type as it is,
+/// in its slot, or [`VarBytes`], a span to bytes in the heap pages after its
+/// leaf. Only those implement it.
+pub trait DiskStored: storage::DiskStorage {}
+
+impl<T: storage::DiskStorage> DiskStored for T {}
+
+/// What a `BBTreeMapFile`'s writer takes for a key or value stored as `T`:
+/// the value, for a plain type; its bytes, borrowed or owned (`Cow`), for
+/// [`VarBytes`].
+pub type Input<'a, T> = <T as storage::DiskStorage>::Input<'a>;
+
+/// What [`DiskStored`] tells a writer, kept out of the public API.
+pub(crate) mod storage {
+    use bbtree::file::{PlainBytes, Storable};
+
+    use crate::var_bytes::{ArenaBytes, ByteArena, VarBytes};
+
+    /// How a writer takes a key or value the file keeps as `Self`, and the
+    /// bytes after the leaf that its slot points to.
+    pub trait DiskStorage: Storable {
+        /// What a writer takes for one: the value, or its bytes.
+        type Input<'a>;
+
+        /// What the writer's tree holds for `input`, whose bytes, if it
+        /// keeps them after the leaf, go into `arena`.
+        fn in_writer(input: Self::Input<'_>, arena: &mut ByteArena) -> Self::InWriter;
+
+        /// The bytes `in_writer` keeps after its leaf; none for a plain
+        /// type.
+        fn leaf_bytes(in_writer: &Self::InWriter) -> &[u8];
+    }
+
+    impl<T: PlainBytes> DiskStorage for T {
+        type Input<'a> = T;
+
+        fn in_writer(input: T, _arena: &mut ByteArena) -> T {
+            input
+        }
+
+        fn leaf_bytes(_in_writer: &T) -> &[u8] {
+            &[]
+        }
+    }
+
+    impl DiskStorage for VarBytes {
+        type Input<'a> = std::borrow::Cow<'a, [u8]>;
+
+        fn in_writer(input: std::borrow::Cow<'_, [u8]>, arena: &mut ByteArena) -> ArenaBytes {
+            arena.push(&input)
+        }
+
+        fn leaf_bytes(in_writer: &ArenaBytes) -> &[u8] {
+            in_writer.bytes()
+        }
+    }
+}
 
 /// A type a [`BBTreeMapFile`](crate::BBTreeMapFile)'s keys or values are:
 /// the integers, `f32` and `f64`, byte arrays, `String`, `Vec<u8>`, and
 /// plain types of the caller's ([`plain_disk_type!`](crate::plain_disk_type)).
 pub trait DiskType: DiskQuery {
     /// How keys of this type are searched, as a map's strategy: [`Auto`]
-    /// for the integers, byte arrays and `VarBytes`, which it takes for byte
-    /// strings; [`WithInlineKey`](bbtree::WithInlineKey) for a caller's type
-    /// with its own [`InlineKey`](bbtree::InlineKey) impl. Values don't use
-    /// it.
+    /// for the integers and byte arrays; [`WithInlineKey`] for
+    /// `VarBytes`, with its byte strings' inline keys, and for a caller's
+    /// type with its own [`InlineKey`](bbtree::InlineKey) impl. Values
+    /// don't use it.
     type Strategy: InlineKeyStrategy<Self::Stored> + InlineKeyStrategy<InWriter<Self::Stored>>;
 
     /// What lookups hand back, borrowing the file: a reference to a plain
@@ -43,17 +105,19 @@ pub trait DiskType: DiskQuery {
 /// bytes as byte strings, as text and `[u8]` order.
 pub trait DiskQuery {
     /// What the file keeps: `Self`, in its slot, for a plain type;
-    /// [`VarBytes`], in the leaf's tail, for text and bytes.
-    type Stored: Storable;
+    /// [`VarBytes`], in the heap pages after the leaf, for text and bytes.
+    type Stored: DiskStored;
 
-    /// What a lookup compares with the file's keys, which borrow as it: the
-    /// key itself, for a plain type; its bytes, `[u8]`, for text and bytes,
-    /// which the search compares in place, as a map's does a `&str` with its
-    /// `String`s.
-    type Query: ?Sized;
+    /// What a lookup compares with the file's keys, as the stored type: a
+    /// reference to the key itself, for a plain type; a [`VarBytesQuery`]
+    /// of its bytes, for text and bytes, which the search compares in
+    /// place, inline keys and all.
+    type Query<'a>: Deref<Target = Self::Stored>
+    where
+        Self: 'a;
 
     /// The key as a lookup compares it.
-    fn query(&self) -> &Self::Query;
+    fn query(&self) -> Self::Query<'_>;
 
     /// What the file's writer takes for this, borrowing it: the value, or
     /// its bytes.
@@ -63,7 +127,7 @@ pub trait DiskQuery {
 /// What a `BBTreeMapFile` is written from, for a key or value stored as `S`: a
 /// [`DiskType`], owned or borrowed (`&`, `&mut`), its borrowed forms, as
 /// `&str`, and bytes as `Cow`, which pass to the writer without a copy.
-pub trait DiskInput<S: Storable> {
+pub trait DiskInput<S: DiskStored> {
     /// What the file's writer takes for this: the value, or its bytes.
     fn into_input<'a>(self) -> Input<'a, S>
     where
@@ -101,9 +165,9 @@ impl<T: DiskQuery + ?Sized> DiskInput<T::Stored> for &mut T {
 /// # Examples
 ///
 /// ```
-/// use bbtree_disk::bbtree::file::PlainBytes;
-/// use bbtree_disk::bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
-/// use bbtree_disk::{BBTreeMapFile, plain_disk_type};
+/// use bbtree_mmap::bbtree::file::PlainBytes;
+/// use bbtree_mmap::bbtree::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
+/// use bbtree_mmap::{BBTreeMapFile, plain_disk_type};
 ///
 /// #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 /// #[repr(transparent)]
@@ -123,7 +187,7 @@ impl<T: DiskQuery + ?Sized> DiskInput<T::Stored> for &mut T {
 ///
 /// plain_disk_type!(UserId, WithInlineKey);
 ///
-/// let path = std::env::temp_dir().join(format!("bbtree-disk-plain-{}", std::process::id()));
+/// let path = std::env::temp_dir().join(format!("bbtree-mmap-plain-{}", std::process::id()));
 /// BBTreeMapFile::<UserId, u64>::create(&path, [(UserId(7), 70_u64), (UserId(42), 420)])?;
 /// let map = BBTreeMapFile::<UserId, u64>::read(&path)?;
 /// assert_eq!(map.get(&UserId(42)), Some(&420));
@@ -138,7 +202,7 @@ macro_rules! plain_disk_type {
     ($plain:ty, $strategy:ty) => {
         impl $crate::DiskQuery for $plain {
             type Stored = $plain;
-            type Query = $plain;
+            type Query<'a> = &'a $plain;
 
             fn query(&self) -> &$plain {
                 self
@@ -186,7 +250,7 @@ plain_disk_type!(f64);
 /// keys under [`Auto`]; others compare whole.
 impl<const N: usize> DiskQuery for [u8; N] {
     type Stored = [u8; N];
-    type Query = [u8; N];
+    type Query<'a> = &'a [u8; N];
 
     fn query(&self) -> &[u8; N] {
         self
@@ -215,17 +279,17 @@ impl<const N: usize> DiskType for [u8; N] {
     }
 }
 
-/// The bytes of byte strings and text, in the leaf's tail: `$owned` is the
-/// disk type, `$borrowed` its borrowed form, `$bytes` how either gives its
-/// bytes.
+/// The bytes of byte strings and text, in the heap pages after the leaf:
+/// `$owned` is the disk type, `$borrowed` its borrowed form, `$bytes` how
+/// either gives its bytes.
 macro_rules! byte_string_disk_type {
     ($owned:ty, $borrowed:ty, $bytes:ident) => {
         impl DiskQuery for $borrowed {
             type Stored = VarBytes;
-            type Query = [u8];
+            type Query<'a> = VarBytesQuery<'a>;
 
-            fn query(&self) -> &[u8] {
-                self.$bytes()
+            fn query(&self) -> VarBytesQuery<'_> {
+                VarBytesQuery::new(self.$bytes())
             }
 
             fn input(&self) -> Cow<'_, [u8]> {
@@ -235,10 +299,10 @@ macro_rules! byte_string_disk_type {
 
         impl DiskQuery for $owned {
             type Stored = VarBytes;
-            type Query = [u8];
+            type Query<'a> = VarBytesQuery<'a>;
 
-            fn query(&self) -> &[u8] {
-                self.$bytes()
+            fn query(&self) -> VarBytesQuery<'_> {
+                VarBytesQuery::new(self.$bytes())
             }
 
             fn input(&self) -> Cow<'_, [u8]> {
@@ -274,7 +338,7 @@ byte_string_disk_type!(Vec<u8>, [u8], as_ref);
 
 /// Text, whose bytes are its UTF-8.
 impl DiskType for String {
-    type Strategy = Auto;
+    type Strategy = WithInlineKey;
     type View<'a> = &'a str;
 
     /// # Panics
@@ -286,7 +350,7 @@ impl DiskType for String {
 }
 
 impl DiskType for Vec<u8> {
-    type Strategy = Auto;
+    type Strategy = WithInlineKey;
     type View<'a> = &'a [u8];
 
     fn view(stored: &VarBytes) -> &[u8] {

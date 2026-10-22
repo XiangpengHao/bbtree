@@ -1,13 +1,13 @@
-//! Lookups of var-length keys and values, kept in the leaves' tails
-//! against plain ones kept in the leaves, and against a map.
+//! Lookups of var-length keys and values, kept in heap pages after the
+//! leaves, against plain ones kept in the leaves, and against a map.
 //!
 //! `cargo run --release --example var_bytes_lookups -- [entries]`: 10M by default.
 //! Two key sets, each with random lookups that hit and that miss:
 //!
 //! - random `u64` keys and values: a map, a `BBTreeMapFile<u64, u64>`, which
 //!   keeps them in their slots, and a file map of their 8 big-endian bytes,
-//!   var-length, in the leaves' tails, looked up by those bytes: what the
-//!   tail costs;
+//!   var-length, in heap pages after the leaves, looked up by those bytes:
+//!   what keeping bytes apart costs;
 //! - random text keys of 8 to 40 bytes, after a shared 5-byte prefix, with
 //!   `u64` values: a map of `String`s and a `BBTreeMapFile<String, u64>`.
 //!
@@ -15,10 +15,8 @@
 
 mod timed_lookups;
 
-use bbtree::Auto;
-use bbtree::file::{FileMap, FileWriter, VarBytes};
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 use timed_lookups::{Numbers, TimedLookups};
 
 #[global_allocator]
@@ -47,19 +45,13 @@ fn main() {
 /// their slots, and a file map of var-length ones.
 fn u64_lookups(count: usize, numbers: &mut Numbers) {
     let (map, lookups) = TimedLookups::of_u64_map(count, numbers);
-    let var_writer =
-        FileWriter::<VarBytes, VarBytes, Auto>::from_ascending(map.iter().map(|(key, value)| {
-            (
-                key.to_be_bytes().to_vec().into(),
-                value.to_be_bytes().to_vec().into(),
-            )
-        }))
-        .unwrap();
-    let var_bytes = var_writer.to_buf();
-    drop(var_writer);
-    let var_map = FileMap::<VarBytes, VarBytes, Auto>::open(&var_bytes).unwrap();
     let path =
         std::env::temp_dir().join(format!("bbtree-var-bytes-lookups-{}", std::process::id()));
+    let var_entries =
+        (map.iter()).map(|(key, value)| (key.to_be_bytes().to_vec(), value.to_be_bytes().to_vec()));
+    BBTreeMapFile::<Vec<u8>, Vec<u8>>::create(&path, var_entries).unwrap();
+    let var_map = BBTreeMapFile::<Vec<u8>, Vec<u8>>::read(&path).unwrap();
+    let var_len = std::fs::metadata(&path).unwrap().len();
     BBTreeMapFile::<u64, u64>::create(&path, &map).unwrap();
     let disk = BBTreeMapFile::<u64, u64>::read(&path).unwrap();
     let disk_len = std::fs::metadata(&path).unwrap().len();
@@ -67,13 +59,13 @@ fn u64_lookups(count: usize, numbers: &mut Numbers) {
     println!(
         "{count} u64 entries: in slots, {:.2} bytes an entry; var-length, {:.2}",
         disk_len as f64 / count as f64,
-        var_bytes.len() as f64 / count as f64
+        var_len as f64 / count as f64
     );
     lookups.report("u64: map", |key| map.get(key).copied());
     lookups.report("u64: BBTreeMapFile<u64, u64>", |key| disk.get(key).copied());
     lookups.report("u64: file map, var-length", |key| {
         let value = var_map.get(key.to_be_bytes().as_slice())?;
-        Some(u64::from_be_bytes(value.bytes().try_into().unwrap()))
+        Some(u64::from_be_bytes(value.try_into().unwrap()))
     });
 }
 

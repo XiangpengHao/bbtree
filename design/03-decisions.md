@@ -43,10 +43,11 @@ Verus is optional but welcome.
 ## Nodes
 
 **D8. Own allocator trait, the map's last type parameter.** (2026-10-14)
-Every allocation is a node, counted, with a size known in advance; no runtime
-surprises. Two levels: an allocator hands out blocks by size and alignment
-alone, and the tree makes each block a node of its kind, a leaf, an internal
-node or the root page, with that kind's layout (D21).
+Every allocation is a page, counted, of a kind and a size known in advance;
+no runtime surprises. A map asks its allocator for each kind of page by a
+method of its own: internal nodes', leaves' and the root page; and a store
+asks for its heap pages by a fourth (D60); every page of one kind with one
+layout (D21, D59).
 
 - **Trait:** `Allocator` (`allocator.rs`), public: the part of std's unstable
   `core::alloc::Allocator` a map needs, `allocate_zeroed(&self, Layout)` and
@@ -54,9 +55,19 @@ node or the root page, with that kind's layout (D21).
   `unsafe trait`; a clone is the same allocator), so it works on stable.
   `Global`, the global allocator, is the default; `&A` is an allocator too,
   to share one between maps.
+- **A method pair per kind** (2026-10-20): `allocate_internal`,
+  `allocate_leaf`, `allocate_root` and `allocate_heap`, each with its
+  `deallocate_*`, by default `allocate_zeroed`'s and `deallocate`'s. An
+  allocator that overrides them budgets, pools or places the kinds apart:
+  a pool of one page size per kind, index memory counted apart from a
+  store's records. Inside, the tree names a page's kind
+  (`PageType::KIND`, `PageKind`) wherever it allocates or frees one, so a
+  latched tree's page pool tells its node pages apart without their
+  layouts.
 - **Zeroed pages:** every page comes zeroed, the allocator's job, which
-  some do for free (fresh memory from the OS). The latched tree needs it,
-  for latch words and the edges optimistic readers read (09-concurrency.md).
+  some do for free (fresh memory from the OS), but a store's heap pages,
+  which may hold anything. The latched tree needs it, for latch words and
+  the edges optimistic readers read (09-concurrency.md).
 - **Never unwinds:** part of the trait's safety contract, as for
   `GlobalAlloc`. The tree calls the allocator in the middle of splits, and
   promises nothing about an unwind there.
@@ -142,14 +153,15 @@ share, with no fence stored (D18, D26).
   time (`tree/node/layout.rs`).
 
 **D13. Every node holds at least 12 keys.** (2026-10-07)
-A node kind's size is the smallest multiple of 1 KB (D15) at which it holds
-≥ 12 keys, with a leaf's values and head or an internal node's edges (D21).
-A type aligned to more than 1 KB raises the node's alignment, and its size
-step, to its own.
+A node kind's size is the smallest multiple of its page size, by default
+1 KB (D15, D59), at which it holds ≥ 12 keys, with a leaf's values and head
+or an internal node's edges (D21). A type aligned to more than the page
+size raises the node's alignment, and its size step, to its own.
 
-**D15. Nodes are 1 KB, aligned to their own size.** (2026-10-07)
-A node is the smallest multiple of 1 KB at which it holds ≥ 12 keys (D13),
-and it is aligned to max(1 KB, align of K, align of its trailing slots).
+**D15. Nodes are 1 KB by default, aligned to their own size.** (2026-10-07)
+A node is the smallest multiple of its page size, by default 1 KB (D59), at
+which it holds ≥ 12 keys (D13), and it is aligned to max(page size, align
+of K, align of its trailing slots).
 
 - Why: a sweep at 10M u64→u64 entries (mimalloc, branchless search, append
   fast path) put 1 KB ahead of every other size, and ahead of std on all three
@@ -170,8 +182,8 @@ and it is aligned to max(1 KB, align of K, align of its trailing slots).
 - A self-aligned 1 KB node never crosses a 4 KB page: one TLB entry per
   node, and hardware prefetchers, which stop at page boundaries, can stream
   the whole node.
-- 1 KB alignment leaves 10 free low address bits, so node capacity is capped
-  at 1023.
+- Node capacity is capped at 1023, the 10 free low address bits of 1 KB
+  alignment, which also bounds a search's scan.
 - A leaf holds 12 entries in 1 KB while `K + V` ≤ ~76 B; larger entries get
   2 KB, 3 KB, … leaves (D21). u64→u64 without inline keys: leaf 63,
   internal 63.
@@ -181,6 +193,37 @@ and it is aligned to max(1 KB, align of K, align of its trailing slots).
   keys, as many as 1 KiB held with keys or more, and a search scans every
   inline key slot (06, lesson 1). In 1 KiB they held 100, 84 and 63, and
   10M `hash32` hits ran 232 ns against 160.
+
+**D59. Node configs: what a map tunes about its nodes is defaulted constants of one trait, which its strategy carries.** (2026-10-20)
+
+- **What:** `NodeConfig` has `LEAF_PAGE_SIZE` (1024),
+  `INTERNAL_PAGE_SIZE` (512, internal nodes with inline keys, D49),
+  `PLAIN_INTERNAL_PAGE_SIZE` (1024, internal nodes that keep their keys,
+  D17) and `HEAP_PAGE_SIZE` (the leaves', a store's heap pages, D60), each
+  with its default. `Sealed` has `type Config: NodeConfig`:
+  `Auto` and `WithInlineKey` take the defaults, `Configured<S, C>` is
+  `S`'s inline keys with config `C`, and `Latched<S>` and `InFile<S>`
+  forward `S::Config`. `NodeLayout<K, V, C, L>` reads the page sizes,
+  `L` the leaf annex (D60); nothing else reads the config.
+- **Why one trait:** a public wrapper per knob (`PageSizes<S, L, I>`) makes
+  every knob a new type to nest, and every wrapper forward every other
+  knob, where a missed forward silently resets one to its default. One
+  associated type forwards every knob at once. A new knob is one more
+  defaulted constant, and configs written before keep compiling.
+- **Why not const generics on `Auto`:** defaults don't drive inference, so
+  `with_strategy(Auto)` stops compiling (E0284).
+- **Bounds, checked at compile time:** page sizes are powers of two;
+  leaves at least 1 KiB, which keeps `MAX_DEPTH` at 23 (smaller leaves
+  raise it, and with it arrays that insert, remove and the latched page
+  pool zero on every call); internal pages at least 64 B. A node's inline
+  keys take at most max(1 KiB, page size) bytes, the 1 KiB cap of before
+  at the default sizes. Leaves and internal nodes may take pages of one
+  size: the page pool is told each page's kind (D8).
+- **Zero cost:** every default layout is unchanged. Get, insert and
+  remove on default unsync (`u64`, `String`, keys without inline keys)
+  and concurrent maps compile to the same machine code as before.
+- **File maps:** the fingerprint covers page sizes and alignments, so a
+  file map read with other sizes is refused, `LayoutMismatch`.
 
 **D16. Leaves and internal nodes stay sorted.** (2026-10-07)
 Unsorted leaf storage, fully unsorted or as a sorted prefix plus an unsorted
@@ -1350,12 +1393,13 @@ Design and measurements in 15-index-file.md.
   file map in place, a tree of strategy `InFile<S>`, which only sets
   `IN_FILE`: `Internal::edge_unchecked` adds the offset to the node's
   address, for `get` and the batch lanes (D53) alike. Keys and values are
-  `PlainBytes`, kept in their slots, or `VarBytes`, of any length, kept in
-  each leaf's tail, the slot holding a span, `{len, offset}` from the slot
-  itself. `Auto` takes `VarBytes` for a byte string, as it does `String`:
-  a `&[u8]` looks a key up, compared in place. bbtree-disk writes, maps
-  and reads typed maps in files (`BBTreeMapFile`), each key and value type
-  picking plain or `VarBytes` storage (`DiskType`);
+  `Storable`: `PlainBytes`, kept in their slots, or a type whose slot
+  points to bytes right after its leaf, which a writer's `LeafBytes` lays
+  out and the type's `check` checks. bbtree-mmap's `VarBytes` is one: a
+  span, `{len, offset}` from the slot itself, to bytes of any length in
+  heap pages after the leaf, searched with `WithInlineKey`. bbtree-mmap
+  writes, maps and reads typed maps in files (`BBTreeMapFile`), each key
+  and value type picking plain or `VarBytes` storage (`DiskType`);
   bbtree-datafusion-parquet embeds indexes of one or more columns in a
   Parquet file, one entry per distinct key, and DataFusion's Parquet scans
   look their predicates' rows up in them.
@@ -1379,13 +1423,71 @@ Design and measurements in 15-index-file.md.
 - **Span offsets from the slot, not the node:** bbtree hands a key's `Ord`
   and `InlineKey` only `&K`; from the slot, that is all a span needs. The
   writer builds over `ArenaBytes`, 8-byte pointers of the span's layout,
-  and rewrites them into spans as it copies each leaf.
+  and rewrites them into spans as it lays each leaf's bytes out.
+- **The bytes after a leaf are bbtree-mmap's** (2026-10-21): bbtree knows
+  two hooks, a slot type's check (`Storable::check`) and what follows a
+  leaf (`LeafBytes`), and nothing of spans. bbtree-mmap lays each leaf's
+  bytes out as a store's leaf keeps its records (D60): heap pages of
+  `HEAP_PAGE_SIZE` right after the leaf, records in key order, a key's
+  bytes then its value's, each in one page but those larger than a page,
+  which start one. After the leaf, not after every leaf: a cold lookup
+  reads one place of the file. At 10M entries the pages took what the
+  tails did, 49.06 bytes a var-length `u64` entry, 73.42 a text one, and
+  the same time.
+- **Queries point to the caller's bytes:** a `VarBytesQuery` is a span
+  marked by a length no span has, then the bytes' address, as a store's
+  lookup key is (D60): a lookup compares with inline keys and copies
+  nothing, under `WithInlineKey`, with no type `Auto` must know.
 - **Fixed-size keys stay plain:** var-length, a 10M `u64` hit took 216 ns
   against 127, the file map 49 bytes an entry against 18.5.
 - **Names:** "file map" for the format; "file" alone for the operating
-  system's; "tail", "span" and "var-length" for the bytes of any length,
-  as "heap" already means the allocator's and "handle" a node's; "OS
-  pages" for the operating system's, as "page" means a node's.
+  system's; "span" and "var-length" for the bytes of any length, "heap
+  pages" for where they lie, as a store's records do; "handle" means a
+  node's; "OS pages" for the operating system's, as "page" means a
+  node's.
+
+**D60. Stores: byte strings in heap pages chained by each leaf's annex, on the shared map.** (2026-10-21)
+Design in 16-bbtree-store.md.
+
+- **What:** the `bbtree-store` crate's `BBTreeStore`, a map of byte
+  strings that threads share, whose every byte lies in pages from its
+  allocator: the shared `BBTreeMap`, whose keys point to their records,
+  key and value, in heap pages (`HEAP_PAGE_SIZE`), each leaf's in a chain
+  its annex holds. Lookups, inserts, removals, scans and copied ranges.
+- **What bbtree gives it: a leaf annex.** `LeafAnnex`, data of the
+  caller's in each leaf of a `BBTreeMap` (`WithLeafAnnex<S, L>`), which a
+  new leaf gets by `Default`, a split and a merge call, and the map's
+  teardown releases; `update_or_insert_with_leaf` and `remove_with_leaf`
+  hand it, and the leaf's keys, to their closures while they hold the
+  leaf (`AnnexedLeaf`), which may refuse an insert for want of a page.
+  Maps keep `()`: same layouts, same instructions. Heap pages, records,
+  chains and compaction are all the store's crate.
+- **Why heap pages, not records in the leaf:** the leaf stays a
+  fixed-size leaf, its layout, search and latches the map's; bytes of any
+  length are sized apart from it.
+- **Why a chain per leaf, not size classes shared by all leaves:** a leaf's
+  records lie together, for scans, and a class's free slots serve only its
+  size. A prototype with classes inserted faster (274 ns against 419 at
+  10M) and took less after inserts alone, but scanned 1.4 times slower.
+- **Why splits move no record:** keeping every record in its own leaf's
+  chain made splits copy records and take heap pages midway, and leaves
+  merge-only; a stray costs locality only. Strays two generations behind
+  their leaf come home on its next write; a compacting leaf takes all of
+  its own home.
+- **Holes are taken back in place,** with no page: a compaction slides a
+  leaf's records together over the pages where only its records live, and
+  frees what that empties. Pages where other leaves' records live wait for
+  them.
+- **A removed record dies after the removal returns:** the map reads the
+  removed key until then (a separator's, to refit prefixes).
+- **Values of any length, in overflow pages:** heap pages a record links,
+  all full, the record keeping what is left over if it fits (SQLite's
+  rule), so that no record outgrows a page's room and chains and
+  compaction stay as they are. A record moves without its pages, which go
+  when it dies. Keys stay capped at a quarter page.
+- **A spent budget refuses inserts** (`InsertError::Alloc`), the store
+  holding what it held; what to free then is the cache's policy, not
+  designed yet.
 
 ## Navigation
 

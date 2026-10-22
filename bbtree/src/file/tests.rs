@@ -3,8 +3,6 @@
 //! of tree; a writer refuses entries out of order; and a reader refuses
 //! bytes that are not a file map of its layout.
 
-mod var_bytes;
-
 use core::cmp::Ordering;
 use core::fmt::Debug;
 use core::ops::Bound;
@@ -154,7 +152,7 @@ fn round_trip<K: NumberedKey, S: crate::InlineKeyStrategy<K>>(
     assert!(file_map.values().eq(map.values()));
     assert_eq!(file_map.first_key_value(), map.first_key_value());
     assert_eq!(file_map.last_key_value(), map.last_key_value());
-    for _ in 0..40 {
+    for _ in 0..if cfg!(miri) { 8 } else { 40 } {
         let (start, end) = rng.range_bounds(space, K::of);
         let bounds = (start.as_ref(), end.as_ref());
         assert!(file_map.range(bounds).eq(map.range(bounds)));
@@ -245,7 +243,8 @@ fn keys_without_values_round_trip() {
 /// every unsafe step of writing and reading a file map.
 #[test]
 fn a_small_file_map_round_trips() {
-    for (seed, count) in [0, 1, 13, 120].into_iter().enumerate() {
+    let most = if cfg!(miri) { 30 } else { 120 };
+    for (seed, count) in [0, 1, 13, most].into_iter().enumerate() {
         round_trip::<[u8; 32], _>(BBTreeMap::new(), count, seed as u64);
     }
 }

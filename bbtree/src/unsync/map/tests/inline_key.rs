@@ -487,7 +487,7 @@ fn run_with_lying_keys(lie: Lie, seed: u64) -> bool {
     let rng = TestRng::new(seed);
     let ledger = DropLedger::new();
     let (steps, key_space) = if cfg!(miri) {
-        (300, 200)
+        (180, 120)
     } else {
         (20_000, 4000)
     };

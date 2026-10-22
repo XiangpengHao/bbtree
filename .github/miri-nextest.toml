@@ -3,7 +3,9 @@
 # tests named here run: Miri interprets each test thousands of times slower
 # than native code, so it runs the few that reach each piece of unsafe code
 # (pages, slots, node splits and merges, inline keys, walks, drops and
-# panics, allocators, batch lanes, the latched tree) in about a minute each.
+# panics, allocators, batch lanes, the latched tree, leaf annexes, and a
+# store's heap pages and overflow pages, in bbtree-store, and file maps'
+# var-length keys and values, in bbtree-mmap) in about a minute each.
 # Other tests don't run under Miri; to add one, name it here. The threads
 # tests stay out: optimistic lock coupling reads nodes writers are changing,
 # which Miri reports as data races.
@@ -40,13 +42,21 @@ default-filter = """
   | test(=unsync::map::tests::allocator::append_keeps_each_page_with_its_own_allocator)
   | test(=file::tests::a_small_file_map_round_trips)
   | test(=tree::file::tests::damaged_file_maps_are_refused_or_read_in_bounds)
-  | test(=file::tests::var_bytes::a_small_var_bytes_file_map_round_trips)
-  | test(=file::tests::var_bytes::a_small_auto_var_bytes_file_map_round_trips)
-  | test(=tree::file::tests::damaged_var_bytes_file_maps_are_refused_or_read_in_bounds)
   | test(=unsync::map::tests::inline_key::wrong_inline_keys_stay_memory_safe)
   | test(=unsync::map::tests::prefix::integer_keys_get_prefixes)
   | test(=unsync::map::tests::batch::empty_single_and_repeated_keys)
   | test(=unsync::map::tests::batch::replaced_and_stored_values_drop_once)
   | test(=map::tests::a_small_map_matches_std)
   | test(=map::tests::refused_pages_fail_their_own_entries)
+  | test(=tree::node::annexed_leaf::tests::annexes_follow_their_leaves_through_splits_merges_and_teardown)
+  | test(=tree::node::annexed_leaf::tests::a_refused_insert_changes_nothing)
+  | (binary(=store) & test(=inserts_reads_replaces_and_removes))
+  | (binary(=store) & test(=refuses_long_keys_and_takes_values_of_any_length))
+  | (binary(=store) & test(=a_long_value_past_the_budget_takes_no_page))
+  | (binary(=store) & test(=matches_a_btree_map))
+  | (binary(=store) & test(=a_spent_budget_refuses_inserts_and_changes_nothing))
+  | test(=var_bytes::tests::a_small_var_bytes_file_map_round_trips)
+  | test(=var_bytes::tests::records_stay_in_their_pages_and_large_ones_start_one)
+  | test(=var_bytes::tests::spans_whose_bytes_lie_outside_are_refused)
+  | test(=var_bytes::tests::damaged_var_bytes_file_maps_are_refused_or_read_in_bounds)
 """

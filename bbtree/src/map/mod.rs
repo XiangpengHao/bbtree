@@ -17,6 +17,7 @@ mod range;
 mod shuttle_tests;
 #[cfg(test)]
 mod tests;
+mod with_leaf;
 
 pub use self::owner::{IntoIter, IterMut};
 pub use self::range::RangeCloned;
@@ -400,7 +401,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.tree.remove_entry(key, |_, _| true, &self.alloc)
+        self.tree
+            .remove_entry(key, |_, _| true, |_, _, _| {}, &self.alloc)
     }
 
     /// Removes the entry whose key equals `key` if `condition` holds of it,
@@ -414,7 +416,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.tree.remove_entry(key, condition, &self.alloc)
+        self.tree
+            .remove_entry(key, condition, |_, _, _| {}, &self.alloc)
     }
 }
 

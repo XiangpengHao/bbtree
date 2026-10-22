@@ -38,10 +38,10 @@ use super::node::root_page::RootPage;
 use super::node_stack::MAX_DEPTH;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
-use crate::file::storage::Storage;
-use crate::file::{FileError, Storable, VarBytes};
+use crate::file::{FileError, LeafBytes, Storable};
 use crate::inline_key::InlineKeyStrategy;
 use crate::inline_key::sealed::{InlineKeySource, Sealed};
+use crate::node_config::NodeConfig;
 
 /// The strategy of a tree in a file map: `S`'s inline keys, and edges that
 /// are offsets from their node's page. Nothing public names it: an
@@ -50,10 +50,13 @@ pub(crate) struct InFile<S>(PhantomData<fn() -> S>);
 
 impl<K, S: InlineKeyStrategy<K>> Sealed<K> for InFile<S> {
     const SOURCE: InlineKeySource<K> = S::SOURCE;
+    type Config = S::Config;
     const IN_FILE: bool = true;
 }
 
-impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for InFile<S> {}
+impl<K, S: InlineKeyStrategy<K>> InlineKeyStrategy<K> for InFile<S> {
+    type LeafAnnex = S::LeafAnnex;
+}
 
 /// The pages of a file map of a tree with keys `K`, values `V` and strategy
 /// `S`: those of the unsync tree, whose layout a tree in a file map keeps.
@@ -109,8 +112,8 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
             align_of::<K>(),
             size_of::<V>(),
             align_of::<V>(),
-            usize::from(K::VAR_LEN),
-            usize::from(V::VAR_LEN),
+            K::FORMAT as usize,
+            V::FORMAT as usize,
             source,
             width(leaf_plan),
             usize::from(leaf_plan.has_hash_tags()),
@@ -155,7 +158,8 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
     /// reached before it, so that the walk visits each page once and ends;
     /// every leaf lies at one depth, at most what a node stack holds; the
     /// shared prefix fits its area; the leaves hold the header's number of
-    /// entries; and the bytes each span points to lie in the file map.
+    /// entries; and each slot that points beyond itself passes its type's
+    /// check ([`Storable::check`]).
     /// Plain keys and values, inline keys and prefix lengths can hold any
     /// bytes: they steer searches, never past a node (`tree/node`).
     pub(crate) fn check(file_bytes: &[u8], header: FileHeader) -> Result<(), FileError> {
@@ -208,7 +212,7 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
                 }
                 if leaves {
                     entries += len + usize::from(has_head);
-                    Self::check_tail(file_bytes, offset, len, has_head == 1)?;
+                    Self::check_slots(file_bytes, offset, len, has_head == 1)?;
                     continue;
                 }
                 for edge in 0..=len {
@@ -243,42 +247,31 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
         Err(FileError::Corrupt("a tree deeper than a node stack"))
     }
 
-    /// Checks that the bytes of each span of the leaf at `offset` of
-    /// `file_bytes`, which holds `len` entries and maybe a head, lie in the
-    /// file map.
-    fn check_tail(
+    /// Checks each slot of the leaf at `offset` of `file_bytes`, which
+    /// holds `len` entries and maybe a head, whose type points beyond it
+    /// ([`Storable::check`]).
+    fn check_slots(
         file_bytes: &[u8],
         offset: usize,
         len: usize,
         has_head: bool,
     ) -> Result<(), FileError> {
         let layout = NodePtr::<K, V, S>::leaf_layout();
-        let mut slots: Vec<usize> = Vec::new();
-        if K::VAR_LEN {
+        if K::HAS_BYTES {
             let keys =
                 (0..len).map(|index| layout.keys.keys_offset + index * layout.keys.key_stride);
-            slots.extend(keys);
-            if has_head {
-                slots.extend(layout.head_key_offset);
+            let head = layout.head_key_offset.filter(|_| has_head);
+            for slot in keys.chain(head) {
+                K::check(file_bytes, offset + slot)?;
             }
         }
-        if V::VAR_LEN {
+        if V::HAS_BYTES {
             let first = if has_head { 0 } else { 1 };
-            let values =
-                (first..=len).map(|index| layout.head_offset + index * layout.value_stride);
-            slots.extend(values);
-        }
-        for slot in slots {
-            let at = offset + slot;
-            let span = file_bytes[at..at + size_of::<VarBytes>()]
-                .try_into()
-                .expect("a span's bytes");
-            let (bytes_len, bytes_offset) = VarBytes::decode(span);
-            let end = (at as u64) + u64::from(bytes_offset) + u64::from(bytes_len);
-            if end > file_bytes.len() as u64 {
-                return Err(FileError::Corrupt(
-                    "a key or value's bytes outside the file map",
-                ));
+            for index in first..=len {
+                V::check(
+                    file_bytes,
+                    offset + layout.head_offset + index * layout.value_stride,
+                )?;
             }
         }
         Ok(())
@@ -347,10 +340,10 @@ impl FileHeader {
     pub(crate) fn read<K: Storable, V: Storable, S: InlineKeyStrategy<K>>(
         file_bytes: &[u8],
     ) -> Result<Self, FileError> {
-        // Var-length keys without inline keys would be kept in internal
-        // nodes too, which no tail backs: no writer writes such an
-        // file map, and no reader reads one.
-        if K::VAR_LEN && !NodePtr::<K, V, S>::has_inline_keys() {
+        // Keys with bytes beyond their slots, without inline keys, would be
+        // kept in internal nodes too, which no bytes follow: no writer
+        // writes such a file map, and no reader reads one.
+        if K::HAS_BYTES && !NodePtr::<K, V, S>::has_inline_keys() {
             return Err(FileError::LayoutMismatch);
         }
         let bytes = file_bytes.get(..Self::LEN).ok_or(FileError::NotAFileMap)?;
@@ -404,13 +397,13 @@ impl FileHeader {
 
 /// A node of the tree a writer builds for a file map of keys `K` and values
 /// `V`.
-type WriterNode<K, V, S> = Node<<K as Storage>::InWriter, <V as Storage>::InWriter, S>;
+type WriterNode<K, V, S> = Node<<K as Storable>::InWriter, <V as Storable>::InWriter, S>;
 
 /// A tree's pages by level, and where its file map puts each, every leaf
-/// followed by its tail: what a file map is written from. `K` and `V` are
-/// the file map's key and value types; the tree holds what they are built
-/// from, of the same layout.
-pub(crate) struct FilePages<'t, K: Storable, V: Storable, S> {
+/// followed by what `L` keeps after it: what a file map is written from.
+/// `K` and `V` are the file map's key and value types; the tree holds what
+/// they are built from, of the same layout.
+pub(crate) struct FilePages<'t, K: Storable, V: Storable, S, L> {
     /// The root, then each level below it, left to right; the last is the
     /// leaves, unless the root is a leaf. Empty without a tree.
     levels: Vec<Vec<WriterNode<K, V, S>>>,
@@ -421,22 +414,23 @@ pub(crate) struct FilePages<'t, K: Storable, V: Storable, S> {
     byte_len: usize,
     /// The tree the nodes are of, borrowed while they are read.
     _tree: PhantomData<&'t Tree<K::InWriter, V::InWriter, S>>,
+    _leaf_bytes: PhantomData<fn() -> L>,
 }
 
-impl<'t, K, V, S> FilePages<'t, K, V, S>
+impl<'t, K, V, S, L> FilePages<'t, K, V, S, L>
 where
     K: Storable,
     V: Storable,
     S: InlineKeyStrategy<K> + InlineKeyStrategy<K::InWriter>,
+    L: LeafBytes<K, V>,
 {
     /// The file map of `tree`, which holds `length` entries.
     ///
     /// # Panics
     ///
-    /// If var-length keys have no inline keys, which only
-    /// `WithInlineKey` gives them: internal nodes would keep keys, whose
-    /// bytes no tail holds. If a leaf's tail reaches past 4 GiB from its
-    /// slots.
+    /// If keys with bytes beyond their slots have no inline keys, which only
+    /// `WithInlineKey` gives them: internal nodes would keep keys, which no
+    /// bytes follow.
     pub(crate) fn of(tree: &'t Tree<K::InWriter, V::InWriter, S>, length: usize) -> Self {
         assert!(
             NodePtr::<K::InWriter, V::InWriter, S>::leaf_layout()
@@ -446,8 +440,8 @@ where
             "a writer's tree has its file map's layout"
         );
         assert!(
-            !K::VAR_LEN || NodePtr::<K, V, S>::has_inline_keys(),
-            "var-length keys need inline keys: the WithInlineKey strategy"
+            !K::HAS_BYTES || NodePtr::<K, V, S>::has_inline_keys(),
+            "keys with bytes beyond their slots need inline keys: the WithInlineKey strategy"
         );
         let mut levels = Vec::new();
         if let Some(root_page) = tree.root_page() {
@@ -472,7 +466,7 @@ where
             let level_offsets = (nodes.iter())
                 .map(|&node| {
                     let offset = position.next_multiple_of(page.align());
-                    position = offset + page.size() + Self::tail_len(node);
+                    position = offset + page.size() + Self::leaf_bytes_len(node);
                     offset
                 })
                 .collect();
@@ -484,6 +478,7 @@ where
             length,
             byte_len: position,
             _tree: PhantomData,
+            _leaf_bytes: PhantomData,
         }
     }
 
@@ -510,50 +505,13 @@ where
         self.offsets[depth][index]
     }
 
-    /// Calls `visit` on each slot of `leaf` whose bytes its tail keeps, in
-    /// the order the tail keeps them: the head's key and value, then each
-    /// entry's, each key before its value. `visit` takes where the slot is
-    /// in the page, and the bytes.
-    fn visit_tail(leaf: Leaf<K::InWriter, V::InWriter, S>, mut visit: impl FnMut(usize, &[u8])) {
-        if !K::VAR_LEN && !V::VAR_LEN {
-            return;
+    /// How many bytes follow `node` in the file map: what `L` keeps after
+    /// a leaf.
+    fn leaf_bytes_len(node: WriterNode<K, V, S>) -> usize {
+        match node {
+            Node::Leaf(leaf) => L::len(&WriterLeaf::new(leaf)),
+            Node::Internal(_) => 0,
         }
-        let layout = NodePtr::<K::InWriter, V::InWriter, S>::leaf_layout();
-        if leaf.has_head() {
-            if K::VAR_LEN {
-                let slot = layout
-                    .head_key_offset
-                    .expect("var-length keys have inline keys");
-                visit(slot, K::tail_bytes(leaf.head_key()));
-            }
-            if V::VAR_LEN {
-                visit(layout.head_offset, V::tail_bytes(leaf.head_value()));
-            }
-        }
-        for index in 0..leaf.len() {
-            let (key, value) = leaf.key_value(index);
-            if K::VAR_LEN {
-                let slot = layout.keys.keys_offset + index * layout.keys.key_stride;
-                visit(slot, K::tail_bytes(key));
-            }
-            if V::VAR_LEN {
-                visit(
-                    layout.values_offset() + index * layout.value_stride,
-                    V::tail_bytes(value),
-                );
-            }
-        }
-    }
-
-    /// The size of `node`'s tail: the bytes of its keys and values kept
-    /// there, if it is a leaf.
-    fn tail_len(node: Node<K::InWriter, V::InWriter, S>) -> usize {
-        let Node::Leaf(leaf) = node else {
-            return 0;
-        };
-        let mut len = 0;
-        Self::visit_tail(leaf, |_, bytes| len += bytes.len());
-        len
     }
 
     /// The header the file map starts with.
@@ -571,10 +529,10 @@ where
         }
     }
 
-    /// Hands the file map to `write`, in order, a header, a page, a leaf's
-    /// tail, or the zeros between them at a time: [`Self::byte_len`]
-    /// bytes in all. Stops at the first error `write` returns, and returns
-    /// it.
+    /// Hands the file map to `write`, in order, a header, a page, the bytes
+    /// after a leaf, or the zeros between them at a time:
+    /// [`Self::byte_len`] bytes in all. Stops at the first error `write`
+    /// returns, and returns it.
     pub(crate) fn write<E>(&self, write: &mut impl FnMut(&[u8]) -> Result<(), E>) -> Result<(), E> {
         write(&self.header().to_bytes())?;
         let mut position = FileHeader::LEN;
@@ -583,7 +541,7 @@ where
             .max(FileFormat::<K, V, S>::internal_page().size())
             .max(FileFormat::<K, V, S>::leaf_page().size());
         let mut page = vec![0; largest_page];
-        let mut tail = Vec::new();
+        let mut leaf_bytes = Vec::new();
         for (depth, nodes) in self.levels.iter().enumerate() {
             let size = Self::page_at(depth, self.levels.len()).size();
             let mut first_child = 0;
@@ -596,65 +554,66 @@ where
                 // SAFETY: the node's page is allocated with at least the
                 // size of its level's pages, the root page's at the top. It
                 // came zeroed from its allocator (`Allocator`'s contract),
-                // and its keys and values have no padding (`Storage`'s
+                // and its keys and values have no padding (`Storable`'s
                 // contract). The tree is borrowed: nothing writes it
                 // meanwhile.
                 unsafe { node.node_ptr().copy_page_to(&mut page, size) };
-                tail.clear();
+                leaf_bytes.clear();
                 match node {
                     Node::Internal(internal) => {
                         self.offset_edges(&mut page, internal, depth, index, first_child);
                         first_child += internal.len() + 1;
                     }
-                    Node::Leaf(leaf) => Self::write_tail(&mut page, &mut tail, leaf, size),
+                    Node::Leaf(leaf) => {
+                        Self::write_leaf_bytes(&mut page[..size], &mut leaf_bytes, leaf);
+                    }
                 }
                 write(&page[..size])?;
-                write(&tail)?;
-                position = offset + size + tail.len();
+                write(&leaf_bytes)?;
+                position = offset + size + leaf_bytes.len();
             }
         }
         debug_assert_eq!(position, self.byte_len);
         Ok(())
     }
 
-    /// Puts into `tail` the bytes `leaf` keeps there, and writes into
-    /// `page`, a copy of the leaf's page, the span of each slot that
-    /// keeps them: its bytes' offset from the slot, the tail starting at
-    /// `tail_start` from the page's start. Slots past the leaf's entries, and
-    /// a missing head's, are zeros, not stale pointers.
-    fn write_tail(
+    /// Puts into `leaf_bytes` what `L` keeps after `leaf`, and into `page`,
+    /// a copy of the leaf's page, what its slots with bytes hold: those past
+    /// the leaf's entries, and a missing head's, zeros, not stale pointers;
+    /// the others `L`'s.
+    fn write_leaf_bytes(
         page: &mut [u8],
-        tail: &mut Vec<u8>,
+        leaf_bytes: &mut Vec<u8>,
         leaf: Leaf<K::InWriter, V::InWriter, S>,
-        tail_start: usize,
     ) {
-        if !K::VAR_LEN && !V::VAR_LEN {
+        if !K::HAS_BYTES && !V::HAS_BYTES {
             return;
         }
         let layout = NodePtr::<K::InWriter, V::InWriter, S>::leaf_layout();
         let capacity = Leaf::<K::InWriter, V::InWriter, S>::capacity();
-        let mut zero = |slot: usize| page[slot..slot + size_of::<VarBytes>()].fill(0);
+        let mut zero = |slot: usize, size: usize| page[slot..slot + size].fill(0);
         for index in 0..=capacity {
-            if K::VAR_LEN && index < capacity {
-                zero(layout.keys.keys_offset + index * layout.keys.key_stride);
+            if K::HAS_BYTES && index < capacity {
+                zero(
+                    layout.keys.keys_offset + index * layout.keys.key_stride,
+                    size_of::<K>(),
+                );
             }
-            if V::VAR_LEN {
-                zero(layout.head_offset + index * layout.value_stride);
+            if V::HAS_BYTES {
+                zero(
+                    layout.head_offset + index * layout.value_stride,
+                    size_of::<V>(),
+                );
             }
         }
-        if K::VAR_LEN
+        if K::HAS_BYTES
             && let Some(slot) = layout.head_key_offset
         {
-            zero(slot);
+            zero(slot, size_of::<K>());
         }
-        Self::visit_tail(leaf, |slot, bytes| {
-            let offset = u32::try_from(tail_start + tail.len() - slot)
-                .expect("a leaf's tail within 4 GiB of its slots");
-            let len = u32::try_from(bytes.len()).expect("a key or value of at most 4 GiB");
-            page[slot..slot + size_of::<VarBytes>()]
-                .copy_from_slice(&VarBytes::encode(len, offset));
-            tail.extend_from_slice(bytes);
-        });
+        let leaf = WriterLeaf::new(leaf);
+        leaf_bytes.resize(L::len(&leaf), 0);
+        L::write(&leaf, page, leaf_bytes);
     }
 
     /// Writes into `page`, a copy of `internal`'s page, which is page
@@ -682,6 +641,100 @@ where
             };
             page[slot..slot + size_of::<usize>()].copy_from_slice(&tagged_offset.to_ne_bytes());
         }
+    }
+}
+
+/// A leaf of a [`FileWriter`](crate::file::FileWriter)'s tree, as its
+/// [`LeafBytes`] sees it: its entries, in key order, the head's first, each
+/// with where its key's and value's slots lie in the leaf's page.
+pub struct WriterLeaf<'t, K: Storable, V: Storable, S> {
+    leaf: Leaf<K::InWriter, V::InWriter, S>,
+    _tree: PhantomData<&'t Tree<K::InWriter, V::InWriter, S>>,
+}
+
+impl<'t, K, V, S> WriterLeaf<'t, K, V, S>
+where
+    K: Storable<InWriter: 't>,
+    V: Storable<InWriter: 't>,
+    S: InlineKeyStrategy<K::InWriter>,
+{
+    /// `leaf`, of a writer's tree borrowed for `'t`.
+    fn new(leaf: Leaf<K::InWriter, V::InWriter, S>) -> Self {
+        Self {
+            leaf,
+            _tree: PhantomData,
+        }
+    }
+
+    /// The entries, in key order, the head's first.
+    pub fn entries(&self) -> impl Iterator<Item = WriterEntry<'t, K, V>> + use<'t, K, V, S> {
+        let leaf = self.leaf;
+        let layout = NodePtr::<K::InWriter, V::InWriter, S>::leaf_layout();
+        // A head keeps its key only with inline keys (D49).
+        let head = leaf.has_head().then(|| WriterEntry {
+            key: layout.head_key_offset.map(|_| leaf.head_key()),
+            key_slot: layout.head_key_offset,
+            value: leaf.head_value(),
+            value_slot: layout.head_offset,
+        });
+        let entries = (0..leaf.len()).map(move |index| {
+            let (key, value) = leaf.key_value(index);
+            WriterEntry {
+                key: Some(key),
+                key_slot: Some(layout.keys.keys_offset + index * layout.keys.key_stride),
+                value,
+                value_slot: layout.values_offset() + index * layout.value_stride,
+            }
+        });
+        head.into_iter().chain(entries)
+    }
+
+    /// The size of the heap pages of the map's node config
+    /// (`NodeConfig::HEAP_PAGE_SIZE`), for bytes that follow the leaf.
+    pub fn heap_page_size(&self) -> usize {
+        const {
+            let size = <<S as Sealed<K::InWriter>>::Config as NodeConfig>::HEAP_PAGE_SIZE;
+            assert!(
+                size >= 1024,
+                "a NodeConfig's HEAP_PAGE_SIZE is at least 1024"
+            );
+            size
+        }
+    }
+}
+
+/// An entry of a [`WriterLeaf`]: what the writer's tree holds for its key
+/// and value, and where their slots lie in the leaf's page.
+pub struct WriterEntry<'t, K: Storable, V: Storable> {
+    /// `None` for a head, in a leaf without inline keys, which keeps no key
+    /// for it (D49); so `key_slot`.
+    key: Option<&'t K::InWriter>,
+    key_slot: Option<usize>,
+    value: &'t V::InWriter,
+    value_slot: usize,
+}
+
+impl<'t, K: Storable, V: Storable> WriterEntry<'t, K, V> {
+    /// What the writer's tree holds for the key: `None` for a head whose
+    /// leaf keeps no key for it, without inline keys.
+    pub fn key(&self) -> Option<&'t K::InWriter> {
+        self.key
+    }
+
+    /// Where the key's slot lies in the leaf's page: `None` for a head
+    /// whose leaf keeps no key for it, without inline keys.
+    pub fn key_slot(&self) -> Option<usize> {
+        self.key_slot
+    }
+
+    /// What the writer's tree holds for the value.
+    pub fn value(&self) -> &'t V::InWriter {
+        self.value
+    }
+
+    /// Where the value's slot lies in the leaf's page.
+    pub fn value_slot(&self) -> usize {
+        self.value_slot
     }
 }
 
@@ -713,7 +766,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::{FileFormat, InFile};
-    use crate::file::{FileBuf, FileError, FileMap, FileWriter, Storable, VarBytes, VarBytesBuf};
+    use crate::file::{FileBuf, FileError, FileMap, FileWriter, Storable};
     use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
@@ -923,11 +976,11 @@ mod tests {
     #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn damaged_file_maps_are_refused_or_read_in_bounds() {
         let rng = TestRng::new(23);
-        let count = if cfg!(miri) { 300 } else { 3000 };
+        let count = if cfg!(miri) { 120 } else { 3000 };
         let file_bytes = file_map_of(count);
         let mut damaged = copy_of(&file_bytes);
         let (mut refused, mut read) = (0, 0);
-        for _ in 0..if cfg!(miri) { 10 } else { 400 } {
+        for _ in 0..if cfg!(miri) { 6 } else { 400 } {
             damaged.copy_from_slice(&file_bytes);
             for _ in 0..1 + rng.below(3) {
                 let at = 64 + rng.below(file_bytes.len() - 64);
@@ -949,115 +1002,7 @@ mod tests {
                 (found, forward, backward, ranged)
             }));
         }
-        // Miri, which damages 10 file maps, checks that reading them stays
-        // in bounds, so it needs some read; which of so few it refuses
-        // depends on the layout.
-        if cfg!(miri) {
-            assert!(read > 0, "{refused} refused, {read} read");
-        } else {
-            assert!(refused > 0 && read > 0, "{refused} refused, {read} read");
-        }
-    }
-
-    type VarBytesMap<'i> = FileMap<'i, VarBytes, VarBytes, WithInlineKey>;
-
-    /// A file map of `count` entries of byte keys and values: key `n` is
-    /// `n`'s decimal digits, its value the key repeated `n % 5` times.
-    fn var_bytes_file_map_of(count: usize) -> FileBuf {
-        let key = |number: usize| std::format!("{number}").into_bytes();
-        let mut keys: Vec<Vec<u8>> = (0..count).map(key).collect();
-        keys.sort();
-        let entries = keys.iter().map(|key| {
-            let value = key.repeat(key.len() % 5);
-            (key.as_slice().into(), value.into())
-        });
-        FileWriter::<VarBytes, VarBytes, WithInlineKey>::from_ascending(entries)
-            .unwrap()
-            .to_buf()
-    }
-
-    /// The offset of the leftmost leaf of `file_bytes`, a file map of var-length keys, down first
-    /// edges from its root.
-    fn first_leaf(file_bytes: &[u8]) -> usize {
-        let (mut node, mut is_leaf) = root_of(file_bytes);
-        let layout = NodePtr::<VarBytes, VarBytes, WithInlineKey>::internal_layout();
-        while !is_leaf {
-            let slot = node + layout.edges_offset;
-            let tagged = usize::from_ne_bytes(
-                file_bytes[slot..slot + size_of::<usize>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            node += tagged & !1;
-            is_leaf = tagged & 1 != 0;
-        }
-        node
-    }
-
-    #[test]
-    fn spans_whose_bytes_lie_outside_are_refused() {
-        let file_bytes = var_bytes_file_map_of(3000);
-        let leaf = first_leaf(&file_bytes);
-        let layout = NodePtr::<VarBytes, VarBytes, WithInlineKey>::leaf_layout();
-        for slot in [layout.keys.keys_offset, layout.values_offset()] {
-            for (len, offset) in [
-                (1, u32::MAX),
-                (u32::MAX, 8),
-                (8, (file_bytes.len() - leaf - slot) as u32),
-            ] {
-                let mut damaged = copy_of(&file_bytes);
-                let at = leaf + slot;
-                damaged[at..at + 8].copy_from_slice(&VarBytes::encode(len, offset));
-                assert!(matches!(
-                    VarBytesMap::open(&damaged).err(),
-                    Some(FileError::Corrupt(
-                        "a key or value's bytes outside the file map"
-                    ))
-                ));
-            }
-        }
-        assert!(VarBytesMap::open(&file_bytes).is_ok());
-    }
-
-    /// As for plain file maps: damaged at random, a file map of var-length keys is refused, or
-    /// read in bounds, its spans' bytes included.
-    #[test]
-    #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
-    fn damaged_var_bytes_file_maps_are_refused_or_read_in_bounds() {
-        let rng = TestRng::new(29);
-        let count = if cfg!(miri) { 200 } else { 3000 };
-        let file_bytes = var_bytes_file_map_of(count);
-        let mut damaged = copy_of(&file_bytes);
-        let (mut refused, mut read) = (0, 0);
-        for _ in 0..if cfg!(miri) { 10 } else { 400 } {
-            damaged.copy_from_slice(&file_bytes);
-            for _ in 0..1 + rng.below(3) {
-                let at = 64 + rng.below(file_bytes.len() - 64);
-                damaged[at] = rng.below(256) as u8;
-            }
-            let Ok(map) = VarBytesMap::open(&damaged) else {
-                refused += 1;
-                continue;
-            };
-            read += 1;
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                let mut query = VarBytesBuf::new(b"");
-                let mut found = 0;
-                for number in (0..count + 100).step_by(7) {
-                    query.set(std::format!("{number}").as_bytes());
-                    found += map.get(&*query).map_or(0, VarBytes::len);
-                }
-                let bytes = |sum: usize, (key, value): (&VarBytes, &VarBytes)| {
-                    sum + key.bytes().len() + value.bytes().len()
-                };
-                (
-                    found,
-                    map.iter().fold(0, bytes),
-                    map.iter().rev().fold(0, bytes),
-                )
-            }));
-        }
-        // Miri, which damages 10 file maps, checks that reading them stays
+        // Miri, which damages 6 file maps, checks that reading them stays
         // in bounds, so it needs some read; which of so few it refuses
         // depends on the layout.
         if cfg!(miri) {

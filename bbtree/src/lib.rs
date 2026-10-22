@@ -13,14 +13,19 @@ mod allocator;
 #[cfg(feature = "file")]
 pub mod file;
 mod inline_key;
+mod leaf_annex;
 mod map;
+mod node_config;
 mod proof;
 mod tree;
 pub mod unsync;
 
 pub use allocator::{AllocError, Allocator, Global};
 pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
+pub use leaf_annex::{LeafAnnex, WithLeafAnnex};
 pub use map::BBTreeMap;
+pub use node_config::{Configured, NodeConfig};
+pub use tree::node::annexed_leaf::AnnexedLeaf;
 
 /// Read-only views of a map's nodes, as the map stores them, from
 /// [`unsync::BBTreeMap::inspect`]: for the visualizer (`vis/`), behind the

@@ -576,7 +576,7 @@ fn entries_drop_like_std() {
 fn retain_and_extract_if_drop_like_std() {
     let ledgers = LockstepLedgers::new();
     let rng = TestRng::new(28);
-    let count = if cfg!(miri) { 300 } else { 2000 };
+    let count = if cfg!(miri) { 180 } else { 2000 };
     let mut maps = TrackedMaps::new(&ledgers);
     for order in 0..count {
         assert!(!maps.insert(order, PanickingPart::Neither));

@@ -1,7 +1,7 @@
 //! [`BBTreeMap`]: an ordered map with the API and behavior of std's
 //! `BTreeMap` (D1). It is a B+-tree that stores each key once (D17), on
-//! nodes sized in 1 KB or 512-byte steps, without parent pointers (D11, D15,
-//! D21).
+//! nodes sized in steps of their page size, by default 1 KB or 512 bytes,
+//! without parent pointers (D11, D15, D21, D59).
 //!
 //! The map owns a [`Tree`], which has no root page until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. The strategy parameter `S`

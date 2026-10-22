@@ -15,12 +15,12 @@ use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::latch::NodeLatch;
-use super::layout::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
+use super::layout::{Header, InternalLayout, KeyArea, LeafLayout, NodeLayout};
 use super::leaf::Leaf;
 use super::node_plan::NodePlan;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
-use crate::allocator::{AllocError, Allocator};
+use crate::allocator::{AllocError, Allocator, PageKind};
 use crate::inline_key::sealed::Sealed;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
@@ -33,6 +33,10 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 /// `page_layout` is the layout the code that uses pages of this type
 /// accesses them with.
 pub(crate) unsafe trait PageType: Sized {
+    /// What pages of this type are for: which of the allocator's methods
+    /// hands them out and takes them back.
+    const KIND: PageKind;
+
     /// The allocation layout of every page of this type (D21) and strategy
     /// (D18), from the layout constants: a node kind's own, or for the root
     /// page, both kinds' and the root area, folded after monomorphization.
@@ -121,7 +125,8 @@ impl<P> FreshPage<P> {
 
 /// Where the tree's operations take pages from and give them back to: the
 /// map's [`Allocator`], or, in a latched tree, the pages of one operation
-/// (`tree/latched/pages.rs`), which hands out pages it took beforehand. An
+/// (`tree/latched/pages.rs`), which hands out pages it took beforehand.
+/// Every call names the page's kind, which picks the allocator's method. An
 /// operation has nothing to do about a failed allocation: the map's
 /// allocator ends the program, as std's collections do, and an operation
 /// of a latched tree that might fail takes its pages before it changes
@@ -132,45 +137,48 @@ impl<P> FreshPage<P> {
 ///
 /// A page `allocate_page` returns is valid for reads and writes of
 /// `layout.size()` bytes, aligned to `layout.align()`, and in no other use
-/// until it is given back to `deallocate_page`. Neither method unwinds.
+/// until it is given back to `deallocate_page`, with its kind. Neither
+/// method unwinds.
 pub(crate) unsafe trait PageAllocator {
-    /// A page for `layout`, of a non-zero size, with any contents.
-    fn allocate_page(&self, layout: Layout) -> NonNull<u8>;
+    /// A page of `kind` for `layout`, of a non-zero size, with any contents.
+    fn allocate_page(&self, kind: PageKind, layout: Layout) -> NonNull<u8>;
 
-    /// Takes back the page at `page`.
+    /// Takes back the page at `page`, of `kind`.
     ///
     /// # Safety
     ///
     /// `page` was handed out by `allocate_page` of this allocator for
-    /// `layout`, and not given back since.
-    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout);
+    /// `kind` and `layout`, and not given back since.
+    unsafe fn deallocate_page(&self, kind: PageKind, page: NonNull<u8>, layout: Layout);
 }
 
-// SAFETY: the allocator's blocks are valid and apart until given back, and
-// it doesn't unwind (its contract); a failed allocation doesn't return.
+// SAFETY: the allocator's pages are valid and apart until given back, and
+// it doesn't unwind (its contract), kind by kind; a failed allocation
+// doesn't return.
 unsafe impl<A: Allocator + ?Sized> PageAllocator for A {
-    fn allocate_page(&self, layout: Layout) -> NonNull<u8> {
-        self.allocate_zeroed(layout)
+    fn allocate_page(&self, kind: PageKind, layout: Layout) -> NonNull<u8> {
+        kind.allocate(self, layout)
             .unwrap_or_else(|AllocError| handle_alloc_error(layout))
     }
 
-    unsafe fn deallocate_page(&self, page: NonNull<u8>, layout: Layout) {
+    unsafe fn deallocate_page(&self, kind: PageKind, page: NonNull<u8>, layout: Layout) {
         // SAFETY: the caller's contract, which is the allocator's.
-        unsafe { self.deallocate(page, layout) }
+        unsafe { kind.deallocate(self, page, layout) }
     }
 }
 
 /// The allocation boundary (D8): one allocator call per page, for the
-/// page's layout. A node's page is a multiple of 1 KiB, or of 512 bytes for
-/// internal nodes that keep no keys (D49). It is aligned to that step
-/// (D15), or more if its keys or values need it, so the lowest bit of every
-/// node pointer is free for its kind's tag ([`NodePtr`]). A root page is
+/// page's layout. A node's page is a multiple of its kind's page size in
+/// the map's node config (D59): by default 1 KiB, or 512 bytes for internal
+/// nodes that keep no keys (D49). It is aligned to that page size (D15), or
+/// more if its keys or values need it, so the lowest bit of every node
+/// pointer is free for its kind's tag ([`NodePtr`]). A root page is
 /// aligned as the larger of the two kinds' (`root_page.rs`).
 impl<P: PageType> FreshPage<P> {
     /// A page from `alloc`.
     pub(crate) fn allocate(alloc: &impl PageAllocator) -> Self {
-        // The layout has a non-zero size: nodes are at least 512 B.
-        let page = alloc.allocate_page(P::page_layout());
+        // The layout has a non-zero size: nodes are at least 64 B.
+        let page = alloc.allocate_page(P::KIND, P::page_layout());
         // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
         unsafe { Self::from_raw(page) }
@@ -180,7 +188,9 @@ impl<P: PageType> FreshPage<P> {
     /// give, the layout it was asked for.
     pub(crate) fn try_allocate(alloc: &impl Allocator) -> Result<Self, Layout> {
         let layout = P::page_layout();
-        let page = alloc.allocate_zeroed(layout).map_err(|AllocError| layout)?;
+        let page = P::KIND
+            .allocate(alloc, layout)
+            .map_err(|AllocError| layout)?;
         // SAFETY: as in `allocate`.
         Ok(unsafe { Self::from_raw(page) })
     }
@@ -192,7 +202,7 @@ impl<P: PageType> FreshPage<P> {
         // `P::page_layout()`, the same every time for this type, and is used
         // by nothing else (type invariant); consuming `self` gives up the last
         // use of it.
-        unsafe { alloc.deallocate_page(page, P::page_layout()) }
+        unsafe { alloc.deallocate_page(P::KIND, page, P::page_layout()) }
     }
 }
 
@@ -304,9 +314,9 @@ impl LatchedNodeHeader {
     }
 }
 
-/// A pointer to an initialized node of `NodeLayout<K, V>`, for a map with
-/// strategy `S`, whose lowest bit tells the node's kind. Every page leaves
-/// that bit 0, being aligned to at least 512 B (D15, D49). A leaf's pointer
+/// A pointer to an initialized node of `NodeLayout<K, V, S::Config>`, for a
+/// map with strategy `S`, whose lowest bit tells the node's kind. Every page
+/// leaves that bit 0, being aligned to at least 64 B (D15, D49, D59). A leaf's pointer
 /// carries the tag, so that a descent uses an internal node's as it is.
 ///
 /// Internal nodes store it as edges, node stacks and walks as the nodes on
@@ -559,14 +569,24 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// fit.
     #[inline(always)]
     pub(super) fn leaf_has_room_for_hash_tags(inline_width: InlineWidth) -> bool {
-        NodeLayout::<K, V>::leaf(Some(inline_width), true, Self::is_latched())
-            .hash_tags_offset
-            .is_some()
+        NodeLayout::<K, V, S::Config, S::LeafAnnex>::leaf(
+            Some(inline_width),
+            true,
+            Self::is_latched(),
+        )
+        .hash_tags_offset
+        .is_some()
     }
 
     pub(in crate::tree) fn leaf_layout() -> LeafLayout {
+        const {
+            assert!(
+                size_of::<S::LeafAnnex>() == 0 || <S as Sealed<K>>::LATCHED,
+                "only a BBTreeMap's leaves keep an annex"
+            );
+        }
         let plan = NodePlan::of::<S, Leaf<K, V, S>>();
-        NodeLayout::<K, V>::leaf(
+        NodeLayout::<K, V, S::Config, S::LeafAnnex>::leaf(
             plan.inline_width(),
             plan.has_hash_tags(),
             Self::is_latched(),
@@ -574,7 +594,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 
     pub(in crate::tree) fn internal_layout() -> InternalLayout {
-        NodeLayout::<K, V>::internal(
+        NodeLayout::<K, V, S::Config>::internal(
             Self::inline_width::<Internal<K, V, S>>(),
             Self::is_latched(),
         )
@@ -601,9 +621,19 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         Self::leaf_layout().keys.key_stride != size_of::<K>()
     }
 
+    /// Where a leaf's annex is (`leaf_annex.rs`): right after its node
+    /// header (`layout.rs`). Nothing is dereferenced.
+    #[inline(always)]
+    pub(super) fn leaf_annex(self) -> NonNull<S::LeafAnnex> {
+        let header = Header::leaf(Self::is_latched(), Layout::new::<S::LeafAnnex>());
+        // SAFETY: a leaf's layout holds its annex at this offset, aligned,
+        // in the page (layout invariants).
+        unsafe { self.page().byte_add(header.annex_offset()).cast() }
+    }
+
     /// Turns a fresh page into an empty node of the page's kind: no keys
-    /// and, for a leaf, no head. An internal node still needs its first edge
-    /// written.
+    /// and, for a leaf, no head, and a new annex. An internal node still
+    /// needs its first edge written.
     ///
     /// It also initializes the columns beside the keys
     /// ([`KeyColumns::initialize`]): every inline-key slot up to the capacity
@@ -633,9 +663,10 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
             has_head: false,
         };
         // SAFETY: the page is aligned to its layout (the caller), whose
-        // alignment either header's divides. The header of its layout fits
-        // before its keys and columns, whose `capacity` slots lie in the
-        // page, aligned (layout invariants). The access is exclusive.
+        // alignment either header's divides. The header of its layout, a
+        // leaf's annex included, fits before its keys and columns, whose
+        // `capacity` slots lie in the page, aligned (layout invariants). The
+        // access is exclusive, and what the page held is given up (caller).
         unsafe {
             if Self::has_inline_keys() {
                 page.cast::<InlineKeyNodeHeader>()
@@ -645,6 +676,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                     });
             } else {
                 page.cast::<NodeHeader>().write(header);
+            }
+            if Kind::IS_LEAF {
+                node.leaf_annex().write(S::LeafAnnex::default());
             }
             node.key_columns::<Kind>().initialize();
         }
@@ -1006,7 +1040,7 @@ mod test_pages {
     use std::vec::Vec;
 
     use super::{FreshPage, PageByType, PageType};
-    use crate::allocator::{AllocError, Allocator, Global};
+    use crate::allocator::{AllocError, Allocator, Global, PageKind};
     use crate::inline_key::{Auto, InlineKeyStrategy};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
@@ -1019,7 +1053,9 @@ mod test_pages {
     /// It keeps each block's layout: a block given back is handed out again
     /// only for the same layout, and giving one back with another layout
     /// than it was allocated for panics, as does giving back a block twice,
-    /// or one from elsewhere.
+    /// or one from elsewhere. It keeps each page's kind too: a page given
+    /// back to another kind's method than it came from panics, as does a
+    /// kind asked for with two layouts.
     ///
     /// Blocks still out when it is dropped (owned by a leaked node) are
     /// never freed, so nothing can dangle; tests check
@@ -1034,6 +1070,10 @@ mod test_pages {
         released: RefCell<Vec<(NonNull<u8>, Layout)>>,
         /// How many more blocks it hands out; `None` for as many as asked.
         budget: Cell<Option<usize>>,
+        /// The pages out, each with its kind.
+        kinds: RefCell<Vec<(NonNull<u8>, PageKind)>>,
+        /// The layout each kind was asked for with, once it was.
+        kind_layouts: RefCell<Vec<(PageKind, Layout)>>,
         _marker: PhantomData<fn() -> (K, V)>,
         _strategy: PhantomData<fn() -> S>,
     }
@@ -1044,6 +1084,8 @@ mod test_pages {
                 allocated: RefCell::new(Vec::new()),
                 released: RefCell::new(Vec::new()),
                 budget: Cell::new(None),
+                kinds: RefCell::new(Vec::new()),
+                kind_layouts: RefCell::new(Vec::new()),
                 _marker: PhantomData,
                 _strategy: PhantomData,
             }
@@ -1142,6 +1184,79 @@ mod test_pages {
             unsafe { ptr.write_bytes(0xA5, layout.size()) };
             self.released.borrow_mut().push((ptr, layout));
         }
+
+        fn allocate_internal(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Internal, layout)
+        }
+
+        unsafe fn deallocate_internal(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Internal, page, layout) }
+        }
+
+        fn allocate_leaf(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Leaf, layout)
+        }
+
+        unsafe fn deallocate_leaf(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Leaf, page, layout) }
+        }
+
+        fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+            self.allocate_page_of(PageKind::Root, layout)
+        }
+
+        unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
+            // SAFETY: forwarded.
+            unsafe { self.deallocate_page_of(PageKind::Root, page, layout) }
+        }
+    }
+
+    impl<K, V, S> TestPages<K, V, S> {
+        /// A page of `kind`, from `allocate_zeroed`, kept with its kind.
+        ///
+        /// # Panics
+        ///
+        /// If `kind` was asked for with another layout before.
+        fn allocate_page_of(
+            &self,
+            kind: PageKind,
+            layout: Layout,
+        ) -> Result<NonNull<u8>, AllocError> {
+            let mut kind_layouts = self.kind_layouts.borrow_mut();
+            match kind_layouts.iter().find(|&&(asked, _)| asked == kind) {
+                Some(&(_, first)) => assert_eq!(first, layout, "a kind's pages have one layout"),
+                None => kind_layouts.push((kind, layout)),
+            }
+            let page = self.allocate_zeroed(layout)?;
+            self.kinds.borrow_mut().push((page, kind));
+            Ok(page)
+        }
+
+        /// Takes back `page`, of `kind`.
+        ///
+        /// # Panics
+        ///
+        /// If the page is out as another kind, or not out.
+        ///
+        /// # Safety
+        ///
+        /// As for `deallocate`.
+        unsafe fn deallocate_page_of(&self, kind: PageKind, page: NonNull<u8>, layout: Layout) {
+            let mut kinds = self.kinds.borrow_mut();
+            let index = (kinds.iter())
+                .position(|&(out, _)| out == page)
+                .expect("a page given back is out");
+            assert_eq!(
+                kinds.swap_remove(index).1,
+                kind,
+                "a page goes back as its kind"
+            );
+            drop(kinds);
+            // SAFETY: forwarded.
+            unsafe { self.deallocate(page, layout) }
+        }
     }
 
     impl<K, V, S> Drop for TestPages<K, V, S> {
@@ -1164,6 +1279,7 @@ mod tests {
 
     use super::{FreshPage, NodeHeader, NodeKind, NodePtr, TestPages};
     use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
+    use crate::node_config::DefaultNodeConfig;
     use crate::tree::node::internal::Internal;
     use crate::tree::node::layout::NodeLayout;
     use crate::tree::node::leaf::Leaf;
@@ -1401,11 +1517,11 @@ mod tests {
         assert!(!NodePtr::<[u64; 1], u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<[u64; 1], u64, Auto>::leaf_layout(),
-            NodeLayout::<[u64; 1], u64>::PLAIN_LEAF
+            NodeLayout::<[u64; 1], u64, DefaultNodeConfig>::PLAIN_LEAF
         );
         assert_eq!(
             NodePtr::<[u64; 1], u64, Auto>::internal_layout(),
-            NodeLayout::<[u64; 1], u64>::PLAIN_INTERNAL
+            NodeLayout::<[u64; 1], u64, DefaultNodeConfig>::PLAIN_INTERNAL
         );
         // 1 KB, 63 keys at offset 8, and the head, or the edges, right after
         // them, at 8 + 63·8 = 512.
@@ -1428,11 +1544,11 @@ mod tests {
         assert!(NodePtr::<String, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<String, u64, Auto>::leaf_layout(),
-            NodeLayout::<String, u64>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
+            NodeLayout::<String, u64, DefaultNodeConfig>::EIGHT_BYTE_INLINE_HASH_TAGGED_LEAF
         );
         assert_eq!(
             NodePtr::<Vec<u8>, u64, Auto>::internal_layout(),
-            NodeLayout::<Vec<u8>, u64>::FOUR_BYTE_INLINE_INTERNAL
+            NodeLayout::<Vec<u8>, u64, DefaultNodeConfig>::FOUR_BYTE_INLINE_INTERNAL
         );
         assert_eq!(
             NodePtr::<String, u64, Auto>::inline_width::<Leaf<String, u64, Auto>>(),
@@ -1444,7 +1560,7 @@ mod tests {
         );
         assert_eq!(
             NodePtr::<[u8; 32], u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<[u8; 32], u64>::EIGHT_BYTE_INLINE_INTERNAL
+            NodeLayout::<[u8; 32], u64, DefaultNodeConfig>::EIGHT_BYTE_INLINE_INTERNAL
         );
         assert!(NodePtr::<Tracked<'_>, u64, WithInlineKey>::has_inline_keys());
         assert!(!NodePtr::<Tracked<'_>, u64, Auto>::has_inline_keys());
@@ -1454,15 +1570,15 @@ mod tests {
         assert!(NodePtr::<i64, u64, Auto>::has_inline_keys());
         assert_eq!(
             NodePtr::<u64, u64, Auto>::leaf_layout(),
-            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
+            NodeLayout::<u64, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_LEAF
         );
         assert_eq!(
             NodePtr::<u64, u64, WithInlineKey>::leaf_layout(),
-            NodeLayout::<u64, u64>::TWO_BYTE_INLINE_LEAF
+            NodeLayout::<u64, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_LEAF
         );
         assert_eq!(
             NodePtr::<i128, u64, WithInlineKey>::internal_layout(),
-            NodeLayout::<i128, u64>::TWO_BYTE_INLINE_INTERNAL
+            NodeLayout::<i128, u64, DefaultNodeConfig>::TWO_BYTE_INLINE_INTERNAL
         );
     }
 

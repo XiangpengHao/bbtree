@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 use datafusion::arrow::array::ArrayRef;
 use datafusion::arrow::compute::cast;
 use datafusion::parquet::arrow::ProjectionMask;
@@ -421,7 +421,7 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::io::ErrorKind;
 
-    use bbtree_disk::DiskQuery;
+    use bbtree_mmap::DiskQuery;
 
     use super::*;
     use crate::test_file::TestFile;
@@ -433,7 +433,7 @@ mod tests {
         let footer = ParquetFooter::read(&mut opened).unwrap();
         let keyed = KeyedRows::read(footer.reader(&opened).unwrap(), schema).unwrap();
         let rows = |ids: &RowIds| -> Vec<u64> {
-            (ids.query().as_chunks::<4>().0.iter())
+            (ids.query().bytes().as_chunks::<4>().0.iter())
                 .map(|&row| u64::from(u32::from_le_bytes(row)))
                 .collect()
         };

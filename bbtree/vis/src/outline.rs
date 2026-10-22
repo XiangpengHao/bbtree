@@ -1,21 +1,21 @@
 //! The post's outline: its headings below the cards, each with an id to
 //! link to, and the outline that lists them beside the text, lighting the
 //! section the reader is in. The headings and the outline read one list
-//! (`PostHeading::ALL`), so they never disagree. On a narrow screen, the
-//! outline is a list of contents above the sections instead.
+//! (`PostHeading::ALL`), so they never disagree: the parts, each with its
+//! sections, which the part shows as tabs (`part_tabs.rs`), and the
+//! headings within them. On a narrow screen, the outline is a list of
+//! contents above the sections instead.
 
 use dioxus::prelude::*;
-
-use crate::how_it_works::{Note, NoteRef};
 
 /// A heading of the post's sections, in the order they come.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PostHeading {
     UseCases,
-    CaseLsmTrees,
+    CaseMemtable,
+    CaseMmap,
     CaseParquetIndex,
     HowItWorks,
-    Principles,
     CacheMisses,
     ThoughtExperiment,
     ApplyToBTrees,
@@ -40,10 +40,10 @@ pub(crate) enum PostHeading {
 impl PostHeading {
     const ALL: [Self; 24] = [
         Self::UseCases,
-        Self::CaseLsmTrees,
+        Self::CaseMemtable,
+        Self::CaseMmap,
         Self::CaseParquetIndex,
         Self::HowItWorks,
-        Self::Principles,
         Self::CacheMisses,
         Self::ThoughtExperiment,
         Self::ApplyToBTrees,
@@ -70,9 +70,9 @@ impl PostHeading {
     fn level(self) -> u8 {
         match self {
             Self::UseCases | Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
-            Self::CaseLsmTrees
+            Self::CaseMemtable
+            | Self::CaseMmap
             | Self::CaseParquetIndex
-            | Self::Principles
             | Self::CacheMisses
             | Self::Instructions
             | Self::Coherence
@@ -85,13 +85,13 @@ impl PostHeading {
     }
 
     /// The anchor the heading takes, and that its link names.
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::UseCases => "what-it-can-do",
-            Self::CaseLsmTrees => "case-lsm-trees",
+            Self::CaseMemtable => "case-memtable",
+            Self::CaseMmap => "case-bbtree-mmap",
             Self::CaseParquetIndex => "case-parquet-index",
             Self::HowItWorks => "how-it-works",
-            Self::Principles => "three-easy-pieces",
             Self::CacheMisses => "minimize-cache-misses",
             Self::ThoughtExperiment => "binary-vs-linear-search",
             Self::ApplyToBTrees => "apply-to-b-trees",
@@ -114,14 +114,15 @@ impl PostHeading {
         }
     }
 
-    /// The heading as plain text, as the outline lists it.
-    fn title(self) -> &'static str {
+    /// The heading as plain text, as the outline and a section's tab show
+    /// it.
+    pub(crate) fn title(self) -> &'static str {
         match self {
             Self::UseCases => "What it can do?",
-            Self::CaseLsmTrees => "Case 1: replace skiplist in LSM-trees",
-            Self::CaseParquetIndex => "Case 2: external index for Parquet files",
+            Self::CaseMemtable => "Case 1: faster memtable",
+            Self::CaseMmap => "Case 2: bbtree-mmap",
+            Self::CaseParquetIndex => "Case 3: Parquet index",
             Self::HowItWorks => "How it works?",
-            Self::Principles => "Three easy pieces",
             Self::CacheMisses => "Minimize cache misses",
             Self::ThoughtExperiment => "Thought experiment: binary search vs linear search",
             Self::ApplyToBTrees => "How does that apply to B-trees?",
@@ -143,8 +144,8 @@ impl PostHeading {
     }
 
     /// The principle's place in the order the post ranks them, which its
-    /// heading shows.
-    fn principle(self) -> Option<u8> {
+    /// tab shows.
+    pub(crate) fn principle(self) -> Option<u8> {
         match self {
             Self::CacheMisses => Some(1),
             Self::Instructions => Some(2),
@@ -153,13 +154,9 @@ impl PostHeading {
         }
     }
 
-    /// The heading as the text shows it: with its code, links and notes.
+    /// The heading as the text shows it: with its code.
     fn rich_title(self) -> Element {
         match self {
-            Self::Principles => rsx! {
-                {self.title()}
-                NoteRef { note: Note::Ostp }
-            },
             Self::SimdSearch => rsx! {
                 "How does "
                 code { "bbtree" }
@@ -170,23 +167,33 @@ impl PostHeading {
                 code { "&V" }
                 " to the user"
             },
-            Self::GuardHuman => rsx! {
-                "Guard 1: "
-                a {
-                    href: "https://xiangpeng.systems",
-                    target: "_blank",
-                    rel: "noopener",
-                    "Xiangpeng Hao"
-                }
-            },
             _ => rsx! {
                 {self.title()}
             },
         }
     }
 
-    /// The section a heading of level 4 belongs to.
-    fn section(self) -> Self {
+    /// The section a heading of level 4 or 5 belongs to: a section's or a
+    /// part's own heading for itself.
+    pub(crate) fn section(self) -> Self {
+        self.within(3)
+    }
+
+    /// The part a heading belongs to: a part's own heading for itself.
+    pub(crate) fn part(self) -> Self {
+        self.within(2)
+    }
+
+    /// The part's sections, in order: its tabs.
+    pub(crate) fn sections(self) -> impl Iterator<Item = Self> {
+        Self::ALL
+            .into_iter()
+            .filter(move |heading| heading.level() == 3 && heading.part() == self)
+    }
+
+    /// The heading at `level` or above that this one comes under: the
+    /// nearest such heading at or before it.
+    fn within(self, level: u8) -> Self {
         let index = Self::ALL
             .iter()
             .position(|heading| *heading == self)
@@ -194,17 +201,19 @@ impl PostHeading {
         Self::ALL[..=index]
             .iter()
             .rev()
-            .find(|heading| heading.level() <= 3)
+            .find(|heading| heading.level() <= level)
             .copied()
             .unwrap_or(self)
     }
 
-    fn of_id(id: &str) -> Option<Self> {
+    pub(crate) fn of_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|heading| heading.id() == id)
     }
 }
 
-/// A heading of the post, at its level, with its anchor.
+/// A part's heading, or one within a section, with its anchor. A
+/// section's title is its tab (`part_tabs.rs`), so the headings within a
+/// section are the page's h3 and h4.
 #[component]
 pub(crate) fn SectionHeading(heading: PostHeading) -> Element {
     let id = heading.id();
@@ -213,19 +222,11 @@ pub(crate) fn SectionHeading(heading: PostHeading) -> Element {
         2 => rsx! {
             h2 { id, class: "post-section", "data-heading": id, {title} }
         },
-        3 => rsx! {
-            h3 { id, class: "post-subsection", "data-heading": id,
-                if let Some(number) = heading.principle() {
-                    span { class: "principle-number", "aria-hidden": "true", "{number}" }
-                }
-                {title}
-            }
-        },
         4 => rsx! {
-            h4 { id, class: "post-minor", "data-heading": id, {title} }
+            h3 { id, class: "post-minor", "data-heading": id, {title} }
         },
         _ => rsx! {
-            h5 { id, class: "post-detail", "data-heading": id, {title} }
+            h4 { id, class: "post-detail", "data-heading": id, {title} }
         },
     }
 }
@@ -340,5 +341,38 @@ mod tests {
             PostHeading::GuardTesting
         );
         assert_eq!(PostHeading::HowItWorks.section(), PostHeading::HowItWorks);
+    }
+
+    #[test]
+    fn a_part_has_its_sections() {
+        assert_eq!(
+            PostHeading::UseCases.sections().collect::<Vec<_>>(),
+            [
+                PostHeading::CaseMemtable,
+                PostHeading::CaseMmap,
+                PostHeading::CaseParquetIndex
+            ]
+        );
+        assert_eq!(
+            PostHeading::HowItWorks.sections().collect::<Vec<_>>(),
+            [
+                PostHeading::CacheMisses,
+                PostHeading::Instructions,
+                PostHeading::Coherence
+            ]
+        );
+        assert_eq!(
+            PostHeading::Correctness.sections().collect::<Vec<_>>(),
+            [
+                PostHeading::GuardHuman,
+                PostHeading::GuardLlms,
+                PostHeading::GuardTesting
+            ]
+        );
+        assert_eq!(PostHeading::Reviewers.sections().count(), 0);
+        assert_eq!(
+            PostHeading::ProblemReclamation.part(),
+            PostHeading::HowItWorks
+        );
     }
 }

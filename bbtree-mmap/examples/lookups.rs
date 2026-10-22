@@ -10,7 +10,7 @@ mod timed_lookups;
 
 use std::time::Instant;
 
-use bbtree_disk::BBTreeMapFile;
+use bbtree_mmap::BBTreeMapFile;
 use timed_lookups::{Numbers, TimedLookups};
 
 #[global_allocator]

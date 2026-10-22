@@ -1,15 +1,16 @@
-//! The post's "How it works" (design/14-blogpost.md): three principles, in
-//! order: minimize cache misses, then instructions, then cache coherence
-//! traffic; and how bbtree is kept correct. Its figures are SVG files
-//! (`vis/figures/` writes them into `assets/figures/`), each embedded as an
-//! image, so that the same files can go into any other page; each plays
-//! its own CSS animation, which starts as its image loads near the reader.
-//! The footnotes the section cites close the post.
+//! The post's "How it works" (design/14-blogpost.md): the cost model's
+//! three principles, in order, then the principles as tabs: minimize cache
+//! misses, then instructions, then cache coherence traffic. Its figures are SVG files (`vis/figures/` writes them into
+//! `assets/figures/`), each embedded as an image, so that the same files
+//! can go into any other page; each plays its own CSS animation, which
+//! starts as its image loads near the reader. The footnotes the post cites
+//! close it.
 
 use dioxus::prelude::*;
 
 use crate::icons::{Icon, IconGlyph};
 use crate::outline::{PostHeading, SectionHeading};
+use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
 use crate::rust_code::RustCode;
 use crate::theme::PostTheme;
@@ -81,56 +82,42 @@ const CHILD_INDEX: &str = r"fn child_index(inline_keys: &[u16; 32], target: u16)
 
 #[component]
 pub(crate) fn HowItWorks() -> Element {
+    let tabs = PartTabs::use_new(PostHeading::HowItWorks);
     rsx! {
         SectionHeading { heading: PostHeading::HowItWorks }
-        ThreePrinciples {}
-        MinimizeCacheMisses {}
-        MinimizeInstructions {}
-        MinimizeCoherenceTraffic {}
-        HowWeMakeItCorrect {}
-        Reviewers {}
-    }
-}
-
-#[component]
-fn Reviewers() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Reviewers }
-        p {
-            "TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here."
-        }
-    }
-}
-
-#[component]
-fn ThreePrinciples() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Principles }
         p { "Every performance optimization should be guided by a cost model." }
         p {
-            "B-tree optimizations are simple: we just need to remember three principles, in order: 1. the number of "
-            strong { "chained cache lines" }
-            " touched, 2. the number of "
-            strong { "instructions" }
-            " executed, 3. the amount of "
-            strong { "cache coherence traffic" }
-            " (especially important for concurrent access)."
+            "B-tree optimizations are simple, three easy pieces"
+            NoteRef { note: Note::Ostp }
+            ": we just need to remember three principles, in order:"
         }
-        p { "Before anything, let's remember these:" }
         ol {
-            li { "A cache miss costs about 100 ns." }
-            li { "An instruction costs about 0.5 ns." }
             li {
-                "Cache coherence traffic forces a cache miss, and costs a little more than 100 ns. But it only happens with concurrent access."
+                "The number of "
+                strong { "chained cache lines" }
+                " touched. A cache miss costs about 100 ns."
+            }
+            li {
+                "The number of "
+                strong { "instructions" }
+                " executed. An instruction costs about 0.5 ns."
+            }
+            li {
+                "The amount of "
+                strong { "cache coherence traffic" }
+                ", especially important for concurrent access. It forces a cache miss, and costs a little more than 100 ns."
             }
         }
+        PartTabList { tabs }
+        SectionPanel { tabs, section: PostHeading::CacheMisses, MinimizeCacheMisses {} }
+        SectionPanel { tabs, section: PostHeading::Instructions, MinimizeInstructions {} }
+        SectionPanel { tabs, section: PostHeading::Coherence, MinimizeCoherenceTraffic {} }
     }
 }
 
 #[component]
 fn MinimizeCacheMisses() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::CacheMisses }
         p {
             "With this cost model, it's clear that the most important optimization is to minimize the number of cache misses. To put it another way, for each cache miss, we want to narrow down the search space as much as we can."
         }
@@ -152,7 +139,7 @@ fn MinimizeCacheMisses() -> Element {
             "So the break-even point is about 16 items, where binary search costs the same as linear search: two cache misses to find the target."
         }
         p {
-            "But there's a catch: 1. the CPU prefetcher may fetch the next cache lines on its own, which gives linear search an even bigger advantage; 2. linear search is simpler, with much less CPU work per item. So the actual break-even point is usually higher."
+            "But there's a catch: 1. the CPU prefetcher may fetch the next cache lines on its own, which gives linear search an even bigger advantage; 2. linear search is simpler, allowing much more parallelism in the CPU pipeline. So the actual break-even point is usually higher."
         }
         SvgFigure {
             src: SEARCH_SPACE,
@@ -342,7 +329,23 @@ fn MinimizeCacheMisses() -> Element {
             ": you don't know which node to fetch next until you have searched the current one."
         }
         p {
-            "But B-trees are often read or built in batches, which lets us play a trick with Rust's async state machines."
+            "But B-trees are often read or built in batches, which lets us play a trick with Rust's async state machines. A batch is one call with many keys, such as "
+            code { "BBTreeMap" }
+            "'s "
+            a {
+                href: "https://docs.rs/bbtree/latest/bbtree/struct.BBTreeMap.html#method.get_many_copied",
+                target: "_blank",
+                rel: "noopener",
+                code { "get_many_copied" }
+            }
+            " and "
+            a {
+                href: "https://docs.rs/bbtree/latest/bbtree/struct.BBTreeMap.html#method.insert_many",
+                target: "_blank",
+                rel: "noopener",
+                code { "insert_many" }
+            }
+            ": an array of keys in, an array of answers out."
         }
         p {
             "The high-level idea is simple: in Rust we often treat an IO operation as a "
@@ -403,21 +406,15 @@ fn MinimizeCacheMisses() -> Element {
 #[component]
 fn MinimizeInstructions() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::Instructions }
         p {
             "In general, minimizing instructions means reducing CPU time, which means two things: 1. reducing the instruction count; 2. reducing branches."
         }
         p {
             "A mispredicted branch costs about 20 cycles (the time of 20 instructions), about 10% of a cache miss."
         }
-        p {
-            "Repeated cache misses stall the CPU pipeline and confuse the cache prefetcher. On an M1 Pro, we kept the same tree, the same nodes and the same cache lines, and only changed how a node is searched (below). A 10M "
-            code { "u64" }
-            " lookup went from 1,678 to 407 instructions, and from 390 to 174 ns."
-        }
         SectionHeading { heading: PostHeading::SearchAgain }
         p {
-            "With inline keys, searching a node means searching a small array of small integers: 2 bytes a key for integers and UUIDs, 4 to 8 for strings. Now let's count instructions and branches over a node of 32 keys:"
+            "With inline keys, searching a node means searching a small array of small integers: 2 bytes a key for integers and UUIDs, 4 to 8 for strings. Now let's compare their instructions and branches over a node of 32 keys:"
         }
         ol {
             li {
@@ -426,22 +423,22 @@ fn MinimizeInstructions() -> Element {
                 " avoids the guess, but then each step waits for the one before."
             }
             li {
-                "Linear search doesn't stop early: it compares every key, with no branches and no chained dependencies, a perfect fit for the CPU pipeline."
+                "Linear search, without its early exit, becomes a count: compare the target with every key, and count the keys smaller than it; that number is the child to follow. It does more compares, but none branches or waits for another, a perfect fit for the CPU pipeline."
             }
         }
         SvgFigure {
             src: KEY_COUNT,
             loops: true,
-            alt: "Counting the inline keys smaller than the target finds child 4 in one step; binary search probes three slots in turn.",
+            alt: "Looking up 45: binary search compares 58, then 27, then 40, each chosen by the one before; the count compares all eight slots at once. Both reach child 4.",
             caption: rsx! {
-                "The count compares every slot at once and has the child after one step; binary search probes one slot at a time, each probe waiting for the last: 3 steps here, and 6 in a full node of 49 children."
+                "Looking up 45 among seven inline keys, all in one cache line: neither search takes another miss. The count compares all of them at once: four are smaller, so it follows child 4. Binary search reaches child 4 after three compares, each waiting for the one before; over 32 keys, it takes about five."
             },
         }
         SectionHeading { heading: PostHeading::SimdSearch }
         p {
             "With SIMD, searching a node takes a handful of instructions"
             NoteRef { note: Note::KarySearch }
-            ". One AVX-512 instruction compares the target with 32 two-byte keys at once; its result is a 32-bit mask, a bit a key, and a popcount of the mask is the answer:"
+            ". One AVX-512 instruction compares the target with 32 two-byte keys at once; its result is a 32-bit mask, a bit a key, and the number of ones in the mask, its popcount, is the answer:"
         }
         RustCode { code: CHILD_INDEX }
         p { "The function has only three steps, all branchless and super fast:" }
@@ -458,7 +455,9 @@ fn MinimizeInstructions() -> Element {
             }
             li {
                 code { "smaller.count_ones()" }
-                " counts the ones in the mask, which is the index of the child to follow."
+                " counts the ones in the mask, which is the index of the child to follow. x86 does this in one instruction, "
+                code { "popcnt" }
+                "."
             }
         }
         p {
@@ -473,7 +472,13 @@ fn MinimizeInstructions() -> Element {
             ", whose scalar code the compiler automatically vectorizes (generates SIMD code for)."
         }
         p {
-            "Here the compiler is not your friend. A node holds few keys, a few dozen at most, and their count is usually not a power of two. The compiler often considers it not worth vectorizing, and sometimes can't prove it safe, so we write the SIMD by hand, and handle the boundary cases very carefully."
+            "Here the compiler is not your friend. A node holds few keys, a few dozen at most, and their number is usually not a power of two. The compiler often considers it not worth vectorizing, and sometimes can't prove it safe, so we write the SIMD by hand, and handle the boundary cases very carefully."
+        }
+        p {
+            "On an M1 Pro, the compiler's own count widened each compare's result to 64 bits and added them up one at a time. We wrote the count in NEON by hand and changed nothing else: the same tree, the same nodes, the same cache lines. A lookup of a "
+            code { "u64" }
+            " key in a map of 10M entries went from 1,678 to 407 instructions, and from 390 to 174 ns."
+            NoteRef { note: Note::NeonCount }
         }
         p {
             "Vectorization isn't the only problem: sometimes the compiler generates bad code because it doesn't know the workload. For example, to compare two "
@@ -503,7 +508,6 @@ fn MinimizeInstructions() -> Element {
 #[component]
 fn MinimizeCoherenceTraffic() -> Element {
     rsx! {
-        SectionHeading { heading: PostHeading::Coherence }
         p {
             "Cache coherence traffic happens when one core writes to a cache line that other cores hold. To make sure every core sees a consistent view of memory, CPU caches implement a cache coherence protocol"
             NoteRef { note: Note::Primer }
@@ -513,7 +517,7 @@ fn MinimizeCoherenceTraffic() -> Element {
             "This causes two problems: 1. more cache misses; 2. more importantly, it puts a ceiling on the B-tree's concurrency."
         }
         p {
-            "On modern hardware, a contended cache line takes only about 10 M op/s. So if we simply put a "
+            "On modern hardware, a contended cache line supports at most about 10 M op/s. So if we simply put a "
             code { "Mutex" }
             " over the B-tree, we reach at most 10 M op/s, while "
             Bbtree {}
@@ -585,7 +589,7 @@ fn MinimizeCoherenceTraffic() -> Element {
         p {
             "In "
             Bbtree {}
-            ", we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved. So a late reader can keep checking the version, find that the node is stale, and retry, without any segfault."
+            ", we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved. Freeing a node and reusing it each change its version, and a version only grows. So a late reader still reads a node, not arbitrary memory, finds a higher version than it saw, and retries, without any segfault."
         }
         SectionHeading { heading: PostHeading::CoherenceResults }
         SvgFigure {
@@ -611,66 +615,6 @@ fn MinimizeCoherenceTraffic() -> Element {
             ", a "
             em { "hashtable" }
             "."
-        }
-    }
-}
-
-#[component]
-fn HowWeMakeItCorrect() -> Element {
-    rsx! {
-        SectionHeading { heading: PostHeading::Correctness }
-        p {
-            "Performance optimization is easy: you simply ask Claude or Codex to make the code 10× faster on a workload. Speed is measurable, and LLMs can iterate on it relentlessly."
-        }
-        p {
-            "But making sure the code is correct is hard. Correctness is implicit: you can never list every DON'T in the prompt, you can never write enough tests to prove the code correct, and you can never enumerate every property you want to hold."
-        }
-        p {
-            Bbtree {}
-            " has three guards to approach correctness."
-        }
-        SectionHeading { heading: PostHeading::GuardHuman }
-        p {
-            "Xiangpeng is a real human behind "
-            Bbtree {}
-            ", and the front line guarding the correctness of its code. All of the code is written by LLMs, but Xiangpeng steers every design decision, and is accountable for the code."
-        }
-        p {
-            "He spent his PhD writing many, many B-trees, including one that runs in production at Microsoft (Bf-Tree"
-            NoteRef { note: Note::BfTree }
-            "). Choosing "
-            Bbtree {}
-            " means offloading the attention to Xiangpeng."
-        }
-        SectionHeading { heading: PostHeading::GuardLlms }
-        p {
-            "No human can write better code than LLMs. All of the implementation is written by LLMs, and cross-checked by LLMs from different providers."
-        }
-        SectionHeading { heading: PostHeading::GuardTesting }
-        p { "Conventional approaches still apply here:" }
-        ol {
-            li {
-                strong { "Fuzzing" }
-                " runs random operations on "
-                Bbtree {}
-                " and std's "
-                code { "BTreeMap" }
-                " side by side, checks that every answer matches, and checks the whole tree's invariants after every operation."
-            }
-            li {
-                strong { "Verification" }
-                " with Verus"
-                NoteRef { note: Note::Verus }
-                " proves the critical properties of the code, e.g., that the inline keys order the same way as the keys themselves."
-            }
-            li {
-                strong { "DSTs" }
-                " (deterministic simulation testing) with Shuttle"
-                NoteRef { note: Note::Shuttle }
-                " and ffs"
-                NoteRef { note: Note::Ffs }
-                " test concurrent behavior in a deterministic and principled way."
-            }
         }
     }
 }
@@ -742,6 +686,7 @@ pub(crate) enum Note {
     Layouts,
     KarySearch,
     FastLanes,
+    NeonCount,
     ArrowCompare,
     Primer,
     Olfit,
@@ -754,7 +699,7 @@ pub(crate) enum Note {
 }
 
 impl Note {
-    const ALL: [Self; 23] = [
+    const ALL: [Self; 24] = [
         Self::Gray,
         Self::ClickBench,
         Self::Ostp,
@@ -769,6 +714,7 @@ impl Note {
         Self::Layouts,
         Self::KarySearch,
         Self::FastLanes,
+        Self::NeonCount,
         Self::ArrowCompare,
         Self::Primer,
         Self::Olfit,
@@ -860,6 +806,23 @@ impl Note {
                 " (VLDB 2017); Christopher Jonathan et al., "
                 NoteLink { href: "https://www.vldb.org/pvldb/vol11/p1702-jonathan.pdf", title: "Exploiting Coroutines to Attack the \"Killer Nanoseconds\"" }
                 " (VLDB 2018)."
+            },
+            Self::NeonCount => rsx! {
+                "Lookups of "
+                code { "u64" }
+                " keys that hit, in a map of 10M "
+                code { "u64" }
+                " entries, one run each on an M1 Pro, with bbtree-eval's "
+                NoteLink {
+                    href: "https://github.com/XiangpengHao/bbtree-eval/tree/main/diagnostics/portable",
+                    title: "portable probe",
+                }
+                ", before and after "
+                NoteLink {
+                    href: "https://github.com/XiangpengHao/bbtree/blob/main/design/03-decisions.md",
+                    title: "decision D56",
+                }
+                ", which counts inline keys in NEON."
             },
             Self::Layouts => rsx! {
                 "Paul-Virak Khuong and Pat Morin, "

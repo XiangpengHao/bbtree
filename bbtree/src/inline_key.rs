@@ -18,6 +18,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use crate::leaf_annex::LeafAnnex;
 use crate::proof::SearchBytes;
 
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
@@ -464,18 +465,33 @@ pub struct Auto;
 pub struct WithInlineKey;
 
 /// Which keys of a map with keys `K` have inline keys: [`Auto`] or
-/// [`WithInlineKey`], the only implementations.
-pub trait InlineKeyStrategy<K>: sealed::Sealed<K> {}
+/// [`WithInlineKey`], with the default [`NodeConfig`], or either of them
+/// with another, [`Configured`]; and what its leaves keep besides,
+/// [`WithLeafAnnex`]. These are the only implementations.
+///
+/// [`NodeConfig`]: crate::NodeConfig
+/// [`Configured`]: crate::Configured
+/// [`WithLeafAnnex`]: crate::WithLeafAnnex
+pub trait InlineKeyStrategy<K>: sealed::Sealed<K> {
+    /// What each leaf keeps besides its entries ([`LeafAnnex`]): nothing,
+    /// `()`, but with [`WithLeafAnnex`](crate::WithLeafAnnex).
+    type LeafAnnex: LeafAnnex;
+}
 
-impl<K> InlineKeyStrategy<K> for Auto {}
+impl<K> InlineKeyStrategy<K> for Auto {
+    type LeafAnnex = ();
+}
 
-impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {}
+impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {
+    type LeafAnnex = ();
+}
 
 /// What a strategy tells the nodes, kept out of the public API.
 pub(crate) mod sealed {
     use core::cmp::Ordering;
 
     use super::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
+    use crate::node_config::{DefaultNodeConfig, NodeConfig};
 
     /// Where a strategy's inline keys come from. Plain data: the node code
     /// resolves it for a key type (`tree/node/inline_keys.rs`), and page
@@ -502,6 +518,11 @@ pub(crate) mod sealed {
     pub trait Sealed<K> {
         const SOURCE: InlineKeySource<K>;
 
+        /// How the nodes are built (`node_config.rs`): every default, or a
+        /// `Configured` strategy's config. A strategy that wraps another
+        /// forwards the other's.
+        type Config: NodeConfig;
+
         /// Whether the nodes keep a latch word in their header, for a tree
         /// that threads share (`tree/node/latch.rs`): only the strategy a
         /// shared `BBTreeMap` wraps its own in, never a public one.
@@ -515,6 +536,7 @@ pub(crate) mod sealed {
 
     impl<K> Sealed<K> for Auto {
         const SOURCE: InlineKeySource<K> = InlineKeySource::RecognizedStdTypes;
+        type Config = DefaultNodeConfig;
     }
 
     impl<K: InlineKey> Sealed<K> for WithInlineKey {
@@ -533,6 +555,7 @@ pub(crate) mod sealed {
             },
             cmp_prefix: K::cmp_prefix,
         };
+        type Config = DefaultNodeConfig;
     }
 }
 

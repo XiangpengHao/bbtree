@@ -32,6 +32,7 @@ use super::page::{FreshPage, NodeKind, NodePtr, PageByType, PageType};
 use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
+use crate::allocator::PageKind;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// A leaf, by its page.
@@ -49,6 +50,8 @@ impl<K, V, S> Copy for Leaf<K, V, S> {}
 
 // SAFETY: leaves have the leaf layout.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Leaf<K, V, S> {
+    const KIND: PageKind = PageKind::Leaf;
+
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::leaf_layout().page
     }
@@ -925,7 +928,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// Moves the entries right of `separator_index` into `right`, a fresh leaf
     /// at this leaf's prefix length. Takes out key `separator_index`, whose
     /// entry becomes `right`'s head (D49), and returns it as the parent's
-    /// separator.
+    /// separator. Then the leaves' annexes split (`annexed_leaf.rs`).
     fn split_around(self, separator_index: usize, right: Self) -> Separator<K, S> {
         let len = self.len();
         debug_assert!(separator_index < len);
@@ -961,6 +964,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             right.node.set_has_head(true);
             right.set_len(right_len);
             self.set_len(separator_index);
+            self.split_annex(right);
             separator
         }
     }
@@ -1209,6 +1213,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Child<K, V, S> for Leaf<K, V, S> {
             );
             left.set_len(left_len + 1 + right_len);
         }
+        left.merge_annex(right);
     }
 
     fn key<'a>(self, index: usize) -> &'a K {

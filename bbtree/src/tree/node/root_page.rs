@@ -23,6 +23,7 @@ use super::internal::Internal;
 use super::leaf::Leaf;
 use super::page::{FreshPage, NodePtr, PageAllocator, PageByType, PageType};
 use super::{Child, Node};
+use crate::allocator::PageKind;
 use crate::inline_key::InlineKeyStrategy;
 use crate::tree::shared_prefix::SharedPrefix;
 
@@ -50,6 +51,8 @@ impl<K, V, S> Copy for RootPage<K, V, S> {}
 // start, with its kind's layout, which fits in the page and whose alignment
 // divides the page's. The root area follows the larger kind's page.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for RootPage<K, V, S> {
+    const KIND: PageKind = PageKind::Root;
+
     fn page_layout() -> Layout {
         let (leaf, internal) = (
             Leaf::<K, V, S>::page_layout(),

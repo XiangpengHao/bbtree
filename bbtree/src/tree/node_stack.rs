@@ -63,8 +63,9 @@ use crate::inline_key::InlineKeyStrategy;
 
 /// The deepest a leaf can be below the root. A non-root internal node has
 /// at least 5 children (D13, D22), the root at least 2, and a leaf takes at
-/// least 1 KB (D15). So leaves one level deeper would take at least 2·5^23
-/// KB, more than 2^64 bytes.
+/// least 1 KB (D15), the least leaf page size a node config may set (D59).
+/// So leaves one level deeper would take at least 2·5^23 KB, more than 2^64
+/// bytes.
 pub(in crate::tree) const MAX_DEPTH: usize = 23;
 
 /// Borrow type of a [`NodeStack`]: shared access for `'a` to the tree, like
@@ -945,22 +946,23 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         }
     }
 
-    /// Detaches the node stack, which a removal is done with. Then it lowers
-    /// the tree if `fixed_root` (the removal's fixing changed the root) and
-    /// merges left the root internal without keys. Lowering moves the root's
-    /// only child up into the root ([`Tree::lower`]), and gives the child's
-    /// page back to `alloc`. Reads the root only if `fixed_root`. Returns
-    /// whether it lowered the tree.
-    pub(in crate::tree) fn detach_lowering_an_emptied_root(
+    /// Lowers the tree if `fixed_root` (a removal's fixing changed the root)
+    /// and merges left the root internal without keys. Lowering moves the
+    /// root's only child up into the root ([`Tree::lower`]), gives the
+    /// child's page back to `alloc`, and starts the node stack at the root;
+    /// otherwise the node stack stays. Reads the root only if `fixed_root`.
+    /// Returns whether it lowered the tree.
+    pub(in crate::tree) fn lower_an_emptied_root(
         &mut self,
         fixed_root: bool,
         alloc: &impl PageAllocator,
     ) -> bool {
-        self.detach();
         let lowers =
             fixed_root && matches!(self.tree.root(), Node::Internal(root) if root.len() == 0);
         if lowers {
+            self.detach();
             self.tree.lower().deallocate(alloc);
+            self.start_at_root();
         }
         lowers
     }

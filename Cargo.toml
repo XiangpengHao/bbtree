@@ -2,5 +2,5 @@
 # visualizer (bbtree/{bench,fuzz,vis}) are workspaces of their own, so that
 # their dependencies stay out of this one.
 [workspace]
-members = ["bbtree", "bbtree-disk", "bbtree-datafusion-parquet"]
+members = ["bbtree", "bbtree-mmap", "bbtree-datafusion-parquet", "bbtree-store"]
 resolver = "3"

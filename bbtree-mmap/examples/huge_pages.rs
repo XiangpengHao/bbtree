@@ -16,7 +16,7 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use bbtree::unsync::BBTreeMap;
-use bbtree_disk::{BBTreeMapFile, OsPages};
+use bbtree_mmap::{BBTreeMapFile, OsPages};
 use timed_lookups::{Numbers, TimedLookups};
 
 #[global_allocator]

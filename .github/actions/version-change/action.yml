@@ -38,7 +38,7 @@ runs:
         base_version=$(version_at "$BASE")
         # The crates released with bbtree are at its version (publish.yml
         # publishes them at it), checked here, before a release merges.
-        for crate in bbtree-disk bbtree-datafusion-parquet; do
+        for crate in bbtree-mmap bbtree-datafusion-parquet bbtree-store; do
           crate_version=$(git show "HEAD:$crate/Cargo.toml" | python3 -c \
             'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])')
           if [ "$crate_version" != "$version" ]; then

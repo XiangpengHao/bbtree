@@ -735,6 +735,15 @@ impl Workload {
         }
     }
 
+    /// As [`Self::new`], for nodes so large that the ordered inserts push the
+    /// leaves only 1 below the root.
+    pub(super) fn shallow(random_steps: usize, key_space: usize) -> Self {
+        Self {
+            min_sequential_leaf_depth: 1,
+            ..Self::new(random_steps, key_space)
+        }
+    }
+
     /// Random operations, then ascending, descending and shuffled inserts,
     /// each on a fresh pair of maps whose ours has strategy `S`, and each
     /// followed by overwriting every separator's value, iterating and

@@ -20,6 +20,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use super::super::interleaving::Interleaving;
+use super::super::node::annexed_leaf::AnnexedLeaf;
 use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
@@ -28,20 +29,26 @@ use super::super::prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf};
 use super::insert::InsertPolicy;
+use crate::allocator::InsertError;
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Appends `key` and `value` to the last leaf, and returns what `policy`
-    /// returns of a new entry. That takes a leaf with room, `key` greater
-    /// than its last key, and `key` sharing what every key shares. Otherwise
-    /// gives all back, for the ordinary insert.
+    /// returns of a new entry, or the entry if it refuses. That takes a leaf
+    /// with room, `key` greater than its last key, and `key` sharing what
+    /// every key shares. Otherwise gives all back, for the ordinary
+    /// insert.
     #[inline(always)]
-    pub(super) fn append<P: InsertPolicy<K, V>>(
+    #[expect(
+        clippy::type_complexity,
+        reason = "the insert's outcome, or all back for the ordinary insert"
+    )]
+    pub(super) fn append<P: InsertPolicy<K, V, S>>(
         &self,
         key: K,
         value: V,
         policy: P,
-    ) -> Result<P::Output, (K, V, P)>
+    ) -> Result<Result<P::Output, InsertError<K, V>>, (K, V, P)>
     where
         K: Ord,
     {
@@ -73,10 +80,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // A key that shares less shrinks the shared prefix first.
             Err(key) => return Err((key, value, policy)),
         };
-        let output = policy.vacant(key.key(), &value);
+        let output = match policy.vacant(AnnexedLeaf::new(leaf), key.key(), &value) {
+            Ok(output) => output,
+            Err(layout) => return Ok(Err(InsertError::new(key.into_key(), value, layout))),
+        };
         leaf.insert_fit(len, key.window_at(leaf.prefix_len()), value);
         drop(held);
-        Ok(output)
+        Ok(Ok(output))
     }
 
     /// The leaf appends go to, the last leaf when no thread holds it; `None`

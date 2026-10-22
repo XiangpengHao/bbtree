@@ -280,6 +280,11 @@ impl Motion {
     /// end, the first frame comes back over the last fade.
     pub(crate) fn animate(&mut self, name: &str, frames: &[(f64, String)]) {
         let mut keyframes = String::new();
+        // The lead holds the first frame. Without a 0% frame, CSS would
+        // start from the mark's own style, its last frame, and undo it.
+        if let Some((_, first)) = frames.first() {
+            let _ = write!(keyframes, "0% {{ {first} }} ");
+        }
         for (at, declarations) in frames {
             let _ = write!(keyframes, "{:.3}% {{ {declarations} }} ", self.percent(*at));
         }
