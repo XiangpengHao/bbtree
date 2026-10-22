@@ -145,15 +145,36 @@ jobs:
           path: ${{ runner.temp }}/perf-report
           retention-days: 30
 
-  # A pull request's report, as one comment that each run updates, with a
-  # review under it: pi runs DeepSeek V4.1 Flash, through OpenRouter, on the
-  # report and the pull request's changes, as .github/perf-review.md asks.
-  # Pull requests from this repository only: the job holds the OpenRouter
-  # key, and a fork's token can't comment; a fork's report is in the measure
-  # job's summary.
+  # A pull request's report, as one comment that each run updates. A fork's
+  # token can't comment; its report is in the measure job's summary.
   comment:
     name: comment
     needs: measure
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: perf-report
+
+      - name: Comment on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+            --body-file report.md --edit-last --create-if-none
+
+  # A model's review of the report, added under it in the comment: pi runs
+  # DeepSeek V4.1 Flash, through OpenRouter, on the report and the pull
+  # request's changes, as .github/perf-review.md asks. On GitHub's runners,
+  # once the report is posted. Pull requests from this repository only: the
+  # job holds the OpenRouter key.
+  review:
+    name: review
+    needs: comment
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
@@ -186,13 +207,13 @@ jobs:
           printf '\n### Review by DeepSeek V4.1 Flash\n\n' >> "$report"
           cat "$review" >> "$report"
 
-      - name: Comment on the pull request
+      - name: Add the review to the comment
         env:
           GH_TOKEN: ${{ github.token }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
-            --body-file "$RUNNER_TEMP/perf-report/report.md" --edit-last --create-if-none
+            --body-file "$RUNNER_TEMP/perf-report/report.md" --edit-last
 
   # Main's results, kept by commit on the `bench-data` branch, which pull
   # requests then compare against.
