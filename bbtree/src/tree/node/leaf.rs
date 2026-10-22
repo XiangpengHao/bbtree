@@ -268,6 +268,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         self.len() < <Self as Child<K, V, S>>::min_len()
     }
 
+    /// Whether the leaf keeps its [`Child::min_len`] after losing an entry.
+    #[inline(always)]
+    pub(in crate::tree) fn keeps_its_minimum(self) -> bool {
+        self.len() > <Self as Child<K, V, S>>::min_len()
+    }
+
     /// How many leading bytes the leaf's fences share, and so every key in
     /// it, which its inline keys skip (05-fence-key.md); 0 for a leaf
     /// without inline keys.
