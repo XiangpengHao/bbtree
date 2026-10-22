@@ -22,8 +22,8 @@
 //!     (`tree/prefix.rs`).
 //!
 //!   Then it runs [`NodeStackMut::remove`] along them. That fixes the
-//!   levels, fits the prefixes, and lowers the tree in the root page when
-//!   the root loses its last separator, down to a leaf if need be.
+//!   levels, lowers the tree in the root page when the root loses its last
+//!   separator, down to a leaf if need be, and fits the prefixes.
 //! - **Freed pages** (a merged node's, and the root's child when the root
 //!   lowers) go on the tree's free lists once the removal lets go
 //!   (`pages.rs`). If the last leaf was freed, appends go to the leaf that
