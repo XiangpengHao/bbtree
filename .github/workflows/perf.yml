@@ -4,7 +4,8 @@ name: perf
 # A report, never a gate: the bench's `ci` suite with `--perf`, bbtree
 # against std's BTreeMap, in ns per operation and the hardware counts of the
 # timed regions (instructions, branches, branch misses, L1d misses, cache
-# lines from memory). A pull request gets it as a comment, against its base;
+# lines from memory). A pull request gets it as a comment, against its base,
+# with a model's review of it;
 # a commit to main gets it in the run's summary, against its parent, and its
 # results are kept on the `bench-data` branch, at
 # `<runner name>/<commit>.csv`, as main's history. Nothing here fails a pull
@@ -144,19 +145,46 @@ jobs:
           path: ${{ runner.temp }}/perf-report
           retention-days: 30
 
-  # A pull request's report, as one comment that each run updates. A fork's
-  # token can't comment; its report is in the measure job's summary.
+  # A pull request's report, as one comment that each run updates, with a
+  # review under it: pi runs DeepSeek V4.1 Flash, through OpenRouter, on the
+  # report and the pull request's changes, as .github/perf-review.md asks.
+  # Pull requests from this repository only: the job holds the OpenRouter
+  # key, and a fork's token can't comment; a fork's report is in the measure
+  # job's summary.
   comment:
     name: comment
     needs: measure
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           name: perf-report
+          path: ${{ runner.temp }}/perf-report
+
+      - name: Review the report
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          report="$RUNNER_TEMP/perf-report/report.md"
+          review="$RUNNER_TEMP/review.md"
+          git diff "$BASE" HEAD -- bbtree/src bbtree/bench > "$RUNNER_TEMP/changes.diff"
+          npx --yes @earendil-works/pi-coding-agent@1.3.0 -p \
+            --model openrouter/deepseek/deepseek-v4.1-flash-1017 \
+            --append-system-prompt .github/perf-review.md \
+            "@$report" "@$RUNNER_TEMP/changes.diff" \
+            "Review the report. The base is $BASE; the checkout is the head merged into it." \
+            > "$review" || echo "The review failed: see the run's log." > "$review"
+          printf '\n### Review by DeepSeek V4.1 Flash\n\n' >> "$report"
+          cat "$review" >> "$report"
 
       - name: Comment on the pull request
         env:
@@ -164,7 +192,7 @@ jobs:
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           gh pr comment "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
-            --body-file report.md --edit-last --create-if-none
+            --body-file "$RUNNER_TEMP/perf-report/report.md" --edit-last --create-if-none
 
   # Main's results, kept by commit on the `bench-data` branch, which pull
   # requests then compare against.
