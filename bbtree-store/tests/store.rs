@@ -174,22 +174,25 @@ fn refuses_long_keys_and_takes_values_of_any_length() {
         store.insert(&vec![1; max_key + 1], b""),
         Err(InsertError::KeyTooLong)
     );
-    // A page's room, 1,008 bytes, holds a record of nine bytes of lengths
-    // and generation, the key, and an 8-byte link before what the record
-    // keeps of a long value; an overflow page's, 1,016 bytes of the value.
-    let (room, overflow_room) = (PAGE - 16, PAGE - 8);
+    // A page's room, past its header of a pointer and two `u32`s (1,008
+    // bytes with 8-byte pointers), holds a record of nine bytes of lengths
+    // and generation, the key, and a pointer-sized link before what the
+    // record keeps of a long value; an overflow page's, past its link, the
+    // value's bytes (1,016).
+    let link = size_of::<*mut u8>();
+    let (room, overflow_room) = (PAGE - link - 8, PAGE - link);
     for (key_len, value_len, overflow_pages) in [
         (20, 0, 0),
         (20, room - 9 - 20, 0),
         // Left over: all of it, which doesn't fit with the link.
         (20, room - 9 - 20 + 1, 1),
         (20, overflow_room, 1),
-        (20, overflow_room + room - 9 - 20 - 8, 1),
-        (20, overflow_room + room - 9 - 20 - 8 + 1, 2),
+        (20, overflow_room + room - 9 - 20 - link, 1),
+        (20, overflow_room + room - 9 - 20 - link + 1, 2),
         (20, 10 * overflow_room + 500, 10),
         (max_key, room - 9 - max_key, 0),
         (max_key, room - 9 - max_key + 1, 1),
-        (max_key, 3 * overflow_room + room - 9 - max_key - 8, 3),
+        (max_key, 3 * overflow_room + room - 9 - max_key - link, 3),
     ] {
         let pages = Counting::default();
         let store = BBTreeStore::new_in(&pages);
@@ -442,6 +445,7 @@ fn holes_go_back_under_churn() {
 /// Threads insert, read and remove entries apart, some of whose values
 /// take overflow pages.
 #[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
 fn threads_share_a_store() {
     let (threads, per_thread) = (4, 5_000);
     let value_len = |n: usize| {
