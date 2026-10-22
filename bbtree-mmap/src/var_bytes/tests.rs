@@ -198,7 +198,12 @@ fn byte_keys_and_values_round_trip() {
 /// them.
 #[test]
 fn a_small_var_bytes_file_map_round_trips() {
-    for (seed, count) in [0, 1, 40, 300].into_iter().enumerate() {
+    let counts: &[usize] = if cfg!(miri) {
+        &[0, 1, 40]
+    } else {
+        &[0, 1, 40, 300]
+    };
+    for (seed, &count) in counts.iter().enumerate() {
         round_trip(count, seed as u64 + 100);
     }
 }
@@ -239,7 +244,8 @@ fn var_bytes_and_plain_slots_mix() {
 #[test]
 fn records_stay_in_their_pages_and_large_ones_start_one() {
     let rng = Rng::new(9);
-    let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..400_u32)
+    let count: u32 = if cfg!(miri) { 60 } else { 400 };
+    let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..count)
         .map(|key| {
             let len = match rng.below(4) {
                 0 => rng.below(if cfg!(miri) { 2000 } else { 300_000 }),
@@ -366,7 +372,7 @@ fn plain_keys_of_a_spans_layout_read_no_var_bytes_file_map() {
 #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
 fn damaged_var_bytes_file_maps_are_refused_or_read_in_bounds() {
     let rng = Rng::new(29);
-    let count = if cfg!(miri) { 200 } else { 3000 };
+    let count = if cfg!(miri) { 100 } else { 3000 };
     let mut keys: Vec<Vec<u8>> = (0..count)
         .map(|number| number.to_string().into_bytes())
         .collect();
@@ -376,7 +382,7 @@ fn damaged_var_bytes_file_maps_are_refused_or_read_in_bounds() {
     let file_bytes = file_map_of::<VarBytes, VarBytes>(entries).unwrap();
     let mut damaged = FileBuf::zeroed(file_bytes.len(), VarBytesMap::alignment());
     let (mut refused, mut read) = (0, 0);
-    for _ in 0..if cfg!(miri) { 10 } else { 400 } {
+    for _ in 0..if cfg!(miri) { 6 } else { 400 } {
         damaged.copy_from_slice(&file_bytes);
         for _ in 0..1 + rng.below(3) {
             let at = 64 + rng.below(file_bytes.len() - 64);
@@ -405,7 +411,7 @@ fn damaged_var_bytes_file_maps_are_refused_or_read_in_bounds() {
             )
         }));
     }
-    // Miri, which damages 10 file maps, checks that reading them stays in
+    // Miri, which damages 6 file maps, checks that reading them stays in
     // bounds, so it needs some read; which of so few it refuses depends on
     // the layout.
     if cfg!(miri) {

@@ -976,11 +976,11 @@ mod tests {
     #[cfg_attr(panic = "abort", ignore = "needs unwinding")]
     fn damaged_file_maps_are_refused_or_read_in_bounds() {
         let rng = TestRng::new(23);
-        let count = if cfg!(miri) { 300 } else { 3000 };
+        let count = if cfg!(miri) { 120 } else { 3000 };
         let file_bytes = file_map_of(count);
         let mut damaged = copy_of(&file_bytes);
         let (mut refused, mut read) = (0, 0);
-        for _ in 0..if cfg!(miri) { 10 } else { 400 } {
+        for _ in 0..if cfg!(miri) { 6 } else { 400 } {
             damaged.copy_from_slice(&file_bytes);
             for _ in 0..1 + rng.below(3) {
                 let at = 64 + rng.below(file_bytes.len() - 64);
@@ -1002,7 +1002,7 @@ mod tests {
                 (found, forward, backward, ranged)
             }));
         }
-        // Miri, which damages 10 file maps, checks that reading them stays
+        // Miri, which damages 6 file maps, checks that reading them stays
         // in bounds, so it needs some read; which of so few it refuses
         // depends on the layout.
         if cfg!(miri) {

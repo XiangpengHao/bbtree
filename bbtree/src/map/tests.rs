@@ -93,7 +93,11 @@ fn assert_batches_match_reads<K: Ord + Clone + core::fmt::Debug>(
         }
     }
     check::<K, 8>(map, queries);
-    check::<K, 65>(map, queries);
+    // Miri takes more than 64 lanes in the executor's tests (`tree/batch.rs`),
+    // as lanes of 65 here would cost it minutes.
+    if !cfg!(miri) {
+        check::<K, 65>(map, queries);
+    }
 }
 
 /// `count` random numbers below `universe`, some repeated.
@@ -472,8 +476,9 @@ fn what_keys_share_grows_shrinks_and_starts_anew() {
 #[test]
 fn a_small_map_matches_std() {
     let rng = TestRng::new(94);
-    let keys = random_numbers(&rng, 300, 1_000);
-    let absent = random_numbers(&rng, 50, 1_000);
+    let (count, absent) = if cfg!(miri) { (60, 10) } else { (300, 50) };
+    let keys = random_numbers(&rng, count, 1_000);
+    let absent = random_numbers(&rng, absent, 1_000);
     assert_matches_std(&keys, &absent);
     let empty = BBTreeMap::<u64, u64>::new();
     assert_eq!(empty.get_cloned(&1), None);

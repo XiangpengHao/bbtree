@@ -215,18 +215,19 @@ fn refuses_long_keys_and_takes_values_of_any_length() {
     }
     let pages = Counting::default();
     let store = BBTreeStore::new_in(&pages);
-    for n in 0..64 {
+    let count = if cfg!(miri) { 15 } else { 64 };
+    for n in 0..count {
         let len = [5_000, 10, 3 * PAGE][n % 3];
         assert_eq!(store.insert(&key(n), &value(n, 0, len)), Ok(false));
     }
-    for n in 0..64 {
+    for n in 0..count {
         let len = [10, 4 * PAGE, 0][n % 3];
         assert_eq!(store.insert(&key(n), &value(n, 1, len)), Ok(true));
         if n % 5 == 0 {
             assert!(store.remove(&key(n)));
         }
     }
-    for n in 0..64 {
+    for n in 0..count {
         let len = [10, 4 * PAGE, 0][n % 3];
         assert_eq!(store.get(&key(n)), (n % 5 != 0).then(|| value(n, 1, len)));
     }
@@ -270,9 +271,13 @@ fn matches_a_btree_map() {
     let store = BBTreeStore::new_in(&pages);
     let mut model: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let steps = if cfg!(miri) { 2_000 } else { 60_000 };
+    let (steps, keys) = if cfg!(miri) {
+        (180, 200)
+    } else {
+        (60_000, 3_000)
+    };
     for step in 0..steps {
-        let n = rng.below(3_000);
+        let n = rng.below(keys);
         let entry_key = key(n);
         match rng.below(10) {
             0..=5 => {
@@ -356,20 +361,25 @@ where
 #[test]
 fn a_spent_budget_refuses_inserts_and_changes_nothing() {
     let pages = Counting::default();
-    pages.limit.store(64, Ordering::Relaxed);
+    let (limit, steps, keys) = if cfg!(miri) {
+        (8, 80, 1_000)
+    } else {
+        (64, 3_000, 2_000)
+    };
+    pages.limit.store(limit, Ordering::Relaxed);
     let store = BBTreeStore::new_in(&pages);
     let mut model = BTreeMap::new();
     let mut refused = 0;
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
-    for step in 0..3_000 {
-        let n = rng.below(2_000);
+    for step in 0..steps {
+        let n = rng.below(keys);
         let (key, value) = (key(n), value(n, step, 100));
         match store.insert(&key, &value) {
             Ok(replaced) => assert_eq!(replaced, model.insert(key, value).is_some()),
             Err(InsertError::Alloc(_)) => refused += 1,
             Err(error) => panic!("{error}"),
         }
-        assert!(pages.out() <= 64);
+        assert!(pages.out() <= limit);
     }
     assert!(refused > 0, "the budget runs out");
     for (key, value) in &model {

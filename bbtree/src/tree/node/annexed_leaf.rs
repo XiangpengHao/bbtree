@@ -154,19 +154,35 @@ mod tests {
     type AnnexedMap<'p> =
         BBTreeMap<u64, u64, WithLeafAnnex<Auto, PagePerEntry>, &'p TestPages<u64, u64>>;
 
+    /// Whether step `step` checks its leaf's keys: every one does, but under
+    /// Miri, which interprets each key read's layout lookups, every 16th.
+    fn checks_leaf_keys(step: u64) -> bool {
+        !cfg!(miri) || step.is_multiple_of(16)
+    }
+
     /// Inserts `key`, taking a heap page into the annex of the leaf it goes
-    /// in; whether it was new.
-    fn insert(map: &AnnexedMap<'_>, pages: &TestPages<u64, u64>, key: u64, value: u64) -> bool {
+    /// in; whether it was new. If `check_keys`, checks the leaf's keys.
+    fn insert(
+        map: &AnnexedMap<'_>,
+        pages: &TestPages<u64, u64>,
+        key: u64,
+        value: u64,
+        check_keys: bool,
+    ) -> bool {
         let inserted = map.update_or_insert_with_leaf(
             key,
             value,
             |leaf, stored, stored_value| {
-                assert!(leaf.keys().is_sorted() && leaf.keys().any(|key| key == stored));
+                if check_keys {
+                    assert!(leaf.keys().is_sorted() && leaf.keys().any(|key| key == stored));
+                }
                 *stored_value = value;
                 Ok(false)
             },
             |mut leaf, new, _| {
-                assert!(leaf.keys().is_sorted() && leaf.keys().all(|key| key != new));
+                if check_keys {
+                    assert!(leaf.keys().is_sorted() && leaf.keys().all(|key| key != new));
+                }
                 let page = pages.allocate_heap(PAGE).map_err(|_| PAGE)?;
                 leaf.annex().pages.push(page);
                 Ok(true)
@@ -176,10 +192,18 @@ mod tests {
     }
 
     /// Removes `key`, giving a heap page of its leaf's annex back, if it
-    /// holds one: the map's teardown gives the rest back.
-    fn remove(map: &AnnexedMap<'_>, pages: &TestPages<u64, u64>, key: u64) -> Option<u64> {
+    /// holds one: the map's teardown gives the rest back. If `check_keys`,
+    /// checks the leaf's keys.
+    fn remove(
+        map: &AnnexedMap<'_>,
+        pages: &TestPages<u64, u64>,
+        key: u64,
+        check_keys: bool,
+    ) -> Option<u64> {
         let removed = map.remove_with_leaf(&key, |mut leaf, stored, _| {
-            assert!(leaf.keys().is_sorted() && leaf.keys().any(|key| key == stored));
+            if check_keys {
+                assert!(leaf.keys().is_sorted() && leaf.keys().any(|key| key == stored));
+            }
             if let Some(page) = leaf.annex().pages.pop() {
                 // SAFETY: the page came from `pages`, for `PAGE`, and the
                 // annex held it alone.
@@ -195,14 +219,19 @@ mod tests {
         let mut map: AnnexedMap<'_> = BBTreeMap::new_in(&pages);
         let rng = TestRng::new(7);
         let mut model = BTreeMap::new();
-        let steps = if cfg!(miri) { 2_000 } else { 30_000 };
+        let (steps, keys) = if cfg!(miri) {
+            (300, 300)
+        } else {
+            (30_000, 3_000)
+        };
         for step in 0..steps {
-            let key = rng.below_u64(3_000);
+            let key = rng.below_u64(keys);
+            let check_keys = checks_leaf_keys(step);
             if rng.below(3) < 2 {
-                let new = insert(&map, &pages, key, step);
+                let new = insert(&map, &pages, key, step, check_keys);
                 assert_eq!(new, model.insert(key, step).is_none());
             } else {
-                assert_eq!(remove(&map, &pages, key), model.remove(&key));
+                assert_eq!(remove(&map, &pages, key, check_keys), model.remove(&key));
             }
         }
         map.check_invariants(model.len());
@@ -222,14 +251,15 @@ mod tests {
         let mut map: AnnexedMap<'_> = BBTreeMap::new_in(&pages);
         let rng = TestRng::new(8);
         let mut model = BTreeMap::new();
-        for step in 0..2_000 {
-            let key = rng.below_u64(4_000);
-            insert(&map, &pages, key, step);
+        let count = if cfg!(miri) { 150 } else { 2_000 };
+        for step in 0..count {
+            let key = rng.below_u64(2 * count);
+            insert(&map, &pages, key, step, checks_leaf_keys(step));
             model.insert(key, step);
         }
         // New keys land in leaves with room, full leaves that would split,
         // and after the last key; held keys refuse on the update.
-        for key in (0..4_100).step_by(3) {
+        for key in (0..2 * count + 100).step_by(3) {
             let refused = map.update_or_insert_with_leaf(
                 key,
                 0,
