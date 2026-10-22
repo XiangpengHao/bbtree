@@ -88,19 +88,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 if !condition(stored, value) {
                     return None;
                 }
-                if Self::keeps_its_minimum(leaf) || self.is_root(leaf) {
+                if leaf.keeps_its_minimum() || self.is_root(leaf) {
                     on_remove(AnnexedLeaf::new(leaf), stored, value);
                     return Some(leaf.remove(index));
                 }
             }
         }
         self.remove_rebalancing(&key, &mut condition, &mut Some(on_remove), alloc)
-    }
-
-    /// Whether `leaf` keeps its minimum after losing an entry.
-    #[inline(always)]
-    fn keeps_its_minimum(leaf: Leaf<K, V, Latched<S>>) -> bool {
-        leaf.len() > Leaf::<K, V, Latched<S>>::min_len()
     }
 
     /// [`Self::remove_entry`] of a separator, or of an entry whose leaf
@@ -173,7 +167,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 return Ok(None);
             }
             // Another thread may have filled the leaf since.
-            if Self::keeps_its_minimum(leaf) || self.is_root(leaf) {
+            if leaf.keeps_its_minimum() || self.is_root(leaf) {
                 take_on_remove(stored, value);
                 return Ok(Some(leaf.remove(index)));
             }

@@ -119,6 +119,17 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     ///
     /// If the node stack ends at no key.
     pub(crate) fn remove(&mut self, alloc: &impl PageAllocator, length: &mut usize) -> (K, V) {
+        // Most removals take an entry out of a leaf that keeps its minimum,
+        // or is the root: nothing to fix, fit or lower, as in the latched
+        // tree (`latched/remove.rs`).
+        if let Node::Leaf(leaf) = self.node()
+            && (leaf.keeps_its_minimum() || self.is_at_root())
+        {
+            let entry = leaf.remove(self.index());
+            *length -= 1;
+            self.detach();
+            return entry;
+        }
         let (entry, mut changed) = self.take_out(alloc, length);
         self.lower_and_refit_changed_fences(&mut changed, alloc);
         self.detach();
