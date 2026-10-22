@@ -7,7 +7,7 @@
 
 use dioxus::prelude::*;
 
-use crate::baseline_bars::{BarScale, BaselineBars, BaselineGroup, BaselinePair};
+use crate::baseline_bars::{BaselineBars, BaselineGroup, BaselinePair};
 use crate::measurements::{Machine, MeasuredKeys, MeasuredMap, MeasuredOperation, Measurements};
 use crate::spotlight::Spotlight;
 
@@ -95,7 +95,6 @@ pub(crate) fn ArchitecturesChart(spotlight: Spotlight) -> Element {
         }
         BaselineBars {
             groups,
-            scale: BarScale::Nanos,
             label: "Time per get of UUID keys on one thread, by machine",
             spotlight,
         }

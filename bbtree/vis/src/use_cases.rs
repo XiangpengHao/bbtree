@@ -9,10 +9,11 @@
 
 use dioxus::prelude::*;
 
-use crate::how_it_works::{Note, NoteRef, SvgFigure};
+use crate::how_it_works::{Note, NoteRef};
 use crate::outline::{PostHeading, SectionHeading};
 use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
+use crate::post_figure::SvgFigure;
 use crate::rust_code::RustCode;
 
 const END_TO_END: Asset = asset!("/assets/figures/end-to-end.svg");
@@ -105,7 +106,11 @@ fn Memtable() -> Element {
         }
         ol {
             li { "Custom allocator is supported on day one." }
-            li { "It never allocates on irregular sizes (i.e., not a power of two)." }
+            li {
+                "It never allocates on irregular sizes (i.e., not a power of two): memory management stays easy, with no external fragmentation"
+                NoteRef { note: Note::FreeSpace }
+                "."
+            }
             li { "Allocation failure can be gracefully handled." }
         }
         p {
@@ -128,7 +133,7 @@ fn Memtable() -> Element {
             }
             li {
                 SystemLink { name: "Lance", href: "https://github.com/lance-format/lance" }
-                "'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.22×."
+                "'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.21×."
             }
             li {
                 SystemLink { name: "Turso", href: "https://github.com/tursodatabase/turso" }

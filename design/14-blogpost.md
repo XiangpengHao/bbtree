@@ -16,7 +16,8 @@ open at a time, so that an impatient reader gets the part from its
 overview and opens only the section they want (`vis/src/part_tabs.rs`):
 the first is open until the reader picks another, a pick names its
 section in the address, a link to any heading in a section opens it, and
-an open section ends with a link to the next; the three principles are
+so does the browser's find (the closed sections stay in the page, hidden
+until found), and an open section ends with a link to the next; the three principles are
 numbered, since the post ranks them; and the post has a dark theme. The figures are SVG files that
 `vis/figures/` writes into `vis/assets/figures/` (`cargo run --release
 --manifest-path vis/figures/Cargo.toml`), so that the same files go into
@@ -32,9 +33,9 @@ site loads it lazily, so it starts as the reader nears it.
 
 **bbtree** is by far the fastest B-tree (that I'm aware of):
 1. 5× faster than std's `BTreeMap` on a single thread, 12× faster than `crossbeam-skiplist` at 96 threads.
-2. 30% lower memory usage, 5× lower p99 latency.
+2. 30% lower memory usage.
 3. Zero dependencies, `no_std` compatible.
-4. `unsync::BBTreeMap` is a drop-in replacement for std's `BTreeMap`/`BTreeSet`.
+4. `bbtree::unsync::BBTreeMap` is a drop-in replacement for std's `BTreeMap`/`BTreeSet`.
 5. Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing.
 6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
 
@@ -59,14 +60,14 @@ All LSM-trees use an ordered map to hold recent writes in memory, the memtable. 
 
 `bbtree` allows more advanced memory management:
 1. Custom allocator is supported on day one.
-2. It never allocates on irregular sizes (i.e., not a power of two).
+2. It never allocates on irregular sizes (i.e., not a power of two): memory management stays easy, with no external fragmentation[^free-space].
 3. Allocation failure can be gracefully handled.
 
 We integrated `bbtree` into five systems, on each system's own benchmarks:
 1. [fjall](https://github.com/fjall-rs/fjall): gets 2.47×, inserts 1.61×, write batches 3.00×.
 2. [SlateDB](https://github.com/slatedb/slatedb): gets 1.71×, puts 1.65×, write batches of 10 rows 2.36×.
 3. [Tonbo](https://github.com/tonbo-io/tonbo): 10M-row writes 6.83×, conflict-checked transactions 4.10×.
-4. [Lance](https://github.com/lance-format/lance)'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.22×.
+4. [Lance](https://github.com/lance-format/lance)'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.21×.
 5. [Turso](https://github.com/tursodatabase/turso)'s MVCC store, not an LSM-tree but a skiplist all the same: inserts 2.22×, indexed `SELECT` 1.90×.
 
 [the End to End card again, as a figure: `end-to-end.svg`. Caption: The End to End card again: each system's own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with `bbtree`; only the map changed.]
@@ -176,7 +177,7 @@ And we only load the full key when the comparison ties.
 **What about keys with long prefixes?**
 Many keys, like URLs and paths, have long prefixes. If we just take the first 8 bytes as the inline key, we may compare nothing at all.
 `bbtree` addresses this with `prefix_keys`: the common prefix of all keys in a node[^prefix-btree].
-The beauty of `prefix_keys` is that they are implicit: every key in a node lies between the two separators around it in its parents, so every key starts with whatever those two separators share.
+The beauty of `prefix_keys` is that no node has to store them. Every key in a node sorts between the two separators on either side of the node in its parent. So if those two separators share their first 20 bytes, every key in the node starts with the same 20 bytes.
 
 [a figure with parent and child nodes: two separators in the parent, and the child's prefix is what the two separators share: `prefix-keys.svg`. Caption: Neighboring Wikipedia titles. The parent's two separators share their first 20 bytes, so every key of the child does too. Over the first 8 bytes, the keys all tie; past the shared 20, they all differ.]
 
@@ -248,7 +249,7 @@ But B-trees are often read or built in batches, which lets us play a trick with 
 
 The high-level idea is simple: in Rust we often treat an IO operation as a `Future`, and `await` it. In `bbtree`, we treat a cache miss as a `Future`, and `await` it too. Database research has interleaved lookups like this for years, by hand and with coroutines[^interleaving].
 
-The code looks roughly like this:
+The code looks roughly like this (they run in a single thread):
 
 ```rust
 fn get_many<const N: usize>(&self, keys: [&K; N]) -> [Option<V>; N] {
@@ -271,7 +272,7 @@ async fn search(&self, key: &K) -> Option<V> {
 }
 ```
 
-[four `u64` keys looked up together, from bbtree's trace of the batch: `batch-lanes.svg`. Caption: Four `u64` keys looked up together on one thread, a row each, time counted in searches, from bbtree's own run of the batch. After each search, a key prefetches the next node it reads; while that line is on its way, the other keys search.]
+[four `u64` keys looked up together, from bbtree's trace of the batch, the core as the axis and a row a task under it: `batch-lanes.svg`. Caption: Four `u64` keys looked up together on one core, each key's search a task, from bbtree's own run of the batch; time is counted in turns. In its turn, a task reads the line it prefetched, steps down the tree, prefetches the next line and yields; while that line is on its way, the core runs the other tasks.]
 
 But we need to be very careful:
 1. A cache miss costs 100 ns, so our `Future` must be as lightweight as possible. This means we can't use `tokio` or any general-purpose async runtime, because their overhead is already higher than a cache miss. `bbtree` polls its lanes with a tiny executor of its own: no allocation, no runtime.
@@ -372,8 +373,8 @@ The usual solution is epoch-based memory reclamation[^ebr], e.g., `crossbeam-epo
 
 But then we either leak the epoch to the user, which is ugly and error-prone, or pin an epoch on every access (many libraries do this), which is expensive: every access is a global read and a private write.
 
-In `bbtree`, we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved.
-Freeing a node and reusing it each change its version, and a version only grows. So a late reader still reads a node, not arbitrary memory, finds a higher version than it saw, and retries, without any segfault.
+In `bbtree`, we do it differently: a freed node never goes back to the allocator while the map lives. Instead, the map keeps it on a free list and reuses it for the next node it needs.
+The node keeps its version through both steps: freeing it bumps the version, reusing it bumps the version again, and a version only grows. So a late reader still reads a node, not arbitrary memory, finds a higher version than it saw, and retries, without any segfault.
 
 #### Results
 
@@ -416,6 +417,8 @@ Conventional approaches still apply here:
 TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here.
 
 [^ostp]: Not more complicated than an operating system! Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, [Operating Systems: Three Easy Pieces](https://pages.cs.wisc.edu/~remzi/OSTEP/) (2016).
+
+[^free-space]: Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, [Free-Space Management](https://pages.cs.wisc.edu/~remzi/OSTEP/vm-freespace.pdf), chapter 17 of *Operating Systems: Three Easy Pieces*: external fragmentation is free space chopped into pieces of different sizes, so that a request can fail although the total would fit it.
 
 [^gray]: Jim Gray and Andreas Reuter, *Transaction Processing: Concepts and Techniques* (1993), as quoted by Goetz Graefe in [Modern B-Tree Techniques](https://doi.org/10.1561/1900000028) (2011).
 
@@ -481,7 +484,7 @@ author's.
 - **Where it lives.** The post is `vis/src/post.rs` at `/post/`. Its cards
   (`performance_cards.rs`) and charts (`single_thread_chart.rs`,
   `concurrent_chart.rs`, `end_to_end_chart.rs`, `memory_chart.rs`,
-  `architectures_chart.rs`; the grouped bars in `baseline_bars.rs`)
+  `architectures_chart.rs`, whose grouped bars are `baseline_bars.rs`)
   compile in the CSVs of `vis/data/<machine>/` (`measurements.rs`). The
   runs live in [bbtree-eval](https://github.com/XiangpengHao/bbtree-eval):
   its `blog/runs.sh` runs every chart's cells on a machine into its
@@ -507,7 +510,9 @@ author's.
   instructions, branch misses and lines from memory only. Per get, std
   against bbtree: lines from memory 10.1 / 13.9 / 45.2 / 45.1 against
   4.0 / 4.7 / 6.9 / 13.8; instructions 409 / 1,219 / 1,465 / 1,468
-  against 312 / 322 / 411 / 690; branch misses 8.7 / 7.5 / 8.5 / 9.5
+  against 312 / 322 / 411 / 690, each row's end saying how many fewer
+  bbtree takes as a share of std's, from the values as shown ("23.7%
+  fewer"; "1.3× fewer" read wrong, the author, 2026-10-22); branch misses 8.7 / 7.5 / 8.5 / 9.5
   against 0.5 / 0.5 / 1.0 / 4.4 (not in the post).
 - **Time to the first answer (2026-10-21).** bbtree-mmap's `first_query`
   example (`cargo run --release -p bbtree-mmap --example first_query`,
@@ -567,8 +572,11 @@ author's.
     crossbeam's SkipMap. bbtree's batch API is a hollow bar under
     bbtree's own, "batched" said once in the legend. std's `HashMap` is a
     reference for an operation that needn't be ordered: last, below a
-    dashed rule, a pale dashed bar, "unordered, no scans"; under Scan its
-    row says it can't.
+    dashed rule, a pale dashed bar, "unordered"; under Scan its row says
+    it can't. The note says it stands in for DashMap, the other cards'
+    hash map: DashMap is std's hash table (hashbrown's) split into
+    shards, each behind a lock; readers mixed the two up (the author,
+    2026-10-22). The Concurrent card's note says the same from its side.
   - Concurrent: a line a map, a point at each thread count measured,
     thread counts to scale from zero (a map whose throughput grows with
     its threads draws a straight line from the corner), names at the
@@ -610,15 +618,14 @@ author's.
     above on string keys, about 2 MiB a worker that only THP adds (off,
     the gap is gone; not the stacks), which std's one-thread build
     doesn't pay.
-  - End to End: one bar chart (`baseline_bars.rs`, `BarScale::Relative`), a group a system (the
-    note names the maps they ship), a cluster a workload, one bar each:
-    the time as shipped, dark, as 100%, and inside it bbtree's, bright,
-    as a share of it, so that no system's times compare with another's;
-    the speedup over each bar. Bars close together, a narrow step each,
-    long workload names on two lines; groups split into rows only where
-    one row can't hold them (on a phone, a system a row). The note names the cells that went
-    against bbtree.
-  - Architectures (no title, no machines table, by the author): the same chart drawn in nanoseconds (`BarScale::Nanos`),
+  - End to End: drawn as `end-to-end.svg` in "Case 1" is (the author's
+    call, 2026-10-22): a row a workload, grouped by system under its
+    name and the map it ships; the time as shipped a dark bar at 100%,
+    bbtree's a bright one inside it, as a share of it, so that no
+    system's times compare with another's; the speedup at the row's
+    end. On a phone the same rows, the bars narrower. The note names the
+    cells that went against bbtree.
+  - Architectures (no title, no machines table, by the author): grouped bars (`baseline_bars.rs`),
     two bars a machine, std's BTreeMap and bbtree side by side on one
     axis, each labelled with its time: UUID gets (the author's pick of
     workload), each machine captioned with its instruction set. Each

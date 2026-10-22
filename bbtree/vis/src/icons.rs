@@ -20,6 +20,10 @@ pub(crate) enum Icon {
     Search,
     /// Opens a menu.
     Disclose,
+    /// Shows a figure at its own size.
+    Enlarge,
+    /// Closes what is open over the page.
+    Close,
     /// Switches the post to its light theme, and to its dark one.
     Sun,
     Moon,
@@ -43,6 +47,8 @@ impl Icon {
             Icon::StepForward => "M4.5 3.5L10 8l-5.5 4.5M12 3.5v9",
             Icon::Search => "M7 12A5 5 0 1 0 7 2a5 5 0 0 0 0 10zM10.6 10.6L14 14",
             Icon::Disclose => "M4.5 6.5L8 10l3.5-3.5",
+            Icon::Enlarge => "M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5L9.5 6.5M2.5 13.5l4-4",
+            Icon::Close => "M4 4l8 8M12 4l-8 8",
             Icon::Sun => {
                 "M8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06"
             }

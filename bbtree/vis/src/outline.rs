@@ -3,10 +3,12 @@
 //! section the reader is in. The headings and the outline read one list
 //! (`PostHeading::ALL`), so they never disagree: the parts, each with its
 //! sections, which the part shows as tabs (`part_tabs.rs`), and the
-//! headings within them. On a narrow screen, the outline is a list of
-//! contents above the sections instead.
+//! headings within them. On a narrow screen, the outline opens from a bar
+//! held at the top, which names the reader's section.
 
 use dioxus::prelude::*;
+
+use crate::icons::{Icon, IconGlyph};
 
 /// A heading of the post's sections, in the order they come.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -231,16 +233,16 @@ pub(crate) fn SectionHeading(heading: PostHeading) -> Element {
     }
 }
 
-/// The outline beside the text on a wide screen, and the list of contents
-/// above the sections on a narrow one: every part and section, and the
-/// headings within the section the reader is in.
+/// The outline beside the text on a wide screen, and on a narrow one a bar
+/// over the sections that opens it.
 #[component]
 pub(crate) fn PostOutline() -> Element {
     let mut current = use_signal(|| None::<PostHeading>);
     use_hook(move || {
         spawn(async move {
             // The heading last scrolled past a third of the way down the
-            // screen, told when it changes.
+            // screen, told when it changes; a closed tab's headings are
+            // in the page but not on it.
             let mut heard = document::eval(
                 r#"
                 let told = null, asked = false;
@@ -249,6 +251,7 @@ pub(crate) fn PostOutline() -> Element {
                     const line = innerHeight / 3;
                     let here = null;
                     for (const heading of document.querySelectorAll('[data-heading]')) {
+                        if (heading.closest('[hidden]')) continue;
                         if (heading.getBoundingClientRect().top <= line) here = heading.dataset.heading;
                         else break;
                     }
@@ -271,36 +274,73 @@ pub(crate) fn PostOutline() -> Element {
             }
         });
     });
+    let mut sheet_open = use_signal(|| false);
     let section = current().map(PostHeading::section);
-    let entries = PostHeading::ALL
-        .into_iter()
-        .filter(|heading| heading.level() <= 3 || Some(heading.section()) == section);
     rsx! {
         aside { class: "post-outline",
             nav { class: "post-outline-nav", "aria-label": "On this page",
                 p { class: "post-outline-title", "On this page" }
-                ol {
-                    for heading in entries {
-                        li { key: "{heading.id()}", class: "outline-level-{heading.level()}",
-                            a {
-                                href: "#{heading.id()}",
-                                "aria-current": if current() == Some(heading) { "location" } else { "false" },
-                                if let Some(number) = heading.principle() {
-                                    span { class: "outline-number", "{number}" }
-                                }
-                                {heading.title()}
-                            }
-                        }
+                OutlineList { current: current() }
+            }
+        }
+        // On a narrow screen, a bar held at the top as the sections pass,
+        // naming the reader's section; a tap opens the outline under it,
+        // and a pick, a tap outside it or Escape closes it.
+        div {
+            class: "post-contents",
+            onkeydown: move |evt| {
+                if evt.key() == Key::Escape {
+                    sheet_open.set(false);
+                }
+            },
+            button {
+                class: "post-contents-bar",
+                r#type: "button",
+                "aria-expanded": sheet_open(),
+                "aria-controls": "post-contents-sheet",
+                onclick: move |_| sheet_open.set(!sheet_open()),
+                span { class: "post-contents-current",
+                    if let Some(number) = section.and_then(PostHeading::principle) {
+                        span { class: "outline-number", "{number}" }
                     }
+                    {section.map_or("Contents", PostHeading::title)}
+                }
+                IconGlyph { icon: Icon::Disclose }
+            }
+            if sheet_open() {
+                div { class: "post-contents-scrim", onclick: move |_| sheet_open.set(false) }
+                nav {
+                    id: "post-contents-sheet",
+                    class: "post-contents-sheet",
+                    "aria-label": "On this page",
+                    // A pick follows its link, then closes the sheet.
+                    onclick: move |_| sheet_open.set(false),
+                    OutlineList { current: current() }
                 }
             }
         }
-        details { class: "post-contents",
-            summary { "Contents" }
-            ol {
-                for heading in PostHeading::ALL.into_iter().filter(|heading| heading.level() <= 3) {
-                    li { key: "{heading.id()}", class: "outline-level-{heading.level()}",
-                        a { href: "#{heading.id()}", {heading.title()} }
+    }
+}
+
+/// Every part and section, and the headings within the section the reader
+/// is in, `current` lit.
+#[component]
+fn OutlineList(current: Option<PostHeading>) -> Element {
+    let section = current.map(PostHeading::section);
+    let entries = PostHeading::ALL
+        .into_iter()
+        .filter(|heading| heading.level() <= 3 || Some(heading.section()) == section);
+    rsx! {
+        ol {
+            for heading in entries {
+                li { key: "{heading.id()}", class: "outline-level-{heading.level()}",
+                    a {
+                        href: "#{heading.id()}",
+                        "aria-current": if current == Some(heading) { "location" } else { "false" },
+                        if let Some(number) = heading.principle() {
+                            span { class: "outline-number", "{number}" }
+                        }
+                        {heading.title()}
                     }
                 }
             }

@@ -37,9 +37,9 @@ pub(crate) fn Post() -> Element {
     let theme = PostTheme::use_new();
     use_hook(|| {
         // The heading the address names in view, as the page loads and as
-        // the address changes: once drawn, as the tab that holds it may
-        // open first (`part_tabs.rs`). The browser can't, as the page
-        // draws after it loads.
+        // the address changes: once drawn and shown, as the tab that holds
+        // it may open first (`part_tabs.rs`). The browser can't, as the
+        // page draws after it loads.
         document::eval(
             r#"
             const follow = () => {
@@ -48,7 +48,7 @@ pub(crate) fn Post() -> Element {
                 let frames = 10;
                 const bring = () => {
                     const target = document.getElementById(id);
-                    if (target) target.scrollIntoView();
+                    if (target && !target.closest('[hidden]')) target.scrollIntoView();
                     else if (frames-- > 0) requestAnimationFrame(bring);
                 };
                 requestAnimationFrame(bring);
@@ -100,14 +100,14 @@ pub(crate) fn Post() -> Element {
                         code { "crossbeam-skiplist" }
                         " at 96 threads."
                     }
-                    li { "30% lower memory usage, 5× lower p99 latency." }
+                    li { "30% lower memory usage." }
                     li {
                         "Zero dependencies, "
                         code { "no_std" }
                         " compatible."
                     }
                     li {
-                        code { "unsync::BBTreeMap" }
+                        code { "bbtree::unsync::BBTreeMap" }
                         " is a drop-in replacement for std's "
                         code { "BTreeMap" }
                         "/"

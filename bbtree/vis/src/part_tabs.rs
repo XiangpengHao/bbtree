@@ -3,12 +3,14 @@
 //! section's title at once and reads the one they want. The first section
 //! is open until the reader picks another or the address names a heading
 //! in another; a pick names its section in the address, so that a link to
-//! the page keeps it. An open section ends with a link to the next.
+//! the page keeps it. An open section ends with a link to the next. The
+//! closed sections stay in the page, hidden until found: a find in the page
+//! searches them, and opens the one it lands in.
 
 use dioxus::prelude::*;
 
 use crate::outline::PostHeading;
-use crate::tab_list::{Tab, TabList};
+use crate::tab_list::{Tab, TabList, TabPanel};
 
 /// Which of a part's sections is open: owned by the part.
 #[derive(Clone, Copy, PartialEq)]
@@ -115,20 +117,18 @@ pub(crate) fn PartTabList(tabs: PartTabs) -> Element {
     }
 }
 
-/// A section's panel, drawn while the section is open: the outline lights
-/// the section from its top, and it ends with a link to the part's next
-/// section.
+/// A section's panel, hidden until found while another section is open:
+/// the outline lights the section from its top, and it ends with a link to
+/// the part's next section.
 #[component]
 pub(crate) fn SectionPanel(tabs: PartTabs, section: PostHeading, children: Element) -> Element {
-    if !tabs.is_open(section) {
-        return rsx! {};
-    }
     rsx! {
-        div {
+        TabPanel {
             id: PartTabs::panel_id(section),
+            tab_id: section.id().to_string(),
             class: "section-panel",
-            role: "tabpanel",
-            "aria-labelledby": section.id(),
+            shown: tabs.is_open(section),
+            onreveal: move |_| tabs.open_section_of(section),
             "data-heading": section.id(),
             {children}
             if let Some(next) = tabs.after(section) {

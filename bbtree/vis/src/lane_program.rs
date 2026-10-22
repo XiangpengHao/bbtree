@@ -1,8 +1,9 @@
 //! A key's search, as `find` in bbtree's `tree/batch.rs` reads, in a few
 //! lines: each `.await` follows a prefetch of the line the search reads
-//! next, and lets the other keys search while it comes. Every key sits in
-//! the gutter of the line it stopped at; the search running lights the
-//! lines it ran. Below the board, what the search did, in a sentence.
+//! next, and lets the other keys take their turns while it comes. Every
+//! key sits in the gutter of the line it stopped at; the key on the core
+//! lights the lines its turn ran. Below the board, what that turn did, in a
+//! sentence.
 
 use bbtree::inspect::LaneFetch;
 use dioxus::prelude::*;
@@ -185,7 +186,8 @@ enum Token {
     Compute,
     /// A request for the line read next, which doesn't wait for it.
     Prefetch,
-    /// Where the key lets the others search until its turn comes again.
+    /// Where the key lets the others take their turns until its own comes
+    /// again.
     Await,
 }
 
@@ -397,8 +399,8 @@ pub(crate) fn LaneProgram(
                 class: "lane-program",
                 "aria-label": "The code each key runs, with each key at the line it stopped at",
                 h2 { class: "batch-heading",
-        "All searches run in a "
-        strong { "single thread" }
+        "Every key runs this, in turns on a "
+        strong { "single core" }
     }
                 ol { class: "program",
                     for line in ProgramLine::ALL {
@@ -468,15 +470,14 @@ pub(crate) fn LaneProgram(
                     }
                     span { class: "legend-item",
                         span { class: "legend-swatch-text tok-await", ".await" }
-                        "the other keys search until this key's turn"
+                        "the other keys take their turns until this key's next"
                     }
                 }
             }
         }
 }
 
-/// The search the batch is at, in a sentence, across the board above the
-/// searches' rows.
+/// The turn the batch is at, in a sentence, under the code.
 #[component]
 pub(crate) fn PollCaption(
     tree: LoadedTree,

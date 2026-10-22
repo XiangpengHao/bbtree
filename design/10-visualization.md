@@ -96,8 +96,8 @@ From the original note:
   them. The post is prose with figures, each one idea and nothing
   else (2026-10-17): a mechanism (the count, version checks, a node of
   strings) drawn plain, from fixed example keys and numbers, which claim
-  no tree's state; what bbtree does (a leaf's bytes, a batch's searches
-  and prefetches) drawn from a real tree's views. The figures are SVG
+  no tree's state; what bbtree does (a leaf's bytes, a batch's turns on
+  the core) drawn from a real tree's views. The figures are SVG
   files (2026-10-18), so that the post can be published elsewhere too
   (the author's Quarto blog) from the same files: see "The post".
   Rejected: interactive figures (sliders, replay and step, links into
@@ -344,40 +344,47 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   that holds its keys (`bk=…`, four times): four keys, picked at random,
   for URLs the last one a key the map lacks, or typed: each key is a field
   the reader edits, and Enter looks it up in the batch, or says why the
-  text names no key. It shows search and prefetch, in the words of the
-  lookup, not of the executor: each key searches a node and prefetches the
-  line it reads next, and the others search while that line comes; all on
-  one thread. It plays a search at a time, the first round slowly; Space
-  pauses, `,` and `.` step, a click on the rows jumps there, `R` or the
-  keys' button picks new keys. Paused or stepped, every view shows the
-  moment just after a search. One grid, the keys and the tree left, the
-  code right:
-  - the keys (`batch_timeline.rs`), each beside a row of its searches,
-    blocks, and its prefetches, drawn from each search to the key's next:
-    across the rows the prefetches stack up, the lines fetched together;
+  text names no key. It shows the batch as the core runs it, in the
+  executor's model (the author's call, 2026-10-22): one core, the keys
+  taking turns on it in the executor's order; in its turn a key comes in,
+  reads the line it prefetched, steps down, prefetches the next line and
+  goes out, and the next key comes in. It plays a turn at a time, the
+  first round slowly; Space pauses, `,` and `.` step, a click on the rows
+  jumps there, `R` or the keys' button picks new keys. Paused or stepped,
+  every view shows the moment just after a turn. One grid, the keys and
+  the tree left, the code right:
+  - the core and the keys (`batch_timeline.rs`): the core is the axis, a
+    turn a numbered block on it, back to back; under it a row a key, its
+    chip lit while it is on the core and dashed once looked up. A turn's
+    connectors run up from its key's row into the core and back down,
+    faint but while it runs; from each turn to the key's next, its line is
+    on its way in its row: across the rows the lines stack up, fetched
+    together;
   - the nodes the batch reads (`batch_tree.rs`), level by level, spread
     over the panel's height, each as its page, a strip of 64-byte lines
     tinted as the page map tints its slots; each key a numbered token on
-    the node it searches or prefetches from, searching, prefetching or
-    done. A prefetched line outlines and fills until the key's next search
-    reads it; an edge draws from the parent's line that holds it to the
+    the node it searches or prefetches from: on the core, its line on its
+    way, or done. A prefetched line outlines and fills until the key's next
+    turn reads it; an edge draws from the parent's line that holds it to the
     child's header;
   - the code (`lane_program.rs`), `find` as a dozen lines of highlighted
-    pseudo-Rust under "All searches run in a single thread": searches,
+    pseudo-Rust under "Every key runs this, in turns on a single core":
+    searches,
     which work on lines at hand, in the keys' blue; prefetches, which ask
     for the line read next without waiting, in the highlighter's ink; each
-    `.await`, where the other keys search until this key's turn, marked;
-    and a comment on every line, aligned. Each key sits in the gutter of
-    the line it stopped at; the search running lights the lines it ran;
+    `.await`, where the other keys take their turns until this key's next,
+    marked; and a comment on every line, aligned. Each key sits in the
+    gutter of the line it stopped at; the key on the core lights the lines
+    its turn ran;
     lines no key of the batch runs are dim. A test walks every lane of
     real batches through it, so it can't drift from `find`. Below it, the
-    search running, in a sentence.
+    turn running, in a sentence.
   The trace says nothing of when a line arrives, so the view claims no
-  stall or speed: a prefetch is only drawn as pending until its key's next
-  search. Clicking a key's number looks it up alone, in the one-key view.
+  stall or speed: a line is only drawn as on its way until its key's next
+  turn. Clicking a key's number looks it up alone, in the one-key view.
   One number drives the motion: a loop writes the playback's time, in
-  searches, to the board as `--t`, and CSS `calc()` on it fills the lines
-  and draws the rows, so the panels redraw only when another search starts.
+  turns, to the board as `--t`, and CSS `calc()` on it fills the lines and
+  draws the rows, so the panels redraw only when another turn starts.
 - **The tree's shape** (`tree_shape.rs`): one top-down read of every node
   per build gives each level's nodes in key order, with parents, children,
   key counts and prefixes. That is enough to name nodes, find neighbors and
@@ -448,11 +455,18 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   sections flow as plain blocks so that a note's float leaves its
   paragraph), and an outline of its headings in the left margin, held in
   view, lighting the section the reader is in (`outline.rs`, which the
-  headings themselves read, so the two never disagree). Narrower, the
-  citations go to a list of notes at the end, then the outline becomes a
-  list of contents. A looping figure has a pause, which, like the theme,
-  reaches its image through its address (`figure.svg#dark-still`): an
-  image hears nothing else from the page.
+  headings themselves read, so the two never disagree). Narrower (the
+  author's picks, 2026-10-22): a tap on a citation's mark unfolds its
+  note under the line and another folds it (the list of notes at the end
+  stays), the mark's tap area 44 px on a touch screen; the outline opens
+  from a bar held at the top as the sections pass, naming the reader's
+  section, as a sheet that a pick, a tap outside or Escape closes; and a
+  figure too narrow to read (a phone) shows whole, shrunk, with an
+  Enlarge button beside its pause, which, as a tap on the image, shows
+  it at its own size over the page to pan, zoom or read with the phone
+  turned (`post_figure.rs`). A looping figure has a pause, which, like
+  the theme, reaches its image through its address
+  (`figure.svg#dark-still`): an image hears nothing else from the page.
 - **Ids are unique to the component that draws them** (`element_ids.rs`):
   the batch's board, the inspector's tabs, the slot table's box. The
   page's one hint is split from each view's spotlight (`PointerHint`).
@@ -474,12 +488,14 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
 - **Charts beside the figures** (`performance_cards.rs`): five cards the
   reader picks, nothing turning by itself: single thread, concurrent, end
   to end, memory and architectures, each a chart of its own
-  (`*_chart.rs`, the grouped bars of the last three in
-  `baseline_bars.rs`). The wide charts are drawn at their card's width, a
-  unit a pixel (`FrameWidth`), and lay themselves out for it. bbtree's
-  maps wear the site's highlighter, every other map a dark slate. Bars
-  grow at one speed and lines draw left to right, once the cards are in
-  view. Their data is compiled in from `bbtree/vis/data/<machine>/`
+  (`*_chart.rs`, the architectures card's grouped bars in
+  `baseline_bars.rs`). The closed cards stay in the page, hidden until
+  found, as the closed sections of a part do (`TabPanel`): the browser's
+  find searches them and opens the one it lands in. The wide charts are
+  drawn at their card's width, a unit a pixel (`FrameWidth`), and lay
+  themselves out for it. bbtree's maps wear the site's highlighter, every
+  other map a dark slate. Bars grow at one speed and lines draw left to
+  right, once the cards are in view, and again as a card is shown. Their data is compiled in from `bbtree/vis/data/<machine>/`
   (`measurements.rs`); doc 14 says what each shows and how it is made.
 
 ## Not done

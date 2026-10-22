@@ -6,6 +6,7 @@
 use std::fmt::{Display, Write};
 use std::fs;
 use std::io;
+use std::ops::Range;
 use std::path::Path;
 
 /// One element and what it holds.
@@ -136,14 +137,16 @@ impl Svg {
         --link: #2266c8; --marker: #ffe24a; --marker-strong: #a67c00; --marker-soft: #fff4b8; \
         --marker-ink: #7a5a00; --compare: #f7a47f; --compare-soft: #fde3d6; \
         --slot-filled: #7f8999; --slot-smaller: #4c5462; --slot-larger: #bcc3cd; \
-        --theirs-1: #353b47; --theirs-2: #59616e; --theirs-3: #6e7682; --theirs-4: #878e99;";
+        --theirs-1: #353b47; --theirs-2: #59616e; --theirs-3: #6e7682; --theirs-4: #878e99; \
+        --shipped: #353b47;";
     const DARK: &'static str = "--paper: #1b1e24; --panel: #131519; --ink: #e6e8ec; \
         --graphite: #b4bac3; --muted: #9aa1ab; --rule: #2a2e35; --rule-strong: #3d434c; \
         --well: #23262c; --ok: #4cc38a; --error: #ff8a80; --error-soft: #3b1f1d; \
         --link: #8cb4ff; --marker: #ffe24a; --marker-strong: #e0b628; --marker-soft: #4a3f14; \
         --marker-ink: #f3d55b; --compare: #f7a47f; --compare-soft: #4a2a1e; \
         --slot-filled: #6b7482; --slot-smaller: #c9cfd8; --slot-larger: #3d434c; \
-        --theirs-1: #d3d7de; --theirs-2: #aeb4be; --theirs-3: #8e959f; --theirs-4: #717884;";
+        --theirs-1: #d3d7de; --theirs-2: #aeb4be; --theirs-3: #8e959f; --theirs-4: #717884; \
+        --shipped: #717884;";
 
     /// The ids of the groups that wrap a figure, which its address can
     /// name to ask for a theme, motion, or both (`figure.svg#dark-still`):
@@ -327,6 +330,27 @@ impl Motion {
                 (until + Self::FADE, "opacity: 0".into()),
             ],
         );
+    }
+
+    /// A mark at opacity `rest`, whole during each span of steps, which
+    /// come in order; spans that meet light it once.
+    pub(crate) fn lit_during(&mut self, name: &str, spans: &[Range<f64>], rest: f64) {
+        let mut merged: Vec<Range<f64>> = Vec::new();
+        for span in spans {
+            match merged.last_mut() {
+                Some(last) if span.start <= last.end + Self::FADE => last.end = span.end,
+                _ => merged.push(span.clone()),
+            }
+        }
+        let rest = format!("opacity: {rest}");
+        let mut frames = vec![(0.0, rest.clone())];
+        for span in merged {
+            frames.push((span.start, rest.clone()));
+            frames.push((span.start + Self::FADE, "opacity: 1".into()));
+            frames.push((span.end, "opacity: 1".into()));
+            frames.push((span.end + Self::FADE, rest.clone()));
+        }
+        self.animate(name, &frames);
     }
 
     /// A mark that is there until step `at`, then fades.

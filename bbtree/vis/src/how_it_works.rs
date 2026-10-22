@@ -1,19 +1,15 @@
 //! The post's "How it works" (design/14-blogpost.md): the cost model's
 //! three principles, in order, then the principles as tabs: minimize cache
-//! misses, then instructions, then cache coherence traffic. Its figures are SVG files (`vis/figures/` writes them into
-//! `assets/figures/`), each embedded as an image, so that the same files
-//! can go into any other page; each plays its own CSS animation, which
-//! starts as its image loads near the reader. The footnotes the post cites
-//! close it.
+//! misses, then instructions, then cache coherence traffic, with their
+//! figures (`post_figure.rs`). The footnotes the post cites close it.
 
 use dioxus::prelude::*;
 
-use crate::icons::{Icon, IconGlyph};
 use crate::outline::{PostHeading, SectionHeading};
 use crate::part_tabs::{PartTabList, PartTabs, SectionPanel};
 use crate::post::Bbtree;
+use crate::post_figure::SvgFigure;
 use crate::rust_code::RustCode;
-use crate::theme::PostTheme;
 
 const SEARCH_SPACE: Asset = asset!("/assets/figures/search-space.svg");
 const STRING_KEYS: Asset = asset!("/assets/figures/string-keys.svg");
@@ -220,7 +216,7 @@ fn MinimizeCacheMisses() -> Element {
             NoteRef { note: Note::PrefixBTree }
             ". The beauty of "
             code { "prefix_keys" }
-            " is that they are implicit: every key in a node lies between the two separators around it in its parents, so every key starts with whatever those two separators share."
+            " is that no node has to store them. Every key in a node sorts between the two separators on either side of the node in its parent. So if those two separators share their first 20 bytes, every key in the node starts with the same 20 bytes."
         }
         SvgFigure {
             src: PREFIX_KEYS,
@@ -362,7 +358,7 @@ fn MinimizeCacheMisses() -> Element {
             NoteRef { note: Note::Interleaving }
             "."
         }
-        p { "The code looks roughly like this:" }
+        p { "The code looks roughly like this (they run in a single thread):" }
         RustCode { code: GET_MANY }
         p {
             "And "
@@ -373,11 +369,11 @@ fn MinimizeCacheMisses() -> Element {
         SvgFigure {
             src: BATCH_LANES,
             loops: true,
-            alt: "Four u64 keys looked up together on one thread, a row each: while one key's line is on its way, the other keys search.",
+            alt: "Four u64 keys looked up together, a task each, on one core: the tasks take turns on the core, and while a task's line is on its way, the core runs the others.",
             caption: rsx! {
                 "Four "
                 code { "u64" }
-                " keys looked up together on one thread, a row each, time counted in searches, from bbtree's own run of the batch. After each search, a key prefetches the next node it reads; while that line is on its way, the other keys search."
+                " keys looked up together on one core, each key's search a task, from bbtree's own run of the batch; time is counted in turns. In its turn, a task reads the line it prefetched, steps down the tree, prefetches the next line and yields; while that line is on its way, the core runs the other tasks."
             },
         }
         p { "But we need to be very careful:" }
@@ -589,7 +585,7 @@ fn MinimizeCoherenceTraffic() -> Element {
         p {
             "In "
             Bbtree {}
-            ", we do it differently: a freed node never goes back to the allocator while the map lives. It goes on a free list with its version preserved, and the next node allocated comes from the free list, version preserved. Freeing a node and reusing it each change its version, and a version only grows. So a late reader still reads a node, not arbitrary memory, finds a higher version than it saw, and retries, without any segfault."
+            ", we do it differently: a freed node never goes back to the allocator while the map lives. Instead, the map keeps it on a free list and reuses it for the next node it needs. The node keeps its version through both steps: freeing it bumps the version, reusing it bumps the version again, and a version only grows. So a late reader still reads a node, not arbitrary memory, finds a higher version than it saw, and retries, without any segfault."
         }
         SectionHeading { heading: PostHeading::CoherenceResults }
         SvgFigure {
@@ -619,60 +615,11 @@ fn MinimizeCoherenceTraffic() -> Element {
     }
 }
 
-/// A figure: an SVG file, played by its own CSS as its image loads, which
-/// it does as the reader nears it, in the post's theme, and its caption.
-#[component]
-pub(crate) fn SvgFigure(
-    src: Asset,
-    alt: &'static str,
-    caption: Element,
-    /// Whether the figure plays in a loop, which the reader can pause.
-    #[props(default)]
-    loops: bool,
-) -> Element {
-    // The figure's palette is the page's, and it rests when the reader
-    // pauses it: an image can't see the page's CSS or hear its buttons, so
-    // its address says both.
-    let theme = PostTheme::of_context();
-    let mut still = use_signal(|| false);
-    let fragment = theme.figure_fragment(still());
-    let (label, icon) = if still() {
-        ("Play", Icon::Play)
-    } else {
-        ("Pause", Icon::Pause)
-    };
-    rsx! {
-        figure { class: "figure",
-            div { class: "figure-view",
-                img {
-                    class: "figure-svg",
-                    src: "{src}{fragment}",
-                    alt,
-                    loading: "lazy",
-                    decoding: "async",
-                }
-            }
-            figcaption { class: "figure-caption",
-                div { class: "figure-text", {caption} }
-                if loops {
-                    button {
-                        class: "figure-motion",
-                        r#type: "button",
-                        "aria-label": "{label} the figure's animation",
-                        onclick: move |_| still.set(!still()),
-                        IconGlyph { icon }
-                        {label}
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// A work the post cites, in the order it first cites them.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Note {
     Gray,
+    FreeSpace,
     ClickBench,
     Ostp,
     CacheConscious,
@@ -699,8 +646,9 @@ pub(crate) enum Note {
 }
 
 impl Note {
-    const ALL: [Self; 24] = [
+    const ALL: [Self; 25] = [
         Self::Gray,
+        Self::FreeSpace,
         Self::ClickBench,
         Self::Ostp,
         Self::CacheConscious,
@@ -743,6 +691,16 @@ impl Note {
                 " (1993), as quoted by Goetz Graefe in "
                 NoteLink { href: "https://doi.org/10.1561/1900000028", title: "Modern B-Tree Techniques" }
                 " (2011)."
+            },
+            Self::FreeSpace => rsx! {
+                "Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, "
+                NoteLink {
+                    href: "https://pages.cs.wisc.edu/~remzi/OSTEP/vm-freespace.pdf",
+                    title: "Free-Space Management",
+                }
+                ", chapter 17 of "
+                em { "Operating Systems: Three Easy Pieces" }
+                ": external fragmentation is free space chopped into pieces of different sizes, so that a request can fail although the total would fit it."
             },
             Self::ClickBench => rsx! {
                 NoteLink { href: "https://github.com/ClickHouse/ClickBench", title: "ClickBench" }
@@ -906,20 +864,33 @@ pub(crate) fn NoteRef(note: Note) -> Element {
 
 /// The marks of works cited together, apart by commas, and each work's
 /// note beside the line, in the margin (`.sidenote`), where the screen is
-/// wide enough; elsewhere the marks link to the notes at the end.
+/// wide enough; elsewhere a tap on a mark unfolds its note under the line,
+/// and another folds it.
 #[component]
 fn NoteRefs(notes: Vec<Note>) -> Element {
+    let mut unfolded = use_signal(|| None::<Note>);
     rsx! {
         sup { class: "note-ref",
-            for (index , note) in notes.iter().enumerate() {
+            for (index , note) in notes.iter().copied().enumerate() {
                 if index > 0 {
                     ","
                 }
-                a { href: "#{note.id()}", "aria-label": "Note {note.number()}", "{note.number()}" }
+                a {
+                    href: "#{note.id()}",
+                    "aria-label": "Note {note.number()}",
+                    "aria-expanded": unfolded() == Some(note),
+                    onclick: move |evt| {
+                        evt.prevent_default();
+                        unfolded.set(if unfolded() == Some(note) { None } else { Some(note) });
+                    },
+                    "{note.number()}"
+                }
             }
         }
         for note in notes {
-            span { class: "sidenote", role: "note",
+            span {
+                class: if unfolded() == Some(note) { "sidenote unfolded" } else { "sidenote" },
+                role: "note",
                 span { class: "sidenote-number", "{note.number()}" }
                 {note.text()}
             }

@@ -5,9 +5,9 @@
 //! the line the lane fetched before it yielded. Plain data for the panels,
 //! read from bbtree, never recomputed.
 //!
-//! The panels count time in searches: each poll of a lane is a search,
-//! from one prefetch to the next, in the order the batch runs them on its
-//! one thread. A prefetched line is pending from its search to its key's
+//! The panels count time in turns: each poll of a lane is a turn on the
+//! core, from one prefetch to the next, in the order the batch runs them on
+//! its one core. A prefetched line is on its way from its turn to its key's
 //! next, which reads it; the trace says nothing of when the line arrives.
 
 use bbtree::inspect::{LaneFetch, TraceOutcome};
@@ -91,7 +91,7 @@ impl LanePoll {
 }
 
 impl BatchRun {
-    /// When, in its search, a key's prefetch goes out: at its end.
+    /// When, in its turn, a key's prefetch goes out: at its end.
     pub(crate) const FETCH_AT: f64 = 0.9;
 
     pub(crate) fn new(lanes: Vec<Trace>, polls: Vec<LanePoll>, batches: bool) -> Self {
@@ -111,12 +111,12 @@ impl BatchRun {
         }
     }
 
-    /// Where poll `index` starts on the time axis: one search a unit.
+    /// Where poll `index` starts on the time axis: one turn a unit.
     pub(crate) fn start(&self, index: usize) -> f64 {
         index as f64
     }
 
-    /// Where the last search ends.
+    /// Where the last turn ends.
     pub(crate) fn duration(&self) -> f64 {
         self.polls.len() as f64
     }

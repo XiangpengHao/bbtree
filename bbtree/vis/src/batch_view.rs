@@ -1,22 +1,22 @@
-//! The batch view: four keys looked up together, played out search by
-//! search, from bbtree's own run of `get_many` (`batch_run.rs`). On the
-//! left the keys, editable, each beside its searches and prefetches in the
-//! order they run (`batch_timeline.rs`), and the nodes they read, with each
-//! key where it is (`batch_tree.rs`); on the right the code every key runs,
-//! with each key at the line it stopped at, and the search running in a
-//! sentence (`lane_program.rs`).
+//! The batch view: four keys looked up together on one core, played out
+//! turn by turn, from bbtree's own run of `get_many` (`batch_run.rs`). On
+//! the left the core, with each key's turns on it, and the keys under it,
+//! editable, each with its lines on their way (`batch_timeline.rs`); and
+//! the nodes they read, with each key where it is (`batch_tree.rs`); on the
+//! right the code every key runs, with each key at the line it stopped at,
+//! and the turn running in a sentence (`lane_program.rs`).
 //!
-//! The moment is one number, the time on the batch's axis, in searches,
-//! which a loop in the browser (`timeline.rs`) advances each frame and writes to the board
-//! as `--t`: prefetched lines fill and the rows draw themselves in CSS,
-//! without a redraw. The panels redraw only when another search starts.
-//! Paused or stepped, the moment is just after a search, which every view
-//! shows as run.
+//! The moment is one number, the time on the batch's axis, in turns, which
+//! a loop in the browser (`timeline.rs`) advances each frame and writes to
+//! the board as `--t`: prefetched lines fill and the rows draw themselves
+//! in CSS, without a redraw. The panels redraw only when another turn
+//! starts. Paused or stepped, the moment is just after a turn, which every
+//! view shows as run.
 
 use dioxus::prelude::*;
 
 use crate::batch_run::{BatchKeys, BatchRun};
-use crate::batch_timeline::KeyRows;
+use crate::batch_timeline::CoreTurns;
 use crate::batch_tree::BatchTree;
 use crate::concepts::{Concept, Term};
 use crate::element_ids::ElementIds;
@@ -198,7 +198,7 @@ fn BatchBoard(
     tracer: Tracer,
     spotlight: Spotlight,
 ) -> Element {
-    // The search running, or last run; and whether the batch plays.
+    // The turn running, or last run; and whether the batch plays.
     let now = use_signal(|| None::<usize>);
     let playing = use_signal(|| true);
     // The key under the pointer, lit in every view.
@@ -212,7 +212,7 @@ fn BatchBoard(
         section {
             id: batcher.board_id(),
             class: "batch-board",
-            "aria-label": "Four keys looked up together, search by search",
+            "aria-label": "Four keys looked up together, turn by turn",
             BatchHeadline {
                 run: run.clone(),
                 now,
@@ -220,10 +220,11 @@ fn BatchBoard(
                 batcher,
                 spotlight,
             }
-            KeyRows {
+            CoreTurns {
                 tree: tree.clone(),
                 run: run.clone(),
                 keys,
+                now,
                 pointed,
                 batcher,
                 tracer,
@@ -276,30 +277,30 @@ fn BatchHeadline(
                 }
                 button {
                     class: "icon-button quiet",
-                    title: "A search back (,)",
-                    "aria-label": "A search back",
+                    title: "A turn back (,)",
+                    "aria-label": "A turn back",
                     onclick: move |_| batcher.play(PlaybackCommand::Back),
                     IconGlyph { icon: Icon::StepBack }
                 }
                 button {
                     class: "icon-button quiet",
-                    title: "The next search (.)",
-                    "aria-label": "The next search",
+                    title: "The next turn (.)",
+                    "aria-label": "The next turn",
                     onclick: move |_| batcher.play(PlaybackCommand::Forward),
                     IconGlyph { icon: Icon::StepForward }
                 }
             }
             div { class: "batch-lead",
                 p { class: "batch-sentence",
-                    strong { "{lanes} keys, searched together on one thread." }
-                    " Each "
+                    strong { "{lanes} keys, looked up together on one core." }
+                    " They take turns on it: in its turn, a key "
                     Term { concept: Concept::Prefetch, spotlight, "prefetches" }
-                    " the line it needs next, and the others search while it comes."
+                    " the line it needs next and goes out, and the others run while it comes."
                 }
                 if !run.batches() {
                     p { class: "batch-note",
                         code { "get_many" }
-                        " searches the keys of a map this small one at a time; these are the searches it runs on larger maps."
+                        " looks the keys of a map this small up one at a time; these are the turns it runs on larger maps."
                     }
                 }
             }

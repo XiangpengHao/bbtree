@@ -97,7 +97,7 @@ impl EndToEnd {
         motion.appear("lands", 0.95);
         svg.style(
             ".bar { transform-box: fill-box; transform-origin: left center; } \
-             .shipped { fill: var(--theirs-1); } \
+             .shipped { fill: var(--shipped); } \
              .ours { fill: var(--marker); stroke: var(--marker-strong); stroke-width: 1.5; } \
              .swatch-label { fill: var(--graphite); }",
         );
