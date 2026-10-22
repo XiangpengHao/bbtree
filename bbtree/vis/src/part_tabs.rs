@@ -3,8 +3,10 @@
 //! section's title at once and reads the one they want. The first section
 //! is open until the reader picks another or the address names a heading
 //! in another; a pick names its section in the address, so that a link to
-//! the page keeps it. An open section ends with a link to the next. The
-//! closed sections stay in the page, hidden until found: a find in the page
+//! the page keeps it. An open section ends with a bar across the text that
+//! opens the next, so that a reader who reads on can't miss that more
+//! follows. The closed
+//! sections stay in the page, hidden until found: a find in the page
 //! searches them, and opens the one it lands in.
 
 use dioxus::prelude::*;
@@ -72,6 +74,13 @@ impl PartTabs {
         (self.open)() == section
     }
 
+    /// Where `section` is in the part, as "2 of 3".
+    fn place(self, section: PostHeading) -> String {
+        let number = self.part.sections().position(|other| other == section);
+        let count = self.part.sections().count();
+        format!("{} of {count}", number.unwrap_or(0) + 1)
+    }
+
     /// The section after `section` in the part, if any.
     fn after(self, section: PostHeading) -> Option<PostHeading> {
         self.part
@@ -118,8 +127,8 @@ pub(crate) fn PartTabList(tabs: PartTabs) -> Element {
 }
 
 /// A section's panel, hidden until found while another section is open:
-/// the outline lights the section from its top, and it ends with a link to
-/// the part's next section.
+/// the outline lights the section from its top, and it ends with a bar
+/// that opens the part's next section.
 #[component]
 pub(crate) fn SectionPanel(tabs: PartTabs, section: PostHeading, children: Element) -> Element {
     rsx! {
@@ -133,11 +142,11 @@ pub(crate) fn SectionPanel(tabs: PartTabs, section: PostHeading, children: Eleme
             {children}
             if let Some(next) = tabs.after(section) {
                 a { class: "next-section", href: "#{next.id()}",
-                    span { class: "next-section-label", "Next" }
+                    span { class: "next-section-label", "Next, {tabs.place(next)}" }
                     span { class: "next-section-title",
                         SectionTitle { section: next }
-                        span { "aria-hidden": "true", " →" }
                     }
+                    span { class: "next-section-arrow", "aria-hidden": "true", "→" }
                 }
             }
         }

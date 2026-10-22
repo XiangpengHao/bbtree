@@ -154,7 +154,7 @@ fn plain_types_of_the_callers_round_trip() {
 }
 
 /// A map within a file of other data, after it and before more of it, as
-/// a Parquet file holds an index before its footer.
+/// an index before a columnar file's footer.
 #[test]
 fn maps_embed_in_other_files() {
     let path = TestFile::new("embedded");

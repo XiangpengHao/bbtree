@@ -441,14 +441,16 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   program writes every figure of "How it works" into
   `bbtree/vis/assets/figures/`: the mechanisms from fixed keys, what bbtree does
   from trees it builds (10M random `u64`s) and reads through bbtree's
-  inspect views, the charts from `bbtree/vis/data/`. The post embeds each as an
-  image (`SvgFigure`), with its caption in HTML; any other page can take
-  the same file. A figure that plays carries its own CSS animation: steps,
+  inspect views, the charts from `bbtree/vis/data/`. The post draws each
+  into the page, in a shadow root that keeps the file's style its own
+  (`SvgFigure`), with its caption in HTML; any other page can take the
+  same file as an image. A figure that plays carries its own CSS animation: steps,
   a hold on the last frame, then again (`Motion`), its marks' own styles
   being that last frame, which is what reduced motion shows; charts play
-  once. Images load lazily, so a figure starts as the reader nears it. Its
-  text is monospace where it lines up with marks, stretched to its columns
-  (`textLength`), since an image gets no web fonts.
+  once. The post draws a figure as the reader nears it and plays it from
+  the start once they see it. Its text is monospace where it lines up
+  with marks, stretched to its columns (`textLength`), since an image
+  gets no web fonts.
 - **The post reads like the author's blog** (2026-10-18): the text in
   one column of about 72 characters a line, its citations floated beside
   their lines in the right margin (`.sidenote`, as Tufte CSS does; the
@@ -464,9 +466,11 @@ tools (`dx`, Tailwind, the wasm32 target) are in the default dev shell; see
   figure too narrow to read (a phone) shows whole, shrunk, with an
   Enlarge button beside its pause, which, as a tap on the image, shows
   it at its own size over the page to pan, zoom or read with the phone
-  turned (`post_figure.rs`). A looping figure has a pause, which, like
-  the theme, reaches its image through its address
-  (`figure.svg#dark-still`): an image hears nothing else from the page.
+  turned (`post_figure.rs`). A looping figure has a pause, which holds it
+  where it is (one that jumps to the last frame reads as a bug); the theme reaches the drawing as an
+  attribute (`data-theme`). A page that shows the file as an image picks
+  the theme or the last frame through its address
+  (`figure.svg#dark-still`), since an image hears nothing else from it.
 - **Ids are unique to the component that draws them** (`element_ids.rs`):
   the batch's board, the inspector's tabs, the slot table's box. The
   page's one hint is split from each view's spotlight (`PointerHint`).

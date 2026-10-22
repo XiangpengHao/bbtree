@@ -2,9 +2,8 @@
 //! picks one, which the browser keeps (`localStorage`) and `index.html`
 //! sets on the page before its first paint (`data-theme`). The page's
 //! colors follow from it in CSS (`light-dark()` in `main.css`); its
-//! figures, images that can't see the page's CSS, take it from their
-//! address (`#light`, `#dark`; `vis/figures/src/svg.rs`). The explorer
-//! stays light.
+//! figures, whose style is their own, take it from an attribute
+//! (`data-theme`; `post_figure.rs`). The explorer stays light.
 
 use dioxus::prelude::*;
 
@@ -104,18 +103,11 @@ impl PostTheme {
         ));
     }
 
-    /// What a figure's address ends with: the theme the reader picked, if
-    /// any, so that otherwise the figure follows the system as the page
-    /// does; and whether it rests, `still` (`vis/figures/src/svg.rs`).
-    pub(crate) fn figure_fragment(self, still: bool) -> &'static str {
-        match ((self.picked)(), still) {
-            (None, false) => "",
-            (None, true) => "#still",
-            (Some(Theme::Light), false) => "#light",
-            (Some(Theme::Light), true) => "#light-still",
-            (Some(Theme::Dark), false) => "#dark",
-            (Some(Theme::Dark), true) => "#dark-still",
-        }
+    /// The theme the reader picked, if any, for a figure to take
+    /// (`data-theme`, `vis/figures/src/svg.rs`), so that otherwise it
+    /// follows the system as the page does.
+    pub(crate) fn picked_slug(self) -> Option<&'static str> {
+        (self.picked)().map(Theme::slug)
     }
 }
 

@@ -620,7 +620,6 @@ fn MinimizeCoherenceTraffic() -> Element {
 pub(crate) enum Note {
     Gray,
     FreeSpace,
-    ClickBench,
     Ostp,
     CacheConscious,
     GraefeLarson,
@@ -646,10 +645,9 @@ pub(crate) enum Note {
 }
 
 impl Note {
-    const ALL: [Self; 25] = [
+    const ALL: [Self; 24] = [
         Self::Gray,
         Self::FreeSpace,
-        Self::ClickBench,
         Self::Ostp,
         Self::CacheConscious,
         Self::GraefeLarson,
@@ -701,12 +699,6 @@ impl Note {
                 ", chapter 17 of "
                 em { "Operating Systems: Three Easy Pieces" }
                 ": external fragmentation is free space chopped into pieces of different sizes, so that a request can fail although the total would fit it."
-            },
-            Self::ClickBench => rsx! {
-                NoteLink { href: "https://github.com/ClickHouse/ClickBench", title: "ClickBench" }
-                ", ClickHouse's analytical benchmark; its "
-                code { "hits" }
-                " table as one Parquet file."
             },
             Self::Ostp => rsx! {
                 "Not more complicated than an operating system! Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, "

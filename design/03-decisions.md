@@ -1399,10 +1399,7 @@ Design and measurements in 15-index-file.md.
   span, `{len, offset}` from the slot itself, to bytes of any length in
   heap pages after the leaf, searched with `WithInlineKey`. bbtree-mmap
   writes, maps and reads typed maps in files (`BBTreeMapFile`), each key
-  and value type picking plain or `VarBytes` storage (`DiskType`);
-  bbtree-datafusion-parquet embeds indexes of one or more columns in a
-  Parquet file, one entry per distinct key, and DataFusion's Parquet scans
-  look their predicates' rows up in them.
+  and value type picking plain or `VarBytes` storage (`DiskType`).
 - **Why the tree's own pages:** lookups run the map's code, so they take
   its time: at 10M `u64`, 125.9 ns a hit read into memory, 126.4 ns mapped
   in huge pages, against the map's 125.4. A format of its own would search

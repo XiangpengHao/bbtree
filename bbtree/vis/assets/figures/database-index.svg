@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 178" width="720" height="178" role="img"><title>Time per operation of real systems with bbtree, relative to as shipped</title><style>
+svg { --paper: #f6f7f9; --panel: #ffffff; --ink: #15171c; --graphite: #5a606b; --muted: #636974; --rule: #e2e5ea; --rule-strong: #c6ccd5; --well: #eef0f3; --ok: #11795a; --error: #b42318; --error-soft: #fdf0ee; --link: #2266c8; --marker: #ffe24a; --marker-strong: #a67c00; --marker-soft: #fff4b8; --marker-ink: #7a5a00; --compare: #f7a47f; --compare-soft: #fde3d6; --slot-filled: #7f8999; --slot-smaller: #4c5462; --slot-larger: #bcc3cd; --theirs-1: #353b47; --theirs-2: #59616e; --theirs-3: #6e7682; --theirs-4: #878e99; --shipped: #353b47; --on-marker: #15171c;
+  font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+}
+@media (prefers-color-scheme: dark) { svg { --paper: #1b1e24; --panel: #131519; --ink: #e6e8ec; --graphite: #b4bac3; --muted: #9aa1ab; --rule: #2a2e35; --rule-strong: #3d434c; --well: #23262c; --ok: #4cc38a; --error: #ff8a80; --error-soft: #3b1f1d; --link: #8cb4ff; --marker: #ffe24a; --marker-strong: #e0b628; --marker-soft: #4a3f14; --marker-ink: #f3d55b; --compare: #f7a47f; --compare-soft: #4a2a1e; --slot-filled: #6b7482; --slot-smaller: #c9cfd8; --slot-larger: #3d434c; --theirs-1: #d3d7de; --theirs-2: #aeb4be; --theirs-3: #8e959f; --theirs-4: #717884; --shipped: #717884; } }
+#light:target, #light-still:target, svg[data-theme="light"] { --paper: #f6f7f9; --panel: #ffffff; --ink: #15171c; --graphite: #5a606b; --muted: #636974; --rule: #e2e5ea; --rule-strong: #c6ccd5; --well: #eef0f3; --ok: #11795a; --error: #b42318; --error-soft: #fdf0ee; --link: #2266c8; --marker: #ffe24a; --marker-strong: #a67c00; --marker-soft: #fff4b8; --marker-ink: #7a5a00; --compare: #f7a47f; --compare-soft: #fde3d6; --slot-filled: #7f8999; --slot-smaller: #4c5462; --slot-larger: #bcc3cd; --theirs-1: #353b47; --theirs-2: #59616e; --theirs-3: #6e7682; --theirs-4: #878e99; --shipped: #353b47; }
+#dark:target, #dark-still:target, svg[data-theme="dark"] { --paper: #1b1e24; --panel: #131519; --ink: #e6e8ec; --graphite: #b4bac3; --muted: #9aa1ab; --rule: #2a2e35; --rule-strong: #3d434c; --well: #23262c; --ok: #4cc38a; --error: #ff8a80; --error-soft: #3b1f1d; --link: #8cb4ff; --marker: #ffe24a; --marker-strong: #e0b628; --marker-soft: #4a3f14; --marker-ink: #f3d55b; --compare: #f7a47f; --compare-soft: #4a2a1e; --slot-filled: #6b7482; --slot-smaller: #c9cfd8; --slot-larger: #3d434c; --theirs-1: #d3d7de; --theirs-2: #aeb4be; --theirs-3: #8e959f; --theirs-4: #717884; --shipped: #717884; }
+:is(#still, #light-still, #dark-still):target * { animation: none !important; }
+.background { fill: var(--panel); }
+text { fill: var(--ink); }
+.label { fill: var(--muted); font-size: 12px; }
+.note { fill: var(--graphite); }
+.strong { font-weight: 600; }
+.data {
+  font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 13.5px;
+}
+text.on-marker { fill: var(--on-marker); }
+.end { text-anchor: end; }
+.middle { text-anchor: middle; }
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; }
+}
+.bar { transform-box: fill-box; transform-origin: left center; } .shipped { fill: var(--shipped); } .ours { fill: var(--marker); stroke: var(--marker-strong); stroke-width: 1.5; } .swatch-label { fill: var(--graphite); }@keyframes grows { 0% { transform: scaleX(0) } 40.000% { transform: scaleX(0) } 100.000% { transform: scaleX(1) } } .grows { transform: scaleX(1); animation: grows 1.50s linear 1 both; }
+@keyframes lands { 0% { opacity: 0 } 40.000% { opacity: 0 } 97.000% { opacity: 0 } 100.000% { opacity: 1 } } .lands { opacity: 1; animation: lands 1.50s linear 1 both; }
+</style><g id="still"><g id="light-still"><g id="dark-still"><g id="light"><g id="dark"><rect class="background" width="720" height="178"/><rect x="170" y="10" width="12" height="12" rx="2" class="shipped"/><text x="188" y="20" class="swatch-label">as shipped, 100%</text><rect x="320" y="10" width="12" height="12" rx="2" class="ours"/><text x="338" y="20" class="swatch-label strong">with bbtree</text><text x="700" y="20" class="label end">time per operation, one thread</text><text x="24" y="62" class="strong">Turso</text><text x="170" y="62" class="label">ships crossbeam SkipMap</text><text x="40" y="86.5" class="note">Lookup</text><rect x="170" y="74" width="450" height="16" rx="2" class="shipped"/><rect x="170" y="77" width="386.8171557562077" height="10" rx="2" class="bar grows ours"/><text x="700" y="86.5" class="data end lands">1.16×</text><text x="40" y="110.5" class="note">Index lookup</text><rect x="170" y="98" width="450" height="16" rx="2" class="shipped"/><rect x="170" y="101" width="236.52797965116278" height="10" rx="2" class="bar grows ours"/><text x="700" y="110.5" class="data end lands">1.90×</text><text x="40" y="134.5" class="note">Insert</text><rect x="170" y="122" width="450" height="16" rx="2" class="shipped"/><rect x="170" y="125" width="202.32467532467533" height="10" rx="2" class="bar grows ours"/><text x="700" y="134.5" class="data end lands">2.22×</text><text x="40" y="158.5" class="note">Update</text><rect x="170" y="146" width="450" height="16" rx="2" class="shipped"/><rect x="170" y="149" width="367.4326750448833" height="10" rx="2" class="bar grows ours"/><text x="700" y="158.5" class="data end lands">1.22×</text></g></g></g></g></g></svg>

@@ -17,13 +17,16 @@ overview and opens only the section they want (`vis/src/part_tabs.rs`):
 the first is open until the reader picks another, a pick names its
 section in the address, a link to any heading in a section opens it, and
 so does the browser's find (the closed sections stay in the page, hidden
-until found), and an open section ends with a link to the next; the three principles are
+until found); an open section ends with a bar across the text that opens
+the next ("Next, 2 of 3"), so
+that a reader who reads on can't miss that more follows; the three principles are
 numbered, since the post ranks them; and the post has a dark theme. The figures are SVG files that
 `vis/figures/` writes into `vis/assets/figures/` (`cargo run --release
 --manifest-path vis/figures/Cargo.toml`), so that the same files go into
 any other page, such as a Quarto copy of the post: each plays its own CSS
-animation in a loop, rests on its last frame with reduced motion, and the
-site loads it lazily, so it starts as the reader nears it.
+animation in a loop and rests on its last frame with reduced motion; the
+site draws it into the page as the reader nears it, plays it from the
+start once they see it, and its pause holds it where it is.
 
 ===============================================
 
@@ -41,14 +44,14 @@ site loads it lazily, so it starts as the reader nears it.
 
 [Charts: Single thread, Concurrent, End to End, Memory, Architectures]
 
-## What it can do? 
+## What can it do?
 
 B-trees are the most important data structure in big data systems, a fast b-tree like `bbtree` benefits everything on top of it: agents memory, LLM training, RAG, KV store, state caching, vector search, and more. 
 
 Here we discuss three representative use cases:
-1. **Replace skiplist in LSM-trees.** In place of the skiplist of five systems, `bbtree` is 1.16–6.83× faster.
-2. **Mmap a bbtree from disk.** No rebuild after a restart: the first answer comes 160–2,500× sooner than std's `BTreeMap`.
-3. **External index for Parquet files.** Embedded at the end of an existing Parquet file, with `bbtree` it runs 1.7–263× faster.
+1. **Replace skiplist in LSM-trees.** In place of the skiplist of four LSM-trees, `bbtree` is 1.37–6.83× faster.
+2. **In-memory database index.** In place of Turso's skiplists, inserts are 2.22× and indexed `SELECT`s 1.90× faster.
+3. **Mmap a bbtree from disk.** No rebuild after a restart: the first answer comes 160–2,500× sooner than std's `BTreeMap`.
 
 ### Case 1: faster memtable 
 
@@ -63,16 +66,27 @@ All LSM-trees use an ordered map to hold recent writes in memory, the memtable. 
 2. It never allocates on irregular sizes (i.e., not a power of two): memory management stays easy, with no external fragmentation[^free-space].
 3. Allocation failure can be gracefully handled.
 
-We integrated `bbtree` into five systems, on each system's own benchmarks:
+We integrated `bbtree` into four LSM-trees, on each system's own benchmarks:
 1. [fjall](https://github.com/fjall-rs/fjall): gets 2.47×, inserts 1.61×, write batches 3.00×.
 2. [SlateDB](https://github.com/slatedb/slatedb): gets 1.71×, puts 1.65×, write batches of 10 rows 2.36×.
 3. [Tonbo](https://github.com/tonbo-io/tonbo): 10M-row writes 6.83×, conflict-checked transactions 4.10×.
 4. [Lance](https://github.com/lance-format/lance)'s MemWAL index (its own skiplist): point lookups 2.19×, batched lookups 3.94×, batched puts 4.21×.
-5. [Turso](https://github.com/tursodatabase/turso)'s MVCC store, not an LSM-tree but a skiplist all the same: inserts 2.22×, indexed `SELECT` 1.90×.
 
-[the End to End card again, as a figure: `end-to-end.svg`. Caption: The End to End card again: each system's own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with `bbtree`; only the map changed.]
+[the End to End card's LSM-trees again, as a figure: `end-to-end.svg`. Caption: The LSM-trees of the End to End card: each system's own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with `bbtree`; only the map changed.]
 
-### Case 2: bbtree-mmap
+### Case 2: database index
+
+A database's tables change while they are read: rows are inserted, updated and deleted between queries, and every index of a table changes with it. An in-memory database keeps each in an ordered map, which has to stay sorted under these writes.
+
+[Turso](https://github.com/tursodatabase/turso), SQLite rewritten in Rust, keeps its MVCC store in memory: its tables' rows and its indexes' entries, each in a `crossbeam-skiplist`. With `bbtree` in their place, on Turso's own benchmarks:
+1. `INSERT` of random rowids: 2.22×.
+2. Indexed point `SELECT`: 1.90×.
+3. `UPDATE` in `BEGIN CONCURRENT`: 1.22×.
+4. Point `SELECT` by rowid: 1.16×.
+
+[the End to End card's Turso again, as a figure: `database-index.svg`. Caption: Turso on the End to End card: its own benchmark, one thread, Ryzen 9 9900X. The dark bar is the time per operation as shipped, the bright one inside it with `bbtree`; only the map changed.]
+
+### Case 3: bbtree-mmap
 
 [`bbtree-mmap`](https://crates.io/crates/bbtree-mmap) allows you to build a bbtree and write it to disk once; when you need it, you can simply mmap it and use it instantly, without rebuilding anything.
 
@@ -98,34 +112,6 @@ assert_eq!(names.get(&42), Some("corro"));
 ```
 
 [the time to the first answer after a restart, std's `BTreeMap` rebuilt against `bbtree-mmap` mapped, with the file in the page cache and from disk: `first-query.svg`. Caption: Time to the first answer after a restart, 10M `u64` entries, Ryzen 9 9900X. std's `BTreeMap` reads its file back and rebuilds; `bbtree-mmap` maps its file and reads only the pages the lookup touches.]
-
-### Case 3: Parquet index
-
-Parquet already has advanced stats and bloom filters to prune the data to scan, `bbtree` pushes the pruning to its extreme: it directly pinpoints the rows to read.
-
-With `bbtree`, you can directly embed the index to the end of an existing Parquet file without rewriting it.
-
-In DataFusion, it looks like this, more details in [bbtree-datafusion-parquet](https://github.com/XiangpengHao/bbtree/tree/main/bbtree-datafusion-parquet):
-
-```rust
-ParquetIndexBuilder::source("hits.parquet")
-    .index(&["UserID"])
-    .index(&["CounterID", "EventDate"])
-    .build()?;
-
-let state = SessionStateBuilder::new()
-    .with_default_features()
-    .with_parquet_index();
-```
-
-On ClickBench's `hits.parquet`[^clickbench] (100M rows, 14.8 GB), with an index of `UserID` (879 MB, 6% of the file) and one of `(CounterID, EventDate)` (401 MB), `SELECT * FROM hits WHERE ...` takes:
-
-| Filter | Rows | Without index | With index | Speedup |
-|---|--:|--:|--:|--:|
-| `UserID = -2398344306775305602` | 142 | 5.97 s | 23 ms | 263× |
-| `CounterID = 1298 AND EventDate = 15889` | 2,072 | 244 ms | 38 ms | 6.4× |
-| `CounterID = 1298` | 2,072 | 200 ms | 29 ms | 6.9× |
-| `CounterID = 62 AND EventDate BETWEEN 15887 AND 15917` | 738,172 | 353 ms | 204 ms | 1.7× |
 
 ## How it works?
 
@@ -468,7 +454,6 @@ TODO: plan to ask friends and one person from each of the end-to-end benchmarks 
 
 [^ffs]: [ffs](https://github.com/aoli-al/ffs), fork-based deterministic concurrency testing.
 
-[^clickbench]: [ClickBench](https://github.com/ClickHouse/ClickBench), ClickHouse's analytical benchmark; its `hits` table as one Parquet file.
 
 
 
@@ -497,9 +482,10 @@ author's.
   blog): `vis/figures/` writes them into `vis/assets/figures/`, the
   mechanisms from fixed keys, `integer-keys.svg` and `batch-lanes.svg`
   from a tree of 10M random `u64`s it builds and reads through bbtree's
-  inspect views, and the charts from `vis/data/`; `end-to-end.svg`, the
-  End to End card again in "What it can do?", from the 9900X's
-  `integrations.csv`; `first-query.svg`, in "Case 2: bbtree-mmap", from
+  inspect views, and the charts from `vis/data/`; `end-to-end.svg` and
+  `database-index.svg`, the End to End card's LSM-trees and Turso again
+  in "What can it do?", from the 9900X's `integrations.csv`;
+  `first-query.svg`, in "Case 3: bbtree-mmap", from
   `vis/data/9900x-20261021/first-query.csv` (below). Each plays a CSS loop
   and rests on its last frame with reduced motion; the charts play once.
   The two Results charts are `vis/data/9900x-20261018/lookups.csv`:
@@ -618,8 +604,9 @@ author's.
     above on string keys, about 2 MiB a worker that only THP adds (off,
     the gap is gone; not the stacks), which std's one-thread build
     doesn't pay.
-  - End to End: drawn as `end-to-end.svg` in "Case 1" is (the author's
-    call, 2026-10-22): a row a workload, grouped by system under its
+  - End to End: drawn as `end-to-end.svg` (the LSM-trees, Case 1) and
+    `database-index.svg` (Turso, Case 2) is (the author's call,
+    2026-10-22): a row a workload, grouped by system under its
     name and the map it ships; the time as shipped a dark bar at 100%,
     bbtree's a bright one inside it, as a share of it, so that no
     system's times compare with another's; the speedup at the row's

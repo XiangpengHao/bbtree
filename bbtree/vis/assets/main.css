@@ -2730,26 +2730,27 @@ html[data-page="post"][data-theme="dark"] {
       box-shadow: inset 3px 0 0 var(--marker);
     }
   }
-  /* The end of an open section: a link to the part's next, so that a
-   * reader who reads on needn't climb back to the tabs. */
+  /* The end of an open section: a bar across the text that opens the
+   * part's next, lit as an open tab is, so that a reader who reads on
+   * can't miss that more follows, nor need climb back to the tabs. */
   .next-section {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-    width: fit-content;
-    max-width: 100%;
-    margin: 40px 0 0 auto;
-    padding: 12px 18px 13px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 3px 16px;
+    margin: 48px 0 0;
+    padding: 14px 20px 15px 22px;
     border: 1px solid var(--rule-strong);
     border-radius: 10px;
+    background: var(--marker-wash);
+    box-shadow: inset 4px 0 0 var(--marker);
     color: var(--ink);
     text-decoration: none;
     transition: border-color 120ms, background-color 120ms;
   }
   .next-section:hover {
     border-color: var(--marker-strong);
-    background: var(--marker-wash);
+    background: var(--marker-soft);
   }
   .next-section:focus-visible {
     outline: 2px solid var(--link);
@@ -2757,14 +2758,29 @@ html[data-page="post"][data-theme="dark"] {
   }
   .next-section-label {
     font: 500 12.5px var(--font-ui);
-    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    color: var(--graphite);
   }
   .next-section-title {
+    grid-column: 1;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    font: 600 15px/1.4 var(--font-ui);
-    text-align: right;
+    font: 600 16px/1.4 var(--font-ui);
+  }
+  .next-section-arrow {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    font: 500 22px/1 var(--font-ui);
+    transition: transform 160ms ease-out;
+  }
+  .next-section:hover .next-section-arrow {
+    transform: translateX(3px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .next-section-arrow {
+      transition: none;
+    }
   }
 
   /* The outline, in the left margin, held in view as the sections pass;
@@ -3001,8 +3017,8 @@ html[data-page="post"][data-theme="dark"] {
   }
 
   /* A figure shows one idea, as wide as the text: an SVG file
-   * (`vis/figures/`), in the page's theme, which plays its own CSS
-   * animation. */
+   * (`vis/figures/`), drawn into the page in its theme, which plays its
+   * own CSS animation (`post_figure.rs`). */
   :is(.post-body, .section-panel) > .figure {
     margin: 20px 0 32px;
   }
@@ -3038,8 +3054,8 @@ html[data-page="post"][data-theme="dark"] {
     flex: 1;
     max-width: 58ch;
   }
-  /* The figure's buttons: a looping figure's pause, which rests it on its
-   * last frame, and on a phone, the one that shows it at its own size. */
+  /* The figure's buttons: a looping figure's pause, which holds it where
+   * it is, and on a phone, the one that shows it at its own size. */
   .figure-actions {
     flex: none;
     display: flex;

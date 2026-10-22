@@ -1,4 +1,4 @@
-//! Writes the post's figures (design/14-blogpost.md, "What it can do?" and
+//! Writes the post's figures (design/14-blogpost.md, "What can it do?" and
 //! "How it works") as SVG files into `vis/assets/figures/`, where the site
 //! embeds them and from where any other page can take them as they are. The figures of a
 //! mechanism are drawn from a few fixed keys; those of what bbtree does
@@ -79,10 +79,15 @@ impl PostFigures {
             map.insert(key, key);
         }
         let lines = self.data.join("9900x-20261018/lookups.csv");
+        let integrations = self.data.join("9900x-20261017/integrations.csv");
         let figures: Vec<(&str, Svg)> = vec![
             (
                 "end-to-end",
-                EndToEnd::read(&self.data.join("9900x-20261017/integrations.csv"))?.svg(),
+                EndToEnd::read(&integrations, &["fjall", "SlateDB", "Tonbo", "Lance"])?.svg(),
+            ),
+            (
+                "database-index",
+                EndToEnd::read(&integrations, &["Turso"])?.svg(),
             ),
             (
                 "first-query",

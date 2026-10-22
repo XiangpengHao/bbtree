@@ -150,12 +150,14 @@ impl Svg {
 
     /// The ids of the groups that wrap a figure, which its address can
     /// name to ask for a theme, motion, or both (`figure.svg#dark-still`):
-    /// the site's own switches, which an image can't otherwise hear.
+    /// a page's switches, which an image can't otherwise hear. The site
+    /// draws its figures into the page, and sets the theme on the drawing
+    /// (`data-theme`).
     const STATES: [&'static str; 5] = ["still", "light-still", "dark-still", "light", "dark"];
 
     /// What every figure's text and marks share, over the palette: light,
-    /// dark where the reader's system is, and either where the address
-    /// asks for it. A still figure, as one with reduced motion, rests on
+    /// dark where the reader's system is, and either where the address or
+    /// the page asks for it. A still figure, as one with reduced motion, rests on
     /// its last frame, which is what its elements draw without their
     /// animations.
     fn shared_style() -> String {
@@ -167,8 +169,8 @@ svg {{ {light} --on-marker: #15171c;
   font-size: 13px;
 }}
 @media (prefers-color-scheme: dark) {{ svg {{ {dark} }} }}
-#light:target, #light-still:target {{ {light} }}
-#dark:target, #dark-still:target {{ {dark} }}
+#light:target, #light-still:target, svg[data-theme="light"] {{ {light} }}
+#dark:target, #dark-still:target, svg[data-theme="dark"] {{ {dark} }}
 :is(#still, #light-still, #dark-still):target * {{ animation: none !important; }}
 .background {{ fill: var(--panel); }}
 text {{ fill: var(--ink); }}

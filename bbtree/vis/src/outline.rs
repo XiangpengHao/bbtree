@@ -15,8 +15,8 @@ use crate::icons::{Icon, IconGlyph};
 pub(crate) enum PostHeading {
     UseCases,
     CaseMemtable,
+    CaseDatabaseIndex,
     CaseMmap,
-    CaseParquetIndex,
     HowItWorks,
     CacheMisses,
     ThoughtExperiment,
@@ -43,8 +43,8 @@ impl PostHeading {
     const ALL: [Self; 24] = [
         Self::UseCases,
         Self::CaseMemtable,
+        Self::CaseDatabaseIndex,
         Self::CaseMmap,
-        Self::CaseParquetIndex,
         Self::HowItWorks,
         Self::CacheMisses,
         Self::ThoughtExperiment,
@@ -73,8 +73,8 @@ impl PostHeading {
         match self {
             Self::UseCases | Self::HowItWorks | Self::Correctness | Self::Reviewers => 2,
             Self::CaseMemtable
+            | Self::CaseDatabaseIndex
             | Self::CaseMmap
-            | Self::CaseParquetIndex
             | Self::CacheMisses
             | Self::Instructions
             | Self::Coherence
@@ -89,10 +89,10 @@ impl PostHeading {
     /// The anchor the heading takes, and that its link names.
     pub(crate) fn id(self) -> &'static str {
         match self {
-            Self::UseCases => "what-it-can-do",
+            Self::UseCases => "what-can-it-do",
             Self::CaseMemtable => "case-memtable",
+            Self::CaseDatabaseIndex => "case-database-index",
             Self::CaseMmap => "case-bbtree-mmap",
-            Self::CaseParquetIndex => "case-parquet-index",
             Self::HowItWorks => "how-it-works",
             Self::CacheMisses => "minimize-cache-misses",
             Self::ThoughtExperiment => "binary-vs-linear-search",
@@ -120,10 +120,10 @@ impl PostHeading {
     /// it.
     pub(crate) fn title(self) -> &'static str {
         match self {
-            Self::UseCases => "What it can do?",
+            Self::UseCases => "What can it do?",
             Self::CaseMemtable => "Case 1: faster memtable",
-            Self::CaseMmap => "Case 2: bbtree-mmap",
-            Self::CaseParquetIndex => "Case 3: Parquet index",
+            Self::CaseDatabaseIndex => "Case 2: database index",
+            Self::CaseMmap => "Case 3: bbtree-mmap",
             Self::HowItWorks => "How it works?",
             Self::CacheMisses => "Minimize cache misses",
             Self::ThoughtExperiment => "Thought experiment: binary search vs linear search",
@@ -389,8 +389,8 @@ mod tests {
             PostHeading::UseCases.sections().collect::<Vec<_>>(),
             [
                 PostHeading::CaseMemtable,
-                PostHeading::CaseMmap,
-                PostHeading::CaseParquetIndex
+                PostHeading::CaseDatabaseIndex,
+                PostHeading::CaseMmap
             ]
         );
         assert_eq!(
