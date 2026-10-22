@@ -1,6 +1,6 @@
 [package]
 name = "bbtree-store"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "A memory-bounded store of byte strings on bbtree: every byte of its keys and values lies in pages from its allocator."
 license = "MIT OR Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
 # Released with bbtree, at its version.
-bbtree = { path = "../bbtree", version = "0.1.4" }
+bbtree = { path = "../bbtree", version = "0.1.5" }
 
 [dev-dependencies]
 mimalloc = "0.1"

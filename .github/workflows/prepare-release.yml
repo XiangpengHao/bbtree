@@ -52,7 +52,7 @@ jobs:
           CUSTOM_VERSION: ${{ inputs.custom_version }}
         run: |
           # bbtree and the crates released with it, at its version.
-          crates="bbtree bbtree-mmap bbtree-datafusion-parquet"
+          crates="bbtree bbtree-mmap bbtree-datafusion-parquet bbtree-store"
           package_version() {
             cargo metadata --no-deps --format-version 1 \
               | jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version'
@@ -111,7 +111,7 @@ jobs:
             ---
 
             **Once the merge gate passes**, this PR merges itself, and the `publish.yml` workflow will:
-            1. Publish bbtree, bbtree-mmap and bbtree-datafusion-parquet to crates.io
+            1. Publish bbtree, bbtree-mmap, bbtree-datafusion-parquet and bbtree-store to crates.io
             2. Create a GitHub Release with tag `v${{ steps.bump.outputs.version }}`
           commit-message: "chore: release v${{ steps.bump.outputs.version }}"
           labels: release
