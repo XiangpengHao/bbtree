@@ -416,11 +416,11 @@ pub(crate) fn BatchTree(
             div { class: "batch-tree-legend", "aria-hidden": "true",
                 span { class: "legend-item",
                     span { class: "legend-token running" }
-                    "searching"
+                    "on the core"
                 }
                 span { class: "legend-item",
                     span { class: "legend-token waiting" }
-                    "prefetching"
+                    "its line on its way"
                 }
                 span { class: "legend-item",
                     span { class: "legend-token ended" }

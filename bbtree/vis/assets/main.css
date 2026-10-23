@@ -79,6 +79,12 @@
   --theirs-2: light-dark(#59616e, #aeb4be);
   --theirs-3: light-dark(#6e7682, #8e959f);
   --theirs-4: light-dark(#878e99, #717884);
+  /* The end-to-end chart's bar as shipped, which bbtree's sits inside:
+   * on the dark theme a mid slate, so that the highlighter's edge reads
+   * against it (3.4:1) as it does against the panel (4.1:1). */
+  --shipped: light-dark(#353b47, #717884);
+  --shadow: light-dark(rgba(21, 23, 28, 0.16), rgba(0, 0, 0, 0.5));
+  --scrim: light-dark(rgba(21, 23, 28, 0.28), rgba(0, 0, 0, 0.55));
 
   --font-display: "Martian Mono", ui-monospace, monospace;
   --font-ui: "IBM Plex Sans", system-ui, sans-serif;
@@ -1924,7 +1930,7 @@ html[data-page="post"][data-theme="dark"] {
     margin-bottom: 10px;
   }
 
-  /* The keys, each beside its searches and prefetches */
+  /* The core, the keys taking turns on it, and their rows under it */
   .batch-keys {
     grid-area: keys;
     padding: 14px 20px 12px;
@@ -1997,12 +2003,63 @@ html[data-page="post"][data-theme="dark"] {
     border-color: var(--error);
     background: var(--error-soft);
   }
-  .search {
+  /* The core: a turn a block, faint until it runs. */
+  .core-track {
+    fill: var(--well);
+  }
+  .core-label {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: flex;
+    align-items: center;
+    height: 30px;
+    padding-left: 2px;
+    font: 600 12.5px var(--font-ui);
+    color: var(--ink);
+  }
+  .turn-block {
     fill: var(--ink);
     opacity: clamp(0.14, calc((var(--t) - var(--s)) * 40 + 0.14), 1);
   }
-  .search.lit {
+  .turn-block.lit {
     fill: var(--link);
+  }
+  .turn-number {
+    fill: var(--panel);
+    font: 600 11px var(--font-data);
+    text-anchor: middle;
+    opacity: clamp(0, calc((var(--t) - var(--s)) * 40), 1);
+    pointer-events: none;
+  }
+  /* A key's way onto the core and back: faint, but whole while its turn
+   * runs, from --from to --until. */
+  .turn-connector {
+    stroke: var(--graphite);
+    stroke-width: 1.25;
+    opacity: calc(
+      0.1 + 0.9 * clamp(0, calc((var(--t) - var(--from)) * 20), 1) *
+        clamp(0, calc((var(--until) - var(--t)) * 20), 1)
+    );
+  }
+  .turn-done {
+    fill: none;
+    stroke: var(--ok);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: clamp(0, calc((var(--t) - var(--s)) * 20), 1);
+  }
+  /* The key on the core, as its token in the tree; a key looked up. */
+  .key-chip.running {
+    background: var(--ink);
+    color: var(--panel);
+    box-shadow: 0 0 0 3px var(--marker);
+  }
+  .key-chip.ended {
+    border-style: dashed;
+    border-color: var(--graphite);
+    color: var(--graphite);
   }
   /* A prefetch: from the search that sends it to the key's next, which
    * reads the line. Drawn faint ahead of time, then as it goes. */
@@ -2049,7 +2106,7 @@ html[data-page="post"][data-theme="dark"] {
     display: inline-block;
     flex: none;
   }
-  .legend-mark.search {
+  .legend-mark.turn {
     width: 10px;
     height: 12px;
     border-radius: 2px;
@@ -2673,26 +2730,27 @@ html[data-page="post"][data-theme="dark"] {
       box-shadow: inset 3px 0 0 var(--marker);
     }
   }
-  /* The end of an open section: a link to the part's next, so that a
-   * reader who reads on needn't climb back to the tabs. */
+  /* The end of an open section: a bar across the text that opens the
+   * part's next, lit as an open tab is, so that a reader who reads on
+   * can't miss that more follows, nor need climb back to the tabs. */
   .next-section {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 2px;
-    width: fit-content;
-    max-width: 100%;
-    margin: 40px 0 0 auto;
-    padding: 12px 18px 13px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 3px 16px;
+    margin: 48px 0 0;
+    padding: 14px 20px 15px 22px;
     border: 1px solid var(--rule-strong);
     border-radius: 10px;
+    background: var(--marker-wash);
+    box-shadow: inset 4px 0 0 var(--marker);
     color: var(--ink);
     text-decoration: none;
     transition: border-color 120ms, background-color 120ms;
   }
   .next-section:hover {
     border-color: var(--marker-strong);
-    background: var(--marker-wash);
+    background: var(--marker-soft);
   }
   .next-section:focus-visible {
     outline: 2px solid var(--link);
@@ -2700,14 +2758,29 @@ html[data-page="post"][data-theme="dark"] {
   }
   .next-section-label {
     font: 500 12.5px var(--font-ui);
-    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    color: var(--graphite);
   }
   .next-section-title {
+    grid-column: 1;
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    font: 600 15px/1.4 var(--font-ui);
-    text-align: right;
+    font: 600 16px/1.4 var(--font-ui);
+  }
+  .next-section-arrow {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    font: 500 22px/1 var(--font-ui);
+    transition: transform 160ms ease-out;
+  }
+  .next-section:hover .next-section-arrow {
+    transform: translateX(3px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .next-section-arrow {
+      transition: none;
+    }
   }
 
   /* The outline, in the left margin, held in view as the sections pass;
@@ -2779,6 +2852,10 @@ html[data-page="post"][data-theme="dark"] {
     color: var(--marker-ink);
     font: 600 12px var(--font-data);
   }
+  /* On a narrow screen, the outline opens from a bar held at the top as
+   * the sections pass, naming the reader's section; the sheet drops from
+   * it over a scrim. Out to the screen's edges on a phone, so that no
+   * text shows beside it. */
   .post-contents {
     display: none;
   }
@@ -2788,32 +2865,115 @@ html[data-page="post"][data-theme="dark"] {
     }
     .post-contents {
       display: block;
-      margin: 8px 0 0;
-      padding: 12px 18px;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      margin: 8px -16px 0;
+    }
+    .post-body [id] {
+      scroll-margin-top: 64px;
+    }
+  }
+  .post-contents-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 48px;
+    padding: 0 16px;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    background: var(--panel);
+    color: var(--ink);
+    font: 600 15px/1.3 var(--font-ui);
+    text-align: left;
+    cursor: pointer;
+  }
+  .post-contents-current {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .post-contents-bar .icon {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    color: var(--muted);
+    transition: transform 160ms var(--ease-out);
+  }
+  .post-contents-bar[aria-expanded="true"] .icon {
+    transform: rotate(180deg);
+  }
+  .post-contents-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background: var(--scrim);
+  }
+  .post-contents-sheet {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 1;
+    max-height: min(70dvh, 560px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 8px 8px 12px;
+    border-bottom: 1px solid var(--rule);
+    border-radius: 0 0 12px 12px;
+    background: var(--panel);
+    box-shadow: 0 12px 28px var(--shadow);
+    font: 15px/1.35 var(--font-ui);
+  }
+  .post-contents-sheet a {
+    display: block;
+    padding: 12px 10px;
+    border-radius: 6px;
+    color: var(--graphite);
+    text-decoration: none;
+  }
+  .post-contents-sheet a[aria-current="location"] {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--marker-wash);
+    box-shadow: inset 0 -2px 0 var(--marker);
+  }
+  .post-contents-sheet .outline-level-2 a {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .post-contents-sheet .outline-level-2:not(:first-child) {
+    margin-top: 8px;
+  }
+  .post-contents-sheet .outline-level-3 a {
+    padding-left: 22px;
+  }
+  .post-contents-sheet .outline-level-4 a {
+    padding-left: 38px;
+    font-size: 14px;
+  }
+  .post-contents-sheet .outline-level-5 a {
+    padding-left: 52px;
+    font-size: 14px;
+  }
+  @media (min-width: 641px) {
+    .post-contents {
+      top: 10px;
+      margin-inline: 0;
+    }
+    .post-contents-bar {
       border: 1px solid var(--rule);
       border-radius: 10px;
-      background: var(--paper);
-      font-size: 15px;
     }
-    .post-contents summary {
-      cursor: pointer;
-      font-weight: 600;
-    }
-    .post-contents ol {
-      margin-top: 10px;
-    }
-    .post-contents a {
-      display: block;
-      padding: 5px 0;
-      color: var(--link);
-      text-decoration: none;
-    }
-    .post-contents .outline-level-2 a {
-      font-weight: 600;
-      color: var(--ink);
-    }
-    .post-contents .outline-level-3 a {
-      padding-left: 16px;
+    .post-contents-sheet {
+      top: calc(100% + 6px);
+      border: 1px solid var(--rule);
+      border-radius: 12px;
     }
   }
 
@@ -2857,8 +3017,8 @@ html[data-page="post"][data-theme="dark"] {
   }
 
   /* A figure shows one idea, as wide as the text: an SVG file
-   * (`vis/figures/`), in the page's theme, which plays its own CSS
-   * animation. */
+   * (`vis/figures/`), drawn into the page in its theme, which plays its
+   * own CSS animation (`post_figure.rs`). */
   :is(.post-body, .section-panel) > .figure {
     margin: 20px 0 32px;
   }
@@ -2894,8 +3054,14 @@ html[data-page="post"][data-theme="dark"] {
     flex: 1;
     max-width: 58ch;
   }
-  /* A looping figure's pause, which rests it on its last frame. */
-  .figure-motion {
+  /* The figure's buttons: a looping figure's pause, which holds it where
+   * it is, and on a phone, the one that shows it at its own size. */
+  .figure-actions {
+    flex: none;
+    display: flex;
+    gap: 8px;
+  }
+  .figure-action {
     flex: none;
     display: inline-flex;
     align-items: center;
@@ -2910,27 +3076,73 @@ html[data-page="post"][data-theme="dark"] {
     cursor: pointer;
     transition: color 120ms, border-color 120ms;
   }
-  .figure-motion:hover {
+  .figure-action:hover {
     color: var(--ink);
     border-color: var(--graphite);
   }
-  .figure-motion .icon {
+  .figure-action .icon {
     width: 13px;
     height: 13px;
   }
-  /* On a phone, a figure keeps its text legible and scrolls sideways. */
+  /* On a phone, a figure shows whole, shrunk, and a tap shows it at its
+   * own size over the page. */
+  .figure-view.shrunk .figure-svg {
+    cursor: zoom-in;
+  }
   @media (max-width: 640px) {
-    .figure-view {
-      overflow-x: auto;
-      overscroll-behavior-x: contain;
-    }
-    .figure-svg {
-      width: 600px;
-      max-width: none;
-    }
     .figure-caption {
       flex-direction: column;
     }
+    .figure-action {
+      min-height: 40px;
+      padding: 0 14px;
+    }
+  }
+  .figure-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: var(--panel);
+  }
+  html:has(.figure-overlay) {
+    overflow: hidden;
+  }
+  /* The figure at its own size, centered where the screen is wide enough
+   * (a phone turned), panned where it isn't. */
+  .figure-overlay-view {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .figure-overlay-svg {
+    flex: none;
+    width: 720px;
+    max-width: none;
+    height: auto;
+    margin: auto;
+    padding: 64px 16px 24px;
+    box-sizing: content-box;
+  }
+  .figure-overlay-close {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--rule-strong);
+    border-radius: 50%;
+    background: var(--paper);
+    color: var(--ink);
+    cursor: pointer;
+    box-shadow: 0 2px 10px var(--shadow);
+  }
+  .figure-overlay-close .icon {
+    width: 18px;
+    height: 18px;
   }
 
   /* The post's code. */
@@ -2943,6 +3155,12 @@ html[data-page="post"][data-theme="dark"] {
     border-radius: 10px;
     font: 14px/1.6 var(--font-data);
     tab-size: 4;
+  }
+  @media (max-width: 640px) {
+    :is(.post-body, .section-panel) > pre {
+      padding: 12px 14px;
+      font-size: 13px;
+    }
   }
   .rust-comment {
     color: var(--code-comment);
@@ -3028,9 +3246,38 @@ html[data-page="post"][data-theme="dark"] {
       pointer-events: none;
     }
   }
+  /* On a narrow screen, a tap on a mark unfolds its note under the line. */
   @media (max-width: 1023px) {
     .sidenote {
       display: none;
+    }
+    .sidenote.unfolded {
+      display: block;
+      float: none;
+      width: auto;
+      margin: 8px 0 12px;
+      padding: 10px 14px 11px;
+      border-radius: 8px;
+      background: var(--well);
+      font-size: 14.5px;
+      line-height: 1.55;
+    }
+    .note-ref a[aria-expanded="true"] {
+      border-radius: 3px;
+      background: var(--marker-soft);
+      color: var(--ink);
+    }
+  }
+  /* A mark is a small target: an invisible box around it takes the tap,
+   * without moving the line or lighting past the mark. */
+  @media (pointer: coarse) {
+    .note-ref a {
+      position: relative;
+    }
+    .note-ref a::after {
+      content: "";
+      position: absolute;
+      inset: -14px -5px;
     }
   }
 
@@ -3105,6 +3352,14 @@ html[data-page="post"][data-theme="dark"] {
   }
   .card-body {
     padding: 18px 20px 16px;
+  }
+  /* A closed card is in the page for the browser's find, hidden until
+   * found: no box of its own, and its motion waits until it is shown. */
+  .card-body[hidden] {
+    padding: 0;
+  }
+  .card-body[hidden] :is(.grow-x, .grow-y, .lands, .draws) {
+    animation: none;
   }
 
   /* Charts: recessive chrome, thin marks, ink for text. */
@@ -3331,7 +3586,7 @@ html[data-page="post"][data-theme="dark"] {
   }
 
   /* A wide chart is drawn at its frame's width, a unit a pixel, and lays
-   * itself out for it; the end-to-end chart's rows of groups stack. */
+   * itself out for it; the architectures chart's rows of groups stack. */
   .chart-panel.wide > .chart-svg + .chart-svg {
     margin-top: 6px;
   }
@@ -3416,15 +3671,9 @@ html[data-page="post"][data-theme="dark"] {
     stroke-width: 1;
   }
 
-  /* The end-to-end chart's clusters and system groups. */
+  /* The architectures chart's clusters and machine groups. */
   .chart-cluster:hover .chart-hit {
     fill: var(--well);
-  }
-  .cluster-speedup {
-    font-size: 13px;
-    font-weight: 600;
-    fill: var(--ink);
-    font-variant-numeric: tabular-nums;
   }
   /* A bar's time, over it, in ink: bbtree's bold. */
   .cluster-value {
@@ -3435,12 +3684,6 @@ html[data-page="post"][data-theme="dark"] {
   .cluster-value.ours {
     fill: var(--ink);
     font-weight: 600;
-  }
-  .cluster-speedup.inside {
-    fill: var(--panel);
-  }
-  .cluster-speedup.slower {
-    fill: var(--graphite);
   }
   .cluster-label {
     font-size: 12px;
@@ -3458,6 +3701,13 @@ html[data-page="post"][data-theme="dark"] {
     font-size: 14px;
     font-weight: 600;
     fill: var(--ink);
+  }
+  /* The end-to-end chart's speedup, at its row's end. */
+  .row-speedup {
+    font-size: 13px;
+    font-weight: 600;
+    fill: var(--ink);
+    font-variant-numeric: tabular-nums;
   }
   .chart-keys {
     display: flex;

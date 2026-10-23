@@ -20,7 +20,7 @@ use crate::disk_type::DiskStored;
 /// is the map it holds.
 ///
 /// A file map may be the whole file, or a range of it, as one embedded in a
-/// Parquet file is. A range must start at a multiple of the file map's
+/// file of other data is. A range must start at a multiple of the file map's
 /// alignment ([`FileMap::alignment`]), as [`Self::write_at`] places it.
 pub(crate) struct MappedFile<K, V, S: InlineKeyStrategy<K> = Auto> {
     /// The map in `bytes`, opened once. It borrows `bytes` for as long as

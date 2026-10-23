@@ -1,7 +1,9 @@
 //! The cards the post leads with, a tab each: one thread, threads
 //! sharing a map, real systems end to end, memory, and other machines and
 //! instruction sets. The reader picks one; nothing turns by itself. The
-//! charts' motion waits until the cards are first in view.
+//! others stay in the page, hidden until found, so that a find in the page
+//! searches them too. The charts' motion waits until the cards are first
+//! in view, and a card's plays again as it is shown.
 
 use std::rc::Rc;
 
@@ -15,7 +17,7 @@ use crate::measurements::Measurements;
 use crate::memory_chart::MemoryChart;
 use crate::single_thread_chart::SingleThreadChart;
 use crate::spotlight::Spotlight;
-use crate::tab_list::{Tab, TabList};
+use crate::tab_list::{Tab, TabList, TabPanel};
 
 /// One of the cards.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,27 +115,31 @@ pub(crate) fn PerformanceCards(measurements: Rc<Measurements>, spotlight: Spotli
                 shown: PerformanceCard::ALL.iter().position(|card| *card == shown()).unwrap_or(0),
                 onpick: move |index: usize| pick(PerformanceCard::ALL[index]),
             }
-            div {
-                id: shown().panel_id(ids),
-                class: "card-body",
-                role: "tabpanel",
-                "aria-labelledby": shown().tab_id(ids),
-                match shown() {
-                    PerformanceCard::SingleThread => rsx! {
-                        SingleThreadChart { measurements: measurements.clone(), spotlight }
-                    },
-                    PerformanceCard::Concurrent => rsx! {
-                        ConcurrentChart { spotlight }
-                    },
-                    PerformanceCard::EndToEnd => rsx! {
-                        EndToEndChart { measurements: measurements.clone(), spotlight }
-                    },
-                    PerformanceCard::Memory => rsx! {
-                        MemoryChart { measurements: measurements.clone(), spotlight }
-                    },
-                    PerformanceCard::Architectures => rsx! {
-                        ArchitecturesChart { spotlight }
-                    },
+            for card in PerformanceCard::ALL {
+                TabPanel {
+                    key: "{card.slug()}",
+                    id: card.panel_id(ids),
+                    tab_id: card.tab_id(ids),
+                    class: "card-body",
+                    shown: card == shown(),
+                    onreveal: move |_| pick(card),
+                    match card {
+                        PerformanceCard::SingleThread => rsx! {
+                            SingleThreadChart { measurements: measurements.clone(), spotlight }
+                        },
+                        PerformanceCard::Concurrent => rsx! {
+                            ConcurrentChart { spotlight }
+                        },
+                        PerformanceCard::EndToEnd => rsx! {
+                            EndToEndChart { measurements: measurements.clone(), spotlight }
+                        },
+                        PerformanceCard::Memory => rsx! {
+                            MemoryChart { measurements: measurements.clone(), spotlight }
+                        },
+                        PerformanceCard::Architectures => rsx! {
+                            ArchitecturesChart { spotlight }
+                        },
+                    }
                 }
             }
         }

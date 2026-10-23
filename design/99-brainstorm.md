@@ -45,6 +45,19 @@ Phase 1 built (D51, D52).
 - [ ] We are better than radix tree: 1. support prefix search, 2. better memory usage, 3. faster scan.
 
 - [x] We need to support a file mode. allowing bbtree to be written to a file, and read from a file. This requires key to implement FromBytes and ToBytes.
-  Built as file maps (15-index-file.md, D58): the tree's pages, compacted, edges as offsets, mapped and used in place; keys and values `PlainBytes` in their slots or `VarBytes`, of any length, in each leaf's tail. bbtree-mmap has typed maps in files (`BBTreeMapFile`, `DiskType`); bbtree-datafusion-parquet embeds indexes of one or more columns in a Parquet file, which DataFusion's Parquet scans look rows up in.
+  Built as file maps (15-index-file.md, D58): the tree's pages, compacted, edges as offsets, mapped and used in place; keys and values `PlainBytes` in their slots or `VarBytes`, of any length, in each leaf's tail. bbtree-mmap has typed maps in files (`BBTreeMapFile`, `DiskType`).
 
-- [ ] We need to add a user case of DataFusion index provider for Parquet. and show it in ClickBench.
+- [-] We need to add a user case of DataFusion index provider for Parquet. and show it in ClickBench.
+Zac's experiement of using bbtree as index vs just sorted array shows that this is not a good position.
+Sorted array is much faster and much more memory efficient. while bbtree's benefits are mostly mutable index.
+We probably want to remove that use case, and replace with something else.
+
+So we should make bbtree-store to be disk based. automatically write larger than memory data to disk.
+And the api should be async.
+And we need a disk trait. And a disk space allocator. On linux, it should be io_uring based.
+We should be gracefully shutting down, and write everything to disk. During recovery, we rebuilt the inner and leaf nodes from disk, through a scan.
+Inner and leaf nodes are still pinned to memory, so we can still do the normal operations; only heap pages are written to disk.
+
+We will have a buffer management. which swaps the cold pages to disk, and bring hot pages to memory.
+
+

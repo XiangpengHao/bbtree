@@ -1,5 +1,5 @@
 //! A timeline the browser plays: time runs over a sequence of steps (a
-//! batch's searches), and a loop in the browser
+//! batch's turns), and a loop in the browser
 //! advances it each frame and writes it to an element as `--t`, so that
 //! what the element draws moves in CSS without a redraw. Rust hears only
 //! when another step starts, and whether it plays.

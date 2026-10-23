@@ -73,8 +73,8 @@ where
     /// Writes the map of `entries` into `file` at `offset`, rounded up to
     /// its alignment, in place of what lay there, and ends the file after
     /// it; returns where it lies, for [`MmapOptions::range`] and
-    /// [`Self::read_range`]: a map embedded in a file of other data, as
-    /// bbtree-datafusion-parquet embeds one in a Parquet file. Entries as
+    /// [`Self::read_range`]: a map embedded in a file of other data, such
+    /// as an index before a columnar file's footer. Entries as
     /// for [`Self::create`]; `file` is untouched if they don't ascend.
     pub fn write_at(
         file: &mut File,

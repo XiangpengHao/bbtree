@@ -1,12 +1,16 @@
-//! The batch's keys, editable, each beside its searches and prefetches in
-//! the order they run: a search is a block, and from each prefetch to that
-//! key's next search the line is pending while the other keys search. The
-//! prefetches stack up across the rows: the keys' lines are fetched
-//! together, where one key alone fetches one at a time.
+//! The batch on its one core, turn by turn, in the order the executor runs
+//! them: the core is the axis, a turn a block on it. A key comes in from
+//! its row, reads the line it prefetched, steps down, prefetches the next
+//! line and goes back out, and the next key comes in. Under the core, a row
+//! a key, editable: from the end of its turn to its next, its line is on
+//! its way while the core runs the others. The lines stack up across the
+//! rows: the keys' lines are fetched together, where one key alone fetches
+//! one at a time.
 //!
-//! The rows draw themselves as the batch plays: what hasn't happened yet is
-//! faint, and the playhead is the board's `--t`. Click a row to pause
-//! there; edit a key and press Enter to look it up in the batch.
+//! The view draws itself as the batch plays: what hasn't happened yet is
+//! faint, a turn's connectors darken while it runs, and the playhead is the
+//! board's `--t`. Click the view to pause there; edit a key and press Enter
+//! to look it up in the batch.
 
 use std::rc::Rc;
 
@@ -20,23 +24,25 @@ use crate::inspected_tree::LoadedTree;
 use crate::spotlight::Spotlight;
 use crate::trace::Tracer;
 
-/// The rows' geometry, in pixels.
+/// The core's and the rows' geometry, in pixels.
 #[derive(Clone, Copy, PartialEq)]
-struct RowsLayout {
-    /// Pixels a search.
+struct TurnsLayout {
+    /// Pixels a turn.
     scale: f64,
-    /// Where the first search starts, past the keys.
+    /// Where the first turn starts, past the keys.
     left: f64,
 }
 
-impl RowsLayout {
+impl TurnsLayout {
+    const CORE_HEIGHT: f64 = 30.0;
+    /// Between the core and the first key's row.
+    const CORE_GAP: f64 = 12.0;
     const ROW_HEIGHT: f64 = 32.0;
-    const BAR_HEIGHT: f64 = 14.0;
     const GAP: f64 = 16.0;
 
     fn of(run: &BatchRun, width: f64, keys_width: f64) -> Self {
         Self {
-            scale: ((width - keys_width - Self::GAP - 4.0) / run.duration().max(1.0)).max(1.0),
+            scale: ((width - keys_width - Self::GAP - 18.0) / run.duration().max(1.0)).max(1.0),
             left: keys_width + Self::GAP,
         }
     }
@@ -45,17 +51,40 @@ impl RowsLayout {
         self.left + time * self.scale
     }
 
-    fn bar_y(lane: usize) -> f64 {
-        lane as f64 * Self::ROW_HEIGHT + (Self::ROW_HEIGHT - Self::BAR_HEIGHT) / 2.0
+    /// How far into a turn its key's connectors meet the core.
+    fn inset(&self) -> f64 {
+        (self.scale * 0.25).min(4.0)
+    }
+
+    /// Whether a turn is wide enough for its connectors to read as lines
+    /// rather than a texture.
+    fn shows_connectors(&self) -> bool {
+        self.scale >= 10.0
+    }
+
+    /// Whether a turn is wide enough for its key's number.
+    fn shows_numbers(&self) -> bool {
+        self.scale >= 12.0
+    }
+
+    fn row_top(lane: usize) -> f64 {
+        Self::CORE_HEIGHT + Self::CORE_GAP + lane as f64 * Self::ROW_HEIGHT
+    }
+
+    fn row_middle(lane: usize) -> f64 {
+        Self::row_top(lane) + Self::ROW_HEIGHT / 2.0
     }
 }
 
-/// The keys, each beside its searches and prefetches.
+/// The core, and the keys' rows under it.
 #[component]
-pub(crate) fn KeyRows(
+pub(crate) fn CoreTurns(
     tree: LoadedTree,
     run: BatchRun,
     keys: BatchKeys,
+    /// The turn running, or last run.
+    now: Signal<Option<usize>>,
+    playing: Signal<bool>,
     pointed: Signal<Option<usize>>,
     batcher: Batcher,
     tracer: Tracer,
@@ -91,18 +120,38 @@ pub(crate) fn KeyRows(
     } else {
         keys_width
     };
-    let layout = (width > 0.0).then(|| RowsLayout::of(&run, width, keys_width));
+    let layout = (width > 0.0).then(|| TurnsLayout::of(&run, width, keys_width));
     let lit = pointed();
+    // Each key's chip: on the core, looked up, or neither; played out, the
+    // last turn's key is off the core.
+    let on_core = now()
+        .filter(|_| !run.played_out(now(), playing()))
+        .map(|turn| run.polls()[turn].lane());
+    let states: Vec<&'static str> = run
+        .moments(None, now())
+        .iter()
+        .enumerate()
+        .map(|(lane, moment)| {
+            if on_core == Some(lane) {
+                " running"
+            } else if moment.ended() {
+                " ended"
+            } else {
+                ""
+            }
+        })
+        .collect();
     let mut batcher = batcher;
-    let height = run.lanes().len() as f64 * RowsLayout::ROW_HEIGHT;
+    let height = TurnsLayout::row_top(run.lanes().len());
     rsx! {
         section {
             class: "batch-keys",
-            "aria-label": "The keys, each beside its searches and prefetches",
+            "aria-label": "The keys' turns on one core, and their lines on their way",
             div { class: "batch-section-head",
                 h2 { class: "batch-heading",
-                    "Keys, with their searches and "
-                    Term { concept: Concept::Prefetch, spotlight, "prefetches" }
+                    "Turns on one core, and "
+                    Term { concept: Concept::Prefetch, spotlight, "prefetched" }
+                    " lines on their way"
                 }
                 button {
                     class: "button",
@@ -133,52 +182,97 @@ pub(crate) fn KeyRows(
                             let x = evt.client_coordinates().x - page_left;
                             batcher.seek((x - layout.left) / layout.scale);
                         },
+                        rect {
+                            class: "core-track",
+                            x: layout.left,
+                            y: 0,
+                            width: layout.x(run.duration()) - layout.left,
+                            height: TurnsLayout::CORE_HEIGHT,
+                            rx: 4,
+                        }
                         for lane in 0..run.lanes().len() {
                             line {
                                 class: "row-rule",
                                 x1: layout.left,
-                                x2: width - 4.0,
-                                y1: RowsLayout::bar_y(lane) + RowsLayout::BAR_HEIGHT / 2.0,
-                                y2: RowsLayout::bar_y(lane) + RowsLayout::BAR_HEIGHT / 2.0,
+                                x2: layout.x(run.duration()),
+                                y1: TurnsLayout::row_middle(lane),
+                                y2: TurnsLayout::row_middle(lane),
                             }
                         }
                         for (index , poll) in run.polls().iter().enumerate() {
                             {
                                 let lane = poll.lane();
                                 let start = run.start(index);
-                                let y = RowsLayout::bar_y(lane);
-                                let middle = y + RowsLayout::BAR_HEIGHT / 2.0;
+                                let fetched_at = run.fetched_at(index);
+                                let middle = TurnsLayout::row_middle(lane);
+                                let inset = layout.inset();
+                                let (into, out) = (layout.x(start) + inset, layout.x(start + 1.0) - inset);
                                 let lit_class = if lit == Some(lane) { " lit" } else { "" };
                                 let pending = poll
                                     .fetched()
                                     .and(run.read_at(index))
                                     .filter(|read| *read > start + 1.0);
                                 rsx! {
+                                    // In from the key's row, out to it.
+                                    if layout.shows_connectors() {
+                                        line {
+                                            class: "turn-connector",
+                                            style: "--from:{start};--until:{start + 1.0};",
+                                            x1: into,
+                                            x2: into,
+                                            y1: middle,
+                                            y2: TurnsLayout::CORE_HEIGHT,
+                                        }
+                                        line {
+                                            class: "turn-connector",
+                                            style: "--from:{fetched_at};--until:{fetched_at + 0.6};",
+                                            x1: out,
+                                            x2: out,
+                                            y1: TurnsLayout::CORE_HEIGHT,
+                                            y2: middle,
+                                        }
+                                    }
                                     if let Some(read) = pending {
                                         line {
                                             class: "prefetch-ghost",
-                                            x1: layout.x(start + 1.0),
-                                            x2: layout.x(read),
+                                            x1: out,
+                                            x2: layout.x(read) + inset,
                                             y1: middle,
                                             y2: middle,
                                         }
                                         line {
                                             class: "prefetch{lit_class}",
-                                            style: "--s:{run.fetched_at(index)};--d:{read - run.fetched_at(index)};",
-                                            x1: layout.x(start + 1.0),
-                                            x2: layout.x(read),
+                                            style: "--s:{fetched_at};--d:{read - fetched_at};",
+                                            x1: out,
+                                            x2: layout.x(read) + inset,
                                             y1: middle,
                                             y2: middle,
                                         }
                                     }
+                                    if poll.fetched().is_none() {
+                                        path {
+                                            class: "turn-done",
+                                            style: "--s:{fetched_at};",
+                                            d: "M{out + 3.0} {middle} l3.5 3.5 l7 -7",
+                                        }
+                                    }
                                     rect {
-                                        class: "search{lit_class}",
+                                        class: "turn-block{lit_class}",
                                         style: "--s:{start};",
                                         x: layout.x(start) + 0.5,
-                                        y,
+                                        y: 3,
                                         rx: 2,
                                         width: (layout.scale - 1.0).max(1.0),
-                                        height: RowsLayout::BAR_HEIGHT,
+                                        height: TurnsLayout::CORE_HEIGHT - 6.0,
+                                    }
+                                    if layout.shows_numbers() {
+                                        text {
+                                            class: "turn-number",
+                                            style: "--s:{start};",
+                                            x: layout.x(start + 0.5),
+                                            y: TurnsLayout::CORE_HEIGHT / 2.0 + 4.0,
+                                            "{lane}"
+                                        }
                                     }
                                 }
                             }
@@ -192,6 +286,7 @@ pub(crate) fn KeyRows(
                         }
                     }
                 }
+                div { class: "core-label", "core" }
                 for (lane , key) in keys.keys().iter().enumerate() {
                     KeyField {
                         key: "{lane}",
@@ -199,6 +294,7 @@ pub(crate) fn KeyRows(
                         key_text: key.clone(),
                         tree: tree.clone(),
                         lit: lit == Some(lane),
+                        state: states[lane],
                         pointed,
                         error,
                         batcher,
@@ -211,12 +307,12 @@ pub(crate) fn KeyRows(
                     span { class: "key-error", "{error}. Try {tree.key_kind().example()}." }
                 } else {
                     span { class: "legend-item",
-                        span { class: "legend-mark search" }
-                        "search"
+                        span { class: "legend-mark turn" }
+                        "a turn: the key comes in, reads its line, prefetches the next, goes out"
                     }
                     span { class: "legend-item",
                         span { class: "legend-mark prefetch" }
-                        "prefetch, pending until the key's next search"
+                        "its line on its way, until its next turn"
                     }
                     span { class: "keys-hint", "Edit a key and press Enter." }
                 }
@@ -233,6 +329,8 @@ fn KeyField(
     key_text: String,
     tree: LoadedTree,
     lit: bool,
+    /// " running" while the key is on the core, " ended" once looked up.
+    state: &'static str,
     pointed: Signal<Option<usize>>,
     error: Signal<Option<String>>,
     batcher: Batcher,
@@ -268,11 +366,11 @@ fn KeyField(
     rsx! {
         div {
             class: if lit { "key-field lit" } else { "key-field" },
-            style: "transform:translate(0,{lane as f64 * RowsLayout::ROW_HEIGHT}px);",
+            style: "transform:translate(0,{TurnsLayout::row_top(lane)}px);",
             onmouseenter: move |_| pointed.set(Some(lane)),
             onmouseleave: move |_| pointed.set(None),
             button {
-                class: "key-chip data",
+                class: "key-chip data{state}",
                 title: "Look key {lane} up alone",
                 "aria-label": "Look key {lane} up alone",
                 onclick: move |_| {

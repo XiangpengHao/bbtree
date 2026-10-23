@@ -41,10 +41,19 @@ impl LookupCount {
         }
     }
 
+    /// The value as the chart shows it: to a tenth of a line, to a whole
+    /// instruction.
+    fn shown(self, value: f64) -> f64 {
+        match self {
+            Self::LinesFromMemory => (value * 10.0).round() / 10.0,
+            Self::Instructions => value.round(),
+        }
+    }
+
     fn format(self, value: f64) -> String {
         match self {
-            Self::LinesFromMemory => format!("{value:.1}"),
-            Self::Instructions => format!("{value:.0}"),
+            Self::LinesFromMemory => format!("{:.1}", self.shown(value)),
+            Self::Instructions => format!("{:.0}", self.shown(value)),
         }
     }
 }
@@ -157,10 +166,12 @@ impl LookupCounts {
                     .class("data lands"),
                 );
             }
+            // From the values as shown, so that the reader's own sum agrees.
+            let (std, ours) = (self.count.shown(std), self.count.shown(ours));
             let fewer = if ours <= std {
-                format!("{:.1}× fewer", std / ours)
+                format!("{:.1}% fewer", (std - ours) / std * 100.0)
             } else {
-                format!("{:.1}× more", ours / std)
+                format!("{:.1}% more", (ours - std) / std * 100.0)
             };
             svg.add(Element::text(700.0, y + Self::BAR + 6.0, &fewer).class("note end lands"));
         }

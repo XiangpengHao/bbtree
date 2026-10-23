@@ -1,27 +1,14 @@
-//! bbtree's times against a baseline's, a cluster each, drawn one of two
-//! ways ([`BarScale`]): as shares, the baseline's time a dark bar at 100%
-//! and bbtree's a bright one inside it, the speedup above, so that no
-//! group's times compare with another's; or as nanoseconds, the two side
-//! by side on one axis, each labelled with its time. Clusters gather in
-//! groups (a system, a machine), each named under its clusters with a
+//! bbtree's times against a baseline's, a cluster each: the two side by
+//! side on one axis of nanoseconds, each labelled with its time. Clusters
+//! gather in groups (a machine), each named under its clusters with a
 //! caption. The groups flow into rows as even as they can be and as wide
-//! as the frame: one or two rows on a desk, a group a row on a phone.
+//! as the frame: one row on a desk, two or three on a phone, every row on
+//! the one axis.
 
 use dioxus::prelude::*;
 
 use crate::chart_scale::{FrameWidth, LinearScale, Nanos};
 use crate::spotlight::{Hint, Spotlight};
-
-/// How a chart draws a cluster's two times.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum BarScale {
-    /// One bar: the baseline's time as 100%, ours inside it as a share,
-    /// the speedup above; each row of groups on an axis of its own.
-    Relative,
-    /// Two bars side by side, each labelled with its time; every row on
-    /// one axis.
-    Nanos,
-}
 
 /// One cluster: a workload of a group, the baseline's time and ours.
 #[derive(Clone, PartialEq, Debug)]
@@ -38,11 +25,6 @@ pub(crate) struct BaselinePair {
 impl BaselinePair {
     fn speedup(&self) -> f64 {
         self.baseline_nanos / self.ours_nanos
-    }
-
-    /// Our time as a share of the baseline's.
-    fn relative_time(&self) -> f64 {
-        self.ours_nanos / self.baseline_nanos
     }
 }
 
@@ -97,7 +79,7 @@ struct PlacedGroup {
     cluster_count: usize,
 }
 
-/// One row of groups, an SVG of its own, with its own axis.
+/// One row of groups, an SVG of its own.
 #[derive(Clone, PartialEq, Debug, Default)]
 struct GroupRow {
     clusters: Vec<Cluster>,
@@ -105,15 +87,6 @@ struct GroupRow {
 }
 
 impl GroupRow {
-    /// The top of its axis: the baseline's 1, or more where ours ran
-    /// slower and reaches past it. A row's own, so that one slow row
-    /// doesn't flatten the others.
-    fn greatest(&self) -> f64 {
-        (self.clusters.iter())
-            .map(|cluster| cluster.pair.relative_time())
-            .fold(1.0, f64::max)
-    }
-
     /// How far below its usual place each group's name goes: a line down
     /// below two-line labels, up into their room where no cluster has one.
     fn name_drop(&self, step: f64) -> f64 {
@@ -128,10 +101,10 @@ impl GroupRow {
 }
 
 /// How the chart is laid out at a width, in steps: a cluster takes one, its
-/// bar half of it centered, its label the whole; a gap between groups
-/// takes half of one. Groups split into as few rows as keep a step wide
-/// enough for a two-word label, as evenly as they go, and the fullest row
-/// fills the width.
+/// two bars two thirds of it centered, its label the whole; a gap between
+/// groups takes half of one. Groups split into as few rows as keep a step
+/// wide enough for both bars' labels, as evenly as they go, and the
+/// fullest row fills the width.
 #[derive(Clone, PartialEq, Debug)]
 struct GroupLayout {
     width: f64,
@@ -146,19 +119,21 @@ impl GroupLayout {
     const BOTTOM: f64 = 93.0;
     /// The gap between groups, in steps.
     const GROUP_GAP: f64 = 0.5;
-    /// The layout at `width` for groups of `cluster_counts` clusters each,
-    /// drawn at `scale`.
-    fn at(width: f64, cluster_counts: &[usize], scale: BarScale) -> Self {
-        let (least_step, most_step) = Self::steps_for(scale);
+    /// The narrowest and widest step: room for both bars' labels.
+    const LEAST_STEP: f64 = 96.0;
+    const MOST_STEP: f64 = 140.0;
+
+    /// The layout at `width` for groups of `cluster_counts` clusters each.
+    fn at(width: f64, cluster_counts: &[usize]) -> Self {
         let room = Self::room(width);
         let total = Self::steps(cluster_counts);
         let mut layout = Self {
             width,
             row_lengths: vec![cluster_counts.len()],
-            step: (room / total).min(most_step),
+            step: (room / total).min(Self::MOST_STEP),
         };
         for row_count in 2..=cluster_counts.len() {
-            if layout.step >= least_step {
+            if layout.step >= Self::LEAST_STEP {
                 break;
             }
             let row_lengths = Self::split(cluster_counts, row_count);
@@ -173,21 +148,10 @@ impl GroupLayout {
             layout = Self {
                 width,
                 row_lengths,
-                step: (room / widest).min(most_step),
+                step: (room / widest).min(Self::MOST_STEP),
             };
         }
         layout
-    }
-
-    /// The narrowest and widest step at `scale`. One bar a cluster: close
-    /// together, a step as narrow as a label of two short lines allows
-    /// ("Index" over "lookup"). Two bars, each labelled with its time:
-    /// room for both labels.
-    fn steps_for(scale: BarScale) -> (f64, f64) {
-        match scale {
-            BarScale::Relative => (50.0, 64.0),
-            BarScale::Nanos => (96.0, 140.0),
-        }
     }
 
     /// The groups of `cluster_counts` in `row_count` rows, in order, each
@@ -222,12 +186,9 @@ impl GroupLayout {
         clusters as f64 + Self::GROUP_GAP * cluster_counts.len().saturating_sub(1) as f64
     }
 
-    /// A bar's width: most of a step for one bar, a third for each of two.
-    fn bar(&self, scale: BarScale) -> f64 {
-        match scale {
-            BarScale::Relative => self.step * 0.62,
-            BarScale::Nanos => self.step / 3.0,
-        }
+    /// A bar's width: a third of a step.
+    fn bar(&self) -> f64 {
+        self.step / 3.0
     }
 
     fn height(&self) -> f64 {
@@ -275,50 +236,34 @@ impl GroupLayout {
 #[component]
 pub(crate) fn BaselineBars(
     groups: Vec<BaselineGroup>,
-    scale: BarScale,
     /// What the chart shows, for screen readers.
     label: String,
-    /// A title and its subtitle over the chart, if it has one.
-    heading: Option<(String, String)>,
     spotlight: Spotlight,
 ) -> Element {
     let frame = FrameWidth::use_new();
     let width = frame.get();
     let counts: Vec<usize> = groups.iter().map(|group| group.pairs.len()).collect();
-    let layout = GroupLayout::at(width, &counts, scale);
+    let layout = GroupLayout::at(width, &counts);
     let rows = layout.rows(groups);
     let clusters: Vec<Cluster> = (rows.iter())
         .flat_map(|row| row.clusters.iter().cloned())
         .collect();
     let height = layout.height();
     let (top, left) = (GroupLayout::TOP, GroupLayout::LEFT);
-    let (step, bar) = (layout.step, layout.bar(scale));
-    // In nanoseconds, every row on the axis that holds the longest time.
+    let (step, bar) = (layout.step, layout.bar());
+    // Every row on the axis that holds the longest time.
     let longest = (clusters.iter())
         .map(|cluster| cluster.pair.baseline_nanos.max(cluster.pair.ours_nanos))
         .fold(0.0, f64::max);
-    // bbtree's bar, inside the baseline's, so that the baseline's shows
-    // around it.
-    let inset = (bar * 0.16).max(2.5);
+    let y = LinearScale::fitting(longest, (height - GroupLayout::BOTTOM, top));
+    let baseline = y.at(0.0);
     let mut spotlight = spotlight;
     rsx! {
         div { class: "chart-frame", onresize: move |resized| frame.measure(resized),
             if width > 0.0 {
                 figure { class: "chart-panel wide",
-                    if let Some((title, subtitle)) = heading {
-                        figcaption { class: "chart-title",
-                            strong { {title} }
-                            span { class: "chart-subtitle", {subtitle} }
-                        }
-                    }
                     for row in rows.iter() {
                         {
-                        let greatest = match scale {
-                            BarScale::Relative => row.greatest(),
-                            BarScale::Nanos => longest,
-                        };
-                        let y = LinearScale::fitting(greatest, (height - GroupLayout::BOTTOM, top));
-                        let baseline = y.at(0.0);
                         let drop = row.name_drop(step);
                         rsx! {
                         svg {
@@ -337,23 +282,14 @@ pub(crate) fn BaselineBars(
                                     y2: y.at(tick),
                                 }
                                 text { class: "chart-tick", x: left - 10.0, y: y.at(tick) + 4.0, text_anchor: "end",
-                                    match (scale, tick == 0.0) {
-                                        (BarScale::Relative, _) => format!("{:.0}%", tick * 100.0),
-                                        (BarScale::Nanos, true) => "0".to_string(),
-                                        (BarScale::Nanos, false) => Nanos(tick).to_string(),
-                                    }
+                                    if tick == 0.0 { "0" } else { "{Nanos(tick)}" }
                                 }
                             }
                             for cluster in row.clusters.iter() {
                                 {
                                     let measured = cluster.pair.clone();
-                                    let speedup = measured.speedup();
-                                    let relative = measured.relative_time();
                                     let center = cluster.x + step / 2.0;
-                                    let hint_title = match scale {
-                                        BarScale::Relative => format!("{} · {}: {speedup:.2}× faster", cluster.group, measured.workload),
-                                        BarScale::Nanos => cluster.group.clone(),
-                                    };
+                                    let hint_title = cluster.group.clone();
                                     let hint_body = format!(
                                         "{}\n{}: {}\n{}: {}",
                                         measured.detail,
@@ -364,17 +300,6 @@ pub(crate) fn BaselineBars(
                                     );
                                     // Two bars side by side, 4 apart, about the middle.
                                     let (theirs_x, ours_x) = (center - bar - 2.0, center + 2.0);
-                                    // The speedup just over bbtree's bar, in the dark bar
-                                    // around it, in its panel's color; over the dark bar,
-                                    // in ink, where the room between them is too short.
-                                    let over_ours = y.at(relative) - 6.0;
-                                    let inside = over_ours - 12.0 >= y.at(1.0) + 2.0;
-                                    let speedup_y = if inside { over_ours } else { y.at(relative.max(1.0)) - 8.0 };
-                                    let speedup_class = match (inside, speedup >= 1.0) {
-                                        (true, _) => "cluster-speedup inside",
-                                        (false, true) => "cluster-speedup",
-                                        (false, false) => "cluster-speedup slower",
-                                    };
                                     rsx! {
                                         g { class: "chart-cluster",
                                             onmouseenter: move |evt| {
@@ -393,45 +318,21 @@ pub(crate) fn BaselineBars(
                                                 width: step,
                                                 height: baseline - top + 20.0,
                                             }
-                                            match scale {
-                                                BarScale::Relative => rsx! {
-                                                    path {
-                                                        class: "grow-y",
-                                                        style: "fill:var(--theirs-1);--grow:{y.growth_ms(1.0)}ms",
-                                                        d: y.column_path(center - bar / 2.0, bar, 1.0),
-                                                    }
-                                                    path {
-                                                        class: "chart-bar ours grow-y",
-                                                        style: "fill:var(--ours);--grow:{y.growth_ms(relative)}ms",
-                                                        d: y.inset_column_path(center - bar / 2.0, bar, relative, inset),
-                                                    }
-                                                    text {
-                                                        class: "{speedup_class} lands",
-                                                        style: "--grow:{y.growth_ms(relative)}ms",
-                                                        x: center,
-                                                        y: speedup_y,
-                                                        text_anchor: "middle",
-                                                        "{speedup:.1}×"
-                                                    }
-                                                },
-                                                BarScale::Nanos => rsx! {
-                                                    path {
-                                                        class: "grow-y",
-                                                        style: "fill:var(--theirs-1);--grow:{y.growth_ms(measured.baseline_nanos)}ms",
-                                                        d: y.column_path(theirs_x, bar, measured.baseline_nanos),
-                                                    }
-                                                    text { class: "cluster-value lands", style: "--grow:{y.growth_ms(measured.baseline_nanos)}ms", x: theirs_x + bar / 2.0, y: y.at(measured.baseline_nanos) - 6.0, text_anchor: "middle",
-                                                        "{Nanos(measured.baseline_nanos)}"
-                                                    }
-                                                    path {
-                                                        class: "chart-bar ours grow-y",
-                                                        style: "fill:var(--ours);--grow:{y.growth_ms(measured.ours_nanos)}ms",
-                                                        d: y.column_path(ours_x, bar, measured.ours_nanos),
-                                                    }
-                                                    text { class: "cluster-value ours lands", style: "--grow:{y.growth_ms(measured.ours_nanos)}ms", x: ours_x + bar / 2.0, y: y.at(measured.ours_nanos) - 6.0, text_anchor: "middle",
-                                                        "{Nanos(measured.ours_nanos)}"
-                                                    }
-                                                },
+                                            path {
+                                                class: "grow-y",
+                                                style: "fill:var(--theirs-1);--grow:{y.growth_ms(measured.baseline_nanos)}ms",
+                                                d: y.column_path(theirs_x, bar, measured.baseline_nanos),
+                                            }
+                                            text { class: "cluster-value lands", style: "--grow:{y.growth_ms(measured.baseline_nanos)}ms", x: theirs_x + bar / 2.0, y: y.at(measured.baseline_nanos) - 6.0, text_anchor: "middle",
+                                                "{Nanos(measured.baseline_nanos)}"
+                                            }
+                                            path {
+                                                class: "chart-bar ours grow-y",
+                                                style: "fill:var(--ours);--grow:{y.growth_ms(measured.ours_nanos)}ms",
+                                                d: y.column_path(ours_x, bar, measured.ours_nanos),
+                                            }
+                                            text { class: "cluster-value ours lands", style: "--grow:{y.growth_ms(measured.ours_nanos)}ms", x: ours_x + bar / 2.0, y: y.at(measured.ours_nanos) - 6.0, text_anchor: "middle",
+                                                "{Nanos(measured.ours_nanos)}"
                                             }
                                             if !measured.workload.is_empty() {
                                                 text { class: "cluster-label", x: center, y: baseline + 16.0, text_anchor: "middle",
@@ -477,7 +378,7 @@ pub(crate) fn BaselineBars(
                                         th { scope: "row", {cluster.group.clone()} }
                                         td { "{cluster.pair.workload}: {cluster.pair.detail}" }
                                         td { "{cluster.pair.baseline}: {Nanos(cluster.pair.baseline_nanos)}" }
-                                        td { "{cluster.pair.ours}: {Nanos(cluster.pair.ours_nanos)}, {cluster.pair.relative_time() * 100.0:.0}%" }
+                                        td { "{cluster.pair.ours}: {Nanos(cluster.pair.ours_nanos)}" }
                                         td { "{cluster.pair.speedup():.2}×" }
                                     }
                                 }
@@ -520,31 +421,25 @@ mod tests {
     fn groups_split_evenly_into_rows_that_fit() {
         let counts = [3, 4, 3, 3, 4];
         let groups = || (counts.iter().enumerate()).map(|(index, n)| group(&index.to_string(), *n));
-        // A desk: one row of narrow steps.
-        let desk = GroupLayout::at(1060.0, &counts, BarScale::Relative);
-        assert_eq!(desk.row_lengths, vec![5]);
+        // A desk: as few rows as keep a step wide enough, split evenly.
+        let desk = GroupLayout::at(1060.0, &counts);
+        assert_eq!(desk.row_lengths, vec![2, 2, 1]);
+        assert!(desk.step >= GroupLayout::LEAST_STEP);
         let rows = desk.rows(groups().collect());
-        let end = ends(&rows)[0];
-        assert!(end <= 1060.0 - 8.0 + 0.5, "the row ends at {end}");
+        for end in ends(&rows) {
+            assert!(end <= 1060.0 - 8.0 + 0.5, "a row ends at {end}");
+        }
         // A phone: a group a row, none past the edge.
-        let phone = GroupLayout::at(350.0, &counts, BarScale::Relative);
+        let phone = GroupLayout::at(350.0, &counts);
         assert_eq!(phone.row_lengths, vec![1; 5]);
         for end in ends(&phone.rows(groups().collect())) {
             assert!(end <= 350.0 - 8.0 + 0.5, "a group ends at {end}");
         }
-        // Two bars a cluster want wider steps: five machines of one
-        // cluster each fit a desk's row, a phone's two.
+        // Five machines of one cluster each fit a desk's row, a phone's
+        // three.
         let machines = [1; 5];
-        assert_eq!(
-            GroupLayout::at(1060.0, &machines, BarScale::Nanos).row_lengths,
-            vec![5]
-        );
-        assert_eq!(
-            GroupLayout::at(350.0, &machines, BarScale::Nanos)
-                .row_lengths
-                .len(),
-            3
-        );
+        assert_eq!(GroupLayout::at(1060.0, &machines).row_lengths, vec![5]);
+        assert_eq!(GroupLayout::at(350.0, &machines).row_lengths.len(), 3);
         // A two-word label too wide for its step takes two lines.
         let cluster = &rows[0].clusters[0];
         let mut wide = cluster.clone();

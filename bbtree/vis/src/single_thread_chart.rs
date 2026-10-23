@@ -104,7 +104,7 @@ pub(crate) fn SingleThreadChart(measurements: Rc<Measurements>, spotlight: Spotl
             }
         }
         p { class: "chart-note",
-            "Mean time per operation, one thread, 10M entries; lower is better. Get: half hits, half misses. Scan: 100 entries in order. Batched: get_many_copied, 64 keys a call; insert_many, 16. scc TreeIndex and concurrent-map are concurrent maps, used from one thread. std's HashMap keeps no order, so it can't scan. {machine.name} ({machine.detail})."
+            "Mean time per operation, one thread, 10M entries; lower is better. Get: half hits, half misses. Scan: 100 entries in order. Batched: get_many_copied, 64 keys a call; insert_many, 16. scc TreeIndex and concurrent-map are concurrent maps, used from one thread. std's HashMap keeps no order, so it can't scan. It stands in for DashMap, the other cards' hash map, which is std's hash table split into shards, each behind a lock. {machine.name} ({machine.detail})."
             RepositoryLinks { links }
         }
     }
@@ -219,7 +219,7 @@ fn TimePanel(
                                 if let Some(nanos) = row.nanos {
                                     if !ordered {
                                         text { class: "chart-row-note", x: label + 4.0, y: bar_top + BAR + 11.0,
-                                            "unordered, no scans"
+                                            "unordered"
                                         }
                                     }
                                     path {

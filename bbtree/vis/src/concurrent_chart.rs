@@ -141,7 +141,7 @@ pub(crate) fn ConcurrentChart(spotlight: Spotlight) -> Element {
             }
         }
         p { class: "chart-note",
-            "All threads together, 10M entries; higher is better. A thread a core. "
+            "All threads together, 10M entries; higher is better. A thread a core. DashMap is std's hash table (the Single thread card's HashMap) split into shards, each behind a lock. "
             match operation() {
                 MeasuredOperation::Get => "Get: half hits, half misses; batched: get_many_copied, 64 keys a call. ",
                 MeasuredOperation::Mixed => "90% lookups, 10% updates. ",

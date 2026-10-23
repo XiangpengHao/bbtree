@@ -137,27 +137,7 @@ impl LinearScale {
     /// `left`: square at the baseline, its top rounded by 4 units, or less
     /// for a column too short.
     pub(crate) fn column_path(&self, left: f64, width: f64, value: f64) -> String {
-        self.column_between(left, width, self.at(0.0), self.at(value))
-    }
-
-    /// The SVG path of a column up to `value` inside the column from `left`
-    /// `width` wide: `inset` in from its sides and its bottom, so that the
-    /// outer one shows around it.
-    pub(crate) fn inset_column_path(
-        &self,
-        left: f64,
-        width: f64,
-        value: f64,
-        inset: f64,
-    ) -> String {
-        let top = self.at(value).min(self.at(0.0) - inset);
-        self.column_between(left + inset, width - 2.0 * inset, self.at(0.0) - inset, top)
-    }
-
-    /// The SVG path of a column between two positions, `bottom` below
-    /// `top`: square at the bottom, its top rounded by 4 units, or less
-    /// for a column too short.
-    fn column_between(&self, left: f64, width: f64, bottom: f64, top: f64) -> String {
+        let (bottom, top) = (self.at(0.0), self.at(value));
         let radius = (bottom - top).min(width / 2.0).clamp(0.0, 4.0);
         let right = left + width;
         format!(

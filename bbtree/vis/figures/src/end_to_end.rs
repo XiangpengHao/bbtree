@@ -1,9 +1,10 @@
-//! The end-to-end results again, inside "What it can do?": real systems,
-//! before and after one of their maps became bbtree, on their own
-//! benchmarks, on one thread, the runs the post's End to End card shows
-//! (`vis/data/9900x-20261017/integrations.csv`). A row a workload, grouped
-//! by system: the time as shipped, dark, as 100%, bbtree's inside it,
-//! bright, as a share of it, and the speedup at the row's end.
+//! The end-to-end results again, inside "What can it do?", a figure a case:
+//! the systems it names, before and after one of their maps became bbtree,
+//! on their own benchmarks, on one thread, the runs the post's End to End
+//! card shows (`vis/data/9900x-20261017/integrations.csv`). A row a
+//! workload, grouped by system: the time as shipped, dark, as 100%,
+//! bbtree's inside it, bright, as a share of it, and the speedup at the
+//! row's end.
 
 use std::fs;
 use std::io;
@@ -39,8 +40,8 @@ impl EndToEnd {
     const ROW: f64 = 24.0;
     const BAR: f64 = 16.0;
 
-    /// The systems' one-thread rows, in the order of the CSV.
-    pub(crate) fn read(csv: &Path) -> io::Result<Self> {
+    /// The one-thread rows of the systems named, in the order of the CSV.
+    pub(crate) fn read(csv: &Path, names: &[&str]) -> io::Result<Self> {
         let text = fs::read_to_string(csv)?;
         let mut systems: Vec<System> = Vec::new();
         for line in text.lines().skip(1) {
@@ -53,6 +54,9 @@ impl EndToEnd {
             let (Ok(shipped_nanos), Ok(bbtree_nanos)) = (shipped.parse(), bbtree.parse()) else {
                 continue;
             };
+            if !names.contains(&system) {
+                continue;
+            }
             if systems.last().is_none_or(|last| last.name != system) {
                 systems.push(System {
                     name: system.to_string(),
@@ -97,7 +101,7 @@ impl EndToEnd {
         motion.appear("lands", 0.95);
         svg.style(
             ".bar { transform-box: fill-box; transform-origin: left center; } \
-             .shipped { fill: var(--theirs-1); } \
+             .shipped { fill: var(--shipped); } \
              .ours { fill: var(--marker); stroke: var(--marker-strong); stroke-width: 1.5; } \
              .swatch-label { fill: var(--graphite); }",
         );
@@ -159,7 +163,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_each_systems_one_thread_rows_in_order() {
+    fn reads_the_named_systems_one_thread_rows_in_order() {
         let csv = std::env::temp_dir().join(format!("end-to-end-{}.csv", std::process::id()));
         fs::write(
             &csv,
@@ -167,10 +171,11 @@ mod tests {
              fjall,Lookup,get,1,crossbeam SkipMap,900,bbtree,300\n\
              fjall,Lookup,get,8,crossbeam SkipMap,100,bbtree,50\n\
              fjall,Insert,insert,1,crossbeam SkipMap,600,bbtree,400\n\
+             Turso,Lookup,select,1,crossbeam SkipMap,2000,bbtree,1700\n\
              Lance,Lookup,get,1,arena skiplist,2000,bbtree,1000\n",
         )
         .unwrap();
-        let chart = EndToEnd::read(&csv).unwrap();
+        let chart = EndToEnd::read(&csv, &["Lance", "fjall"]).unwrap();
         fs::remove_file(&csv).unwrap();
         let names: Vec<(&str, usize)> = (chart.systems.iter())
             .map(|system| (system.name.as_str(), system.workloads.len()))

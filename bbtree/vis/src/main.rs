@@ -35,6 +35,7 @@ mod path_tree;
 mod performance_cards;
 mod popover;
 mod post;
+mod post_figure;
 mod query_key;
 mod repository_links;
 mod rust_code;

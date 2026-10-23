@@ -1,4 +1,4 @@
-//! The figure of "Case 2: bbtree-mmap": the time from a restart to a map's
+//! The figure of "Case 3: bbtree-mmap": the time from a restart to a map's
 //! first answer, its 10M `u64` entries on disk. std's `BTreeMap` reads
 //! them back and rebuilds itself; a `BBTreeMapFile` maps its file and
 //! looks the key up where it lies. From bbtree-mmap's `first_query`
