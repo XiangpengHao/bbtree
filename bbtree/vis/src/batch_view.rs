@@ -225,6 +225,7 @@ fn BatchBoard(
                 run: run.clone(),
                 keys,
                 now,
+                playing,
                 pointed,
                 batcher,
                 tracer,
@@ -261,7 +262,7 @@ fn BatchHeadline(
     spotlight: Spotlight,
 ) -> Element {
     let lanes = run.lanes().len();
-    let at_end = now().is_some_and(|now| now + 1 == run.polls().len()) && !playing();
+    let at_end = run.played_out(now(), playing());
     rsx! {
         div { class: "batch-headline",
             div {

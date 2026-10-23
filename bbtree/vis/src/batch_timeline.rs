@@ -84,6 +84,7 @@ pub(crate) fn CoreTurns(
     keys: BatchKeys,
     /// The turn running, or last run.
     now: Signal<Option<usize>>,
+    playing: Signal<bool>,
     pointed: Signal<Option<usize>>,
     batcher: Batcher,
     tracer: Tracer,
@@ -121,8 +122,11 @@ pub(crate) fn CoreTurns(
     };
     let layout = (width > 0.0).then(|| TurnsLayout::of(&run, width, keys_width));
     let lit = pointed();
-    // Each key's chip: on the core, looked up, or neither.
-    let on_core = now().map(|turn| run.polls()[turn].lane());
+    // Each key's chip: on the core, looked up, or neither; played out, the
+    // last turn's key is off the core.
+    let on_core = now()
+        .filter(|_| !run.played_out(now(), playing()))
+        .map(|turn| run.polls()[turn].lane());
     let states: Vec<&'static str> = run
         .moments(None, now())
         .iter()

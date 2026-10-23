@@ -121,6 +121,12 @@ impl BatchRun {
         self.polls.len() as f64
     }
 
+    /// Whether the batch has played out: stopped on its last poll, which no
+    /// key runs any more.
+    pub(crate) fn played_out(&self, now: Option<usize>, playing: bool) -> bool {
+        !playing && now.is_some_and(|now| now + 1 == self.polls.len())
+    }
+
     /// When poll `index`'s fetch goes out.
     pub(crate) fn fetched_at(&self, index: usize) -> f64 {
         self.start(index) + Self::FETCH_AT
