@@ -148,7 +148,21 @@ fn Reviewers() -> Element {
     rsx! {
         SectionHeading { heading: PostHeading::Reviewers }
         p {
-            "TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here."
+            "Thanks to "
+            a { href: "https://andrew.nerdnetworks.org/", target: "_blank", rel: "noopener", "Andrew Lamb" }
+            " (InfluxData), "
+            a { href: "https://github.com/zfarrell", target: "_blank", rel: "noopener", "Zac Farrell" }
+            " (Hotdata), "
+            a { href: "https://eddietejeda.com/", target: "_blank", rel: "noopener", "Eddie Tejeda" }
+            " (Hotdata), "
+            a { href: "https://www.linkedin.com/in/divs1101/", target: "_blank", rel: "noopener", "Divya Ranganathan" }
+            " (Hotdata), "
+            a { href: "https://jacopotagliabue.it/", target: "_blank", rel: "noopener", "Jacopo Tagliabue" }
+            " (bauplan), "
+            a { href: "https://shawnzhong.com", target: "_blank", rel: "noopener", "Wanxiang Zhong" }
+            " and "
+            a { href: "https://github.com/MikeWalrus", target: "_blank", rel: "noopener", "Junxuan Liao" }
+            " for reviewing this post."
         }
     }
 }
