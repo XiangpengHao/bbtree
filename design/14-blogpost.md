@@ -400,7 +400,7 @@ Conventional approaches still apply here:
 
 ## Reviewers of this post
 
-TODO: plan to ask friends and one person from each of the end-to-end benchmarks to review the post. Ask if they are willing to put their name here.
+Thanks to [Andrew Lamb](https://andrew.nerdnetworks.org/) (InfluxData), [Zac Farrell](https://github.com/zfarrell) (Hotdata), [Eddie Tejeda](https://eddietejeda.com/) (Hotdata), [Divya Ranganathan](https://www.linkedin.com/in/divs1101/) (Hotdata), [Jacopo Tagliabue](https://jacopotagliabue.it/) (bauplan), [Wanxiang Zhong](https://shawnzhong.com) and [Junxuan Liao](https://github.com/MikeWalrus) for reviewing this post.
 
 [^ostp]: Not more complicated than an operating system! Remzi H. Arpaci-Dusseau and Andrea C. Arpaci-Dusseau, [Operating Systems: Three Easy Pieces](https://pages.cs.wisc.edu/~remzi/OSTEP/) (2016).
 
