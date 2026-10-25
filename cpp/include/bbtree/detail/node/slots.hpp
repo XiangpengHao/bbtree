@@ -343,7 +343,7 @@ class KeyColumns {
   /// search masks out every slot outside its candidates (invariant 5).
   void mark_vacant(std::size_t from, std::size_t to) const noexcept {
     if constexpr (Kind::has_inline_keys) {
-      for (std::size_t index = from; index < to; ++index) inline_key_slots()[index] = ~Word{0};
+      for (std::size_t index = from; index < to; ++index) inline_key_slots()[index] = static_cast<Word>(~Word{0});
     }
   }
 
