@@ -20,31 +20,35 @@
 namespace bbtree::detail {
 
 /// How a leaf is latched: shared, exclusive, or not at all (read at a
-/// version, checked after).
+/// version, checked after). `Held` is what letting go needs, as Rust's
+/// `LatchMode::Held`: nothing for a shared hold, the version otherwise.
 struct SharedMode {
+  struct Held {};
   static constexpr bool latches = true;
-  static Version lock(NodeLatch& latch) noexcept {
+  static Held lock(NodeLatch& latch) noexcept {
     latch.lock_shared();
-    return Version(0);
+    return Held{};
   }
-  static void unlock(NodeLatch& latch, Version) noexcept { latch.unlock_shared(); }
-  static bool is_unchanged(NodeLatch&, Version) noexcept { return true; }
+  static void unlock(NodeLatch& latch, Held) noexcept { latch.unlock_shared(); }
+  static bool is_unchanged(NodeLatch&, Held) noexcept { return true; }
 };
 
 struct ExclusiveMode {
+  using Held = Version;
   static constexpr bool latches = true;
-  static Version lock(NodeLatch& latch) noexcept { return latch.lock_exclusive(); }
-  static void unlock(NodeLatch& latch, Version version) noexcept { latch.unlock_exclusive(version); }
-  static bool is_unchanged(NodeLatch&, Version) noexcept { return true; }
+  static Held lock(NodeLatch& latch) noexcept { return latch.lock_exclusive(); }
+  static void unlock(NodeLatch& latch, Held version) noexcept { latch.unlock_exclusive(version); }
+  static bool is_unchanged(NodeLatch&, Held) noexcept { return true; }
 };
 
 /// Not latched: the leaf is read in place at the version it was at, which
 /// the reader checks after (`lookup.rs`). A miss settled so writes nothing.
 struct OptimisticMode {
+  using Held = Version;
   static constexpr bool latches = false;
-  static Version lock(NodeLatch& latch) noexcept { return latch.read_version(); }
-  static void unlock(NodeLatch&, Version) noexcept {}
-  static bool is_unchanged(NodeLatch& latch, Version version) noexcept {
+  static Held lock(NodeLatch& latch) noexcept { return latch.read_version(); }
+  static void unlock(NodeLatch&, Held) noexcept {}
+  static bool is_unchanged(NodeLatch& latch, Held version) noexcept {
     return latch.is_unchanged(version);
   }
 };
@@ -55,7 +59,7 @@ class HeldLeaf {
  public:
   using LeafNode = Leaf<K, V, S>;
 
-  HeldLeaf() noexcept : leaf_(), held_(0), owns_(false) {}
+  HeldLeaf() noexcept : leaf_(), held_(), owns_(false) {}
 
   /// Latches `leaf`, waiting for the other mode's holders.
   static HeldLeaf lock(LeafNode leaf) noexcept {
@@ -90,7 +94,7 @@ class HeldLeaf {
   bool holds() const noexcept { return owns_; }
   LeafNode leaf() const noexcept { return leaf_; }
   /// The version the leaf was read at, optimistically.
-  Version version() const noexcept { return held_; }
+  typename Mode::Held version() const noexcept { return held_; }
 
   /// Whether the leaf is still as the descent found it.
   bool is_unchanged() const noexcept { return Mode::is_unchanged(leaf_.node_ptr().latch(), held_); }
@@ -105,10 +109,10 @@ class HeldLeaf {
 
  private:
   LeafNode leaf_;
-  Version held_;
+  typename Mode::Held held_;
   bool owns_;
 
-  HeldLeaf(LeafNode leaf, Version held) noexcept : leaf_(leaf), held_(held), owns_(true) {}
+  HeldLeaf(LeafNode leaf, typename Mode::Held held) noexcept : leaf_(leaf), held_(held), owns_(true) {}
 };
 
 /// An internal node a descent went through, at the version it read, and
