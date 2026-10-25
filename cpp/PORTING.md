@@ -130,10 +130,21 @@ Shared map, millions of operations per second (higher is better):
 | 10M u64 get_copied at 1 / 4 / 8 threads | 8.4 / 33.6–34.3 / 61.7–66.0 | 8.4–8.8 / 34.1–34.8 / 53.5–63.3 |
 | 10M u64 batch_get_hit, 1 thread | 17.5–17.7 | 18.0 |
 | 10M u64 batch_get_hit, 8 threads | 117.2–134.7 | 113.1–126.0 |
-| 10M u64 batch_get_hit, instructions / cycles per key, 1 thread | 752 / 221 | 736 / 221 |
-| 10M u64 get_copied / setup and insert, instructions per op, 1 thread | 424 / 674 | 445 / 731 |
+| 10M u64 batch_get_hit, instructions / cycles per key, 1 thread | 752 / 221 | 734 / 221 |
+| 10M u64 get_copied, instructions per op, 1 thread | 424 | 443 |
 
-The 8-thread batch row predates the fixes below.
+Shared inserts, counted per insert by `/usr/bin/time -l` over every
+thread, key setup (31–35 instructions) taken out. These counts hold still
+while other load moves wall-clock throughput by ±15%; the cycles move by
+about 2% from run to run.
+
+| instructions / cycles per insert | Rust | C++ |
+|---|--:|--:|
+| 1 thread | 641 / 915 | 659 / 927 |
+| 4 threads | 647 / 922 | 665 / 949 |
+| 8 threads | 660 / 1029 | 683 / 1042 |
+
+The throughput rows predate the fixes below.
 
 - **Spinning waits with `isb`, as Rust's `spin_loop` does on Arm.** C++
   spun on `yield`, which waits for nothing on Apple cores: a thread waiting
@@ -151,10 +162,23 @@ The 8-thread batch row predates the fixes below.
   the steps read a lane's fields before the fence, and the level loop keeps
   its count and lane index in locals: 52 fewer instructions per key, 20
   fewer cycles.
+- **Shared inserts inline into their caller, as Rust's do.** They ran 62
+  more instructions per insert than Rust's, on one thread as on eight: a
+  per-insert cost, not contention. Single-stepping 90 inserts of each map
+  under lldb, every instruction attributed to its inlined function and
+  line, found the excess: `BBTreeMap::insert` called out of line, saving
+  and restoring 13 registers and checking the stack protector on every
+  insert (24 instructions); the descent's `std::optional<Descent>`, moved
+  out and destroyed (5); `LatchedTree::insert` out of line (6); and the
+  separator flag, a `bool` read back from the register the out-of-line tie
+  search returns it in, converted on each level (9). The map's inserts and
+  `LatchedTree::insert` are force-inlined now, the descent fills the
+  caller's `Descent`, and `Routed::at_separator` is a byte the descent ORs
+  into its own.
 
 Open:
 
-- Shared inserts at 4 and 8 threads: not measured on a quiet machine since
-  the spin fix.
-- Single-key shared inserts run 57 more instructions per op than Rust's,
-  gets 21 more; time is at parity on one thread.
+- Shared inserts run 18–23 more instructions than Rust's, within 1–3% of
+  its cycles; gets 19 more instructions, at parity in time. Measured by
+  counts only: wall-clock throughput at 4 and 8 threads still wants a quiet
+  machine.

@@ -136,7 +136,7 @@ class LatchedBatch {
     Ptr child;
     Version version;
     Stage stage;
-    bool at_separator;
+    std::uint8_t at_separator;  // 0 or 1, ORed from `Routed`'s as it comes
     bool at_root;
     std::uint16_t index;
     std::uint16_t prefix_len;
@@ -168,7 +168,7 @@ class LatchedBatch {
     const std::size_t prefix_len = node.node_ptr().load_racing_header().second;
     for (std::size_t lane = 0; lane < count; ++lane) {
       search_keys.emplace(lane, keys[lane]);
-      lanes[lane] = Lane<Q>{node, Ptr(), version, Stage::Route, false, true, 0, 0};
+      lanes[lane] = Lane<Q>{node, Ptr(), version, Stage::Route, 0, true, 0, 0};
       if (shared && shared->place_outside(search_keys[lane])) {
         // Outside every key, if the root vouches for the prefix read.
         lanes[lane].stage = node.node_ptr().latch().is_unchanged(version) ? Stage::Done : Stage::Fallback;
@@ -561,7 +561,7 @@ class LatchedBatch {
         destinations[lane] = Destination{LeafNode(), Version(0), false, state.stage == Stage::Leaf};
         if (!destinations[lane].valid) continue;
         const LeafNode leaf = LeafNode::at(state.child);
-        destinations[lane] = Destination{leaf, state.version, state.at_separator, true};
+        destinations[lane] = Destination{leaf, state.version, state.at_separator != 0, true};
         // The insertion shifts the entries from there: hint that line.
         Prefetcher::hint(Race::insertion_line(leaf, search_keys[lane]));
       }

@@ -29,7 +29,9 @@ namespace bbtree::detail {
 /// Where a key goes from an internal node read optimistically: down `edge`,
 /// with the node's `len` as read; `at_separator` if the key equals separator
 /// `edge - 1`, whose entry is the head of the leftmost leaf below (D17).
-/// 12 bytes, so that `std::optional<Routed>` returns in registers.
+/// 12 bytes, so that `std::optional<Routed>` returns in registers;
+/// `at_separator` a byte, 0 or 1, that a descent ORs into its own without
+/// converting it from the register it came back in, as a `bool` would.
 struct Routed {
   Routed() = default;
   Routed(std::size_t edge, bool at_separator, std::size_t len) noexcept
@@ -37,7 +39,7 @@ struct Routed {
 
   std::uint32_t edge;
   std::uint32_t len;
-  bool at_separator;
+  std::uint8_t at_separator;
 };
 
 /// A copy of a value of type `T`, read as bytes from a slot a writer may be

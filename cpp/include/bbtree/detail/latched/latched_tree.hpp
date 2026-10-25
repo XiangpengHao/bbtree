@@ -202,8 +202,8 @@ class LatchedTree {
   /// allocator has no page to give, the tree is unchanged, and the entry
   /// comes back.
   template <class Policy, class A>
-  InsertOutcome<typename Policy::Output, K, V> insert(K&& key, V&& value, Policy policy,
-                                                      A& alloc) const noexcept {
+  BBTREE_ALWAYS_INLINE InsertOutcome<typename Policy::Output, K, V> insert(K&& key, V&& value, Policy policy,
+                                                                           A& alloc) const noexcept {
     using Outcome = InsertOutcome<typename Policy::Output, K, V>;
     if (!has_root()) {
       Layout refused{0, 0};
@@ -396,23 +396,25 @@ class LatchedTree {
   /// internal nodes the descent went through.
   template <class Mode, class P, class Q>
   BBTREE_ALWAYS_INLINE Descent<Mode> descend(const SearchKey<K, Q>& key, P& path) const noexcept {
-    for (;;) {
-      std::optional<Descent<Mode>> descent = try_descend<Mode>(key, path);
-      if (descent) return std::move(*descent);
+    Descent<Mode> descent;
+    while (!try_descend<Mode>(key, path, descent)) {
     }
+    return descent;
   }
 
-  /// One try of `descend`; `nullopt` to start over.
+  /// One try of `descend`, into `descent`; false to start over. Filling the
+  /// caller's descent rather than returning an optional one spares a move
+  /// and a destructor of the latch it holds on every descent.
   template <class Mode, class P, class Q>
-  BBTREE_ALWAYS_INLINE std::optional<Descent<Mode>> try_descend(const SearchKey<K, Q>& key,
-                                                                P& path) const noexcept {
+  BBTREE_ALWAYS_INLINE bool try_descend(const SearchKey<K, Q>& key, P& path,
+                                        Descent<Mode>& descent) const noexcept {
     path.clear();
     const Root root_page = this->root_page();
     const AnyNode root = root_page.node();
     if (root.is_leaf()) {
       Held<Mode> held = Held<Mode>::lock(root.leaf());
       // A split that raised the tree changed the tag first.
-      if (!is_root(root.leaf())) return std::nullopt;
+      if (!is_root(root.leaf())) return false;
       std::optional<Ordering> outside;
       if constexpr (Mode::latches) {
         outside = root_page.shared_prefix().place_outside(key);
@@ -420,45 +422,52 @@ class LatchedTree {
         if (const std::optional<SharedPrefix> shared = root_page.load_racing_shared_prefix()) {
           outside = shared->place_outside(key);
         }
-        if (!held.is_unchanged()) return std::nullopt;
+        if (!held.is_unchanged()) return false;
       }
-      if (outside) return Descent<Mode>{Held<Mode>(), false, outside};
-      return Descent<Mode>{std::move(held), false, std::nullopt};
+      if (outside) {
+        descent.outside = outside;
+        return true;
+      }
+      descent.held = std::move(held);
+      return true;
     }
     InternalNode node = root.internal();
     Version version(0);
-    if (!root_version(node, version)) return std::nullopt;
+    if (!root_version(node, version)) return false;
     if (const std::optional<SharedPrefix> shared = root_page.load_racing_shared_prefix()) {
       if (const std::optional<Ordering> outside = shared->place_outside(key)) {
-        if (!node.node_ptr().latch().is_unchanged(version)) return std::nullopt;
-        return Descent<Mode>{Held<Mode>(), false, outside};
+        if (!node.node_ptr().latch().is_unchanged(version)) return false;
+        descent.outside = outside;
+        return true;
       }
     }
-    bool at_separator = false;
+    std::uint8_t at_separator = 0;
     bool at_root = true;
     for (;;) {
       const std::optional<Routed> routed = Race::route(node, key, version);
-      if (!routed) return std::nullopt;
+      if (!routed) return false;
       const Ptr child = Race::child(node, routed->edge);
-      if (child.is_null()) return std::nullopt;
+      if (child.is_null()) return false;
       // An edge read from the root page is followed only once the root's
       // version vouches for it: the page may hold a leaf now.
-      if (at_root && !node.node_ptr().latch().is_unchanged(version)) return std::nullopt;
+      if (at_root && !node.node_ptr().latch().is_unchanged(version)) return false;
       at_root = false;
       at_separator |= routed->at_separator;
       path.record(node, version, *routed);
       if (child.is_leaf()) {
         const LeafNode leaf = LeafNode::at(child);
         Held<Mode> held = Held<Mode>::lock(leaf);
-        if (!node.node_ptr().latch().is_unchanged(version)) return std::nullopt;
+        if (!node.node_ptr().latch().is_unchanged(version)) return false;
         // The separator matched above may have been removed since, its
         // successor the head now; an unlatched caller checks itself.
-        if (Mode::latches && at_separator && !is_head(leaf, key)) return std::nullopt;
-        return Descent<Mode>{std::move(held), at_separator, std::nullopt};
+        if (Mode::latches && at_separator && !is_head(leaf, key)) return false;
+        descent.held = std::move(held);
+        descent.at_separator = at_separator != 0;
+        return true;
       }
       const InternalNode next = InternalNode::at(child);
       const Version next_version = next.node_ptr().latch().read_version();
-      if (!node.node_ptr().latch().is_unchanged(version)) return std::nullopt;
+      if (!node.node_ptr().latch().is_unchanged(version)) return false;
       node = next;
       version = next_version;
     }

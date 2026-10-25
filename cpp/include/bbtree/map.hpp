@@ -94,7 +94,7 @@ class BBTreeMap {
   /// Inserts `key` and `value`; if an equal key is there, keeps it, replaces
   /// the value and returns the old one. If the allocator has no page to give,
   /// the map is unchanged and the entry comes back.
-  InsertOutcome<std::optional<V>, K, V> insert(K key, V value) const noexcept {
+  BBTREE_ALWAYS_INLINE InsertOutcome<std::optional<V>, K, V> insert(K key, V value) const noexcept {
     return update_or_insert(std::move(key), std::move(value), [](const K&, V& stored, V&& value) {
       V old = std::move(stored);
       stored = std::move(value);
@@ -106,7 +106,7 @@ class BBTreeMap {
   /// while its leaf is latched exclusively, and returns what `f` returned; or
   /// inserts `key` and `value` if there is none, and returns `nullopt`.
   template <class F>
-  auto update_or_insert(K key, V value, F f) const noexcept {
+  BBTREE_ALWAYS_INLINE auto update_or_insert(K key, V value, F f) const noexcept {
     return tree_.insert(std::move(key), std::move(value), detail::UpdateOrInsert<K, V, F>{std::move(f)},
                         alloc_);
   }
@@ -114,7 +114,7 @@ class BBTreeMap {
   /// Runs `f(key, value)` on the entry, inserting `key` and `value` first if
   /// there is none, while its leaf is latched exclusively.
   template <class F>
-  auto get_or_insert(K key, V value, F f) const noexcept {
+  BBTREE_ALWAYS_INLINE auto get_or_insert(K key, V value, F f) const noexcept {
     return tree_.insert(std::move(key), std::move(value), detail::ReadOrInsert<K, V, F>{std::move(f)},
                         alloc_);
   }
