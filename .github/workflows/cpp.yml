@@ -1,0 +1,148 @@
+# The C++17 port (cpp/): its tests on every architecture and SIMD path it
+# has, and under the sanitizers. Named for its README badge.
+#
+# Not yet here: GCC with libstdc++, whose std::string the map refuses as a
+# key (cpp/PORTING.md, P2) and the tests still use.
+name: cpp
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64: baseline (SSE2, no POPCNT), then AVX2 with BMI2 and
+          # POPCNT, then AVX-512, which runs only where the runner has it.
+          - name: linux x86_64 sse2
+            runner: ubuntu-24.04
+            flags: -stdlib=libc++ -march=x86-64
+          - name: linux x86_64 avx2
+            runner: ubuntu-24.04
+            flags: -stdlib=libc++ -march=x86-64-v3
+          - name: linux x86_64 avx512
+            runner: ubuntu-24.04
+            flags: -stdlib=libc++ -march=x86-64-v4
+            needs_cpu: avx512bw
+          # Arm: NEON.
+          - name: linux aarch64
+            runner: ubuntu-24.04-arm
+            flags: -stdlib=libc++
+          # Apple's chips and allocator, and Intel Macs.
+          - name: macos arm64
+            runner: macos-latest
+            flags: ""
+          - name: macos x86_64
+            runner: macos-15-intel
+            flags: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and libc++
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build
+
+      - name: Install ninja
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
+        env:
+          CXX: ${{ runner.os == 'Linux' && 'clang++' || 'c++' }}
+        run: >
+          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build
+
+      # A build for an instruction set the runner lacks only compiles.
+      - name: Test
+        run: |
+          if [ -n "${{ matrix.needs_cpu }}" ] && ! grep -qw "${{ matrix.needs_cpu }}" /proc/cpuinfo; then
+            echo "::notice::no ${{ matrix.needs_cpu }} on this runner: built, not run"
+            exit 0
+          fi
+          ctest --test-dir build --output-on-failure
+
+  # MSVC, as DuckDB builds on Windows: x64 at SSE2 and AVX2 (BMI2, POPCNT),
+  # Arm64 with NEON, and AVX-512 built only, which the Linux job runs. The
+  # Visual Studio generator needs no developer prompt; the flags keep MSVC's
+  # default `/EHsc`, which setting CMAKE_CXX_FLAGS replaces.
+  test-msvc:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows x64 sse2
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc
+          - name: windows x64 avx2
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc /arch:AVX2
+          - name: windows x64 avx512
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc /arch:AVX512
+            build_only: true
+          - name: windows arm64
+            runner: windows-11-arm
+            platform: ARM64
+            flags: /EHsc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S cpp -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build --config RelWithDebInfo --parallel
+
+      - name: Test
+        if: ${{ !matrix.build_only }}
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
+
+  sanitize:
+    name: sanitize (${{ matrix.sanitizer }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: ["address;undefined", thread]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang and libc++
+        run: sudo apt-get update && sudo apt-get install -y clang libc++-dev libc++abi-dev ninja-build
+
+      - name: Configure
+        env:
+          CXX: clang++
+        run: >
+          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DBBTREE_NATIVE=OFF "-DBBTREE_SANITIZE=${{ matrix.sanitizer }}"
+          -DCMAKE_CXX_FLAGS=-stdlib=libc++
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

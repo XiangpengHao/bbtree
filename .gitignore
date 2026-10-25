@@ -1,2 +1,5 @@
+.vscode/
 /target
 .impeccable
+/cpp/build*/
+/cpp/bench/reference/target
