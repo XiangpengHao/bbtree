@@ -90,13 +90,13 @@ class NodeLatch {
   /// holder; otherwise fails at once.
   inline bool try_lock_at(Version version) noexcept {
     std::uint64_t expected = version.word();
-    const bool locked = word_.compare_exchange_strong(
-        expected, version.word() | exclusive_bit, std::memory_order_acquire,
-        std::memory_order_relaxed);
-    // A reader that sees a write made under the latch sees the latch taken
-    // when it checks its version: this fence pairs with its acquire fence.
-    std::atomic_thread_fence(std::memory_order_release);
-    return locked;
+    // Acquire-release, not acquire with a release fence after (Rust's
+    // spelling): the acquire half keeps writes made under the latch from
+    // being seen before the latch taken, which is what the fence paired
+    // with a reader's acquire fence to say; one `casal`, no `dmb`.
+    return word_.compare_exchange_strong(expected, version.word() | exclusive_bit,
+                                         std::memory_order_acq_rel,
+                                         std::memory_order_relaxed);
   }
 
   /// Lets go of the node, held exclusively since `version`, at the next one.
