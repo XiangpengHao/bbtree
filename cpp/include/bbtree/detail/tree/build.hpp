@@ -218,6 +218,8 @@ class TreeBuilder {
   using AnyNode = Node<K, V, S>;
 
   explicit TreeBuilder(const Pages& pages) noexcept : pages_(pages) {}
+  /// The builder keeps a reference to `pages`: a temporary would dangle.
+  explicit TreeBuilder(const Pages&&) = delete;
   TreeBuilder(const TreeBuilder&) = delete;
   TreeBuilder& operator=(const TreeBuilder&) = delete;
   /// Takes apart a tree that was not finished.

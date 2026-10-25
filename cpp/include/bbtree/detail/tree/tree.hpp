@@ -462,6 +462,15 @@ class MutStack : public NodeStack<K, V, S> {
     return Base::descend_to_last_key();
   }
 
+  /// Starts at the root and goes to the first entry not below `lower`, as a
+  /// range from it starts; detached if there is none.
+  template <class Q>
+  void go_to_first_entry_from(const ::bbtree::Bound<Q>& lower) noexcept {
+    start_at_root();
+    this->go_to_lower_edge(lower, tree_->shared_prefix());
+    go_to_entry_at_slot(this->index() + 1);
+  }
+
   /// Goes up to the bottom node's parent; at the root, first raises the tree
   /// a level, and ends at the new root's only edge.
   template <class Pages>

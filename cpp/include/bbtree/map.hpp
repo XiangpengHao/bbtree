@@ -23,6 +23,7 @@
 #include "detail/latched/batch.hpp"
 #include "detail/latched/latched_tree.hpp"
 #include "insert_error.hpp"
+#include "leaf_annex.hpp"
 #include "node_config.hpp"
 #include "relocatable.hpp"
 #include "unsync/range.hpp"
@@ -31,15 +32,18 @@ namespace bbtree {
 
 /// An ordered map of keys `K` to values `V` that threads share. Keys need
 /// inline keys (`InlineKey<K>`, D49): integers, byte strings, or a key type of
-/// your own that specializes it.
-template <class K, class V, class Config = DefaultNodeConfig, class A = Global>
+/// your own that specializes it. `Annex` is what each leaf keeps for the code
+/// that owns where keys and values point (`leaf_annex.hpp`); none by default.
+template <class K, class V, class Config = DefaultNodeConfig, class A = Global, class Annex = NoLeafAnnex>
 class BBTreeMap {
   static_assert(is_trivially_relocatable_v<K> && is_trivially_relocatable_v<V>,
                 "bbtree moves keys and values as bytes: specialize bbtree::is_trivially_relocatable");
+  static_assert(is_trivially_relocatable_v<Annex> && std::is_nothrow_default_constructible_v<Annex>,
+                "a leaf annex moves with its leaf's bytes, and a new leaf makes one");
   static_assert(std::is_nothrow_move_constructible_v<K> && std::is_nothrow_move_constructible_v<V>,
                 "keys and values move without throwing");
 
-  using Strategy = detail::Strategy<Config, NoLeafAnnex, true>;
+  using Strategy = detail::Strategy<Config, Annex, true>;
   using TreeType = detail::LatchedTree<K, V, Strategy>;
   template <class Q>
   using Query = typename detail::Query<K>::template type<Q>;
@@ -119,6 +123,34 @@ class BBTreeMap {
                         alloc_);
   }
 
+  // The leaf and its annex (`leaf_annex.hpp`, `map/with_leaf.rs`).
+
+  /// The leaf an insert or a removal holds, as its closure sees it.
+  using annexed_leaf = AnnexedLeaf<K, V, Strategy>;
+
+  /// Inserts `key` and `value`, handing the closure the leaf held
+  /// exclusively: `occupied(leaf, stored, stored_value)` if an equal key is
+  /// there, which keeps it; `vacant(leaf, key, value)`, before the entry goes
+  /// in, if not. Each returns `LeafOutcome<R>`: `R`, which the insert
+  /// returns, or a refusal, which leaves the map as it was and gives the
+  /// entry back in the `InsertError`. Either may run again if the insert
+  /// starts over for another thread, but only one's result stands.
+  template <class Occupied, class Vacant>
+  auto update_or_insert_with_leaf(K key, V value, Occupied occupied, Vacant vacant) const noexcept {
+    return tree_.insert(std::move(key), std::move(value),
+                        detail::WithLeaf<K, V, Strategy, Occupied, Vacant>{std::move(occupied), std::move(vacant)},
+                        alloc_);
+  }
+
+  /// Removes the entry whose key equals `key`, and returns it, its key as
+  /// stored; `f(leaf, key, value)` runs once, with the leaf held
+  /// exclusively, right before the entry comes out.
+  template <class Q, class F>
+  std::optional<std::pair<K, V>> remove_with_leaf(const Q& key, F f) const noexcept {
+    return tree_.remove_entry(detail::Query<K>::of(key), [](const K&, const V&) { return true; }, std::move(f),
+                              alloc_);
+  }
+
   // Removals.
 
   template <class Q>
@@ -131,14 +163,15 @@ class BBTreeMap {
   /// stored.
   template <class Q>
   std::optional<std::pair<K, V>> remove_entry(const Q& key) const noexcept {
-    return tree_.remove_entry(detail::Query<K>::of(key), [](const K&, const V&) { return true; }, alloc_);
+    return tree_.remove_entry(detail::Query<K>::of(key), [](const K&, const V&) { return true; },
+                              detail::NoLeafCallback(), alloc_);
   }
 
   /// Removes the entry if `condition(key, value)` holds of it, latched
   /// exclusively: only the entry the caller saw.
   template <class Q, class Condition>
   std::optional<std::pair<K, V>> remove_if(const Q& key, Condition condition) const noexcept {
-    return tree_.remove_entry(detail::Query<K>::of(key), condition, alloc_);
+    return tree_.remove_entry(detail::Query<K>::of(key), condition, detail::NoLeafCallback(), alloc_);
   }
 
   // Batches (D55): each key in a lane, the lanes' waits for memory

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstddef>
+#include <new>
 #include <optional>
 
 #include "../../bound.hpp"
@@ -38,6 +39,43 @@ struct LeafPosition {
 
 /// A walk over a tree, forward or backward (`Reverse`), from a position to a
 /// stop position or the tree's end.
+/// Keys side by side in a leaf, `stride` bytes apart, or one key alone: a
+/// run a set's cursor steps through without touching its walk
+/// (`tree/node/leaf.rs`'s `KeyRun`).
+template <class K>
+class KeyRun {
+ public:
+  KeyRun() noexcept = default;
+  KeyRun(const K* first, std::size_t stride, std::size_t len) noexcept
+      : next_(reinterpret_cast<const std::byte*>(first)), stride_(stride), remaining_(len) {}
+
+  /// `key` alone.
+  static KeyRun one(const K* key) noexcept { return KeyRun(key, 0, 1); }
+
+  std::size_t len() const noexcept { return remaining_; }
+
+  /// The run's next key, or null past its last.
+  BBTREE_ALWAYS_INLINE const K* peek() const noexcept {
+    return remaining_ > 0 ? std::launder(reinterpret_cast<const K*>(next_)) : nullptr;
+  }
+
+  BBTREE_ALWAYS_INLINE void advance() noexcept {
+    if (remaining_ > 0) {
+      --remaining_;
+      // Past the last key the address stays within the leaf's page, unread.
+      next_ += stride_;
+    }
+  }
+
+  /// Keeps the run's first `len` keys only; `len` is at most its length.
+  void truncate(std::size_t len) noexcept { remaining_ = len; }
+
+ private:
+  const std::byte* next_ = nullptr;
+  std::size_t stride_ = 0;
+  std::size_t remaining_ = 0;
+};
+
 template <class K, class V, class S, bool Reverse>
 class Walk {
  public:
@@ -110,6 +148,22 @@ class Walk {
     return cross(entry);
   }
 
+  /// The keys left in the current leaf's run, which the walk moves past at
+  /// once; or, where it crosses into another leaf, the separator alone.
+  /// False at the stop or the end. Forward walks only.
+  BBTREE_ALWAYS_INLINE bool next_key_run(KeyRun<K>& run) noexcept {
+    static_assert(!Reverse, "key runs go forward");
+    if (index_ < limit_) {
+      run = KeyRun<K>(leaf_.entry_slots(index_).key, LeafNode::Kind::keys.key_stride, limit_ - index_);
+      index_ = limit_;
+      return true;
+    }
+    Entry entry;
+    if (!cross(entry)) return false;
+    run = KeyRun<K>::one(entry.key);
+    return true;
+  }
+
   /// Hands every entry left to `visit(entry)`, a counted loop per leaf
   /// (D32): no per-entry bookkeeping beyond the index.
   template <class Visit>
@@ -146,42 +200,20 @@ class Walk {
     has_stop_ = true;
   }
 
-  /// Where a range from `lower` starts: before an included key, after an
-  /// excluded one, at the tree's start without a bound.
+  /// Where a range from `lower` starts (`NodeStack::go_to_lower_edge`).
   template <class Q>
   static void position_at_lower(const Tree<K, V, S>& tree, const ::bbtree::Bound<Q>& lower,
                                 Stack& stack) noexcept {
     stack.attach(tree.root());
-    switch (lower.kind()) {
-      case ::bbtree::Bound<Q>::Kind::Included:
-        stack.search_to_edge(SearchKey<K, Q>(lower.key()), KeySide::Before, tree.shared_prefix());
-        break;
-      case ::bbtree::Bound<Q>::Kind::Excluded:
-        stack.search_to_edge(SearchKey<K, Q>(lower.key()), KeySide::After, tree.shared_prefix());
-        break;
-      case ::bbtree::Bound<Q>::Kind::Unbounded:
-        stack.template descend_to_end<FirstEdge>();
-        break;
-    }
+    stack.go_to_lower_edge(lower, tree.shared_prefix());
   }
 
-  /// Where a range to `upper` ends: after an included key, before an
-  /// excluded one, at the tree's end without a bound.
+  /// Where a range to `upper` ends (`NodeStack::go_to_upper_edge`).
   template <class Q>
   static void position_at_upper(const Tree<K, V, S>& tree, const ::bbtree::Bound<Q>& upper,
                                 Stack& stack) noexcept {
     stack.attach(tree.root());
-    switch (upper.kind()) {
-      case ::bbtree::Bound<Q>::Kind::Included:
-        stack.search_to_edge(SearchKey<K, Q>(upper.key()), KeySide::After, tree.shared_prefix());
-        break;
-      case ::bbtree::Bound<Q>::Kind::Excluded:
-        stack.search_to_edge(SearchKey<K, Q>(upper.key()), KeySide::Before, tree.shared_prefix());
-        break;
-      case ::bbtree::Bound<Q>::Kind::Unbounded:
-        stack.template descend_to_end<LastEdge>();
-        break;
-    }
+    stack.go_to_upper_edge(upper, tree.shared_prefix());
   }
 
   /// Takes the leaf and edge the node stack ends at as the run.

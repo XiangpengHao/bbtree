@@ -510,8 +510,9 @@ class LatchedBatch {
     if (destination.at_separator && !TreeType::is_head(destination.leaf, SearchKey<K, K>(key))) return false;
     Replacing policy = replacing();
     std::size_t edge = 0;
+    std::optional<Layout> refused;  // Replacing a value refuses nothing.
     std::optional<std::optional<V>> output =
-        tree.insert_into(held, destination.at_separator, key, value, policy, MapPages<A>(alloc), edge);
+        tree.insert_into(held, destination.at_separator, key, value, policy, MapPages<A>(alloc), edge, refused);
     if (!output) return false;
     previous = std::move(*output);
     return true;
@@ -538,7 +539,8 @@ class LatchedBatch {
     }
     // Ascending keys: if the first appends, the rest go one by one.
     Replacing first_policy = replacing();
-    if (std::optional<std::optional<V>> appended = tree.try_append(keys[0], values[0], first_policy)) {
+    std::optional<Layout> refused;  // Replacing a value refuses nothing.
+    if (std::optional<std::optional<V>> appended = tree.try_append(keys[0], values[0], first_policy, refused)) {
       previous[0] = std::move(*appended);
       for (std::size_t index = 1; index < count; ++index) insert_one(index);
       return;

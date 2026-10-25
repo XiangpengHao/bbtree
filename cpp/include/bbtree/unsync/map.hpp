@@ -21,9 +21,15 @@
 #include "../detail/tree/tree.hpp"
 #include "../node_config.hpp"
 #include "../relocatable.hpp"
+#include "entry.hpp"
+#include "extract_if.hpp"
+#include "into_iter.hpp"
 #include "range.hpp"
 
 namespace bbtree::unsync {
+
+template <class K, class Config, class A>
+class BBTreeSet;
 
 /// An ordered map of keys `K` to values `V`, for one thread. Keys order by
 /// `operator<`; `InlineKey<K>` gives them inline keys where it is specialized
@@ -316,17 +322,131 @@ class BBTreeMap {
   /// order, removing the others in place (D25).
   template <class Keep>
   void retain(Keep keep) noexcept {
-    if (!state_.tree.has_root()) return;
-    detail::MutStack<K, V, Strategy> stack(state_.tree);
-    if (!stack.descend_to_first_key()) return;
+    auto drop = [&](const K& key, V& value) { return !keep(key, value); };
+    ExtractionWalk<K, V, Strategy, A, K> walk(state_.tree, state_.length, pages(), Bound<K>::unbounded(),
+                                              Bound<K>::unbounded());
+    while (walk.next(drop)) {
+    }
+  }
+
+  /// The entries within `lower` and `upper` that `pick(key, value)` picks,
+  /// each removed as it is handed out, in key order. Lazy: entries the
+  /// extraction doesn't reach stay. It keeps a copy of `upper`'s key.
+  template <class L, class U, class Pick>
+  ExtractIf<K, V, Strategy, A, U, Pick> extract_if(const Bound<L>& lower, const Bound<U>& upper,
+                                                   Pick pick) noexcept {
+    return ExtractIf<K, V, Strategy, A, U, Pick>(state_.tree, state_.length, pages(), lower, upper,
+                                                 std::move(pick));
+  }
+
+  /// `extract_if` over the whole map.
+  template <class Pick>
+  ExtractIf<K, V, Strategy, A, K, Pick> extract_if(Pick pick) noexcept {
+    return extract_if(Bound<K>::unbounded(), Bound<K>::unbounded(), std::move(pick));
+  }
+
+  /// Moves every entry of `other` into this map, `other`'s value winning
+  /// where both hold a key, and leaves `other` empty: both maps' entries
+  /// merged in key order and built into full nodes, in O(n + m), as std's.
+  void append(BBTreeMap& other) noexcept {
+    if (other.empty()) return;
+    if (empty()) {
+      std::swap(state_.tree, other.state_.tree);
+      std::swap(state_.length, other.state_.length);
+      return;
+    }
+    IntoIter<K, V, Strategy, A> ours(state_.tree.take(), std::exchange(state_.length, 0), state_.allocator());
+    IntoIter<K, V, Strategy, A> theirs(other.state_.tree.take(), std::exchange(other.state_.length, 0),
+                                       other.state_.allocator());
     const Pages map_pages = pages();
-    while (stack.is_attached()) {
-      if (keep(stack.key(), stack.value())) {
-        stack.go_past_entry();
+    detail::TreeBuilder<K, V, Strategy, Pages> merged(map_pages);
+    for (;;) {
+      const auto our_next = ours.peek();
+      const auto their_next = theirs.peek();
+      if (!our_next && !their_next) break;
+      const Ordering order =
+          !their_next ? Ordering::Less
+          : !our_next ? Ordering::Greater
+                      : detail::SearchKey<K, K>(our_next->first).cmp_full(their_next->first);
+      if (order == Ordering::Less) {
+        auto [key, value] = *ours.next();
+        merged.push(std::move(key), std::move(value));
+      } else if (order == Ordering::Greater) {
+        auto [key, value] = *theirs.next();
+        merged.push(std::move(key), std::move(value));
       } else {
-        stack.remove_and_go_to_next(map_pages, state_.length);
+        // Our key, their value: as `insert` keeps the key it has.
+        K key = std::move(ours.next()->first);
+        merged.push(std::move(key), std::move(theirs.next()->second));
       }
     }
+    auto [tree, length] = merged.finish();
+    state_.tree = tree;
+    state_.length = length;
+  }
+
+  // Entries (`unsync/map/entry.rs`).
+
+  using entry_type = Entry<K, V, Strategy, A>;
+  using occupied_entry = OccupiedEntry<K, V, Strategy, A>;
+  using vacant_entry = VacantEntry<K, V, Strategy, A>;
+
+  /// `key`'s entry, to change in place. Every comparison of keys happens
+  /// here; the entry's operations compare none.
+  entry_type entry(K key) noexcept {
+    detail::MutStack<K, V, Strategy> stack(state_.tree);
+    if (!state_.tree.has_root()) {
+      return entry_type(vacant_entry(std::move(key), stack, state_.length, pages(), false));
+    }
+    if (stack.search(detail::SearchKey<K, K>(key))) {
+      return entry_type(occupied_entry(stack, state_.length, pages()));
+    }
+    return entry_type(vacant_entry(std::move(key), stack, state_.length, pages(), true));
+  }
+
+  /// The entry with the smallest key, if any.
+  std::optional<occupied_entry> first_entry() noexcept {
+    detail::MutStack<K, V, Strategy> stack(state_.tree);
+    if (!state_.tree.has_root() || !stack.descend_to_first_key()) return std::nullopt;
+    return occupied_entry(stack, state_.length, pages());
+  }
+
+  /// The entry with the largest key, if any.
+  std::optional<occupied_entry> last_entry() noexcept {
+    detail::MutStack<K, V, Strategy> stack(state_.tree);
+    if (!state_.tree.has_root() || !stack.descend_to_last_key()) return std::nullopt;
+    return occupied_entry(stack, state_.length, pages());
+  }
+
+  /// Puts `key` in place of an equal key and returns that one, keeping its
+  /// value; or, if there is none, inserts `key` with `value` and returns
+  /// `nullopt`: a set's `replace`, on one search.
+  std::optional<K> replace_key(K key, V value) noexcept {
+    detail::MutStack<K, V, Strategy> stack(state_.tree);
+    const bool has_tree = state_.tree.has_root();
+    if (has_tree && stack.search(detail::SearchKey<K, K>(key))) return stack.replace_key(std::move(key));
+    vacant_entry(std::move(key), stack, state_.length, pages(), has_tree).insert_entry(std::move(value));
+    return std::nullopt;
+  }
+
+  // Iteration by value (`unsync/map/into_iter.rs`).
+
+  /// Every entry, moved out in key order, from either end; the map is left
+  /// empty.
+  IntoIter<K, V, Strategy, A> into_iter() && noexcept {
+    return IntoIter<K, V, Strategy, A>(state_.tree.take(), std::exchange(state_.length, 0), state_.allocator());
+  }
+
+  /// Every key, moved out in key order; the map is left empty.
+  IntoIter<K, V, Strategy, A, IntoPart::Keys> into_keys() && noexcept {
+    return IntoIter<K, V, Strategy, A, IntoPart::Keys>(state_.tree.take(), std::exchange(state_.length, 0),
+                                                       state_.allocator());
+  }
+
+  /// Every value, moved out in key order; the map is left empty.
+  IntoIter<K, V, Strategy, A, IntoPart::Values> into_values() && noexcept {
+    return IntoIter<K, V, Strategy, A, IntoPart::Values>(state_.tree.take(), std::exchange(state_.length, 0),
+                                                         state_.allocator());
   }
 
   /// Removes every entry, and gives every page back.
@@ -349,6 +469,10 @@ class BBTreeMap {
   }
 
  private:
+  /// A set is a map of `Unit` values: it walks and batches over its tree.
+  template <class, class, class>
+  friend class BBTreeSet;
+
   /// The allocator, the tree and its count; an empty allocator takes no
   /// room, so that the map is 24 bytes, as the Rust map (D52).
   struct State : A {

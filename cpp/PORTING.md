@@ -15,6 +15,12 @@ cpp/
     map.hpp              bbtree::BBTreeMap, the concurrent map (latched nodes)
     unsync/map.hpp       bbtree::unsync::BBTreeMap, the single-threaded map
     unsync/range.hpp     its ranges and iterators
+    unsync/entry.hpp     its entries (Entry, OccupiedEntry, VacantEntry)
+    unsync/extract_if.hpp  its extractions, and retain's walk
+    unsync/into_iter.hpp its iteration by value
+    unsync/set.hpp       bbtree::unsync::BBTreeSet
+    unsync/set_algebra.hpp operations on two sets: difference, intersection, union, ...
+    leaf_annex.hpp       AnnexedLeaf, and what a shared map's leaf annex provides
     bound.hpp            Bound<Q> for ranges
     insert_error.hpp     InsertError, InsertOutcome (the shared map's failures)
     allocator.hpp        Allocator concept, Global, Layout, PageKind
@@ -80,6 +86,19 @@ cpp/
   sends back, or puts at another depth, goes alone after the batch. Stage
   dispatch through one switch cost the shared lookups 168 instructions per
   key; compacting after every stage, 36 more.
+- **P11. A consuming iterator frees its pages at the end.** Rust's `IntoIter`
+  takes the tree apart as it goes, freeing each node once both ends are
+  past it. C++'s walks go one way, so `IntoIter` runs one walk from each
+  end, moves entries out until the count left reaches zero, and gives every
+  page back when it is destroyed. The work is the same; the pages stay
+  allocated until then.
+- **P12. Set operations look ahead without copying a walk.** Rust's batched
+  lookups clone the iterator to read 32 elements ahead. C++ walks are never
+  copied (D23): the cursor hands the next 32 to a buffer of pointers, which
+  one batch looks up in place (`PointedKeys`), then out one at a time. A
+  fold's runs come back from the refill by value: passed by reference, they
+  lived in memory, and every step loaded and stored them (32 instructions a
+  merge step against Rust's 18; by value, parity).
 
 ## Status
 
@@ -95,9 +114,10 @@ Rust paths are under `bbtree/src/`.
 | unsync batches | `tree/batch.rs` | `detail/tree/batch.hpp` | ported; same nodes as single inserts |
 | bulk build, clone, `split_off`, `retain`, `extend` | `tree/{build,clone,cut}.rs`, `unsync/map/{from_entries,mod}.rs` | `detail/tree/build.hpp`, `unsync/map.hpp` | ported; differential tests, ASan clean |
 | latched tree, OLC, scans, batches | `tree/latched/*.rs`, `tree/node/optimistic.rs`, `map/{mod,batch}.rs` | `detail/latched/*.hpp`, `map.hpp` | ported; TSan clean (racing reads excluded, P7) |
-| entry API, `extract_if`, `append`, `into_iter` | `unsync/map/{entry,extract_if,append,into_iter}.rs` | | not ported |
-| sets and set algebra | `unsync/set/*.rs` | | not ported |
-| leaf annexes, shared map's `with_leaf`, owned maps | `leaf_annex.rs`, `tree/node/annexed_leaf.rs`, `map/{with_leaf,owner}.rs` | | not ported (annex hooks kept in the node code) |
+| entry API, `extract_if`, `append`, `into_iter` | `unsync/map/{entry,extract_if,append,into_iter}.rs` | `unsync/{entry,extract_if,into_iter}.hpp`, `unsync/map.hpp` | ported; differential tests, ASan and leak checks clean |
+| sets and set algebra | `unsync/set/*.rs` | `unsync/{set,set_algebra}.hpp` | ported, every strategy; differential tests against `std::set` algorithms |
+| leaf annexes, shared map's `with_leaf` | `leaf_annex.rs`, `tree/node/annexed_leaf.rs`, `map/with_leaf.rs` | `leaf_annex.hpp`, `map.hpp` | ported; leak-checked through splits, merges, refusals and threads (TSan) |
+| owned maps (`get_mut`, `iter_mut`, `clear`) | `map/owner.rs` | `map.hpp` | ported |
 | file maps, mmap, store, vis, fuzz, Verus proofs | | | out of scope |
 
 ## Measurements
@@ -121,6 +141,15 @@ Unsync map, ns per operation (lower is better):
 | 1M u64 range64 (per scan) | 249 | 195 |
 | 10M u64 range64 (per scan) | 481 | 407 |
 | 10M u64 batch insert / hit / miss, 64 a call (ns per key) | 92.1 / 49.4 / 42.3 | 87.5 / 46.1 / 42.3 |
+
+Unsync sets of u64 (`set_bench.cpp`), each operation folded into a count, ns
+per element: two 1M sets sharing half their elements, walked side by side;
+a 27K set, every 37th element of one, looked up in it a batch at a time.
+
+| cell | Rust | C++ |
+|---|--:|--:|
+| 1M difference / intersection / union | 7.1 / 6.8 / 6.6 | 6.8 / 6.8 / 6.9 |
+| 27K into 1M intersection / `is_subset` | 29.3 / 26.9 | 22.1 / 19.5 |
 
 Shared map, millions of operations per second (higher is better):
 

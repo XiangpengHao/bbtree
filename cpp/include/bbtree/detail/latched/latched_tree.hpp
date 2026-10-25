@@ -27,6 +27,7 @@
 #include <utility>
 
 #include "../../insert_error.hpp"
+#include "../../leaf_annex.hpp"
 #include "../config.hpp"
 #include "../tree/invariants.hpp"
 #include "../tree/remove.hpp"
@@ -52,9 +53,15 @@ struct alignas(128) CachePadded {
   T value;
 };
 
-/// What an insert does where the tree holds an equal key, and where it holds
-/// none: replaces the value through a closure that takes the new one, and
-/// returns the closure's result, `nullopt` for an entry inserted (Rust's
+// An insert's policy says what it does where the tree holds an equal key,
+// `occupied(leaf, key, value, stored, stored_value)`, and where it holds none,
+// `vacant(leaf, key, value)`, with the leaf held exclusively; each returns a
+// `LeafOutcome`: the insert's output, or a refusal that leaves the map as it
+// was. A refused insert keeps `key` and `value`; `vacant` runs before the
+// entry goes in.
+
+/// Replaces the value through a closure that takes the new one, and returns
+/// the closure's result, `nullopt` for an entry inserted (Rust's
 /// `UpdateOrInsert`).
 template <class K, class V, class F>
 struct UpdateOrInsert {
@@ -62,10 +69,14 @@ struct UpdateOrInsert {
   using Output = std::optional<R>;
   F f;
 
-  Output occupied(K&&, V&& value, const K& stored, V& stored_value) {
-    return Output(Returned<F, const K&, V&, V&&>::call(f, stored, stored_value, std::move(value)));
+  template <class Leaf>
+  LeafOutcome<Output> occupied(Leaf, K&, V& value, const K& stored, V& stored_value) {
+    return LeafOutcome<Output>::done(Output(Returned<F, const K&, V&, V&&>::call(f, stored, stored_value, std::move(value))));
   }
-  Output vacant(const K&, const V&) { return std::nullopt; }
+  template <class Leaf>
+  LeafOutcome<Output> vacant(Leaf, const K&, const V&) {
+    return LeafOutcome<Output>::done(std::nullopt);
+  }
 };
 
 /// Runs a closure on the key's entry: the stored one, left as it is, or the
@@ -75,10 +86,45 @@ struct ReadOrInsert {
   using Output = typename Returned<F, const K&, const V&>::type;
   F f;
 
-  Output occupied(K&&, V&&, const K& stored, V& stored_value) {
-    return Returned<F, const K&, const V&>::call(f, stored, stored_value);
+  template <class Leaf>
+  LeafOutcome<Output> occupied(Leaf, K&, V&, const K& stored, V& stored_value) {
+    return LeafOutcome<Output>::done(Returned<F, const K&, const V&>::call(f, stored, stored_value));
   }
-  Output vacant(const K& key, const V& value) { return Returned<F, const K&, const V&>::call(f, key, value); }
+  template <class Leaf>
+  LeafOutcome<Output> vacant(Leaf, const K& key, const V& value) {
+    return LeafOutcome<Output>::done(Returned<F, const K&, const V&>::call(f, key, value));
+  }
+};
+
+/// The result type `R` of a closure that returns `LeafOutcome<R>`.
+template <class Outcome>
+struct LeafOutcomeOf;
+template <class R>
+struct LeafOutcomeOf<LeafOutcome<R>> {
+  using type = R;
+};
+
+/// Hands the held leaf to the caller's closures, which may refuse the insert
+/// (Rust's `WithLeaf`): `occupied(leaf, stored, stored_value)` and
+/// `vacant(leaf, key, value)`, each returning `LeafOutcome<R>`.
+template <class K, class V, class S, class Occupied, class Vacant>
+struct WithLeaf {
+  using Output = typename LeafOutcomeOf<std::invoke_result_t<Occupied&, AnnexedLeaf<K, V, S>, const K&, V&>>::type;
+  Occupied on_occupied;
+  Vacant on_vacant;
+
+  LeafOutcome<Output> occupied(AnnexedLeaf<K, V, S> leaf, K&, V&, const K& stored, V& stored_value) {
+    return on_occupied(leaf, stored, stored_value);
+  }
+  LeafOutcome<Output> vacant(AnnexedLeaf<K, V, S> leaf, const K& key, const V& value) {
+    return on_vacant(leaf, key, value);
+  }
+};
+
+/// A removal's leaf callback that does nothing.
+struct NoLeafCallback {
+  template <class Leaf, class K, class V>
+  void operator()(Leaf, const K&, const V&) const noexcept {}
 };
 
 /// The order a scan visits entries in.
@@ -211,8 +257,10 @@ class LatchedTree {
         return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), refused));
       }
     }
-    std::optional<typename Policy::Output> appended = try_append(key, value, policy);
+    std::optional<Layout> refused;
+    std::optional<typename Policy::Output> appended = try_append(key, value, policy, refused);
     if (appended) return Outcome::done(std::move(*appended));
+    if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
     for (;;) {
       NoPath path;
       Descent<ExclusiveMode> descent = descend<ExclusiveMode>(SearchKey<K, K>(key), path);
@@ -221,9 +269,10 @@ class LatchedTree {
         continue;
       }
       std::size_t edge = 0;
-      std::optional<typename Policy::Output> output =
-          insert_into(descent.held, descent.at_separator, key, value, policy, MapPages<A>(alloc), edge);
+      std::optional<typename Policy::Output> output = insert_into(descent.held, descent.at_separator, key, value,
+                                                                  policy, MapPages<A>(alloc), edge, refused);
       if (output) return Outcome::done(std::move(*output));
+      if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
       descent.held.release();
       return insert_splitting(std::move(key), std::move(value), policy, alloc);
     }
@@ -233,9 +282,12 @@ class LatchedTree {
 
   /// Removes the entry whose key equals `key` if `condition(key, value)`
   /// holds of it, and returns it with the key as stored. `condition` runs
-  /// once per try, while the entry's leaf is latched exclusively.
-  template <class Q, class Condition, class A>
-  std::optional<std::pair<K, V>> remove_entry(const Q& key, Condition condition, A& alloc) const noexcept {
+  /// once per try, while the entry's leaf is latched exclusively;
+  /// `on_remove(leaf, key, value)` once, as the removal commits, before the
+  /// entry comes out.
+  template <class Q, class Condition, class OnRemove, class A>
+  std::optional<std::pair<K, V>> remove_entry(const Q& key, Condition condition, OnRemove on_remove,
+                                              A& alloc) const noexcept {
     if (!has_root()) return std::nullopt;
     const SearchKey<K, Q> search(key);
     {
@@ -249,10 +301,13 @@ class LatchedTree {
         const std::optional<std::size_t> index = leaf.template find<void>(search);
         if (!index) return std::nullopt;
         if (!condition(leaf.key(*index), leaf.value(*index))) return std::nullopt;
-        if (leaf.keeps_its_minimum() || is_root(leaf)) return leaf.remove(*index);
+        if (leaf.keeps_its_minimum() || is_root(leaf)) {
+          on_remove(AnnexedLeaf<K, V, S>(leaf), leaf.key(*index), leaf.value(*index));
+          return leaf.remove(*index);
+        }
       }
     }
-    return remove_rebalancing(search, condition, alloc);
+    return remove_rebalancing(search, condition, on_remove, alloc);
   }
 
   // Scans (`scan.rs`).
@@ -620,28 +675,40 @@ class LatchedTree {
   // Inserts, internals.
 
   /// Inserts into `held`, the leaf where `key` belongs, if it holds `key` or
-  /// has room, and returns what `policy` returned; or, the leaf full,
-  /// `nullopt` and the edge where `key` goes, keeping the entry.
+  /// has room, and returns what `policy` returned; or `nullopt`, keeping the
+  /// entry: with `refused` set if the policy refused, or else the leaf full
+  /// and `edge` where `key` goes.
   template <class Policy, class Pages>
   BBTREE_ALWAYS_INLINE std::optional<typename Policy::Output> insert_into(
       const Held<ExclusiveMode>& held, bool at_separator, K& key, V& value, Policy& policy,
-      const Pages& pages, std::size_t& edge) const noexcept {
+      const Pages& pages, std::size_t& edge, std::optional<Layout>& refused) const noexcept {
     const LeafNode leaf = held.leaf();
+    const AnnexedLeaf<K, V, S> annexed(leaf);
     if (at_separator) {
-      return policy.occupied(std::move(key), std::move(value), leaf.head_key(), leaf.head_value());
+      return settle(policy.occupied(annexed, key, value, leaf.head_key(), leaf.head_value()), refused);
     }
     const SearchResult found = leaf.search_always_inlined(SearchKey<K, K>(key));
     if (found.found) {
-      return policy.occupied(std::move(key), std::move(value), leaf.key(found.index),
-                             leaf.value(found.index));
+      return settle(policy.occupied(annexed, key, value, leaf.key(found.index), leaf.value(found.index)), refused);
     }
     if (leaf.len() < LeafNode::capacity()) {
-      std::optional<typename Policy::Output> output(policy.vacant(key, value));
+      std::optional<typename Policy::Output> output = settle(policy.vacant(annexed, key, value), refused);
+      if (!output) return std::nullopt;
       PrefixedKey<K> prefixed = this->prefixed(std::move(key), leaf, pages);
       leaf.insert_fit(found.index, std::move(prefixed).window_at(leaf.prefix_len()), std::move(value));
       return output;
     }
     edge = found.index;
+    return std::nullopt;
+  }
+
+  /// A policy's outcome as an insert's: its output, or `nullopt` with the
+  /// refusal's layout in `refused`.
+  template <class Output>
+  BBTREE_ALWAYS_INLINE static std::optional<Output> settle(LeafOutcome<Output>&& outcome,
+                                                           std::optional<Layout>& refused) noexcept {
+    if (BBTREE_LIKELY(outcome.ok())) return std::optional<Output>(std::move(outcome.value()));
+    refused = outcome.layout();
     return std::nullopt;
   }
 
@@ -660,8 +727,8 @@ class LatchedTree {
   /// key, and `key` shares what every key shares; returns what `policy`
   /// returned. Otherwise `nullopt`, the entry kept.
   template <class Policy>
-  BBTREE_ALWAYS_INLINE std::optional<typename Policy::Output> try_append(K& key, V& value,
-                                                                         Policy& policy) const noexcept {
+  BBTREE_ALWAYS_INLINE std::optional<typename Policy::Output> try_append(K& key, V& value, Policy& policy,
+                                                                         std::optional<Layout>& refused) const noexcept {
     const Ptr last = Ptr::from_tagged(rightmost_leaf_.value.load(std::memory_order_acquire));
     if (last.is_null()) return std::nullopt;
     const LeafNode leaf = LeafNode::at(last);
@@ -672,7 +739,8 @@ class LatchedTree {
     if (len >= LeafNode::capacity() || len == 0) return std::nullopt;
     if (SearchKey<K, K>(key).cmp_full(leaf.key(len - 1)) != Ordering::Greater) return std::nullopt;
     if (!root_page().shared_prefix().is_shared_by(key)) return std::nullopt;
-    std::optional<typename Policy::Output> output(policy.vacant(key, value));
+    std::optional<typename Policy::Output> output = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
+    if (!output) return std::nullopt;
     leaf.insert_fit(len, WindowedKey<K>::at(std::move(key), leaf.prefix_len()), std::move(value));
     return output;
   }
@@ -701,15 +769,16 @@ class LatchedTree {
         continue;
       }
       std::size_t edge = 0;
-      std::optional<typename Policy::Output> output =
-          insert_into(descent.held, descent.at_separator, key, value, policy, MapPages<A>(alloc), edge);
+      std::optional<Layout> refused;
+      std::optional<typename Policy::Output> output = insert_into(descent.held, descent.at_separator, key, value,
+                                                                  policy, MapPages<A>(alloc), edge, refused);
       if (output) return Outcome::done(std::move(*output));
-      Layout refused{0, 0};
+      if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
       switch (split(path, descent.held, edge, key, value, policy, pages, output, refused)) {
         case SplitResult::Inserted:
           return Outcome::done(std::move(*output));
         case SplitResult::NoPage:
-          return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), refused));
+          return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
         case SplitResult::StartOver:
           break;
       }
@@ -728,7 +797,8 @@ class LatchedTree {
   template <class Policy, class A>
   SplitResult split(const Path& path, const Held<ExclusiveMode>& held, std::size_t edge, K& key,
                     V& value, Policy& policy, NodePages<A>& pages,
-                    std::optional<typename Policy::Output>& output, Layout& refused) const noexcept {
+                    std::optional<typename Policy::Output>& output,
+                    std::optional<Layout>& refused) const noexcept {
     // The lowest node with room takes the separator; every node below it
     // splits. Without one, the root splits, and the tree grows.
     std::optional<std::size_t> room;
@@ -751,9 +821,18 @@ class LatchedTree {
     } else if (!room) {
       internals = splits + 1;
     }
-    if (!pages.reserve(leaves, internals, refused)) return SplitResult::NoPage;
+    Layout no_page{0, 0};
+    if (!pages.reserve(leaves, internals, no_page)) {
+      refused = no_page;
+      return SplitResult::NoPage;
+    }
     const LeafNode leaf = held.leaf();
-    output.emplace(policy.vacant(key, value));
+    output = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
+    if (!output) {
+      // The policy refused: the split takes no page.
+      pages.unreserve();
+      return SplitResult::NoPage;
+    }
     const bool was_last_leaf = is_rightmost_leaf(leaf);
     PrefixedKey<K> prefixed = this->prefixed(std::move(key), leaf, pages);
     change_held([&](TreeType& tree) {
@@ -808,22 +887,24 @@ class LatchedTree {
 
   // Removals, internals.
 
-  template <class Q, class Condition, class A>
+  template <class Q, class Condition, class OnRemove, class A>
   BBTREE_NOINLINE std::optional<std::pair<K, V>> remove_rebalancing(const SearchKey<K, Q>& key,
-                                                                    Condition& condition,
+                                                                    Condition& condition, OnRemove& on_remove,
                                                                     A& alloc) const noexcept {
     NodePages<A> pages = this->pages(alloc);
     for (;;) {
       bool start_over = false;
-      std::optional<std::pair<K, V>> removed = try_remove_rebalancing(key, condition, pages, start_over);
+      std::optional<std::pair<K, V>> removed =
+          try_remove_rebalancing(key, condition, on_remove, pages, start_over);
       if (!start_over) return removed;
       Backoff().spin();
     }
   }
 
-  template <class Q, class Condition, class A>
+  template <class Q, class Condition, class OnRemove, class A>
   std::optional<std::pair<K, V>> try_remove_rebalancing(const SearchKey<K, Q>& key, Condition& condition,
-                                                        NodePages<A>& pages, bool& start_over) const noexcept {
+                                                        OnRemove& on_remove, NodePages<A>& pages,
+                                                        bool& start_over) const noexcept {
     Path path;
     Descent<ExclusiveMode> descent = descend<ExclusiveMode>(key, path);
     if (descent.outside) return std::nullopt;
@@ -846,7 +927,10 @@ class LatchedTree {
       if (!index) return std::nullopt;
       if (!condition(leaf.key(*index), leaf.value(*index))) return std::nullopt;
       // Another thread may have filled the leaf since.
-      if (leaf.keeps_its_minimum() || is_root(leaf)) return leaf.remove(*index);
+      if (leaf.keeps_its_minimum() || is_root(leaf)) {
+        on_remove(AnnexedLeaf<K, V, S>(leaf), leaf.key(*index), leaf.value(*index));
+        return leaf.remove(*index);
+      }
       leaf_index = *index;
     }
     // Either way, the leaf loses an entry.
@@ -869,6 +953,12 @@ class LatchedTree {
     if (!held_nodes.take_path(path, top)) {
       start_over = true;
       return std::nullopt;
+    }
+    // Every node the removal changes is held: it commits.
+    if (separator_level) {
+      on_remove(AnnexedLeaf<K, V, S>(leaf), leaf.head_key(), leaf.head_value());
+    } else {
+      on_remove(AnnexedLeaf<K, V, S>(leaf), leaf.key(leaf_index), leaf.value(leaf_index));
     }
     std::pair<K, V> removed = change_held([&](TreeType& tree) {
       MutStack<K, V, S> stack(tree);

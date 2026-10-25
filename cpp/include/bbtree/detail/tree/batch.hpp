@@ -65,6 +65,23 @@ class LaneArray {
   Slot slots_[N];
 };
 
+/// Keys a batch looks up where they are: `keys[i]` is the key `pointers[i]`
+/// points to, as a set operation looks up another set's elements in place.
+template <class Q>
+class PointedKeys {
+ public:
+  explicit PointedKeys(const Q* const* pointers) noexcept : pointers_(pointers) {}
+  const Q& operator[](std::size_t index) const noexcept { return *pointers_[index]; }
+  PointedKeys operator+(std::size_t offset) const noexcept { return PointedKeys(pointers_ + offset); }
+
+ private:
+  const Q* const* pointers_;
+};
+
+/// The key type of a batch's keys, `Keys` an array of them or `PointedKeys`.
+template <class Keys>
+using BatchKey = std::remove_cv_t<std::remove_reference_t<decltype(std::declval<const Keys&>()[0])>>;
+
 template <class K, class V, class S>
 class TreeBatch {
  public:
@@ -87,8 +104,9 @@ class TreeBatch {
 
   /// Each key's value, as separate `find`s give them: `values[i]` for
   /// `keys[i]`, null for a key the tree lacks. `length` is the tree's.
-  template <class Q>
-  static void find_many(const TreeType& tree, const Q* keys, std::size_t count, const V** values,
+  /// `keys` is an array of keys, or `PointedKeys`.
+  template <class Keys>
+  static void find_many(const TreeType& tree, Keys keys, std::size_t count, const V** values,
                         std::size_t length) noexcept {
     if (count < 2 || !batches(length) || !tree.has_root() || tree.root().is_leaf()) {
       for (std::size_t index = 0; index < count; ++index) values[index] = find_one(tree, keys[index]);
@@ -152,8 +170,9 @@ class TreeBatch {
 
   /// Starts a lane per key at the root, all live but those whose keys lack
   /// what every key shares (D50), which no node holds.
-  template <class Q>
-  static void start_lanes(const TreeType& tree, const Q* keys, std::size_t count, Lanes<Q>& lanes) noexcept {
+  template <class Keys>
+  static void start_lanes(const TreeType& tree, Keys keys, std::size_t count,
+                          Lanes<BatchKey<Keys>>& lanes) noexcept {
     const SharedPrefix& shared = tree.shared_prefix();
     const Ptr root = tree.root().node_ptr();
     const std::size_t root_prefix_len = tree.root().prefix_len();
@@ -200,10 +219,10 @@ class TreeBatch {
     }
   }
 
-  template <class Q>
-  static void find_lanes(const TreeType& tree, const Q* keys, std::size_t count, const V** values) noexcept {
+  template <class Keys>
+  static void find_lanes(const TreeType& tree, Keys keys, std::size_t count, const V** values) noexcept {
     for (std::size_t lane = 0; lane < count; ++lane) values[lane] = nullptr;
-    Lanes<Q> lanes;
+    Lanes<BatchKey<Keys>> lanes;
     start_lanes(tree, keys, count, lanes);
     descend_lanes(lanes, [&](std::size_t lane, InternalNode node, std::size_t index) {
       values[lane] = Found<K, V, S>::separator(node, index).key_value().second;

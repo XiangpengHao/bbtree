@@ -52,6 +52,27 @@ class InsertOutcome {
   explicit InsertOutcome(InsertError<K, V>&& error) noexcept : error_(std::move(error)) {}
 };
 
+/// What a leaf closure of a shared map's insert returns
+/// (`update_or_insert_with_leaf`): its result, or the layout it had no memory
+/// for, which refuses the insert, leaving the map as it was and the entry to
+/// come back in an `InsertError` (Rust's `Result<R, Layout>`).
+template <class R>
+class LeafOutcome {
+ public:
+  static LeafOutcome done(R value) noexcept { return LeafOutcome(std::move(value), Layout{0, 0}); }
+  static LeafOutcome refused(Layout layout) noexcept { return LeafOutcome(std::nullopt, layout); }
+
+  bool ok() const noexcept { return value_.has_value(); }
+  R& value() noexcept { return *value_; }
+  Layout layout() const noexcept { return layout_; }
+
+ private:
+  std::optional<R> value_;
+  Layout layout_;
+
+  LeafOutcome(std::optional<R> value, Layout layout) noexcept : value_(std::move(value)), layout_(layout) {}
+};
+
 /// What a closure returning `void` returns, where a result is kept.
 struct Unit {
   friend constexpr bool operator==(Unit, Unit) noexcept { return true; }

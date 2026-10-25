@@ -6,7 +6,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use bbtree::unsync::BBTreeMap;
+use bbtree::unsync::{BBTreeMap, BBTreeSet};
 
 /// The splitmix64 finalizer, as `Keys::mix` in `workload.hpp`.
 fn mix(mut value: u64) -> u64 {
@@ -227,6 +227,34 @@ fn batch(entries: usize) {
     }
 }
 
+/// Operations on two sets, folded into a count, as `set_bench.cpp` times
+/// the C++ set: two sets that share half their elements, walked side by
+/// side; and a set with a 37th of one of them, looked up in it.
+fn set(elements: usize) {
+    let rounds: usize = std::env::var("SET_ROUNDS").map_or(1, |rounds| rounds.parse().unwrap());
+    let set_of = |first: u64, count: u64, step: u64| -> BBTreeSet<u64> {
+        (0..count).map(|index| mix(first + index * step)).collect()
+    };
+    let n = elements as u64;
+    let a = set_of(0, n, 1);
+    let b = set_of(n / 2, n, 1);
+    let small = set_of(0, n / 37, 37);
+    let time = |name: &str, size: usize, operation: &dyn Fn() -> usize| {
+        let start = Instant::now();
+        let mut count = 0;
+        for _ in 0..rounds {
+            count += operation();
+        }
+        black_box(count);
+        report(name, size, ns_per(start, size * rounds));
+    };
+    time("set difference", elements, &|| a.difference(&b).count());
+    time("set intersection", elements, &|| a.intersection(&b).count());
+    time("set union", elements, &|| a.union(&b).count());
+    time("set intersection small", elements / 37, &|| small.intersection(&a).count());
+    time("set is_subset small", elements / 37, &|| usize::from(small.is_subset(&a)));
+}
+
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let suite = arguments.first().map(String::as_str).unwrap_or("point");
@@ -243,6 +271,7 @@ fn main() {
         }
         "scan" => scan(entries),
         "batch" => batch(entries),
+        "set" => set(entries),
         "shared" => {
             let counts: Vec<usize> = arguments
                 .get(2)

@@ -537,6 +537,16 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
 
   using annex_type = typename S::annex;
 
+  /// The leaf goes with the map: its annex gives what it holds back to
+  /// `alloc`, the map's allocator, and is destroyed.
+  template <class Alloc>
+  void release_annex(Alloc& alloc) const noexcept {
+    if constexpr (!std::is_empty_v<annex_type>) {
+      annex().release(alloc);
+      annex().~annex_type();
+    }
+  }
+
   KeySlots<K, Kind> key_slots() const noexcept { return node_.template key_slots<Kind>(); }
 
   /// # Contract: keys and values `0..len` are initialized at this call.

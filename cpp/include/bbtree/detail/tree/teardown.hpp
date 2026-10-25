@@ -2,7 +2,8 @@
 // destroyed once, in ascending key order, each key before its value, as
 // std's `BTreeMap` drops them, and every page given back once. A separator's
 // value is its head (D17), destroyed right after the separator's key. Keys and
-// values without destructors are skipped a leaf at a time (D23).
+// values without destructors are skipped a leaf at a time (D23). A shared
+// map's leaf annexes are released to its allocator with their leaves.
 #pragma once
 
 #include <cstddef>
@@ -39,7 +40,30 @@ class Teardown {
     node.free().deallocate(pages);
   }
 
+  /// Gives back every page of `tree`, whose entries were all moved out and
+  /// destroyed already (a map consumed by its `IntoIter`), leaving none.
+  template <class Pages>
+  static void free_emptied(TreeType& tree, const Pages& pages) noexcept {
+    if (!tree.has_root()) return;
+    const auto root_page = tree.root_page();
+    free_children(root_page.node(), pages);
+    std::move(root_page.free()).deallocate(pages);
+    tree = TreeType();
+  }
+
  private:
+  /// Frees every page below `node`, destroying nothing in them.
+  template <class Pages>
+  static void free_children(AnyNode node, const Pages& pages) noexcept {
+    if (node.is_leaf()) return;
+    const InternalNode internal = node.internal();
+    for (std::size_t edge = 0; edge <= internal.len(); ++edge) {
+      const AnyNode child = internal.child(edge);
+      free_children(child, pages);
+      child.free().deallocate(pages);
+    }
+  }
+
   static constexpr bool entries_need_destroying =
       !std::is_trivially_destructible_v<K> || !std::is_trivially_destructible_v<V>;
 
@@ -49,6 +73,7 @@ class Teardown {
   static void destroy_entries_and_children(AnyNode node, const Pages& pages) noexcept {
     if (node.is_leaf()) {
       if constexpr (entries_need_destroying) destroy_leaf_entries(node.leaf());
+      if constexpr (!std::is_empty_v<typename S::annex>) node.leaf().release_annex(pages.allocator());
       return;
     }
     const InternalNode internal = node.internal();

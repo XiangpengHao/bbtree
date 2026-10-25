@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 
+#include "../../bound.hpp"
 #include "../config.hpp"
 #include "../node/internal.hpp"
 #include "../node/shared_prefix.hpp"
@@ -236,6 +237,42 @@ class NodeStack {
     } else {
       set_index(index() + 1);
       descend_to_leaf<FirstEdge>();
+    }
+  }
+
+  /// From the root, attached, goes to the leaf edge where a range from
+  /// `lower` starts: before an included key, after an excluded one, at the
+  /// tree's first edge without a bound.
+  template <class Q>
+  void go_to_lower_edge(const ::bbtree::Bound<Q>& lower, const SharedPrefix& shared) noexcept {
+    switch (lower.kind()) {
+      case ::bbtree::Bound<Q>::Kind::Included:
+        search_to_edge(SearchKey<K, Q>(lower.key()), KeySide::Before, shared);
+        break;
+      case ::bbtree::Bound<Q>::Kind::Excluded:
+        search_to_edge(SearchKey<K, Q>(lower.key()), KeySide::After, shared);
+        break;
+      case ::bbtree::Bound<Q>::Kind::Unbounded:
+        descend_to_end<FirstEdge>();
+        break;
+    }
+  }
+
+  /// From the root, attached, goes to the leaf edge where a range to `upper`
+  /// ends: after an included key, before an excluded one, at the tree's last
+  /// edge without a bound.
+  template <class Q>
+  void go_to_upper_edge(const ::bbtree::Bound<Q>& upper, const SharedPrefix& shared) noexcept {
+    switch (upper.kind()) {
+      case ::bbtree::Bound<Q>::Kind::Included:
+        search_to_edge(SearchKey<K, Q>(upper.key()), KeySide::After, shared);
+        break;
+      case ::bbtree::Bound<Q>::Kind::Excluded:
+        search_to_edge(SearchKey<K, Q>(upper.key()), KeySide::Before, shared);
+        break;
+      case ::bbtree::Bound<Q>::Kind::Unbounded:
+        descend_to_end<LastEdge>();
+        break;
     }
   }
 
