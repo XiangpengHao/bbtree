@@ -229,10 +229,21 @@ The throughput rows predate the fixes below.
   more instructions per insert, the flag round-tripping through the
   stack where the load had been merged with the descent's own.
 
+- **The leaf hands its outcome back unboxed.** `insert_into`,
+  `try_append` and `settle` wrapped the insert policy's output in a
+  second `std::optional`, and `split` took one by reference: three
+  optional layers per insert where Rust's policy returns one `Result`.
+  They return `LeafOutcome` directly now; a full leaf is a refusal of
+  no layout, told apart from a policy refusal by the `refused`
+  out-param, as before. 43 fewer instructions per insert at 10M
+  (6,889M to 6,846M); the lldb line profile no longer shows the
+  optional-construction line that dominated the old one.
+
 Open:
 
-- Shared inserts run about 14 more instructions than Rust's (694 against
-  680 per insert at 10M, key setup included in both, by the same
-  difference count at `GET_ROUNDS=0`), at parity in cycles on the run
-  measured (923 against 936). Wall-clock throughput at 4 and 8 threads
-  still wants a quiet machine.
+- Shared inserts run about 9 more instructions than Rust's (685 against
+  676 per insert at 10M, key setup included in both, by the same
+  difference count at `GET_ROUNDS=0`), at parity in cycles on the runs
+  measured. What remains is diffuse across the descent and leaf lines
+  both maps share, not one call or copy. Wall-clock throughput at 4
+  and 8 threads still wants a quiet machine.
