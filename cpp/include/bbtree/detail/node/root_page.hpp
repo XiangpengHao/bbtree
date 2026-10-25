@@ -79,6 +79,21 @@ class RootPage {
     return copy;
   }
 
+  /// Where `key` sorts against every key of the tree, read in place while
+  /// a thread holding the root may be changing the prefix: `place_outside`
+  /// without the 65-byte copy above. The bytes read may be mid-change;
+  /// the caller's version check vouches for them, as it does for a copy.
+  template <class Q>
+  BBTREE_RACING_READ std::optional<Ordering> place_outside_racing(
+      const SearchKey<K, Q>& key) const noexcept {
+    SharedPrefix* shared = area();
+    const std::size_t len = RacingLoad::relaxed(&shared->len);
+    if (len == 0) return std::nullopt;
+    const std::optional<Ordering> order = key.cmp_shared_prefix(shared->bytes, len);
+    if (order && *order == Ordering::Equal) return std::nullopt;
+    return order;
+  }
+
   /// Makes the tree a level taller: moves the root node to a fresh page of
   /// its kind and makes the root internal above it, at the tree's shared
   /// prefix length (D50). Returns the page's new handle.

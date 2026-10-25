@@ -476,9 +476,7 @@ class LatchedTree {
       if constexpr (Mode::latches) {
         outside = root_page.shared_prefix().place_outside(key);
       } else {
-        if (const std::optional<SharedPrefix> shared = root_page.load_racing_shared_prefix()) {
-          outside = shared->place_outside(key);
-        }
+        outside = root_page.place_outside_racing(key);
         if (!held.is_unchanged()) return false;
       }
       if (outside) {
@@ -491,12 +489,10 @@ class LatchedTree {
     InternalNode node = root.internal();
     Version version(0);
     if (!root_version(node, version)) return false;
-    if (const std::optional<SharedPrefix> shared = root_page.load_racing_shared_prefix()) {
-      if (const std::optional<Ordering> outside = shared->place_outside(key)) {
-        if (!node.node_ptr().latch().is_unchanged(version)) return false;
-        descent.outside = outside;
-        return true;
-      }
+    if (const std::optional<Ordering> outside = root_page.place_outside_racing(key)) {
+      if (!node.node_ptr().latch().is_unchanged(version)) return false;
+      descent.outside = outside;
+      return true;
     }
     std::uint8_t at_separator = 0;
     bool at_root = true;

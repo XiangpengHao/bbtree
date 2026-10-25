@@ -11,6 +11,7 @@ race:bbtree::detail::NeonLanes
 race:load_racing_header
 race:load_racing_has_head
 race:load_racing_shared_prefix
+race:place_outside_racing
 # A latch word is only ever accessed atomically, by `NodeLatch`, which reads
 # and writes nothing else and calls nothing: a race reported inside it is with
 # a non-atomic write to a latch word, a fresh page's zeroing by its allocator.
