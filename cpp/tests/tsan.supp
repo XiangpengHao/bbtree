@@ -1,0 +1,13 @@
+# ThreadSanitizer suppressions for the optimistic reads of the shared map
+# (PORTING.md, P7; `tree/node/optimistic.rs`): a reader reads a node in place
+# while a writer that holds it changes it, and a version check afterwards
+# throws away what it read. Every entry names a reader-side function, so a
+# race between two writers, which the latches forbid, is still reported.
+race:bbtree::detail::Racing
+race:bbtree::detail::RacingCopy
+race:bbtree::detail::NodeInlineKeys
+race:bbtree::detail::VectorCount
+race:bbtree::detail::NeonLanes
+race:load_racing_header
+race:load_racing_has_head
+race:load_racing_shared_prefix
