@@ -70,7 +70,13 @@ cpp/
 - **P7. Racing reads.** Optimistic readers read header fields with relaxed
   atomic loads, and slots with plain loads in functions excluded from
   ThreadSanitizer, as the Rust code reads raw pointers. The version check
-  decides what a read was worth (D54).
+  decides what a read was worth (D54). A reader can also reach a page a
+  writer just allocated, through an edge it read racing, and load that
+  page's latch word while the allocator's zeroing of it is unordered with
+  the load: the compare-and-swap that follows reads the word's latest value
+  (the writer's lock), and a version read there is thrown away by the
+  parent's check. Rust's reads are the same; TSan ignores races inside
+  `NodeLatch`, which only ever touches latch words, atomically.
 - **P8. Iterators.** Cursors keep the node stack (D24) in place; `end()` is
   a sentinel type, so range-for never copies a cursor.
 - **P9. Walks cross leaves inline.** Rust keeps a walk's leaf crossing out of
