@@ -18,6 +18,12 @@
 #define BBTREE_COLD __attribute__((cold, noinline))
 #define BBTREE_LIKELY(condition) __builtin_expect(!!(condition), 1)
 #define BBTREE_UNLIKELY(condition) __builtin_expect(!!(condition), 0)
+#elif defined(_MSC_VER)
+#define BBTREE_ALWAYS_INLINE __forceinline
+#define BBTREE_NOINLINE __declspec(noinline)
+#define BBTREE_COLD __declspec(noinline)
+#define BBTREE_LIKELY(condition) (condition)
+#define BBTREE_UNLIKELY(condition) (condition)
 #else
 #define BBTREE_ALWAYS_INLINE inline
 #define BBTREE_NOINLINE

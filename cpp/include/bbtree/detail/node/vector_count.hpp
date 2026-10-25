@@ -22,9 +22,11 @@
 #include <cstdint>
 #include <optional>
 
-#if defined(__x86_64__)
-#include <immintrin.h>
-#elif defined(__aarch64__)
+#include "../target.hpp"
+
+#if defined(BBTREE_ARM64) && defined(BBTREE_MSVC)
+#include <arm64_neon.h>
+#elif defined(BBTREE_ARM64)
 #include <arm_neon.h>
 #endif
 
@@ -55,32 +57,6 @@ struct SlotMatches {
   static constexpr SlotMatches many() noexcept { return {Kind::Many, 0, 0}; }
 };
 
-/// Bit tricks the counts share.
-struct Bits {
-  /// `bits` with all but its `count` lowest cleared, `count <= 64`: one `bzhi`
-  /// where BMI2 is there.
-  static inline std::uint64_t keep_low(std::uint64_t bits, unsigned count) noexcept {
-#if defined(__x86_64__) && defined(__BMI2__)
-    return _bzhi_u64(bits, count);
-#else
-    return count >= 64 ? bits : bits & ((std::uint64_t{1} << count) - 1);
-#endif
-  }
-
-  static inline unsigned count_ones(std::uint64_t bits) noexcept {
-    return static_cast<unsigned>(__builtin_popcountll(bits));
-  }
-
-  static inline unsigned trailing_zeros(std::uint64_t bits) noexcept {
-    return bits == 0 ? 64 : static_cast<unsigned>(__builtin_ctzll(bits));
-  }
-
-  static inline unsigned trailing_ones(std::uint64_t bits) noexcept { return trailing_zeros(~bits); }
-
-  static inline unsigned leading_zeros(std::uint64_t bits) noexcept {
-    return bits == 0 ? 64 : static_cast<unsigned>(__builtin_clzll(bits));
-  }
-};
 
 /// The slots equal to a target, as a bit mask over the capacity: an exact-key
 /// lookup over 8-byte slots needs no ordered count.
@@ -92,7 +68,7 @@ class U64EqualityMask {
   template <std::size_t Capacity>
   static inline std::optional<U64EqualityMask> matching(const std::uint64_t* slots,
                                                         std::uint64_t target) noexcept {
-#if defined(__x86_64__) && defined(__AVX512F__)
+#if defined(BBTREE_AVX512F)
     if constexpr (Capacity <= 64) {
       constexpr std::size_t lanes = 8;
       std::uint64_t bits = 0;
@@ -146,7 +122,7 @@ struct U8EqualitySearch {
   static inline std::optional<SlotMatches> matching(const std::uint8_t* slots,
                                                     IndexRange candidates,
                                                     std::uint8_t target) noexcept {
-#if defined(__x86_64__)
+#if defined(BBTREE_X86_64)
     constexpr std::size_t lanes = 16;
     if constexpr (Capacity < lanes || Capacity > 64) {
       (void)slots, (void)candidates, (void)target;
@@ -181,7 +157,7 @@ struct U8EqualitySearch {
   }
 };
 
-#if defined(__aarch64__)
+#if defined(BBTREE_ARM64)
 /// A slot width's NEON lanes: 16-byte vectors of `lanes` slots. A node's
 /// capacity is below 2^16, so a lane's count and their sum fit any width.
 template <class W>
@@ -250,15 +226,15 @@ struct VectorCount {
   template <std::size_t Capacity>
   static inline std::optional<IndexRange> equal_range(const W* slots, std::size_t len,
                                                       W target) noexcept {
-#if defined(__aarch64__)
+#if defined(BBTREE_ARM64)
     return neon_equal_range<Capacity>(slots, len, target);
-#elif defined(__x86_64__) && defined(__AVX512BW__)
+#elif defined(BBTREE_AVX512BW)
     if constexpr (sizeof(W) == 8 && (Capacity < 28 || Capacity > 31)) {
       return std::nullopt;
     } else {
       return avx512_equal_range<Capacity>(slots, len, target);
     }
-#elif defined(__x86_64__) && !defined(__POPCNT__)
+#elif defined(BBTREE_X86_64) && !defined(BBTREE_POPCNT)
     if constexpr (sizeof(W) == 8) {
       return std::nullopt;
     } else {
@@ -282,7 +258,7 @@ struct VectorCount {
   }
 
  private:
-#if defined(__aarch64__)
+#if defined(BBTREE_ARM64)
   template <std::size_t Capacity>
   static inline std::optional<IndexRange> neon_equal_range(const W* slots, std::size_t len,
                                                            W target) noexcept {
@@ -320,7 +296,7 @@ struct VectorCount {
   }
 #endif
 
-#if defined(__x86_64__) && defined(__AVX512BW__)
+#if defined(BBTREE_AVX512BW)
   template <std::size_t Capacity>
   static inline std::optional<IndexRange> avx512_equal_range(const W* slots, std::size_t len,
                                                              W target) noexcept {
@@ -363,7 +339,7 @@ struct VectorCount {
   }
 #endif
 
-#if defined(__x86_64__) && !defined(__AVX512BW__) && !defined(__POPCNT__)
+#if defined(BBTREE_X86_64) && !defined(BBTREE_AVX512BW) && !defined(BBTREE_POPCNT)
   template <std::size_t Capacity>
   static inline std::optional<IndexRange> sse2_equal_range(const W* slots, std::size_t len,
                                                            W target) noexcept {

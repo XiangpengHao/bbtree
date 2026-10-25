@@ -73,7 +73,7 @@ class RootPage {
   /// once checked. `nullopt` if its length, read first, is 0.
   BBTREE_RACING_READ std::optional<SharedPrefix> load_racing_shared_prefix() const noexcept {
     SharedPrefix* shared = area();
-    if (__atomic_load_n(&shared->len, __ATOMIC_RELAXED) == 0) return std::nullopt;
+    if (RacingLoad::relaxed(&shared->len) == 0) return std::nullopt;
     SharedPrefix copy;
     std::memcpy(&copy, shared, sizeof(copy));
     return copy;

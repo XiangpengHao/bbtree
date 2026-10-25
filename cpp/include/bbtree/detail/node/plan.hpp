@@ -20,6 +20,7 @@
 
 #include "../../inline_key.hpp"
 #include "../../node_config.hpp"
+#include "../target.hpp"
 #include "layout.hpp"
 
 namespace bbtree {
@@ -221,7 +222,7 @@ struct KeyInliner {
     for (std::size_t offset = 0; offset < limit; offset += 8) {
       const InlineWord differing_bits = a_at(offset) ^ b_at(offset);
       if (differing_bits != 0) {
-        return offset + static_cast<std::size_t>(__builtin_clzll(differing_bits)) / 8;
+        return offset + static_cast<std::size_t>(Bits::leading_zeros(differing_bits)) / 8;
       }
     }
     return SIZE_MAX;

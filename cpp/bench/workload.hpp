@@ -76,10 +76,16 @@ inline void report(const char* cell, std::size_t size, double ns) {
   std::fflush(stdout);
 }
 
-/// Keeps `value` from being optimized away.
+/// Keeps `value` from being optimized away: an empty asm that reads it, or,
+/// on MSVC, a volatile read of it.
 template <class T>
 inline void keep(const T& value) {
+#if defined(_MSC_VER) && !defined(__clang__)
+  const volatile T* sink = &value;
+  (void)*sink;
+#else
   asm volatile("" : : "r,m"(value) : "memory");
+#endif
 }
 
 }  // namespace bbtree_bench

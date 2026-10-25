@@ -21,6 +21,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "detail/target.hpp"
+
 namespace bbtree {
 
 /// An inline key: 8 bytes of a key's encoding, big-endian, so that inline keys
@@ -148,21 +150,13 @@ class ByteWindows {
   }
 
   static InlineWord to_big_endian(InlineWord word) noexcept {
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return word;
-#else
-    return __builtin_bswap64(word);
-#endif
+    return detail::ByteOrder::big_endian64(word);
   }
 
   static std::uint32_t load_be32(const std::uint8_t* bytes) noexcept {
     std::uint32_t word;
     std::memcpy(&word, bytes, sizeof(word));
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return word;
-#else
-    return __builtin_bswap32(word);
-#endif
+    return detail::ByteOrder::big_endian32(word);
   }
 
   /// `inline_key_at` of fewer than 8 bytes: they padded to a word, shifted.

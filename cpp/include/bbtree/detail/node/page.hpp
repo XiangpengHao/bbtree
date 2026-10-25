@@ -144,13 +144,13 @@ class NodePtr {
   /// changing them, for an optimistic read: each read once, relaxed.
   BBTREE_RACING_READ std::pair<std::size_t, std::size_t> load_racing_header() const noexcept {
     auto* header = reinterpret_cast<InlineKeyNodeHeader*>(page());
-    return {__atomic_load_n(&header->header.len, __ATOMIC_RELAXED),
-            __atomic_load_n(&header->prefix_len, __ATOMIC_RELAXED)};
+    return {RacingLoad::relaxed(&header->header.len),
+            RacingLoad::relaxed(&header->prefix_len)};
   }
 
   /// `has_head` of a latched tree's leaf, while a writer may change it.
   BBTREE_RACING_READ bool load_racing_has_head() const noexcept {
-    return __atomic_load_n(&header()->has_head, __ATOMIC_RELAXED);
+    return RacingLoad::relaxed(&header()->has_head);
   }
 
   /// Where a leaf's annex is: right after its node header.

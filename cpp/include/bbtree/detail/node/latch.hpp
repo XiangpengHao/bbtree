@@ -20,10 +20,7 @@
 #include <cstdint>
 
 #include "../config.hpp"
-
-#if defined(__x86_64__)
-#include <immintrin.h>
-#endif
+#include "../target.hpp"
 
 namespace bbtree::detail {
 
@@ -52,24 +49,13 @@ class Version {
 class Backoff {
  public:
   void spin() noexcept {
-    for (unsigned spin = 0; spin < (1u << round_); ++spin) relax();
+    for (unsigned spin = 0; spin < (1u << round_); ++spin) SpinWait::relax();
     if (round_ < max_round) ++round_;
   }
 
  private:
   static constexpr unsigned max_round = 10;
   unsigned round_ = 0;
-
-  /// One wait, as Rust's `core::hint::spin_loop`: `pause` on x86, `isb` on
-  /// Arm, where `yield` waits for nothing on most cores and a spinning
-  /// thread would read a contended latch word as fast as it can.
-  static void relax() noexcept {
-#if defined(__x86_64__)
-    _mm_pause();
-#elif defined(__aarch64__)
-    __asm__ __volatile__("isb sy" ::: "memory");
-#endif
-  }
 };
 
 /// A node's latch word; see the header comment. Only atomics access it.

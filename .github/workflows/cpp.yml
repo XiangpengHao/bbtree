@@ -2,8 +2,7 @@
 # has, and under the sanitizers. Named for its README badge.
 #
 # Not yet here: GCC with libstdc++, whose std::string the map refuses as a
-# key (cpp/PORTING.md, P2) and the tests still use; MSVC, which lacks the
-# GCC builtins the headers use.
+# key (cpp/PORTING.md, P2) and the tests still use.
 name: cpp
 
 on:
@@ -78,6 +77,47 @@ jobs:
             exit 0
           fi
           ctest --test-dir build --output-on-failure
+
+  # MSVC, as DuckDB builds on Windows: x64 at SSE2 and AVX2 (BMI2, POPCNT),
+  # Arm64 with NEON, and AVX-512 built only, which the Linux job runs. The
+  # Visual Studio generator needs no developer prompt; the flags keep MSVC's
+  # default `/EHsc`, which setting CMAKE_CXX_FLAGS replaces.
+  test-msvc:
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows x64 sse2
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc
+          - name: windows x64 avx2
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc /arch:AVX2
+          - name: windows x64 avx512
+            runner: windows-latest
+            platform: x64
+            flags: /EHsc /arch:AVX512
+            build_only: true
+          - name: windows arm64
+            runner: windows-11-arm
+            platform: ARM64
+            flags: /EHsc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S cpp -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build --config RelWithDebInfo --parallel
+
+      - name: Test
+        if: ${{ !matrix.build_only }}
+        run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
 
   sanitize:
     name: sanitize (${{ matrix.sanitizer }}, ${{ matrix.runner }})

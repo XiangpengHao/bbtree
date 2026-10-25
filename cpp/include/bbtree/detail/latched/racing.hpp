@@ -143,7 +143,7 @@ class Racing {
       if (!key.template ends_within_window<Kind::width>(prefix_len)) return std::nullopt;
       const std::uint8_t query_tag = key.hash_tag();
       if (!HashTags<Kind::capacity>::is_exact_length(query_tag)) return std::nullopt;
-      const std::uint8_t tag = __atomic_load_n(leaf.hash_tags() + index, __ATOMIC_RELAXED);
+      const std::uint8_t tag = RacingLoad::relaxed(leaf.hash_tags() + index);
       return tag == query_tag;
     } else {
       return std::nullopt;
@@ -198,7 +198,7 @@ class Racing {
   /// null for an edge none has (a zeroed page's).
   BBTREE_RACING_READ static Ptr child(InternalNode node, std::size_t index) noexcept {
     BBTREE_ASSERT(index <= InternalNode::capacity());
-    return Ptr::from_tagged(__atomic_load_n(node.node_ptr().edge_word(index), __ATOMIC_RELAXED));
+    return Ptr::from_tagged(RacingLoad::relaxed(node.node_ptr().edge_word(index)));
   }
 
   /// The leftmost leaf under `node`, down first edges read in place; null if

@@ -26,6 +26,7 @@
 #include <utility>
 
 #include "../config.hpp"
+#include "../target.hpp"
 #include "tree.hpp"
 
 namespace bbtree::detail {
@@ -34,7 +35,14 @@ namespace bbtree::detail {
 /// next, which reads nothing and can't fault.
 struct Prefetcher {
   BBTREE_ALWAYS_INLINE static void hint(const void* line) noexcept {
-    if (line != nullptr) __builtin_prefetch(line, 0, 3);
+    if (line == nullptr) return;
+#if !defined(BBTREE_MSVC)
+    __builtin_prefetch(line, 0, 3);
+#elif defined(BBTREE_X86_64)
+    _mm_prefetch(static_cast<const char*>(line), _MM_HINT_T0);
+#elif defined(BBTREE_ARM64)
+    __prefetch(line);
+#endif
   }
 };
 
