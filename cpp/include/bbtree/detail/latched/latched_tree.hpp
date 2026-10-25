@@ -254,8 +254,8 @@ class LatchedTree {
       }
     }
     std::optional<Layout> refused;
-    std::optional<typename Policy::Output> appended = try_append(key, value, policy, refused);
-    if (appended) return Outcome::done(std::move(*appended));
+    LeafOutcome<typename Policy::Output> appended = try_append(key, value, policy, refused);
+    if (appended.ok()) return Outcome::done(std::move(appended.value()));
     if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
     for (;;) {
       NoPath path;
@@ -265,9 +265,9 @@ class LatchedTree {
         continue;
       }
       std::size_t edge = 0;
-      std::optional<typename Policy::Output> output = insert_into(descent.held, descent.at_separator, key, value,
+      LeafOutcome<typename Policy::Output> outcome = insert_into(descent.held, descent.at_separator, key, value,
                                                                   policy, MapPages<A>(alloc), edge, refused);
-      if (output) return Outcome::done(std::move(*output));
+      if (outcome.ok()) return Outcome::done(std::move(outcome.value()));
       if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
       descent.held.release();
       return insert_splitting(std::move(key), std::move(value), policy, alloc);
@@ -673,13 +673,17 @@ class LatchedTree {
   // Inserts, internals.
 
   /// Inserts into `held`, the leaf where `key` belongs, if it holds `key` or
-  /// has room, and returns what `policy` returned; or `nullopt`, keeping the
-  /// entry: with `refused` set if the policy refused, or else the leaf full
-  /// and `edge` where `key` goes.
+  /// has room, and returns what `policy` returned, as the policy's own
+  /// `LeafOutcome` (no second optional around it: that layer cost
+  /// instructions on every insert, where Rust's `Result` is one enum).
+  /// Keeping the entry instead: with `refused` set if the policy refused,
+  /// or else a refusal of no layout, the leaf full and `edge` where `key`
+  /// goes.
   template <class Policy, class Pages>
-  BBTREE_ALWAYS_INLINE std::optional<typename Policy::Output> insert_into(
+  BBTREE_ALWAYS_INLINE LeafOutcome<typename Policy::Output> insert_into(
       const Held<ExclusiveMode>& held, bool at_separator, K& key, V& value, Policy& policy,
       const Pages& pages, std::size_t& edge, std::optional<Layout>& refused) const noexcept {
+    using Output = typename Policy::Output;
     const LeafNode leaf = held.leaf();
     const AnnexedLeaf<K, V, S> annexed(leaf);
     if (at_separator) {
@@ -690,24 +694,22 @@ class LatchedTree {
       return settle(policy.occupied(annexed, key, value, leaf.key(found.index), leaf.value(found.index)), refused);
     }
     if (leaf.len() < LeafNode::capacity()) {
-      std::optional<typename Policy::Output> output = settle(policy.vacant(annexed, key, value), refused);
-      if (!output) return std::nullopt;
+      LeafOutcome<Output> outcome = settle(policy.vacant(annexed, key, value), refused);
+      if (!outcome.ok()) return outcome;
       PrefixedKey<K> prefixed = this->prefixed(std::move(key), leaf, pages);
       leaf.insert_fit(found.index, std::move(prefixed).window_at(leaf.prefix_len()), std::move(value));
-      return output;
+      return outcome;
     }
     edge = found.index;
-    return std::nullopt;
+    return LeafOutcome<Output>::refused(Layout{0, 0});
   }
 
-  /// A policy's outcome as an insert's: its output, or `nullopt` with the
-  /// refusal's layout in `refused`.
+  /// A policy's outcome, recording a refusal's layout in `refused`.
   template <class Output>
-  BBTREE_ALWAYS_INLINE static std::optional<Output> settle(LeafOutcome<Output>&& outcome,
-                                                           std::optional<Layout>& refused) noexcept {
-    if (BBTREE_LIKELY(outcome.ok())) return std::optional<Output>(std::move(outcome.value()));
-    refused = outcome.layout();
-    return std::nullopt;
+  BBTREE_ALWAYS_INLINE static LeafOutcome<Output> settle(LeafOutcome<Output>&& outcome,
+                                                         std::optional<Layout>& refused) noexcept {
+    if (BBTREE_UNLIKELY(!outcome.ok())) refused = outcome.layout();
+    return std::move(outcome);
   }
 
   /// `key`, bound for `leaf`, which the caller holds exclusively. A root leaf
@@ -723,24 +725,27 @@ class LatchedTree {
 
   /// Appends to the last leaf, if it has room, `key` goes after its last
   /// key, and `key` shares what every key shares; returns what `policy`
-  /// returned. Otherwise `nullopt`, the entry kept.
+  /// returned. Otherwise a refusal of no layout, the entry kept (as
+  /// `insert_into`'s full leaf; a policy refusal sets `refused`).
   template <class Policy>
-  BBTREE_ALWAYS_INLINE std::optional<typename Policy::Output> try_append(K& key, V& value, Policy& policy,
-                                                                         std::optional<Layout>& refused) const noexcept {
+  BBTREE_ALWAYS_INLINE LeafOutcome<typename Policy::Output> try_append(
+      K& key, V& value, Policy& policy, std::optional<Layout>& refused) const noexcept {
+    using Output = typename Policy::Output;
+    const LeafOutcome<Output> not_appended = LeafOutcome<Output>::refused(Layout{0, 0});
     const Ptr last = Ptr::from_tagged(rightmost_leaf_.value.load(std::memory_order_acquire));
-    if (last.is_null()) return std::nullopt;
+    if (last.is_null()) return not_appended;
     const LeafNode leaf = LeafNode::at(last);
-    if (!Race::may_go_last(leaf, SearchKey<K, K>(key))) return std::nullopt;
+    if (!Race::may_go_last(leaf, SearchKey<K, K>(key))) return not_appended;
     const Held<ExclusiveMode> held = Held<ExclusiveMode>::lock(leaf);
-    if (!is_rightmost_leaf(leaf)) return std::nullopt;
+    if (!is_rightmost_leaf(leaf)) return not_appended;
     const std::size_t len = leaf.len();
-    if (len >= LeafNode::capacity() || len == 0) return std::nullopt;
-    if (SearchKey<K, K>(key).cmp_full(leaf.key(len - 1)) != Ordering::Greater) return std::nullopt;
-    if (!root_page().shared_prefix().is_shared_by(key)) return std::nullopt;
-    std::optional<typename Policy::Output> output = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
-    if (!output) return std::nullopt;
+    if (len >= LeafNode::capacity() || len == 0) return not_appended;
+    if (SearchKey<K, K>(key).cmp_full(leaf.key(len - 1)) != Ordering::Greater) return not_appended;
+    if (!root_page().shared_prefix().is_shared_by(key)) return not_appended;
+    LeafOutcome<Output> outcome = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
+    if (!outcome.ok()) return outcome;
     leaf.insert_fit(len, WindowedKey<K>::at(std::move(key), leaf.prefix_len()), std::move(value));
-    return output;
+    return outcome;
   }
 
   bool is_rightmost_leaf(LeafNode leaf) const noexcept {
@@ -768,13 +773,13 @@ class LatchedTree {
       }
       std::size_t edge = 0;
       std::optional<Layout> refused;
-      std::optional<typename Policy::Output> output = insert_into(descent.held, descent.at_separator, key, value,
+      LeafOutcome<typename Policy::Output> outcome = insert_into(descent.held, descent.at_separator, key, value,
                                                                   policy, MapPages<A>(alloc), edge, refused);
-      if (output) return Outcome::done(std::move(*output));
+      if (outcome.ok()) return Outcome::done(std::move(outcome.value()));
       if (refused) return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
-      switch (split(path, descent.held, edge, key, value, policy, pages, output, refused)) {
+      switch (split(path, descent.held, edge, key, value, policy, pages, outcome, refused)) {
         case SplitResult::Inserted:
-          return Outcome::done(std::move(*output));
+          return Outcome::done(std::move(outcome.value()));
         case SplitResult::NoPage:
           return Outcome::failed(InsertError<K, V>(std::move(key), std::move(value), *refused));
         case SplitResult::StartOver:
@@ -795,7 +800,7 @@ class LatchedTree {
   template <class Policy, class A>
   SplitResult split(const Path& path, const Held<ExclusiveMode>& held, std::size_t edge, K& key,
                     V& value, Policy& policy, NodePages<A>& pages,
-                    std::optional<typename Policy::Output>& output,
+                    LeafOutcome<typename Policy::Output>& outcome,
                     std::optional<Layout>& refused) const noexcept {
     // The lowest node with room takes the separator; every node below it
     // splits. Without one, the root splits, and the tree grows.
@@ -825,8 +830,8 @@ class LatchedTree {
       return SplitResult::NoPage;
     }
     const LeafNode leaf = held.leaf();
-    output = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
-    if (!output) {
+    outcome = settle(policy.vacant(AnnexedLeaf<K, V, S>(leaf), key, value), refused);
+    if (!outcome.ok()) {
       // The policy refused: the split takes no page.
       pages.unreserve();
       return SplitResult::NoPage;
