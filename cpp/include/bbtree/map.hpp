@@ -64,14 +64,14 @@ class BBTreeMap {
   /// Runs `f(key, value)` on the entry whose key equals `key` while its leaf
   /// is latched shared, and returns what `f` returned; `nullopt` without one.
   template <class Q, class F>
-  auto read(const Q& key, F&& f) const noexcept {
+  BBTREE_ALWAYS_INLINE auto read(const Q& key, F&& f) const noexcept {
     return tree_.read(detail::Query<K>::of(key), std::forward<F>(f));
   }
 
   /// A copy of the value, read without a latch where the leaf settles the
   /// key (D57): for trivially copyable values.
   template <class Q>
-  std::optional<V> get_copied(const Q& key) const noexcept {
+  BBTREE_ALWAYS_INLINE std::optional<V> get_copied(const Q& key) const noexcept {
     return tree_.get_copied(detail::Query<K>::of(key));
   }
 
@@ -82,7 +82,7 @@ class BBTreeMap {
   }
 
   template <class Q>
-  bool contains_key(const Q& key) const noexcept {
+  BBTREE_ALWAYS_INLINE bool contains_key(const Q& key) const noexcept {
     return tree_.contains_key(detail::Query<K>::of(key));
   }
 

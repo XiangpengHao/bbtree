@@ -21,6 +21,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "detail/config.hpp"
 #include "detail/target.hpp"
 
 namespace bbtree {
@@ -55,7 +56,7 @@ class ByteWindows {
   std::size_t size() const noexcept { return bytes_.size; }
 
   /// Bytes `offset..offset + 8`, big-endian, zero past the end.
-  inline InlineWord inline_key_at(std::size_t offset) const noexcept {
+  BBTREE_ALWAYS_INLINE InlineWord inline_key_at(std::size_t offset) const noexcept {
     const std::size_t len = bytes_.size;
     if (len < 8) return short_inline_key_at(offset);
     const std::size_t last_start = len - 8;
@@ -72,7 +73,7 @@ class ByteWindows {
   /// How the bytes, padded with zeros, order against `prefix` in its first
   /// `prefix_len` bytes (D50): whole 32-byte chunks for equality first, then a
   /// window at a time.
-  inline Ordering cmp_prefix(const std::uint8_t* prefix, std::size_t prefix_len) const noexcept {
+  BBTREE_ALWAYS_INLINE Ordering cmp_prefix(const std::uint8_t* prefix, std::size_t prefix_len) const noexcept {
     constexpr std::size_t chunk = 32;
     std::size_t offset = 0;
     while (prefix_len - offset >= chunk && offset + chunk <= bytes_.size &&
@@ -94,7 +95,7 @@ class ByteWindows {
   /// How the bytes order against `shared`, the bytes every key of a tree
   /// starts with: as `cmp_prefix`, but a byte string ending inside them goes
   /// first, as every byte string of the tree is at least as long.
-  inline Ordering cmp_shared(const std::uint8_t* shared, std::size_t shared_len) const noexcept {
+  BBTREE_ALWAYS_INLINE Ordering cmp_shared(const std::uint8_t* shared, std::size_t shared_len) const noexcept {
     const Ordering ordering = cmp_prefix(shared, shared_len);
     if (ordering == Ordering::Equal && bytes_.size < shared_len) return Ordering::Less;
     return ordering;
@@ -104,7 +105,7 @@ class ByteWindows {
   /// bytes are equal when padded with zeros: 8 bytes at a time from there,
   /// as big-endian words, then by length. A string that ends within the
   /// equal bytes isn't read at all.
-  inline Ordering cmp_from(ByteView stored, std::size_t equal_len) const noexcept {
+  BBTREE_ALWAYS_INLINE Ordering cmp_from(ByteView stored, std::size_t equal_len) const noexcept {
     const std::size_t query_len = bytes_.size;
     const std::size_t both_len = min(query_len, stored.size);
     if (equal_len < both_len && both_len < 8) {
@@ -125,7 +126,7 @@ class ByteWindows {
   }
 
   /// Whether the bytes equal `other`'s.
-  bool equals(ByteView other) const noexcept {
+  BBTREE_ALWAYS_INLINE bool equals(ByteView other) const noexcept {
     return bytes_.size == other.size &&
            (bytes_.size == 0 || std::memcmp(bytes_.data, other.data, bytes_.size) == 0);
   }
@@ -160,7 +161,7 @@ class ByteWindows {
   }
 
   /// `inline_key_at` of fewer than 8 bytes: they padded to a word, shifted.
-  inline InlineWord short_inline_key_at(std::size_t offset) const noexcept {
+  BBTREE_ALWAYS_INLINE InlineWord short_inline_key_at(std::size_t offset) const noexcept {
     const std::uint8_t* bytes = bytes_.data;
     const std::size_t len = bytes_.size;
     InlineWord word;
@@ -210,8 +211,8 @@ struct InlineKeyBase {
 
   /// How `key`'s encoding, padded with zeros, orders against `prefix` in its
   /// first `prefix_len` bytes: by default a window at a time.
-  static Ordering cmp_prefix(const K& key, const std::uint8_t* prefix,
-                             std::size_t prefix_len) noexcept {
+  static BBTREE_ALWAYS_INLINE Ordering cmp_prefix(const K& key, const std::uint8_t* prefix,
+                                                  std::size_t prefix_len) noexcept {
     const ByteWindows prefix_windows(ByteView{prefix, prefix_len});
     const std::size_t words = prefix_len / 8;
     for (std::size_t index = 0; index < words; ++index) {

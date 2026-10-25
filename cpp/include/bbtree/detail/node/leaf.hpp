@@ -183,7 +183,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
   /// confirm a lone candidate by equality alone (D38). `CallSite` compiles
   /// the single-key and batch lookups apart (D53).
   template <class CallSite, class Q>
-  std::optional<std::size_t> find(const SearchKey<K, Q>& key) const noexcept {
+  BBTREE_ALWAYS_INLINE std::optional<std::size_t> find(const SearchKey<K, Q>& key) const noexcept {
     if constexpr (has_inline_keys && SearchKey<K, Q>::has_inline_target) {
       const Window target = key.inline_target(prefix_len());
       const auto inline_keys = this->inline_keys();

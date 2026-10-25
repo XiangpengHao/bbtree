@@ -211,7 +211,7 @@ class LatchedTree {
   }
 
   template <class Q>
-  bool contains_key(const Q& key) const noexcept {
+  BBTREE_ALWAYS_INLINE bool contains_key(const Q& key) const noexcept {
     if (!has_root()) return false;
     const SearchKey<K, Q> search(key);
     LeafFind<true> found = find_optimistic<true>(search);

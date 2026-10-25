@@ -232,7 +232,7 @@ class SearchKey {
 
   /// The query's window at a node's `prefix_len`; only with
   /// `has_inline_target`.
-  inline Window inline_target(std::size_t prefix_len) const noexcept {
+  BBTREE_ALWAYS_INLINE Window inline_target(std::size_t prefix_len) const noexcept {
     static_assert(has_inline_target);
     if constexpr (by_bytes) {
       return Window(prefix_len, ByteWindows(query_bytes()).inline_key_at(prefix_len));
@@ -242,7 +242,7 @@ class SearchKey {
   }
 
   /// Orders the query against `stored` from their first byte.
-  inline Ordering cmp_full(const K& stored) const noexcept {
+  BBTREE_ALWAYS_INLINE Ordering cmp_full(const K& stored) const noexcept {
     if constexpr (by_bytes) {
       return ByteWindows(query_bytes()).cmp_from(KInliner::bytes(stored), 0);
     } else {
@@ -252,7 +252,7 @@ class SearchKey {
 
   /// Whether the query equals `stored`, comparing their bytes all at once: an
   /// exact-key lookup's lone candidate (D38). Only `by_bytes`.
-  inline bool equals_whole_bytes(const K& stored) const noexcept {
+  BBTREE_ALWAYS_INLINE bool equals_whole_bytes(const K& stored) const noexcept {
     static_assert(by_bytes);
     return ByteWindows(query_bytes()).equals(KInliner::bytes(stored));
   }
@@ -301,7 +301,7 @@ class SearchKey {
   /// in them. Byte strings compare from past the bytes known equal, as do
   /// keys whose impl has `cmp_from`; others by `operator<`.
   template <std::size_t Width>
-  inline Ordering cmp_tied(Window target, const K& stored) const noexcept {
+  BBTREE_ALWAYS_INLINE Ordering cmp_tied(Window target, const K& stored) const noexcept {
     if constexpr (Width != 0 && by_bytes) {
       return ByteWindows(query_bytes()).cmp_from(KInliner::bytes(stored), target.prefix_len() + Width);
     } else if constexpr (Width != 0 && by_impl && KInliner::impl_has_cmp_from) {

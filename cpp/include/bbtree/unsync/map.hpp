@@ -140,7 +140,7 @@ class BBTreeMap {
 
   /// The value of the entry whose key equals `key`, if any.
   template <class Q>
-  const V* get(const Q& key) const noexcept {
+  BBTREE_ALWAYS_INLINE const V* get(const Q& key) const noexcept {
     const auto found = state_.tree.find(detail::Query<K>::of(key));
     return found ? found->second : nullptr;
   }
@@ -162,7 +162,7 @@ class BBTreeMap {
   }
 
   template <class Q>
-  bool contains_key(const Q& key) const noexcept {
+  BBTREE_ALWAYS_INLINE bool contains_key(const Q& key) const noexcept {
     return state_.tree.find(detail::Query<K>::of(key)).has_value();
   }
 
