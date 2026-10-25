@@ -10,7 +10,18 @@ repository = "https://github.com/XiangpengHao/bbtree"
 # Released with bbtree, at its version.
 bbtree = { path = "../bbtree", version = "0.1.5" }
 crc32c = "0.6"
+# Verus's specs and proofs of the WAL, purely ghost, gone after compilation;
+# `alloc` for the specs of `Vec`.
+vstd = { version = "=0.0.0-2026-08-30-0159", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 mimalloc = "0.1"
 pollster = "0.4"
+
+[lints.rust]
+# Verus sets `verus_only` while it verifies: the proofs' modules, which only
+# it reads, are behind it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_only)"] }
+
+[package.metadata.verus]
+verify = true

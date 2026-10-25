@@ -225,6 +225,9 @@ impl EncodedAppend {
             let pos = bytes.len();
             let last_in_append = i + 1 == count;
             let lsn = first_lsn + i as u64;
+            // `encode`'s precondition: a record's lengths are `u32`s.
+            let fits = |bytes: &[u8]| u32::try_from(bytes.len()).is_ok();
+            assert!(fits(key) && fits(value), "at most u32::MAX bytes");
             StoredRecord {
                 lsn,
                 kind,

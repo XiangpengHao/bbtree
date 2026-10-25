@@ -303,3 +303,40 @@ assumed whole.
 - **Retention.** The WAL is kept forever (00-init), at $0.11 per
   GB-month.
 - **Later docs:** snapshots, the buffer manager over the WAL.
+
+### Verification
+
+With Verus, as bbtree's proofs (`design/08-fuzzing-verification.md`):
+proofs on pure functions over bytes, the async calls to the storage left
+thin and unproven. `cargo verus focus -p bbtree-store` checks them, in CI
+too (`verus.yml`).
+
+- **Records round-trip** (proven, `wal/record.rs`). `encode` appends a
+  record's bytes; `decode` returns a record only if the bytes start with
+  its bytes, and returns every record they start with. Its key and value
+  must be at most `u32::MAX` bytes, which the writer checks.
+
+Planned:
+
+- **The scan accepts exactly what the writer writes.** The bytes of any
+  appends, from any tail, claims and new files included, scan to the
+  appends' inserts and removals in order, at the addresses the appends
+  gave, and to the writer's tail. A scan that succeeds read only such
+  bytes: it never makes up a record.
+- **A scan picks up where it stopped.** Scanning two runs of bytes one
+  after the other gives what scanning them at once does, as an open does
+  after its claim fails.
+- **A lookup reads what was written.** `read_value` at an address the
+  writer or the scan gave returns that insert's value.
+- **No overflow or panic** in any of it.
+- **An append's result is true,** against storage that only appends at
+  a file's length, loses responses and has other writers: `Ok` means its
+  bytes are at its offset, `TailMoved` that they aren't and won't be;
+  they are never written twice.
+- **A claim fences.** Once a writer's claim is written, every later
+  append of a writer before it fails.
+
+Trusted (`wal/trusted.rs`): CRC32C, as a function of its bytes;
+little-endian words, as vstd describes them; that each backend keeps the
+storage contract ("Storage"). Not proven: that a CRC catches corruption,
+which only a probability bounds.

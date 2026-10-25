@@ -14,6 +14,7 @@ use std::io;
 
 mod record;
 mod storage;
+mod trusted;
 mod writer;
 
 pub use record::{Record, RecordAddress};

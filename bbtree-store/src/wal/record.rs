@@ -7,12 +7,27 @@
 //! ```
 //!
 //! little-endian and unaligned, the CRC32C of every byte after it. The kind
-//! is an insert, a removal or a claim, its bit 7 set on an append's last
-//! record.
-
+//! is an insert, a removal or a claim, plus 0x80 on an append's last record.
+//!
+//! Verus proves that encoding round-trips ([`StoredRecord::decode`]):
+//! a record decodes from its bytes, whatever follows them, and nothing
+//! else does. The specs are what to review; the one lemma they need,
+//! [`RecordView::lemma_starts_with`], Verus checks, and `trusted.rs` holds
+//! what the proofs trust.
 use std::vec::Vec;
 
+use vstd::bytes::{u32_from_le_bytes, u64_from_le_bytes};
+use vstd::prelude::*;
+use vstd::slice::slice_subrange;
+
+use super::trusted::{Crc32c, LittleEndian};
 use super::{WalError, WalStorage};
+
+#[cfg(verus_only)]
+use vstd::bytes::{
+    lemma_auto_spec_u32_to_from_le_bytes, lemma_auto_spec_u64_to_from_le_bytes,
+    spec_u32_from_le_bytes, spec_u32_to_le_bytes, spec_u64_from_le_bytes, spec_u64_to_le_bytes,
+};
 
 /// One key's insert or removal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,31 +70,162 @@ impl RecordAddress {
     }
 }
 
-/// A record's kind byte, but for bit 7.
+verus! {
+
+/// A record's bytes before its key: CRC, LSN, both lengths and kind.
+const RECORD_HEADER_LEN: usize = 21;
+
+/// A record's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
-    Insert = 1,
-    Remove = 2,
+    Insert,
+    Remove,
     /// A writer's claim on the WAL, its key the writer's id.
-    Claim = 3,
+    Claim,
 }
 
 impl Kind {
-    /// The kind byte's bit set on an append's last record.
-    const LAST_IN_APPEND: u8 = 0x80;
+    /// The kind byte of a record of this kind: 1, 2 or 3, plus 0x80 on an
+    /// append's last record.
+    pub(super) open spec fn spec_byte(self, last_in_append: bool) -> u8 {
+        let byte: u8 = match self {
+            Kind::Insert => 1,
+            Kind::Remove => 2,
+            Kind::Claim => 3,
+        };
+        if last_in_append {
+            (byte + 0x80) as u8
+        } else {
+            byte
+        }
+    }
 
-    fn from_byte(byte: u8) -> Option<Self> {
-        match byte & !Self::LAST_IN_APPEND {
-            1 => Some(Self::Insert),
-            2 => Some(Self::Remove),
-            3 => Some(Self::Claim),
+    fn byte(self, last_in_append: bool) -> (byte: u8)
+        ensures
+            byte == self.spec_byte(last_in_append),
+    {
+        let byte: u8 = match self {
+            Kind::Insert => 1,
+            Kind::Remove => 2,
+            Kind::Claim => 3,
+        };
+        if last_in_append {
+            byte + 0x80
+        } else {
+            byte
+        }
+    }
+
+    /// The kind of a kind byte, and whether its record is its append's last.
+    fn of_byte(byte: u8) -> (kind: Option<(Kind, bool)>)
+        ensures
+            forall|k: Kind, last: bool| #[trigger]
+                k.spec_byte(last) == byte <==> kind == Some((k, last)),
+    {
+        match byte {
+            1 => Some((Kind::Insert, false)),
+            2 => Some((Kind::Remove, false)),
+            3 => Some((Kind::Claim, false)),
+            0x81 => Some((Kind::Insert, true)),
+            0x82 => Some((Kind::Remove, true)),
+            0x83 => Some((Kind::Claim, true)),
             _ => None,
         }
     }
 }
 
-/// A record's bytes before its key: CRC, LSN, both lengths and kind.
-const RECORD_HEADER_LEN: usize = 21;
+/// What a record's bytes hold.
+#[allow(dead_code, reason = "only specs read it, and a normal build erases them")]
+pub(super) struct RecordView {
+    pub(super) lsn: u64,
+    pub(super) kind: Kind,
+    pub(super) last_in_append: bool,
+    pub(super) key: Seq<u8>,
+    pub(super) value: Seq<u8>,
+}
+
+impl RecordView {
+    /// Whether a record can hold it: its key's and value's lengths fit
+    /// `u32`s.
+    pub(super) open spec fn fits(self) -> bool {
+        self.key.len() <= u32::MAX && self.value.len() <= u32::MAX
+    }
+
+    /// The record's bytes after its CRC, which the CRC covers.
+    pub(super) open spec fn checked_bytes(self) -> Seq<u8> {
+        spec_u64_to_le_bytes(self.lsn) + spec_u32_to_le_bytes(self.key.len() as u32)
+            + spec_u32_to_le_bytes(self.value.len() as u32) + seq![
+            self.kind.spec_byte(self.last_in_append),
+        ] + self.key + self.value
+    }
+
+    /// The record's bytes.
+    pub(super) open spec fn bytes(self) -> Seq<u8> {
+        spec_u32_to_le_bytes(Crc32c::spec_of(self.checked_bytes())) + self.checked_bytes()
+    }
+
+    /// Whether decoding `bytes` reads this record's fields: its lengths,
+    /// LSN, kind byte, key and value where a record keeps them, and a CRC
+    /// that matches the bytes after it.
+    spec fn is_read_from(self, bytes: Seq<u8>) -> bool {
+        let key_end = 21 + self.key.len() as int;
+        let len = key_end + self.value.len();
+        &&& len <= bytes.len()
+        &&& spec_u32_from_le_bytes(bytes.subrange(0, 4)) == Crc32c::spec_of(bytes.subrange(4, len))
+        &&& spec_u64_from_le_bytes(bytes.subrange(4, 12)) == self.lsn
+        &&& spec_u32_from_le_bytes(bytes.subrange(12, 16)) as int == self.key.len()
+        &&& spec_u32_from_le_bytes(bytes.subrange(16, 20)) as int == self.value.len()
+        &&& bytes[20] == self.kind.spec_byte(self.last_in_append)
+        &&& bytes.subrange(21, key_end) == self.key
+        &&& bytes.subrange(key_end, len) == self.value
+    }
+
+    /// `bytes` start with this record's bytes exactly when decoding them
+    /// reads its fields.
+    proof fn lemma_starts_with(self, bytes: Seq<u8>)
+        requires
+            self.fits(),
+        ensures
+            self.bytes().is_prefix_of(bytes) <==> self.is_read_from(bytes),
+    {
+        lemma_auto_spec_u32_to_from_le_bytes();
+        lemma_auto_spec_u64_to_from_le_bytes();
+        let (encoded, checked) = (self.bytes(), self.checked_bytes());
+        let len = encoded.len() as int;
+        let key_end = 21 + self.key.len() as int;
+        // Where the fields lie in `encoded`.
+        assert(encoded.subrange(0, 4) =~= spec_u32_to_le_bytes(Crc32c::spec_of(checked)));
+        assert(encoded.subrange(4, len) =~= checked);
+        assert(encoded.subrange(4, 12) =~= spec_u64_to_le_bytes(self.lsn));
+        assert(encoded.subrange(12, 16) =~= spec_u32_to_le_bytes(self.key.len() as u32));
+        assert(encoded.subrange(16, 20) =~= spec_u32_to_le_bytes(self.value.len() as u32));
+        assert(encoded.subrange(21, key_end) =~= self.key);
+        assert(encoded.subrange(key_end, len) =~= self.value);
+        if encoded.is_prefix_of(bytes) {
+            // Each field of `bytes` is the one at the same place in `encoded`.
+            assert(bytes.subrange(0, len) == encoded);
+            assert(bytes.subrange(0, 4) =~= encoded.subrange(0, 4));
+            assert(bytes.subrange(4, len) =~= encoded.subrange(4, len));
+            assert(bytes.subrange(4, 12) =~= encoded.subrange(4, 12));
+            assert(bytes.subrange(12, 16) =~= encoded.subrange(12, 16));
+            assert(bytes.subrange(16, 20) =~= encoded.subrange(16, 20));
+            assert(bytes[20] == encoded[20]);
+            assert(bytes.subrange(21, key_end) =~= encoded.subrange(21, key_end));
+            assert(bytes.subrange(key_end, len) =~= encoded.subrange(key_end, len));
+        }
+        if self.is_read_from(bytes) {
+            // Each field of `encoded` is the one at the same place in `bytes`.
+            assert(spec_u64_to_le_bytes(self.lsn) == bytes.subrange(4, 12));
+            assert(self.key.len() as u32 == spec_u32_from_le_bytes(bytes.subrange(12, 16)));
+            assert(spec_u32_to_le_bytes(self.key.len() as u32) == bytes.subrange(12, 16));
+            assert(self.value.len() as u32 == spec_u32_from_le_bytes(bytes.subrange(16, 20)));
+            assert(spec_u32_to_le_bytes(self.value.len() as u32) == bytes.subrange(16, 20));
+            assert(checked =~= bytes.subrange(4, len));
+            assert(spec_u32_to_le_bytes(Crc32c::spec_of(checked)) == bytes.subrange(0, 4));
+            assert(encoded =~= bytes.subrange(0, len));
+        }
+    }
+}
 
 /// A record as the WAL stores it.
 pub(super) struct StoredRecord<'a> {
@@ -90,67 +236,112 @@ pub(super) struct StoredRecord<'a> {
     pub(super) value: &'a [u8],
 }
 
+impl View for StoredRecord<'_> {
+    type V = RecordView;
+
+    closed spec fn view(&self) -> RecordView {
+        RecordView {
+            lsn: self.lsn,
+            kind: self.kind,
+            last_in_append: self.last_in_append,
+            key: self.key@,
+            value: self.value@,
+        }
+    }
+}
+
 impl<'a> StoredRecord<'a> {
     /// Writes the record's bytes to the end of `out`.
-    ///
-    /// # Panics
-    ///
-    /// If the key or the value is longer than `u32::MAX` bytes.
-    pub(super) fn encode(&self, out: &mut Vec<u8>) {
-        let length = |bytes: &[u8]| u32::try_from(bytes.len()).expect("at most u32::MAX bytes");
-        let mut kind = self.kind as u8;
-        if self.last_in_append {
-            kind |= Kind::LAST_IN_APPEND;
-        }
+    pub(super) fn encode(&self, out: &mut Vec<u8>)
+        requires
+            self@.fits(),
+        ensures
+            final(out)@ == old(out)@ + self@.bytes(),
+    {
         let start = out.len();
-        out.extend_from_slice(&[0; 4]);
-        out.extend_from_slice(&self.lsn.to_le_bytes());
-        out.extend_from_slice(&length(self.key).to_le_bytes());
-        out.extend_from_slice(&length(self.value).to_le_bytes());
-        out.push(kind);
+        LittleEndian::push_u32(out, 0);
+        let checked_start = out.len();
+        LittleEndian::push_u64(out, self.lsn);
+        LittleEndian::push_u32(out, self.key.len() as u32);
+        LittleEndian::push_u32(out, self.value.len() as u32);
+        out.push(self.kind.byte(self.last_in_append));
         out.extend_from_slice(self.key);
         out.extend_from_slice(self.value);
-        let crc = crc32c::crc32c(&out[start + 4..]);
-        out[start..start + 4].copy_from_slice(&crc.to_le_bytes());
+        proof {
+            lemma_auto_spec_u32_to_from_le_bytes();
+            lemma_auto_spec_u64_to_from_le_bytes();
+            assert(out@ =~= old(out)@ + spec_u32_to_le_bytes(0) + self@.checked_bytes());
+            assert(out@.subrange(checked_start as int, out@.len() as int)
+                =~= self@.checked_bytes());
+        }
+        let crc = Crc32c::of(slice_subrange(out.as_slice(), checked_start, out.len()));
+        let ghost before_crc = out@;
+        LittleEndian::write_u32(out.as_mut_slice(), start, crc);
+        proof {
+            assert(before_crc.subrange(0, start as int) =~= old(out)@);
+            assert(before_crc.subrange(checked_start as int, before_crc.len() as int)
+                =~= self@.checked_bytes());
+            assert(out@ =~= old(out)@ + self@.bytes());
+        }
     }
 
-    /// The record at the start of `bytes`, if its lengths fit in `bytes`,
-    /// its CRC checks and its kind is one.
-    pub(super) fn decode(bytes: &'a [u8]) -> Option<Self> {
-        let header: &[u8; RECORD_HEADER_LEN] = bytes.get(..RECORD_HEADER_LEN)?.try_into().ok()?;
-        let word = |pos: usize| {
-            u32::from_le_bytes([
-                header[pos],
-                header[pos + 1],
-                header[pos + 2],
-                header[pos + 3],
-            ])
-        };
-        let key_len = usize::try_from(word(12)).ok()?;
-        let value_len = usize::try_from(word(16)).ok()?;
-        let len = RECORD_HEADER_LEN
-            .checked_add(key_len)?
-            .checked_add(value_len)?;
-        let record = bytes.get(..len)?;
-        if crc32c::crc32c(&record[4..]) != word(0) {
+    /// The record at the start of `bytes`, if one is.
+    pub(super) fn decode(bytes: &'a [u8]) -> (decoded: Option<Self>)
+        ensures
+    // What it decodes, `bytes` start with.
+
+            decoded matches Some(record) ==> record@.fits() && record@.bytes().is_prefix_of(bytes@),
+            // Whatever record `bytes` start with, it decodes.
+            forall|record: RecordView|
+                record.fits() && #[trigger] record.bytes().is_prefix_of(bytes@) ==> (
+                decoded matches Some(decoded) && decoded@ == record),
+    {
+        proof {
+            assert forall|record: RecordView| record.fits() implies (
+            #[trigger] record.bytes().is_prefix_of(bytes@) <==> record.is_read_from(bytes@)) by {
+                record.lemma_starts_with(bytes@);
+            }
+        }
+        if bytes.len() < RECORD_HEADER_LEN {
             return None;
         }
-        let (key, value) = record[RECORD_HEADER_LEN..].split_at(key_len);
-        Some(Self {
-            lsn: u64::from_le_bytes(header[4..12].try_into().ok()?),
-            kind: Kind::from_byte(header[20])?,
-            last_in_append: header[20] & Kind::LAST_IN_APPEND != 0,
-            key,
-            value,
-        })
+        let crc = u32_from_le_bytes(slice_subrange(bytes, 0, 4));
+        let lsn = u64_from_le_bytes(slice_subrange(bytes, 4, 12));
+        let key_len = u32_from_le_bytes(slice_subrange(bytes, 12, 16)) as usize;
+        let value_len = u32_from_le_bytes(slice_subrange(bytes, 16, 20)) as usize;
+        let (kind, last_in_append) = Kind::of_byte(bytes[20])?;
+        if key_len > bytes.len() - RECORD_HEADER_LEN {
+            return None;
+        }
+        let key_end = RECORD_HEADER_LEN + key_len;
+        if value_len > bytes.len() - key_end {
+            return None;
+        }
+        let len = key_end + value_len;
+        if Crc32c::of(slice_subrange(bytes, 4, len)) != crc {
+            return None;
+        }
+        let key = slice_subrange(bytes, RECORD_HEADER_LEN, key_end);
+        let value = slice_subrange(bytes, key_end, len);
+        Some(Self { lsn, kind, last_in_append, key, value })
     }
 
     /// Its length in bytes.
-    pub(super) fn len(&self) -> usize {
+    pub(super) fn len(&self) -> (len: usize)
+        requires
+            self@.bytes().len() <= usize::MAX,
+        ensures
+            len == self@.bytes().len(),
+    {
+        proof {
+            lemma_auto_spec_u32_to_from_le_bytes();
+            lemma_auto_spec_u64_to_from_le_bytes();
+        }
         RECORD_HEADER_LEN + self.key.len() + self.value.len()
     }
 }
 
+} // verus!
 #[cfg(test)]
 mod tests {
     use super::*;

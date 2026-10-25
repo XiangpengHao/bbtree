@@ -1,9 +1,9 @@
 # Named for its README badge.
 name: verus
 
-# The proofs in bbtree/src/proof/ (design/08-fuzzing-verification.md),
-# checked by Verus, which flake.nix pins with the Rust toolchain of its own it
-# needs.
+# The proofs in bbtree/src/proof/ (design/08-fuzzing-verification.md) and
+# bbtree-store's WAL (design/bbtree-store/01-wal.md), checked by Verus, which
+# flake.nix pins with the Rust toolchain of its own it needs.
 on:
   push:
     branches: [main]
@@ -36,3 +36,7 @@ jobs:
 
       - name: Verify
         run: nix develop .#verus -c cargo verus verify -p bbtree
+
+      # Its own proofs only: `verify` would check bbtree's again.
+      - name: Verify bbtree-store
+        run: nix develop .#verus -c cargo verus focus -p bbtree-store
