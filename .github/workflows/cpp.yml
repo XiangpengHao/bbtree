@@ -98,7 +98,7 @@ jobs:
           CXX: clang++
         run: >
           cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DBBTREE_NATIVE=OFF -DBBTREE_SANITIZE=${{ matrix.sanitizer }}
+          -DBBTREE_NATIVE=OFF "-DBBTREE_SANITIZE=${{ matrix.sanitizer }}"
           -DCMAKE_CXX_FLAGS=-stdlib=libc++
 
       - name: Build
