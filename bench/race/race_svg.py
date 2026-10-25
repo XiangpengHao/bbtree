@@ -18,6 +18,7 @@ LABELS = {
     "folly::ConcurrentSkipList": ("folly SkipList", "theirs"),
     "absl::btree_map + shared_mutex": ("absl btree + rwlock", "theirs"),
     "std::map + shared_mutex": ("std::map + rwlock", "theirs"),
+    "bbtree::BBHashMap (unordered)": ("bbtree hash (unordered)", "unordered"),
     "boost::concurrent_flat_map (unordered)": ("boost hash (unordered)", "unordered"),
 }
 

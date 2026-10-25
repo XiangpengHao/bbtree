@@ -132,6 +132,153 @@ Rust paths are under `bbtree/src/` of upstream at `8adae97`.
 | owned maps (`get_mut`, `iter_mut`, `clear`) | `map/owner.rs` | `map.hpp` | ported |
 | file maps, mmap, store, vis, fuzz, Verus proofs | | | out of scope |
 
+## Hash maps
+
+The C++ port also has an initial DuckDB-inspired hash map implementation.
+`bbtree::unsync::BBHashMap` owns a single-threaded table; `bbtree::BBHashMap`
+protects the same table implementation with independently locked shards.
+Both are header-only C++17 with no external dependencies. This is a new
+implementation, with no Rust reference or established performance claims.
+
+```cpp
+#include "bbtree/unsync/hash_map.hpp"
+#include "bbtree/hash_map.hpp"
+
+bbtree::unsync::BBHashMap<std::string, int> owned;
+owned.insert("one", 1);                       // optional previous value
+const int* value = owned.get("one");          // borrowed query, no string allocation
+owned.reserve(10000);                        // value's address stays valid
+
+bbtree::BBHashMap<std::string, int> shared;
+auto inserted = shared.insert("one", 1);      // InsertOutcome, as the shared tree
+auto copied = shared.get_copied("one");
+shared.update("one", [](const auto&, int& value) { ++value; });
+```
+
+### Layout and costs
+
+The inspiration is DuckDB's [two-part aggregate hash table](https://duckdb.org/2022/03/07/aggregate-hashtable):
+a compact probe index filters candidates before following references into
+payload storage, and cached full hashes allow index growth without hashing
+keys again. Our descriptors use a 16-bit fingerprint and a 48-bit entry
+identifier, without encoding pointers. Empty and deleted identifiers are
+distinct; equality always checks the real key. Contiguous linear probing
+stops only at an empty descriptor.
+
+Entries contain the full mixed hash, `K`, and `V`. Pages contain at most 64
+entries and aim for 4 KiB when entry size permits. Oversized entries get one
+slot per page; over-alignment is preserved. Page bitmaps support iteration,
+and deleted slots form a free list. Every allocation, including the page
+directory and probe index, goes through the supplied allocator's
+`allocate_zeroed`/`deallocate` interface.
+
+The index grows at 75% occupied-plus-deleted capacity. At that threshold,
+if live occupancy is below 50%, it rebuilds at the same capacity instead.
+Index rebuilding is linear in allocated entry slots plus index capacity,
+but moves no keys or values and calls neither hash nor equality. Payload
+pages and holes remain allocated until `clear` or destruction.
+
+With index occupancy `alpha`, payload occupancy `beta`, and aligned entry
+size `E`, steady-state memory is approximately `8 / alpha + E / beta`
+bytes per live entry, plus page headers, the directory and alignment.
+Immediately after doubling, index occupancy falls to approximately 37.5%.
+For `u64 -> u64`, `E = 24`: at 75% index occupancy and full payload pages
+the estimate is 34.7 bytes per entry before bookkeeping. Small pairs pay a
+substantial overhead relative to flat hash maps. A hit also depends on
+descriptor, page pointer, entry, and any heap-owned key bytes; batching
+overlaps independent queries but does not remove those dependencies.
+
+### API and ownership
+
+Template parameters are `K, V, Hasher, Equal, Allocator`; the shared map
+additionally accepts a power-of-two shard count (default 64, maximum 65536).
+Keys and values must have non-throwing move constructors and destructors.
+Unlike the tree, byte relocatability is unnecessary: entries are constructed
+in place, so ordinary `std::string` works on either standard library.
+Replacement retains the original key and returns the previous value.
+
+Hashing defaults to `bbtree::Hash<K>` (based on `std::hash`); owning byte
+strings hash their borrowed string view. Both maps avalanche the policy's
+result before extracting placement/fingerprint bits. This is not a keyed
+hash or a collision-attack defense. Supply a suitable hasher for hostile
+input. Equivalent keys and heterogeneous queries must hash identically;
+hashing and equality must stay consistent while entries are stored, and
+must not re-enter the map.
+
+The owned map supports lookup, mutable lookup, key/value lookup, insertion,
+removal, reservation, copying/moving, iteration, and batches. `clear_retain_capacity`
+destroys entries while retaining the index and pages for another build. Fresh
+slots use a bump cursor; erased slots use the free list. Insert/reserve
+preserve existing references. Erase invalidates the removed entry; clear
+and assignment invalidate all entries. Iteration order is unspecified;
+structural mutation invalidates iteration. Empty maps allocate nothing.
+`reserve` reserves index capacity, with payload pages still allocated lazily.
+Allocation failure throws `std::bad_alloc` and preserves the entries, though
+capacity may have changed. Hash/equality exceptions also preserve entries.
+Copy assignment constructs the replacement before changing the target.
+
+The shared map offers copied/cloned reads, scoped `read`/`update`, insertion,
+removal and conditional removal, traversal, clear, and batches. Hash and
+equality policies must allow simultaneous const calls; allocator copies
+must allow calls from different shards. Read callbacks hold a shared lock;
+updates hold an exclusive lock. Callbacks must neither re-enter the map nor
+retain entry references. Direct pointer/reference callback results are
+rejected. Callback exceptions release locks; changes an update made before
+throwing remain. Shared maps are neither copyable nor movable.
+
+Shared insertion returns an `InsertOutcome`, preserving the input entry on
+the allocator's refusal. Exceptions from user policies propagate, including
+`std::bad_alloc` thrown by a policy. Shard selection uses mixed bits 32–47,
+leaving the fingerprint and low 32 placement bits untouched. Growth pauses
+operations on its shard for a linear rebuild. Counts, traversal, clear and
+invariant checks lock one shard at a time, and are not map-wide snapshots.
+Exclude concurrent writers if `clear` must leave the entire map empty.
+
+Owned `get_many` advances bounded tiles of 128 queries through descriptor
+discovery and key comparison, writing pointers in input order. Completed
+queries are removed from further rounds. `get_or_insert_many` hashes each
+borrowed query once, creates missing owned keys with an initializer, and
+returns stable mutable value pointers. Duplicate keys share a pointer and
+invoke the initializer only once. Cached empty slots can be published directly
+when there are no tombstones, the slot remains empty and enough capacity has
+been reserved for the tile; otherwise it searches again. Earlier inserts
+remain committed if initialization or allocation throws. `update_or_insert_many`
+shares this discovery/publication logic and fuses value updates with resolution:
+`initialize(row, query)` constructs a missing value; `update(row, query, value)`
+changes an existing one. Callbacks run in input order, including duplicates,
+and must not re-enter the map. Completed changes and modifications made by a
+throwing update remain. `for_each_hashed` walks dense page runs and exports the
+cached mixed hash without hashing again; that hash is local to the map's policy,
+not a persistent identifier. Shared batch
+reads take one lock per key. Insert batches process inputs sequentially,
+including duplicates, and move from input arrays. Shared batches restore
+refused entries to their input slots and report `failed[i]`. Earlier
+operations remain committed on a later exception. Batch inputs/outputs
+must be valid disjoint arrays; zero count permits null pointers. No hash
+map path uses software prefetching.
+
+### Verification
+
+`hash_map_test` differentially checks mixed operations against
+`std::unordered_map`, including forced collisions and tombstones. Tests
+also cover borrowed strings, stable references, cached hashes, move-only
+and nonassignable values, over-aligned oversized entries, object lifetimes,
+copy failures, and allocator refusals. `shared_hash_map_test` checks racing
+writers/readers, atomic updates, scoped access, batch semantics, allocator
+failure/retry, and exception unwinding. Both participate in normal CTest
+and sanitizer builds. No benchmarks are run as part of tests.
+
+`bbtree::unsync::BBHashIndex<Handle, Allocator>`, in
+[`unsync/hash_index.hpp`](src/bbtree/unsync/hash_index.hpp), indexes rows
+owned elsewhere: it consumes cached hashes unchanged, stores row handles
+directly, and batches key matching and row creation through callbacks. It
+shares descriptor storage with the owned map. `hash_index_test` covers it.
+
+The DuckDB experiments built on these maps (the benchmark linking upstream
+DuckDB's `GroupedAggregateHashTable`, the native integration, and their
+measurements) stay on branch `codex/hashmap` (`f8ef72f`), with their
+reports, logs and data.
+
 ## Measurements
 
 `bench/*_bench.cpp` against `bench/reference` (the Rust map, same keys, same

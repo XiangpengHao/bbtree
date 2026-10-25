@@ -3,8 +3,9 @@
 // times the Rust maps. bbtree against the best-known C++ maps that threads
 // can share: oneTBB's `concurrent_map` and folly's `ConcurrentSkipList`
 // (skip lists), Abseil's `btree_map` and `std::map` behind a
-// `std::shared_mutex`, and Boost's `concurrent_flat_map`, a hash map, for
-// reference.
+// `std::shared_mutex`; and, unordered, for reference, bbtree's hash map
+// (`bbtree::BBHashMap`, shards behind locks) and Boost's
+// `concurrent_flat_map`.
 //
 // Each map takes its best use, as upstream's harness gives it: bbtree's
 // batched lookups (`get_many_copied`, 64 keys a call) and its plain ones; a
@@ -36,6 +37,7 @@
 #include <vector>
 
 #include "../workload.hpp"
+#include "bbtree/hash_map.hpp"
 #include "bbtree/map.hpp"
 
 namespace {
@@ -283,6 +285,39 @@ class StdMap : public SharedMutexMap<std::map<Uuid, Value>> {
   static constexpr const char* name = "std::map + shared_mutex";
 };
 
+class BBTreeHashMap {
+ public:
+  static constexpr const char* name = "bbtree::BBHashMap (unordered)";
+  using Map = bbtree::BBHashMap<Uuid, Value, UuidKeys::Hash>;
+
+  void build(const std::vector<Uuid>& keys, std::size_t threads) {
+    ThreadTeam::run(threads, [&](std::size_t thread) {
+      for (std::size_t index = thread; index < keys.size(); index += threads) {
+        if (!map_.insert(keys[index], index + 1).ok()) std::abort();
+      }
+    });
+  }
+
+  class Reader {
+   public:
+    explicit Reader(const Map& map) : map_(map) {}
+    Value look_up(const Uuid* probes) {
+      std::optional<Value> values[lookups_per_call];
+      map_.get_many_copied(probes, lookups_per_call, values);
+      Value sum = 0;
+      for (const auto& value : values) sum += value.value_or(0);
+      return sum;
+    }
+
+   private:
+    const Map& map_;
+  };
+  Reader reader() const { return Reader(map_); }
+
+ private:
+  Map map_;
+};
+
 class BoostConcurrentFlatMap {
  public:
   static constexpr const char* name = "boost::concurrent_flat_map (unordered)";
@@ -410,6 +445,7 @@ int main(int argc, char** argv) {
   race.run<FollyConcurrentSkipList>();
   race.run<AbslBtreeMap>();
   race.run<StdMap>();
+  race.run<BBTreeHashMap>();
   race.run<BoostConcurrentFlatMap>();
   return 0;
 }

@@ -17,6 +17,10 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 - `bbtree::BBTreeMap`: a concurrent map, latched nodes with optimistic reads.
 - `bbtree::unsync::BBTreeMap` and `BBTreeSet`: single-threaded, with the
   `std::map`/`std::set` operations, entries, ranges and set algebra.
+- Experimental hash maps after DuckDB's aggregate hash table:
+  `bbtree::unsync::BBHashMap`, `bbtree::BBHashMap` (locked shards) and
+  `bbtree::unsync::BBHashIndex` for rows stored elsewhere
+  ([PORTING.md](PORTING.md#hash-maps)).
 - SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
   and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
