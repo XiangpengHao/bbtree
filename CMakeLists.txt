@@ -70,3 +70,24 @@ foreach(bench_source ${BBTREE_BENCHES})
     target_compile_options(${bench_name} PRIVATE -O3)
   endif()
 endforeach()
+
+# The race against other C++ maps (bench/race/), which the library's zero
+# dependencies leave out by default: oneTBB, folly, Abseil and Boost.
+option(BBTREE_RACE_BENCH "Build the race against oneTBB, folly, Abseil and Boost maps" OFF)
+if(BBTREE_RACE_BENCH)
+  find_package(TBB CONFIG REQUIRED)
+  # folly links `gflags_shared`, which gflags' package defines.
+  find_package(gflags CONFIG REQUIRED)
+  find_package(folly CONFIG REQUIRED)
+  find_package(absl CONFIG REQUIRED)
+  find_package(Boost 1.83 CONFIG REQUIRED)
+  # Homebrew's folly exports the SDK's C headers as an include directory,
+  # which puts them before libc++'s own.
+  get_target_property(folly_includes Folly::folly_deps INTERFACE_INCLUDE_DIRECTORIES)
+  list(FILTER folly_includes EXCLUDE REGEX "\\.sdk/usr/include$")
+  set_target_properties(Folly::folly_deps PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${folly_includes}")
+  add_executable(race_bench ${CMAKE_CURRENT_SOURCE_DIR}/bench/race/race_bench.cpp)
+  bbtree_target_options(race_bench)
+  target_compile_options(race_bench PRIVATE -O3)
+  target_link_libraries(race_bench PRIVATE TBB::tbb Folly::folly absl::btree Boost::headers)
+endif()

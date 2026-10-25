@@ -20,6 +20,35 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 - SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
   and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
+![bbtree against C++ concurrent maps: lookups at 14 threads on a MacBook Pro M4 Pro](assets/readme-race.svg)
+
+## Against other C++ maps
+
+Upstream's README race, in C++: 10M random UUID keys, lookups of which half
+miss, on all 14 cores of a MacBook Pro M4 Pro (10 performance, 4
+efficiency), 2 seconds a map, one run. Millions of lookups per second:
+
+| map | M ops/s |
+|---|--:|
+| bbtree, batched (`get_many_copied`, 64 keys a call) | **158.4** |
+| bbtree (`get_copied`) | **81.4** |
+| oneTBB `tbb::concurrent_map` (skip list) | 8.2 |
+| folly `ConcurrentSkipList` | 8.2 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
+| `std::map` + `std::shared_mutex` | 1.5 |
+| Boost `boost::concurrent_flat_map` (hash map, unordered) | 206.4 |
+
+The shared maps are built by every thread; a locked map by one thread, and
+it takes its lock for every lookup. Every map must answer the same first
+65,536 lookups right before it races. The bench is
+[bench/race/race_bench.cpp](bench/race/race_bench.cpp), and this run's
+output [bench/race/m4-pro-14-threads.csv](bench/race/m4-pro-14-threads.csv).
+To run it (it needs oneTBB, folly, Abseil and Boost, e.g. from Homebrew):
+
+```bash
+cmake -B build-race -G Ninja -DCMAKE_BUILD_TYPE=Release -DBBTREE_RACE_BENCH=ON && cmake --build build-race --target race_bench && ./build-race/race_bench 10000000 14 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race.svg
+```
+
 ## Performance against Rust
 
 The C++ benches (`bench/`) ran against the Rust crate at `8adae97` on the
