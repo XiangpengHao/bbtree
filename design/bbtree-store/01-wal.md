@@ -315,20 +315,32 @@ too (`verus.yml`).
   record's bytes; `decode` returns a record only if the bytes start with
   its bytes, and returns every record they start with. Its key and value
   must be at most `u32::MAX` bytes, which the writer checks.
+- **The scan accepts exactly what the writer writes** (proven,
+  `wal/tail.rs`). Bytes past a tail hold records (`WalTail::holds`) when
+  they are a file header where the file starts, then the records' bytes,
+  their LSNs one after another from the tail's, the last ending an append.
+  `WalTail::scan_bytes` returns records only if the bytes hold them, and
+  every run of records they hold; `EncodedAppend::new` encodes bytes that
+  hold its records. Both give the records the same addresses
+  (`WalTail::addresses`) and the same tail after them (`WalTail::after`).
+- **A scan picks up where it stopped** (proven,
+  `WalTail::lemma_scan_in_two`). Bytes that hold records, then bytes that
+  hold more past the tail after them, hold all of them, at the same
+  addresses, to the same tail: so a WAL file of appends scans to all their
+  records, and an open that scans on after its claim fails reads what a
+  fresh one would.
+- **No overflow or panic** in the proven code, given that LSNs, file
+  lengths and appends stay below `u64::MAX`: preconditions, which the
+  writer doesn't check.
+
+Not proven: the async shell (`wal/writer.rs`), which loops over the files,
+reads them, attempts appends, and maps records to their kinds, keys and
+values and back.
 
 Planned:
 
-- **The scan accepts exactly what the writer writes.** The bytes of any
-  appends, from any tail, claims and new files included, scan to the
-  appends' inserts and removals in order, at the addresses the appends
-  gave, and to the writer's tail. A scan that succeeds read only such
-  bytes: it never makes up a record.
-- **A scan picks up where it stopped.** Scanning two runs of bytes one
-  after the other gives what scanning them at once does, as an open does
-  after its claim fails.
 - **A lookup reads what was written.** `read_value` at an address the
   writer or the scan gave returns that insert's value.
-- **No overflow or panic** in any of it.
 - **An append's result is true,** against storage that only appends at
   a file's length, loses responses and has other writers: `Ok` means its
   bytes are at its offset, `TailMoved` that they aren't and won't be;

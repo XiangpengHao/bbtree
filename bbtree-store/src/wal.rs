@@ -14,6 +14,7 @@ use std::io;
 
 mod record;
 mod storage;
+mod tail;
 mod trusted;
 mod writer;
 
