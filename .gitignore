@@ -1,6 +1,4 @@
 .vscode/
-/target
 .impeccable
-/cpp/build*/
-/cpp/bench/reference/target
-cpp/.cache/
+build*/
+.cache/

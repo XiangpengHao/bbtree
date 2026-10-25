@@ -1,8 +1,0 @@
-host: xiangpeng-madison
-date: 2026-10-21T14:54:20-07:00
-bbtree: 4df85d600695a38f9a5b08eaf5b2ce77c1ab7cc3 (working copy, as the example built it)
-rustc: rustc 1.101.0-nightly (8d1a76430 2026-10-06)
-Linux xiangpeng-madison 7.2.8-cachyos #1-NixOS SMP PREEMPT_DYNAMIC Sat Sep 26 14:39:58 UTC 2026 x86_64 GNU/Linux
-Model name:                              AMD Ryzen 9 9900X 12-Core Processor
-disk: WD_BLACK SN770 1TB, ext4, the file system of the system's temporary directory
-run: RUSTFLAGS='-C target-cpu=native' cargo run --release -p bbtree-mmap --example first_query (10M entries, one run; each restart a process of its own, mimalloc)

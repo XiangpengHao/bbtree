@@ -1,72 +1,92 @@
-# bbtree
+# bbtree-cpp
 
-[![crates.io](https://img.shields.io/crates/v/bbtree.svg)](https://crates.io/crates/bbtree)
-[![docs.rs](https://img.shields.io/docsrs/bbtree)](https://docs.rs/bbtree)\
-[![test](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/ci.yml?branch=main&label=test)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
-[![miri](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/miri.yml?branch=main&label=miri)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
-[![sanitizer](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/sanitizer.yml?branch=main&label=sanitizer)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
-[![DST](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=DST)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
-[![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
-[![verification](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/verus.yml?branch=main&label=verification)](https://github.com/XiangpengHao/bbtree/actions/workflows/verus.yml?query=branch%3Amain)
+[![cpp](https://img.shields.io/github/actions/workflow/status/redox/bbtree-cpp/cpp.yml?branch=main&label=cpp)](https://github.com/redox/bbtree-cpp/actions/workflows/cpp.yml?query=branch%3Amain)
 
-> B-trees are by far the most important access path structure in database and file systems.
-> — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
+A header-only C++17 port of [bbtree](https://github.com/XiangpengHao/bbtree),
+the B+ tree ordered map by [Xiangpeng Hao](https://xiangpeng.systems).
 
+This fork keeps only the C++ version. The Rust crate, its formal
+verification, fuzzing and visualizer live upstream; the port keeps the same
+data structure, node layouts and algorithms, and was measured against the
+Rust crate on the same workloads before the Rust code left this repository
+([PORTING.md](PORTING.md)). How the tree works:
+[bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post) and the
+upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design) at `8adae97`, where this fork branched.
 
-bbtree is by far the fastest btree (ordered map):
-1. 5x faster than std's `BTreeMap` at single thread, 12x faster than `crossbeam-skiplist` at 96 threads.
-2. 30% lower memory usage, 5x lower p99 latency.
-3. Zero dependencies, `no_std` compatible.
-4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.
-5. Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing.
-6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
-
-
-![bbtree vs other concurrent maps, get throughput at 96 threads](https://github.com/XiangpengHao/bbtree/raw/main/design/assets/readme-race.svg)
-
-Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
+- Header-only C++17, zero dependencies, built to be embedded in DuckDB.
+- `bbtree::BBTreeMap`: a concurrent map, latched nodes with optimistic reads.
+- `bbtree::unsync::BBTreeMap` and `BBTreeSet`: single-threaded, with the
+  `std::map`/`std::set` operations, entries, ranges and set algebra.
+- SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
+  and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
 ## Usage
 
-```bash
-cargo add bbtree
+Add `src` to the include path, or with CMake:
+
+```cmake
+add_subdirectory(bbtree-cpp)
+target_link_libraries(your_target PRIVATE bbtree)
 ```
 
-### Concurrent bbtree
+### Concurrent map
 
-```rust
-use bbtree::BBTreeMap;
+```cpp
+#include <bbtree/map.hpp>
 
-let map = BBTreeMap::new();
+bbtree::BBTreeMap<std::uint64_t, std::uint64_t> map;
 
-std::thread::scope(|scope| {
-    scope.spawn(|| map.insert(1_u64, 10_u64));
-    scope.spawn(|| map.insert(2, 20));
-});
+std::thread a([&] { map.insert(1, 10); });
+std::thread b([&] { map.insert(2, 20); });
+a.join();
+b.join();
 
-assert_eq!(map.get_copied(&1), Some(10));
-assert_eq!(map.read(&2, |_, value| value + 1), Some(21));
-assert_eq!(map.get_many_copied([&1, &2, &3]), [Some(10), Some(20), None]);
+assert(map.get_copied(1) == 10u);
+assert(map.read(2, [](const auto&, const auto& value) { return value + 1; }) == 21u);
+map.scan(bbtree::Bound<std::uint64_t>::unbounded(), bbtree::Bound<std::uint64_t>::unbounded(),
+         [](const auto& key, const auto& value) { return true; /* keep going */ });
 ```
+
+`insert` returns an `InsertOutcome`: the previous value, or an
+`InsertError` when allocation failed, leaving the map unchanged.
 
 ### Single thread
 
-```rust
-use bbtree::unsync::BBTreeMap;
+```cpp
+#include <bbtree/unsync/map.hpp>
 
-let mut map = BBTreeMap::new();
+bbtree::unsync::BBTreeMap<std::uint64_t, std::string> map;
 map.insert(1, "one");
 map.insert(2, "two");
-assert_eq!(map.get(&1), Some(&"one"));
+assert(*map.get(1) == "one");
+for (const auto& [key, value] : map) { /* in key order */ }
 ```
 
-### Agent's guide
+### Keys and values
 
-1. Implement `InlinkeKey` trait for best performance, check how String and Vec<u8> implement it. 
-2. Consider using batching api if semantically appropriate.
-3. Create an issue here if you see any performance regression.
+- Keys and values must be trivially relocatable: the nodes move them as
+  bytes. Trivially copyable types are; `std::vector`, `std::unique_ptr`,
+  `std::shared_ptr` and libc++'s `std::string` are declared so.
+  libstdc++'s `std::string` is not: use `std::vector<uint8_t>` or a
+  `std::string_view` into stable storage.
+- Keys order by `operator<`. Comparisons must not throw.
+- Specialize `bbtree::InlineKey<K>` for the fastest lookups on your own key
+  types; the byte strings and 64/128-bit integers come specialized.
+- Batched lookups and inserts (`get_many_copied`, `read_many`,
+  `insert_many`) overlap their keys' memory latency: use them when the
+  semantics allow.
 
-## license
+## Build and test
+
+```bash
+cmake -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+`-DBBTREE_SANITIZE="address;undefined"` (or `thread`) builds the tests
+under sanitizers; `-DBBTREE_NATIVE=OFF` drops `-march=native`. The
+benchmarks are `bench/*_bench.cpp`.
+
+## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license, at
 your option; [LICENSE](LICENSE) holds both texts.

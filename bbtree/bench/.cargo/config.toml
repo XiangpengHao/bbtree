@@ -1,5 +1,0 @@
-# The bench measures what the machine it runs on can do: build for its CPU,
-# AVX-512 included where it has it. The report's `vector extensions` row
-# records what the binary was built with.
-[build]
-rustflags = ["-C", "target-cpu=native"]

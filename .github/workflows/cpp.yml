@@ -1,8 +1,8 @@
-# The C++17 port (cpp/): its tests on every architecture and SIMD path it
+# The C++17 port: its tests on every architecture and SIMD path it
 # has, and under the sanitizers. Named for its README badge.
 #
 # Not yet here: GCC with libstdc++, whose std::string the map refuses as a
-# key (cpp/PORTING.md, P2) and the tests still use.
+# key (PORTING.md, P2) and the tests still use.
 name: cpp
 
 on:
@@ -63,7 +63,7 @@ jobs:
         env:
           CXX: ${{ runner.os == 'Linux' && 'clang++' || 'c++' }}
         run: >
-          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S cpp -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+        run: cmake -S . -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build --config RelWithDebInfo --parallel
@@ -137,7 +137,7 @@ jobs:
         env:
           CXX: clang++
         run: >
-          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DBBTREE_NATIVE=OFF "-DBBTREE_SANITIZE=${{ matrix.sanitizer }}"
           -DCMAKE_CXX_FLAGS=-stdlib=libc++
 

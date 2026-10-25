@@ -1,6 +1,0 @@
-# The library and the crates built on it. The bench, the fuzz targets and the
-# visualizer (bbtree/{bench,fuzz,vis}) are workspaces of their own, so that
-# their dependencies stay out of this one.
-[workspace]
-members = ["bbtree", "bbtree-mmap", "bbtree-store"]
-resolver = "3"
