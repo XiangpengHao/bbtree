@@ -2,10 +2,16 @@
 // 48-bit entry identifier. Empty and deleted are identifier encodings,
 // independent of the fingerprint (including an all-zero fingerprint).
 //
-// An array of descriptors begins with a header line that holds its
-// capacity, so that an optimistic reader of a shared map, which reaches the
-// array through a pointer it read racing, knows the bounds of that array
-// whatever array the pointer was (`racing_view`).
+// Beside them, a byte a slot, its tag: empty, deleted, or occupied with the
+// hash's top seven bits. Lookups walk the tags, a ninth of the index's
+// bytes, which stay in cache where the descriptors don't: a key that is
+// absent costs no descriptor, and a present one only its own. Descriptors
+// stay the truth; every write of one writes its tag (`write_descriptor`).
+//
+// A block holds a header line with the capacity, the descriptors, then the
+// tags, so that an optimistic reader of a shared map, which reaches the
+// block through a pointer it read racing, knows the bounds of that block
+// whatever block the pointer was (`racing_view`).
 #pragma once
 
 #include <atomic>
@@ -24,6 +30,12 @@ namespace bbtree::detail {
 template <class A>
 class HashProbeIndex {
  public:
+  /// A slot's tag: empty, deleted (or claimed), or occupied with the top
+  /// seven bits of its entry's hash.
+  static constexpr std::uint8_t empty_tag = 0;
+  static constexpr std::uint8_t deleted_tag = 1;
+  static constexpr std::uint8_t occupied_tag = 0x80;
+
   explicit HashProbeIndex(A allocator = A()) noexcept : allocator_(std::move(allocator)) {}
   HashProbeIndex(const HashProbeIndex &) = delete;
   HashProbeIndex &operator=(const HashProbeIndex &) = delete;
@@ -62,6 +74,19 @@ class HashProbeIndex {
     return id != 0 && id != identifier_mask();
   }
   std::uint64_t fingerprint(std::size_t slot) const noexcept { return descriptors_[slot] >> 48; }
+  std::uint8_t tag(std::size_t slot) const noexcept { return tags()[slot]; }
+  /// The tag of a slot whose descriptor holds this hash's entry.
+  static std::uint8_t wanted_tag(std::uint64_t hash) noexcept {
+    return static_cast<std::uint8_t>(occupied_tag | (hash >> 57));
+  }
+  /// From `slot` on, the first slot that is empty or whose tag is
+  /// `hash`'s: where a lookup reads a descriptor, if any.
+  std::size_t probe(std::uint64_t hash, std::size_t slot) const noexcept {
+    const auto wanted = wanted_tag(hash);
+    const std::uint8_t *tags = this->tags();
+    while (tags[slot] != empty_tag && tags[slot] != wanted) slot = next(slot);
+    return slot;
+  }
   std::size_t home(std::uint64_t hash) const noexcept {
     return static_cast<std::size_t>(hash) & (capacity_ - 1);
   }
@@ -73,27 +98,41 @@ class HashProbeIndex {
   /// map's readers may hold it (`RetainedBlocks`).
   struct RacingView {
     const std::uint64_t *descriptors;
+    const std::uint8_t *tags;
     std::size_t capacity;
   };
   BBTREE_RACING_READ RacingView racing_view() const noexcept {
     const std::uint64_t *descriptors = RacingLoad::relaxed(&descriptors_);
-    if (!descriptors) return {nullptr, 0};
-    return {descriptors, static_cast<std::size_t>(RacingLoad::relaxed(descriptors - 1))};
+    if (!descriptors) return {nullptr, nullptr, 0};
+    const auto capacity = static_cast<std::size_t>(RacingLoad::relaxed(descriptors - 1));
+    return {descriptors, reinterpret_cast<const std::uint8_t *>(descriptors + capacity), capacity};
   }
   BBTREE_RACING_READ static std::uint64_t racing_descriptor(const RacingView &view,
                                                             std::size_t slot) noexcept {
     return RacingLoad::relaxed(view.descriptors + slot);
   }
+  /// From `slot` on, the first slot that is empty or whose tag is `hash`'s,
+  /// as `probe`, in a view; it gives up after a lap, which only a view a
+  /// writer is changing could need.
+  BBTREE_RACING_READ static std::size_t racing_probe(const RacingView &view, std::uint64_t hash,
+                                                     std::size_t slot) noexcept {
+    const auto wanted = wanted_tag(hash);
+    for (std::size_t probes = 0; probes < view.capacity; ++probes) {
+      const auto tag = RacingLoad::relaxed(view.tags + slot);
+      if (tag == empty_tag || tag == wanted) return slot;
+      slot = (slot + 1) & (view.capacity - 1);
+    }
+    return slot;
+  }
+  BBTREE_RACING_READ static std::uint8_t racing_tag(const RacingView &view, std::size_t slot) noexcept {
+    return RacingLoad::relaxed(view.tags + slot);
+  }
 
   template <class Store, class Q, class Equal>
   std::size_t find(std::uint64_t hash, const Q &key, const Store &store, const Equal &equal) const {
     if (capacity_ == 0) return capacity_;
-    auto slot = home(hash);
-    while (identifier(slot) != 0) {
-      if (occupied(slot) && fingerprint(slot) == hash >> 48 &&
-          equal(store.at(identifier(slot)).key, key))
-        return slot;
-      slot = next(slot);
+    for (auto slot = probe(hash, home(hash)); tag(slot) != empty_tag; slot = probe(hash, next(slot))) {
+      if (fingerprint(slot) == hash >> 48 && equal(store.at(identifier(slot)).key, key)) return slot;
     }
     return capacity_;
   }
@@ -104,7 +143,7 @@ class HashProbeIndex {
 
   std::size_t vacant(std::uint64_t hash) const noexcept {
     auto slot = home(hash);
-    while (occupied(slot)) slot = next(slot);
+    while (tag(slot) & occupied_tag) slot = next(slot);
     return slot;
   }
 
@@ -112,15 +151,15 @@ class HashProbeIndex {
   std::size_t locate(std::uint64_t hash, const Q &key, const Store &store,
                      const Equal &equal) const {
     if (capacity_ == 0) return capacity_;
+    const auto wanted = wanted_tag(hash);
     auto slot = home(hash);
     auto deleted = capacity_;
-    while (identifier(slot) != 0) {
-      if (occupied(slot)) {
+    for (std::uint8_t tag; (tag = this->tag(slot)) != empty_tag; slot = next(slot)) {
+      if (tag == wanted) {
         if (fingerprint(slot) == hash >> 48 && equal(store.at(identifier(slot)).key, key))
           return slot;
-      } else if (deleted == capacity_)
+      } else if (tag == deleted_tag && deleted == capacity_)
         deleted = slot;
-      slot = next(slot);
     }
     return deleted == capacity_ ? slot : deleted;
   }
@@ -128,7 +167,7 @@ class HashProbeIndex {
   void publish_at(std::size_t slot, std::uint64_t hash, std::uint64_t identifier) noexcept {
     BBTREE_ASSERT(slot < capacity_ && !occupied(slot));
     if (this->identifier(slot) != 0) --deleted_;
-    descriptors_[slot] = (hash & ~identifier_mask()) | identifier;
+    write_descriptor(slot, (hash & ~identifier_mask()) | identifier);
     ++size_;
   }
 
@@ -136,21 +175,21 @@ class HashProbeIndex {
   // to tombstone accounting. They must be committed or released before return.
   void claim_empty(std::size_t slot, std::uint64_t hash) noexcept {
     BBTREE_ASSERT(identifier(slot) == 0);
-    descriptors_[slot] = (hash & ~identifier_mask()) | identifier_mask();
+    write_descriptor(slot, (hash & ~identifier_mask()) | identifier_mask());
   }
   void commit_claim(std::size_t slot, std::uint64_t identifier) noexcept {
     BBTREE_ASSERT(this->identifier(slot) == identifier_mask());
-    descriptors_[slot] = (descriptors_[slot] & ~identifier_mask()) | identifier;
+    write_descriptor(slot, (descriptors_[slot] & ~identifier_mask()) | identifier);
     ++size_;
   }
   void release_claim(std::size_t slot) noexcept {
     BBTREE_ASSERT(identifier(slot) == identifier_mask());
-    descriptors_[slot] = 0;
+    write_descriptor(slot, 0);
   }
 
   void erase(std::size_t slot) noexcept {
     BBTREE_ASSERT(occupied(slot));
-    descriptors_[slot] = identifier_mask();
+    write_descriptor(slot, identifier_mask());
     --size_;
     ++deleted_;
   }
@@ -200,7 +239,7 @@ class HashProbeIndex {
   }
 
   void reset() noexcept {
-    for (std::size_t slot = 0; slot < capacity_; ++slot) descriptors_[slot] = 0;
+    for (std::size_t slot = 0; slot < capacity_; ++slot) write_descriptor(slot, 0);
     size_ = deleted_ = 0;
   }
 
@@ -213,11 +252,22 @@ class HashProbeIndex {
 
   /// The header line before the descriptors; its last word is the capacity.
   static constexpr std::size_t header_words = 64 / sizeof(std::uint64_t);
-
   static constexpr std::uint64_t identifier_mask() noexcept { return (std::uint64_t{1} << 48) - 1; }
   static std::size_t threshold(std::size_t capacity) noexcept { return capacity - capacity / 4; }
   static Layout layout(std::size_t capacity) noexcept {
-    return {(header_words + capacity) * sizeof(std::uint64_t), 64};
+    return {header_words * sizeof(std::uint64_t) + capacity * (sizeof(std::uint64_t) + 1), 64};
+  }
+  /// The tags, after the descriptors in the block.
+  std::uint8_t *tags() const noexcept { return reinterpret_cast<std::uint8_t *>(descriptors_ + capacity_); }
+  static std::uint8_t tag_of(std::uint64_t descriptor) noexcept {
+    const auto identifier = descriptor & identifier_mask();
+    if (identifier == 0) return empty_tag;
+    if (identifier == identifier_mask()) return deleted_tag;
+    return static_cast<std::uint8_t>(occupied_tag | (descriptor >> 57));
+  }
+  void write_descriptor(std::size_t slot, std::uint64_t descriptor) noexcept {
+    descriptors_[slot] = descriptor;
+    tags()[slot] = tag_of(descriptor);
   }
 
   template <class Store>
@@ -229,11 +279,12 @@ class HashProbeIndex {
     ::new (static_cast<void *>(block + header_words - 1)) std::uint64_t(capacity);
     replacement.descriptors_ = block + header_words;
     replacement.capacity_ = capacity;
-    for (std::size_t slot = 0; slot < capacity; ++slot)
+    for (std::size_t slot = 0; slot < capacity; ++slot) {
       ::new (static_cast<void *>(replacement.descriptors_ + slot)) std::uint64_t(0);
+      ::new (static_cast<void *>(replacement.tags() + slot)) std::uint8_t(empty_tag);
+    }
     store.for_each([&](std::uint64_t identifier, const auto &entry) {
-      const auto slot = replacement.vacant(entry.hash);
-      replacement.descriptors_[slot] = (entry.hash & ~identifier_mask()) | identifier;
+      replacement.write_descriptor(replacement.vacant(entry.hash), (entry.hash & ~identifier_mask()) | identifier);
     });
     replacement.size_ = size_;
     // A racing reader reaches the array through the pointer swapped in: its
@@ -247,9 +298,9 @@ class HashProbeIndex {
   // store rebuilds at the same capacity, and its walk runs no user code.
   template <class Store>
   void rebuild_in_place(const Store &store) {
-    for (std::size_t slot = 0; slot < capacity_; ++slot) descriptors_[slot] = 0;
+    for (std::size_t slot = 0; slot < capacity_; ++slot) write_descriptor(slot, 0);
     store.for_each([&](std::uint64_t identifier, const auto &entry) {
-      descriptors_[vacant(entry.hash)] = (entry.hash & ~identifier_mask()) | identifier;
+      write_descriptor(vacant(entry.hash), (entry.hash & ~identifier_mask()) | identifier);
     });
     deleted_ = 0;
   }

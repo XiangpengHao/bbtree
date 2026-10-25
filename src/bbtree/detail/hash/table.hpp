@@ -101,44 +101,59 @@ class HashTable {
                             equal, found);
   }
 
-  /// One key's optimistic lookup in steps, which a batch takes for all its
-  /// keys before the next step, so that the keys' waits for memory overlap:
-  /// the descriptor at the key's home slot, then the cached hash of the
-  /// entry it leads to, then the entry and the keys compared. A key that
-  /// probes past its home slot finishes as `racing_find` does.
+  /// One key's optimistic lookup in steps, which a bulk read takes for all
+  /// its keys before the next step, so that the keys' waits for memory
+  /// overlap. A step branches only on what an earlier step loaded: a branch
+  /// on a load still in flight, mispredicted, would throw away the loads of
+  /// the keys after it. The tag at the key's home slot; the tags from there
+  /// to the first that is empty or its own, and the descriptor there; the
+  /// cached hash of the entry it leads to; the entry copied and the keys
+  /// compared. A key that probes past that slot finishes as `racing_find`
+  /// does. The batch keeps each key's hash.
   class RacingLookup {
    public:
-    BBTREE_ALWAYS_INLINE void start(const HashTable &table, std::uint64_t hash) noexcept {
-      hash_ = hash;
+    BBTREE_ALWAYS_INLINE void load_tag(const HashTable &table, std::uint64_t hash) noexcept {
       view_ = table.index_.racing_view();
       slot_ = static_cast<std::size_t>(hash) & (view_.capacity - 1);
-      descriptor_ = view_.capacity == 0 ? 0 : Index::racing_descriptor(view_, slot_);
+      tag_ = view_.capacity == 0 ? Index::empty_tag : Index::racing_tag(view_, slot_);
     }
-    BBTREE_ALWAYS_INLINE void locate(const HashTable &table) noexcept {
+    BBTREE_ALWAYS_INLINE void load_descriptor(std::uint64_t hash) noexcept {
+      descriptor_ = 0;
+      if (tag_ == Index::empty_tag) return;
+      const auto wanted = Index::wanted_tag(hash);
+      if (tag_ != wanted) {
+        slot_ = Index::racing_probe(view_, hash, slot_);
+        tag_ = Index::racing_tag(view_, slot_);
+        if (tag_ != wanted) return;
+      }
+      descriptor_ = Index::racing_descriptor(view_, slot_);
+    }
+    BBTREE_ALWAYS_INLINE void load_entry_hash(const HashTable &table, std::uint64_t hash) noexcept {
       entry_ = nullptr;
-      if (!Index::descriptor_matches(descriptor_, hash_)) return;
+      if (!Index::descriptor_matches(descriptor_, hash)) return;
       entry_ = table.entries_.racing_entry(Index::descriptor_identifier(descriptor_));
       if (entry_) entry_hash_ = racing_hash(entry_);
     }
     template <class Q, class Equal>
-    BBTREE_ALWAYS_INLINE bool finish(const HashTable &table, const Q &key, const Equal &equal,
-                                     RacingCopy<Entry> &found) const {
-      if (Index::descriptor_identifier(descriptor_) == 0) return false;
-      if (entry_ && entry_hash_ == hash_) {
+    BBTREE_ALWAYS_INLINE bool finish(const HashTable &table, std::uint64_t hash, const Q &key,
+                                     const Equal &equal, RacingCopy<Entry> &found) const {
+      // No descriptor: the probe met an empty tag, the key is absent.
+      if (descriptor_ == 0) return false;
+      if (entry_ && entry_hash_ == hash) {
         found.read_from(entry_);
         if (equal(found.assume_read().key, key)) return true;
       }
-      return table.racing_find_from(view_, (slot_ + 1) & (view_.capacity - 1), hash_, key, equal,
+      return table.racing_find_from(view_, (slot_ + 1) & (view_.capacity - 1), hash, key, equal,
                                     found);
     }
 
    private:
     typename Index::RacingView view_;
-    std::uint64_t hash_;
     std::size_t slot_;
     std::uint64_t descriptor_;
     const Entry *entry_;
     std::uint64_t entry_hash_;
+    std::uint8_t tag_;
   };
 
   template <class Equal>
@@ -237,8 +252,9 @@ class HashTable {
     static_assert(std::is_trivially_copyable_v<Entry>, "racing reads copy entries as bytes");
     const auto mask = view.capacity - 1;
     for (std::size_t probes = 0; probes < view.capacity; ++probes) {
+      slot = Index::racing_probe(view, hash, slot);
+      if (Index::racing_tag(view, slot) != Index::wanted_tag(hash)) return false;
       const auto descriptor = Index::racing_descriptor(view, slot);
-      if (Index::descriptor_identifier(descriptor) == 0) return false;
       if (Index::descriptor_matches(descriptor, hash)) {
         if (const Entry *entry = entries_.racing_entry(Index::descriptor_identifier(descriptor))) {
           found.read_from(entry);

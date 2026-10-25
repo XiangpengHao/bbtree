@@ -35,30 +35,29 @@ Millions of lookups per second:
 
 | tree maps (ordered) | M ops/s |
 |---|--:|
-| bbtree, batched (`get_many_copied`, 64 keys a call) | **145.4** |
-| bbtree (`get_copied`) | **77.5** |
-| folly `ConcurrentSkipList` | 7.7 |
-| oneTBB `tbb::concurrent_map` (skip list) | 7.5 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
+| bbtree, bulk (`get_many_copied`, 64 keys a call) | **151.4** |
+| bbtree (`get_copied`) | **74.9** |
+| oneTBB `tbb::concurrent_map` (skip list) | 7.0 |
+| folly `ConcurrentSkipList` | 6.3 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.0 |
 | `std::map` + `std::shared_mutex` | 1.4 |
 
 | hash maps (unordered) | M ops/s |
 |---|--:|
-| bbtree `BBHashMap`, batched (`get_many_copied`, 64 keys a call) | **237.7** |
-| bbtree `BBHashMap` (`get_copied`) | **119.0** |
-| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 390.3 |
-| oneTBB `tbb::concurrent_hash_map` | 134.6 |
-| folly `ConcurrentHashMap` | 118.5 |
-| oneTBB `tbb::concurrent_unordered_map` | 58.9 |
-| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 5.7 |
-| `std::unordered_map` + `std::shared_mutex` | 3.8 |
+| bbtree `BBHashMap`, bulk (`get_many_copied`, 64 keys a call) | **260.5** |
+| bbtree `BBHashMap` (`get_copied`) | **134.6** |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 402.4 |
+| oneTBB `tbb::concurrent_hash_map` | 133.2 |
+| folly `ConcurrentHashMap` | 112.9 |
+| oneTBB `tbb::concurrent_unordered_map` | 58.7 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 7.6 |
+| `std::unordered_map` + `std::shared_mutex` | 4.3 |
 
-bbtree's tree maps lead their heat by 9–19×. Its hash map comes second to
-Boost's when batched, and level with oneTBB's and folly's one key at a
-time. Boost's keeps one byte of metadata per slot, which stays in cache,
-where bbtree's eight-byte descriptors miss it (PORTING.md, Hash maps).
-Readers of both bbtree maps write nothing shared: they check a version
-after reading.
+bbtree's tree maps lead their heat by 11–22×. Its hash map comes second to
+Boost's in bulk, and leads one key at a time. Boost's stores entries in
+the slots it probes; bbtree's reaches them through descriptors and pages,
+about twice the work a key (PORTING.md, Hash maps). Readers of both
+bbtree maps write nothing shared: they check a version after reading.
 
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first
@@ -89,7 +88,7 @@ Unsync map, ns per operation (lower is better):
 | 10M u64 remove, random | 279.0 | **220.7** |
 | 1M path-string get, hit | 276 | **185** |
 | 10M u64 range of 64, per scan | 481 | **407** |
-| 10M u64 batch insert / hit / miss, per key | 92.1 / 49.4 / 42.3 | **87.5 / 46.1** / 42.3 |
+| 10M u64 bulk insert / hit / miss, per key | 92.1 / 49.4 / 42.3 | **87.5 / 46.1** / 42.3 |
 
 Unsync sets of u64, ns per element:
 
@@ -104,8 +103,8 @@ Shared map, 10M u64, millions of operations per second (higher is better):
 |---|--:|--:|
 | insert, 1 / 4 / 8 threads | 4.4 / 17.0–17.3 / 31.3–31.6 | 4.4 / 16.1–16.4 / 29.1–29.7 |
 | `get_copied`, 1 / 4 / 8 threads | 8.4 / 33.6–34.3 / 61.7–66.0 | 8.4–8.8 / 34.1–34.8 / 53.5–63.3 |
-| batched get, 1 thread | 17.5–17.7 | **18.0** |
-| batched get, 8 threads | 117.2–134.7 | 113.1–126.0 |
+| bulk get, 1 thread | 17.5–17.7 | **18.0** |
+| bulk get, 8 threads | 117.2–134.7 | 113.1–126.0 |
 
 The shared-map throughput rows predate the last round of fixes: inlining
 the lookup and insert paths, one acquire-release CAS per latch, and `isb`
@@ -166,7 +165,7 @@ for (const auto& [key, value] : map) { /* in key order */ }
 - Keys order by `operator<`. Comparisons must not throw.
 - Specialize `bbtree::InlineKey<K>` for the fastest lookups on your own key
   types; the byte strings and 64/128-bit integers come specialized.
-- Batched lookups and inserts (`get_many_copied`, `read_many`,
+- Bulk lookups and inserts (`get_many_copied`, `read_many`,
   `insert_many`) overlap their keys' memory latency: use them when the
   semantics allow.
 

@@ -38,7 +38,7 @@ class BBHashMap {
   static constexpr bool reads_racing = std::is_trivially_copyable_v<K> && std::is_trivially_copyable_v<V>;
   /// Optimistic reads of a key before it waits for its shard shared.
   static constexpr int racing_attempts = 4;
-  /// Keys a batched read reads optimistically before checking their versions.
+  /// Keys a bulk read reads optimistically before checking their versions.
   static constexpr std::size_t batch_width = 64;
 
   struct alignas(64) Shard {
@@ -293,13 +293,17 @@ class BBHashMap {
     // keys' waits for memory overlap.
     std::atomic_thread_fence(std::memory_order_acquire);
     for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].start(shards[lane]->table, hashes[lane]);
+      if (optimistic[lane]) lookups[lane].load_tag(shards[lane]->table, hashes[lane]);
     }
     for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].locate(shards[lane]->table);
+      if (optimistic[lane]) lookups[lane].load_descriptor(hashes[lane]);
     }
     for (size_type lane = 0; lane < width; ++lane) {
-      hits[lane] = optimistic[lane] && lookups[lane].finish(shards[lane]->table, keys[lane], equal_, found[lane]);
+      if (optimistic[lane]) lookups[lane].load_entry_hash(shards[lane]->table, hashes[lane]);
+    }
+    for (size_type lane = 0; lane < width; ++lane) {
+      hits[lane] = optimistic[lane] && lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane],
+                                                            equal_, found[lane]);
     }
     std::atomic_thread_fence(std::memory_order_acquire);
     for (size_type lane = 0; lane < width; ++lane) {

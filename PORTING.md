@@ -166,6 +166,13 @@ identifier, without encoding pointers. Empty and deleted identifiers are
 distinct; equality always checks the real key. Contiguous linear probing
 stops only at an empty descriptor.
 
+A slot also has a tag, a byte beside the descriptors in the same block:
+empty, deleted, or occupied with the hash's top seven bits. Lookups walk
+the tags (a ninth of the index's bytes) and read a descriptor only where
+the tag matches, so a miss reads no descriptor. Writers keep descriptors
+as the truth, writing the tag with every descriptor
+(`HashProbeIndex::write_descriptor`).
+
 Entries contain the full mixed hash, `K`, and `V`. Pages contain at most 64
 entries and aim for 4 KiB when entry size permits. Oversized entries get one
 slot per page; over-alignment is preserved. Page bitmaps support iteration,
@@ -182,13 +189,13 @@ but moves no keys or values and calls neither hash nor equality. Payload
 pages and holes remain allocated until `clear` or destruction.
 
 With index occupancy `alpha`, payload occupancy `beta`, and aligned entry
-size `E`, steady-state memory is approximately `8 / alpha + E / beta`
+size `E`, steady-state memory is approximately `9 / alpha + E / beta`
 bytes per live entry, plus page headers, the directory and alignment.
 Immediately after doubling, index occupancy falls to approximately 37.5%.
 For `u64 -> u64`, `E = 24`: at 75% index occupancy and full payload pages
-the estimate is 34.7 bytes per entry before bookkeeping. Small pairs pay a
+the estimate is 36 bytes per entry before bookkeeping. Small pairs pay a
 substantial overhead relative to flat hash maps. A hit also depends on
-descriptor, page pointer, entry, and any heap-owned key bytes; batching
+descriptor, page pointer, entry, and any heap-owned key bytes; bulk reads
 overlaps independent queries but does not remove those dependencies.
 
 ### API and ownership
@@ -209,7 +216,7 @@ hashing and equality must stay consistent while entries are stored, and
 must not re-enter the map.
 
 The owned map supports lookup, mutable lookup, key/value lookup, insertion,
-removal, reservation, copying/moving, iteration, and batches. `clear_retain_capacity`
+removal, reservation, copying/moving, iteration, and bulk operations. `clear_retain_capacity`
 destroys entries while retaining the index and pages for another build. Fresh
 slots use a bump cursor; erased slots use the free list. Insert/reserve
 preserve existing references. Erase invalidates the removed entry; clear
@@ -221,7 +228,7 @@ capacity may have changed. Hash/equality exceptions also preserve entries.
 Copy assignment constructs the replacement before changing the target.
 
 The shared map offers copied/cloned reads, scoped `read`/`update`, insertion,
-removal and conditional removal, traversal, clear, and batches. Hash and
+removal and conditional removal, traversal, clear, and bulk operations. Hash and
 equality policies must allow simultaneous const calls; allocator copies
 must allow calls from different shards. Read callbacks run on a copy of the
 entry when keys and values are trivially copyable, and with the shard held
@@ -256,11 +263,11 @@ changes an existing one. Callbacks run in input order, including duplicates,
 and must not re-enter the map. Completed changes and modifications made by a
 throwing update remain. `for_each_hashed` walks dense page runs and exports the
 cached mixed hash without hashing again; that hash is local to the map's policy,
-not a persistent identifier. Shared batch reads go 64 keys at a time
-("Shared reads"). Insert batches process inputs sequentially,
-including duplicates, and move from input arrays. Shared batches restore
+not a persistent identifier. Shared bulk reads go 64 keys at a time
+("Shared reads"). Bulk inserts process inputs sequentially,
+including duplicates, and move from input arrays. Shared bulk inserts restore
 refused entries to their input slots and report `failed[i]`. Earlier
-operations remain committed on a later exception. Batch inputs/outputs
+operations remain committed on a later exception. Bulk inputs/outputs
 must be valid disjoint arrays; zero count permits null pointers. No hash
 map path uses software prefetching.
 
@@ -289,30 +296,45 @@ or directory's contents before the pointer that publishes it.
 `get_many_copied` reads 64 keys a call in steps, each step for every key
 before the next, so that the keys' waits for memory overlap (no
 prefetching): every shard's version by a relaxed load, then one fence; the
-descriptor at each key's home slot; the cached hash of the entry each
-leads to; the entries copied and keys compared; one fence, then every
-version checked. A key whose shard changed is read again on its own. The
-versions are loaded relaxed and fenced once because an acquire load per key
-held each key up behind the previous key's memory wait.
+tag at each key's home slot; the tags on to the first empty or matching
+one, and the descriptor there; the cached hash of the entry it leads to;
+the entries copied and keys compared; one fence, then every version
+checked. A key whose shard changed is read again on its own. The versions
+are loaded relaxed and fenced once because an acquire load per key held
+each key up behind the previous key's memory wait. A step branches only on
+what an earlier step loaded: merging the tag and descriptor steps, or the
+entry's hash and its copy, put a branch on a load still in flight, and its
+mispredictions threw away the next keys' loads (27.4 to 19.8 M/s).
 
 Measured with `bench/race/race_bench.cpp` (10M random UUID keys, half the
-lookups missing, M4 Pro), batched, millions of lookups per second:
+lookups missing, M4 Pro), millions of lookups per second:
 
-| | 1 thread | 14 threads |
-|---|--:|--:|
-| shard behind `std::shared_mutex` | 8.6 | 13.5 |
-| optimistic, versions by acquire loads | 8.5 | 113.2 |
-| versions relaxed, one fence | 10.3 | |
-| in steps across the batch | 28.5 | 243.4 |
-| Boost `concurrent_flat_map`, bulk `cvisit` | 42.4 | 392.7 |
+| | bulk, 1 thread | bulk, 14 threads | one key, 14 threads |
+|---|--:|--:|--:|
+| shard behind `std::shared_mutex` | 8.6 | 13.5 | |
+| optimistic, versions by acquire loads | 8.5 | 113.2 | |
+| versions relaxed, one fence | 10.3 | | |
+| in steps across the bulk read | 28.5 | 247.9 | 120.0 |
+| tags before descriptors | 27.4 | 270.8 | 134.3 |
+| Boost `concurrent_flat_map` (bulk `cvisit`, `cvisit`) | 42.4 | 392.7 | 200.9 |
 
-Before the steps, a key cost 117 instructions and 412 cycles (IPC 0.28):
-the lookups waited on memory one after another. What separates the map
-from Boost's now is the first access: Boost's metadata, a byte a slot
-(about 12 MB here), stays in cache, while a miss here reads an eight-byte
-descriptor from an index of 128 MB. A compact fingerprint array in front
-of the descriptors would take that access out of most misses; it would
-change the index the owned map and `BBHashIndex` share.
+The last two of ours ran back to back. Before the steps, a key cost 117
+instructions and 412 cycles (IPC 0.28): the lookups waited on memory one
+after another.
+
+Tags (see "Layout and costs") take the descriptor's line out of most
+misses. One thread, waiting on latency, doesn't see it; fourteen, sharing
+the memory's bandwidth, do. They were meant to close the gap to Boost on
+the assumption that Boost's lead was its metadata staying in cache. The
+counters say otherwise: with every key in cache (100K keys), a bulk read
+costs 160 instructions and 96 cycles a key here against Boost's 85 and 41,
+and at 10M keys memory adds 54 cycles to ours and 56 to Boost's. The gap
+is work, not memory: a hit here goes shard, version, index header, tag,
+descriptor, directory, page, entry and version again, about ten dependent
+loads where Boost goes from a group's metadata to the element stored in
+its slot. The paged entries, reached through descriptors, give the owned
+map stable references; the shared map hands out none, so an inline layout
+(entries in the probed slots, tags in front) would remove that walk there.
 
 ### Verification
 
@@ -321,7 +343,7 @@ change the index the owned map and `BBHashIndex` share.
 also cover borrowed strings, stable references, cached hashes, move-only
 and nonassignable values, over-aligned oversized entries, object lifetimes,
 copy failures, and allocator refusals. `shared_hash_map_test` checks racing
-writers/readers, atomic updates, scoped access, batch semantics, allocator
+writers/readers, atomic updates, scoped access, bulk semantics, allocator
 failure/retry, and exception unwinding; optimistic readers against writers
 that grow, erase, rebuild and clear, and against writers that rewrite
 eight-word values (a reader without its version check sees words from two
@@ -332,7 +354,7 @@ and sanitizer builds. No benchmarks are run as part of tests.
 `bbtree::unsync::BBHashIndex<Handle, Allocator>`, in
 [`unsync/hash_index.hpp`](src/bbtree/unsync/hash_index.hpp), indexes rows
 owned elsewhere: it consumes cached hashes unchanged, stores row handles
-directly, and batches key matching and row creation through callbacks. It
+directly, and does key matching and row creation in bulk, through callbacks. It
 shares descriptor storage with the owned map. `hash_index_test` covers it.
 
 The DuckDB experiments built on these maps (the benchmark linking upstream

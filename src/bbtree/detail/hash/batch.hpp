@@ -1,5 +1,6 @@
 // Descriptor discovery and payload comparisons run in separate loops. Only
-// false fingerprint matches survive to another round. Larger bounded tiles
+// false fingerprint matches survive to another round. Discovery walks the
+// index's tags, which stay in cache, before any descriptor. Larger bounded tiles
 // overlap payload waits across more queries without software prefetching.
 #pragma once
 
@@ -51,7 +52,7 @@ class HashLookupBatch {
                                                   const V** values, const HashAt& hash_at,
                                                   const Equal& equal, std::size_t* positions) {
     while (count != 0) {
-      std::array<std::uint64_t, 128> hashes, descriptors;
+      std::array<std::uint64_t, 128> hashes;
       std::array<std::size_t, 128> local_slots;
       auto* slots = positions ? positions : local_slots.data();
       std::array<std::uint8_t, 128> pending, candidates;
@@ -63,27 +64,25 @@ class HashLookupBatch {
         for (std::size_t row = 0; row < width; ++row) {
           hashes[row] = hash_at(keys[row], row);
           slots[row] = index.home(hashes[row]);
-          descriptors[row] = index.descriptor(slots[row]);
           pending[row] = static_cast<std::uint8_t>(row);
         }
         auto remaining = width;
         while (remaining != 0) {
+          // Tags first (in cache), then the descriptors and payloads of the
+          // slots whose tags match: an absent key reads no descriptor.
           std::size_t candidate_count = 0;
           for (std::size_t lane = 0; lane < remaining; ++lane) {
             const auto row = pending[lane];
-            auto slot = slots[row];
-            auto descriptor = descriptors[row];
-            while (Index::descriptor_identifier(descriptor) != 0 &&
-                   !Index::descriptor_matches(descriptor, hashes[row])) {
-              slot = index.next(slot);
-              descriptor = index.descriptor(slot);
-            }
+            auto slot = index.probe(hashes[row], slots[row]);
+            while (index.tag(slot) != Index::empty_tag &&
+                   !Index::descriptor_matches(index.descriptor(slot), hashes[row]))
+              slot = index.probe(hashes[row], index.next(slot));
             slots[row] = slot;
-            if (Index::descriptor_identifier(descriptor) == 0)
+            if (index.tag(slot) == Index::empty_tag)
               values[row] = nullptr;
             else {
               candidates[candidate_count] = row;
-              payloads[candidate_count++] = &entries.at(Index::descriptor_identifier(descriptor));
+              payloads[candidate_count++] = &entries.at(index.identifier(slot));
             }
           }
           remaining = 0;
@@ -94,7 +93,6 @@ class HashLookupBatch {
               values[row] = &payload->value;
             else {
               slots[row] = index.next(slots[row]);
-              descriptors[row] = index.descriptor(slots[row]);
               pending[remaining++] = row;
             }
           }
