@@ -9,7 +9,7 @@ From 00-init:
 - The WAL holds the data; the bbtree, in memory, points into it. A crash
   rebuilds the tree by scanning the WAL.
 - S3 Express One Zone by default, appended every 1 ms (group commit); an
-  append waits for the one before it to land.
+  append waits for the one before it to finish.
 - A new WAL file every 10,000 appends.
 - One linear history, in LSN order.
 
@@ -27,7 +27,7 @@ rules as its contract.
 - **Record:** one key's insert or removal.
 - **LSN:** a record's sequence number, in its header.
 - **Append:** a few records at the end of the last WAL file, or starting
-  the next one, in one call: they land whole or not at all.
+  the next one, in one call: written whole or not at all.
 - **Writer:** the process that appends to the WAL, one at a time. Each
   open of a store is a new writer, with a random id.
 - **Claim:** a writer's first append, one record of its id ("Opening").
@@ -41,8 +41,8 @@ buckets:
   equal to the object's size appends; any other offset fails
   (`InvalidWriteOffset`). Offset 0 creates the object, and fails if it
   exists.
-- **Whole or nothing.** An append lands entire or not at all: S3 never
-  adds part of a body.
+- **Whole or nothing.** An append is written entire or not at all: S3
+  never adds part of a body.
 - **10,000 appends** an object; past them, appends fail (`TooManyParts`).
 - **5 GB** an append at most, no minimum.
 - **Checksums.** An append may carry its body's CRC32C, which S3 checks
@@ -53,7 +53,57 @@ buckets:
   prices), plus $0.0032 per GB.
 
 The write offset makes an append a compare-and-append: two writers never
-both land at one offset. The WAL leans on it for its one writer.
+both write at one offset. The WAL leans on it for its one writer.
+
+## Interface
+
+What the store calls: a writer that appends, and records' addresses,
+which read their records back while it does.
+
+```rust
+impl<S: WalStorage> WalWriter<S> {
+    /// Scans the WAL, giving `replay` each record but claims, with its
+    /// address; then claims the WAL.
+    async fn open(storage: S, replay: impl FnMut(RecordAddress, Record<'_>)) -> Result<Self, WalError>;
+
+    /// Appends `records` as one append; gives their addresses.
+    async fn append(&mut self, records: &[Record<'_>]) -> Result<Vec<RecordAddress>, WalError>;
+}
+
+impl RecordAddress {
+    /// Reads the insert here from `storage`, and gives its value.
+    async fn read_value(self, storage: &impl WalStorage) -> Result<Vec<u8>, WalError>;
+}
+
+enum Record<'a> {
+    Insert { key: &'a [u8], value: &'a [u8] },
+    Remove { key: &'a [u8] },
+}
+
+enum WalError {
+    /// The storage failed: an append's records may or may not have been
+    /// written.
+    Storage(io::Error),
+    /// The WAL's tail moved under the writer: another writer claimed the
+    /// WAL, or an append that failed was written after all. Open the WAL
+    /// again.
+    TailMoved,
+    /// The bytes at `offset` of WAL file `file` fail their checks.
+    Corrupted { file: u64, offset: u64 },
+}
+```
+
+- **`WalWriter` is the writer:** `open` is "Opening", `append` one
+  append, and `&mut self` keeps one in flight. The store times its
+  appends (every 1 ms) and puts its commits in them; the WAL times
+  nothing.
+- **A `RecordAddress`** is a record's WAL file, offset and length: what
+  the index keeps. A lookup reads its record with one `WalStorage::read`
+  of that range, while the writer appends.
+- **An append whose outcome is unknown is attempted 3 times,** then
+  fails with `Storage`. The writer's tail stays where it was: its next
+  append goes where the failed one would have, or, if that one was
+  written after all, fails with `TailMoved`.
 
 ## Storage
 
@@ -61,34 +111,35 @@ The WAL reaches its storage through one trait, whose contract is S3
 Express's rules, so that they hold on every backend:
 
 ```rust
-trait WalStorage {
+trait WalStorage: Send + Sync {
     /// Appends a file takes at most (S3 Express: 10,000).
     const MAX_APPENDS: u32;
 
-    /// Appends `bytes` to file `n` if its size is `offset`; offset 0 creates
-    /// it. Whole or nothing, durable once it returns `Ok`.
-    async fn append(&self, n: u64, offset: u64, bytes: &[u8]) -> Result<(), AppendError>;
+    /// Appends `bytes` to file `file` if its length is `offset`; offset 0
+    /// creates it. Whole or nothing, durable once it returns `Ok`.
+    async fn append(&self, file: u64, offset: u64, bytes: &[u8]) -> Result<(), AppendError>;
 
-    /// File `n`'s size; `None` if it doesn't exist.
-    async fn len(&self, n: u64) -> io::Result<Option<u64>>;
+    /// File `file`'s length; `None` if it doesn't exist.
+    async fn len(&self, file: u64) -> io::Result<Option<u64>>;
 
-    /// Reads `buf.len()` bytes of file `n` from `offset`.
-    async fn read(&self, n: u64, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+    /// Reads `buf.len()` bytes of file `file` from `offset`.
+    async fn read(&self, file: u64, offset: u64, buf: &mut [u8]) -> io::Result<()>;
 }
 
 enum AppendError {
-    /// Something else is at that offset (or the file exists, for offset 0).
-    OffsetTaken,
-    /// It may or may not have landed.
-    Unknown(io::Error),
+    /// The offset isn't the file's length, or, for offset 0, the file
+    /// exists. Nothing was written.
+    OffsetMismatch,
+    /// The bytes may or may not have been written.
+    OutcomeUnknown(io::Error),
 }
 ```
 
-- **`append` is the contract:** a compare-and-append, landing only at
-  the file's size; whole or nothing; durable once it returns. Creating a
+- **`append` is the contract:** a compare-and-append, written only at
+  the file's length; whole or nothing; durable once it returns. Creating a
   file is an append at offset 0, under the same rule, which a claim's new
   file relies on. No flush: an append that returned is durable.
-- **Any error but `OffsetTaken` leaves the outcome unknown.** The WAL
+- **Any error but `OffsetMismatch` leaves the outcome unknown.** The WAL
   retries and reads back ("Writing"), the same way on every backend.
 - **`len`** finds the last file, and where each ends ("Opening").
 - **`MAX_APPENDS`** keeps S3's limit out of the WAL's code; a local
@@ -96,16 +147,19 @@ enum AppendError {
 - **Names are the backend's.** The WAL passes a file's number; the S3
   backend names it `{prefix}/{n:016x}`, a local one a path.
 - **Async:** S3 is a network service, and a lookup's read takes
-  milliseconds that shouldn't hold a thread.
+  milliseconds that shouldn't hold a thread. The trait declares each
+  method `fn … -> impl Future<Output = …> + Send`, so that the writer's
+  futures are `Send`; backends write `async fn`.
 - **Not in it:** listing (files are named by number), deleting (the WAL
   is kept forever), a create or a flush of their own.
 - **Backends:**
   - **S3 Express:** `append` is a `PutObject` with
     `x-amz-write-offset-bytes` the offset and `x-amz-checksum-crc32c` the
     body's CRC; `len` a `HeadObject`; `read` a ranged `GetObject`.
-  - **In memory,** for tests. It injects the two failures the WAL must
-    survive: an append that lands but reports `Unknown`, and another
-    writer taking the offset.
+  - **In memory,** in the tests (`bbtree-store/tests/wal/memory.rs`). It
+    injects the two failures the WAL must survive: an append that is
+    written but reports `OutcomeUnknown`, and one that isn't written and
+    reports it.
   - **A local file,** for development. Its append isn't whole or nothing
     across a crash ("On a local SSD").
 
@@ -155,37 +209,39 @@ offset  size  field
   appends.
 - **A removal keeps its key,** for the scan to remove it from the index.
 - **A claim's key is its writer's id**, 8 bytes, alone in its append.
-- **Read alone.** A lookup reads one record, checks its CRC and that its
-  key is the one looked up, and returns its value. A buffer manager over
-  the WAL, caching what lookups read, is a later doc.
+- **Read alone.** A lookup reads one record by its address, checks its
+  CRC, its length and that it is an insert, and returns its value. A
+  buffer manager over the WAL, caching what lookups read, is a later doc.
 
 ### CRC
 
 - **CRC32C everywhere.** x86 (SSE 4.2) and ARMv8.1 compute it with an
   instruction, 8 bytes each: 100 KB checks in about 10 µs. It is also
   S3's: each append carries its body's `x-amz-checksum-crc32c`, and S3
-  refuses a body damaged on the way.
+  refuses a body corrupted on the way.
 - **One a record,** because records are read alone: a CRC over an append
   can't check a record read by range without reading the whole append.
   The price is 4 bytes a record: 11% of a record of an 8-byte key and an
   8-byte value (37 bytes).
-- **32 bits,** not 64: random damage passes once in 4 billion checks, and
+- **32 bits,** not 64: random corruption passes once in 4 billion checks, and
   every record pays the width.
 
 ## Writing
 
-- **One append in flight.** An append's write offset is its file's size,
-  known once the append before it landed. A store appends every 1 ms
-  (00-init), or once the append before landed if that takes longer. A
+- **One append in flight.** An append's write offset is its file's
+  length, known once the append before it finished. A store appends
+  every 1 ms (00-init), or once the append before finished if that takes
+  longer. A
   commit is acknowledged when its append succeeds.
-- **A WAL file takes `MAX_APPENDS` appends;** the next append creates the next
-  file, at offset 0, its header and records together. Not `CopyObject`
+- **A WAL file takes `MAX_APPENDS` appends;** the next append creates
+  the next file, at offset 0, its header and records together. Not `CopyObject`
   to reset the count: each copy rewrites the whole file, the copies add
   up to bytes quadratic in its length, and appends wait for them.
-- **An append whose outcome is lost** (a timeout, a dropped connection)
-  is retried, same bytes at the same offset. If it fails with
-  `OffsetTaken`, the writer reads back the bytes at that offset: its own mean the first try
-  landed; others mean another writer claimed the WAL. It stops, failing
+- **An append whose outcome is unknown** (a timeout, a dropped connection)
+  is attempted again, same bytes at the same offset. If that fails with
+  `OffsetMismatch`, the writer reads back the bytes at that offset: its
+  own mean an earlier attempt was written; others mean another writer
+  claimed the WAL. It stops, failing
   the commits it hasn't acknowledged.
 - **Cost.** Each append is a PUT: 1,000 appends a second cost $98 a day.
   An idle store appends nothing, and a store appends at most once per
@@ -200,17 +256,17 @@ offset  size  field
    CRC, its lengths within the file, its LSN the record before's plus 1.
    Apply the records: an insert points its key to the record's file,
    offset and length; a removal removes the key.
-3. **A failed check is damage, an error,** never the WAL's end: an append
-   lands whole, so the WAL ends where its last file ends, after an
-   append's last record. The error names the file and the offset.
+3. **A failed check is corruption, an error,** never the WAL's end: an
+   append is written whole, so the WAL ends where its last file ends,
+   after an append's last record. The error names the file and the offset.
 4. **Claim the WAL:** append a claim at the end of the last file, or
    create the next file with it if the last is full, or file 0 for a new
-   store. It lands only if no writer appended since the scan. A writer
-   before this one, still alive (failed over, not dead), finds its next
-   append's offset taken, reads back the claim and stops. If the claim
+   store. It is written only if no writer appended since the scan. A
+   writer before this one, still alive (failed over, not dead), finds its
+   next append's offset mismatched, reads back the claim and stops. If the claim
    fails, another writer appended: scan on from where the scan ended, and
    claim again.
-5. **Serve once the claim lands.** Before it, the writer before could
+5. **Serve once the claim is written.** Before it, the writer before could
    still commit, and reads would miss its commits.
 
 Files are read and checked in parallel; their records apply in LSN
@@ -229,11 +285,11 @@ trait doesn't have:
   records failing their checks at the end of the last file. They were
   never acknowledged: the scan ends after the last append's last record,
   and the backend truncates the rest. A failed check anywhere else is
-  still damage. Stale bytes, of a preallocated or recycled file, fail
+  still corruption. Stale bytes, of a preallocated or recycled file, fail
   their CRCs or the LSN check.
 
 Until SSD is wanted, the local backend is for development, its appends
-taken as whole.
+assumed whole.
 
 ## Open
 
