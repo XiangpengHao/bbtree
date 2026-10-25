@@ -2,6 +2,7 @@
 // by hand from D13, D15, D18, D21, D29, D36 and D49.
 #include <array>
 #include <cstdint>
+#include <string>
 
 #include "bbtree/detail/node/plan.hpp"
 #include "test_harness.hpp"
@@ -26,24 +27,11 @@ struct Plain24 {
 
 struct Unit {};
 
-/// Rust's `String` as the layouts see it: 24 bytes, a byte string that
-/// points to its bytes. The numbers below are Rust's, whatever size this
-/// standard library gives `std::string` (libc++ 24 bytes, MSVC's 32).
-struct RustString {
-  const std::uint8_t* bytes;
-  std::size_t len;
-  std::size_t capacity;
-  bool operator<(const RustString& other) const { return len < other.len; }
-};
-
-}  // namespace
-
-template <>
-struct bbtree::InlineKey<RustString> : bbtree::ByteStringInlineKey<RustString, false> {
-  static bbtree::ByteView bytes(const RustString& key) noexcept { return {key.bytes, key.len}; }
-};
-
-namespace {
+/// Whether this standard library's `std::string` has the 24 bytes of Rust's
+/// `String`, which the string numbers below are worked out for: libc++'s
+/// does; MSVC's has 32, for which Rust has no numbers to check against. The
+/// layout math checks its invariants at compile time for any size.
+constexpr bool string_has_rust_size = sizeof(std::string) == 24;
 
 struct ExpectedNode {
   std::size_t size, align, capacity, keys_offset, trailing_offset;
@@ -111,27 +99,32 @@ TEST(set_of_i64_with_two_byte_inline_keys) {
 }
 
 TEST(string_to_u64_with_hash_tags_in_the_padding) {
-  using Shape = NodeShape<RustString, std::uint64_t, Strategy<>>;
-  check_leaf<RustString, std::uint64_t>(ExpectedNode::one_page(24, 256, 248));
-  CHECK_EQ(Shape::leaf_layout.keys.key_stride, 32u);
+  using Shape = NodeShape<std::string, std::uint64_t, Strategy<>>;
   CHECK(Shape::leaf_plan.hash_tags);
   CHECK(Shape::leaf_layout.has_hash_tags());
   CHECK_EQ(Shape::leaf_plan.inline_width, 8u);
   // Heap byte strings keep 4 bytes inside (D43).
-  check_internal<RustString, std::uint64_t>(ExpectedNode::keyless(41, 172, 176));
   CHECK(Shape::internal_plan.rehydrates_windows);
   CHECK(!Shape::internal_plan.inlines_node_search);
+  if constexpr (string_has_rust_size) {
+    check_leaf<std::string, std::uint64_t>(ExpectedNode::one_page(24, 256, 248));
+    CHECK_EQ(Shape::leaf_layout.keys.key_stride, 32u);
+    check_internal<std::string, std::uint64_t>(ExpectedNode::keyless(41, 172, 176));
+  }
 }
 
 TEST(string_to_string_gives_up_an_entry_for_hash_tags) {
-  check_leaf<RustString, RustString>(ExpectedNode::one_page(16, 200, 176));
-  using Shape = NodeShape<RustString, RustString, Strategy<>>;
-  CHECK_EQ(Shape::leaf_layout.keys.key_stride, 48u);
+  if constexpr (string_has_rust_size) {
+    check_leaf<std::string, std::string>(ExpectedNode::one_page(16, 200, 176));
+    using Shape = NodeShape<std::string, std::string, Strategy<>>;
+    CHECK_EQ(Shape::leaf_layout.keys.key_stride, 48u);
+  }
 }
 
 TEST(sets_of_strings_have_no_room_for_hash_tags) {
-  using Shape = NodeShape<RustString, Unit, Strategy<>>;
-  CHECK(!Shape::leaf_plan.hash_tags);
+  // A 32-byte string leaves room for them.
+  using Shape = NodeShape<std::string, Unit, Strategy<>>;
+  if constexpr (string_has_rust_size) CHECK(!Shape::leaf_plan.hash_tags);
 }
 
 TEST(byte_arrays_keep_two_bytes_in_both_kinds) {
@@ -145,11 +138,11 @@ TEST(byte_arrays_keep_two_bytes_in_both_kinds) {
 }
 
 TEST(latched_string_leaves_give_up_an_entry_for_hash_tags) {
-  using Shape = NodeShape<RustString, std::uint64_t, Strategy<bbtree::DefaultNodeConfig,
+  using Shape = NodeShape<std::string, std::uint64_t, Strategy<bbtree::DefaultNodeConfig,
                                                                bbtree::NoLeafAnnex, true>>;
   CHECK(Shape::leaf_plan.hash_tags);
-  CHECK_EQ(Shape::leaf_layout.keys.capacity, 23u);
   CHECK_EQ(Shape::leaf_layout.keys.inline_keys_offset, 16u);
+  if constexpr (string_has_rust_size) CHECK_EQ(Shape::leaf_layout.keys.capacity, 23u);
 }
 
 TEST_MAIN()
