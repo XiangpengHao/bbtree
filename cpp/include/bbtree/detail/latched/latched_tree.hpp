@@ -174,7 +174,6 @@ class LatchedTree {
   BBTREE_ALWAYS_INLINE std::optional<typename Returned<F, const K&, const V&>::type> read(
       const Q& key, F&& f) const noexcept {
     using Out = typename Returned<F, const K&, const V&>::type;
-    if (!has_root()) return std::nullopt;
     const SearchKey<K, Q> search(key);
     LeafFind<false> found = find_optimistic<false>(search);
     switch (found.kind) {
@@ -195,7 +194,6 @@ class LatchedTree {
   template <class Q>
   BBTREE_ALWAYS_INLINE std::optional<V> get_copied(const Q& key) const noexcept {
     static_assert(std::is_trivially_copyable_v<V>, "get_copied copies values read unlatched");
-    if (!has_root()) return std::nullopt;
     const SearchKey<K, Q> search(key);
     LeafFind<true> found = find_optimistic<true>(search);
     switch (found.kind) {
@@ -212,7 +210,6 @@ class LatchedTree {
 
   template <class Q>
   BBTREE_ALWAYS_INLINE bool contains_key(const Q& key) const noexcept {
-    if (!has_root()) return false;
     const SearchKey<K, Q> search(key);
     LeafFind<true> found = find_optimistic<true>(search);
     switch (found.kind) {
@@ -227,7 +224,6 @@ class LatchedTree {
   /// change, while its leaf is latched exclusively.
   template <class Q, class F>
   std::optional<typename Returned<F, const K&, V&>::type> update(const Q& key, F&& f) const noexcept {
-    if (!has_root()) return std::nullopt;
     const SearchKey<K, Q> search(key);
     NoPath path;
     Descent<ExclusiveMode> descent = descend<ExclusiveMode>(search, path);
@@ -288,7 +284,6 @@ class LatchedTree {
   template <class Q, class Condition, class OnRemove, class A>
   std::optional<std::pair<K, V>> remove_entry(const Q& key, Condition condition, OnRemove on_remove,
                                               A& alloc) const noexcept {
-    if (!has_root()) return std::nullopt;
     const SearchKey<K, Q> search(key);
     {
       NoPath path;
@@ -465,6 +460,13 @@ class LatchedTree {
                                         Descent<Mode>& descent) const noexcept {
     path.clear();
     const Root root_page = this->root_page();
+    // No root yet: the key is in no node. Every caller reads `outside`
+    // as absent here (a scan checks for a root before it descends), so
+    // lookups load the root pointer once, in this descent, not twice.
+    if (root_page.is_null()) {
+      descent.outside = Ordering::Less;
+      return true;
+    }
     const AnyNode root = root_page.node();
     if (root.is_leaf()) {
       Held<Mode> held = Held<Mode>::lock(root.leaf());
