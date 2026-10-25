@@ -1,5 +1,6 @@
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -243,6 +244,123 @@ TEST(shared_hash_map_callback_exception_releases_lock) {
   const auto copied = map.get_copied(1);
   CHECK_EQ(*copied, 3);
   CHECK(map.remove(1));
+}
+
+// Keys and values that copy as bytes are read without a latch. Readers race
+// writers that grow the index and the page directory, erase (tombstones,
+// then rebuilds in place) and clear, on two shards to make them meet often.
+// A value is two words derived from its key: a torn read would split them.
+TEST(shared_hash_map_optimistic_readers_see_whole_entries_while_writers_change_the_table) {
+  using Value = std::array<std::uint64_t, 2>;
+  using Map = bbtree::BBHashMap<std::uint64_t, Value, bbtree::Hash<std::uint64_t>, std::equal_to<>,
+                                bbtree::Global, 2>;
+  const auto value_of = [](std::uint64_t key) { return Value{key * 3 + 1, ~key}; };
+  constexpr std::uint64_t key_space = 1 << 15;
+  Map map;
+  std::atomic<int> writers_left{2};
+  std::vector<std::thread> threads;
+  for (std::uint64_t writer = 0; writer < 2; ++writer) {
+    threads.emplace_back([&, writer] {
+      // Another writer's clear can take any key away: only readers check.
+      for (int round = 0; round < 40; ++round) {
+        for (std::uint64_t key = writer; key < key_space; key += 2) CHECK(map.insert(key, value_of(key)).ok());
+        for (std::uint64_t key = writer; key < key_space; key += 4) map.remove(key);
+        for (std::uint64_t key = writer + 2; key < key_space; key += 8)
+          map.update(key, [&](const std::uint64_t &, Value &value) { value = value_of(key); });
+        if (round % 3 == 2) map.clear();
+      }
+      writers_left.fetch_sub(1);
+    });
+  }
+  for (std::uint64_t reader = 0; reader < 3; ++reader) {
+    threads.emplace_back([&, reader] {
+      std::uint64_t state = reader + 1;
+      std::array<std::uint64_t, 64> keys;
+      std::array<std::optional<Value>, 64> values;
+      while (writers_left.load() != 0) {
+        for (auto &key : keys) {
+          state = state * 6364136223846793005ull + 1442695040888963407ull;
+          key = (state >> 33) % key_space;
+        }
+        map.get_many_copied(keys.data(), keys.size(), values.data());
+        for (std::size_t lane = 0; lane < keys.size(); ++lane) {
+          if (!values[lane]) continue;
+          CHECK(*values[lane] == value_of(keys[lane]));
+        }
+        const auto single = map.read(keys[0], [](const std::uint64_t &key, const Value &value) {
+          return value == Value{key * 3 + 1, ~key};
+        });
+        CHECK(!single || *single);
+      }
+    });
+  }
+  for (auto &thread : threads) thread.join();
+  map.check_invariants();
+  map.for_each([&](const std::uint64_t &key, const Value &value) { CHECK(value == value_of(key)); });
+}
+
+// A reader that took a copy made while a writer rewrote the entry would see
+// words from two writes: the version check must turn such a copy away.
+TEST(shared_hash_map_optimistic_readers_never_see_a_value_half_written) {
+  using Value = std::array<std::uint64_t, 8>;
+  using Map = bbtree::BBHashMap<std::uint64_t, Value, bbtree::Hash<std::uint64_t>, std::equal_to<>,
+                                bbtree::Global, 4>;
+  constexpr std::uint64_t hot_keys = 16;
+  Map map;
+  for (std::uint64_t key = 0; key < hot_keys; ++key) CHECK(map.insert(key, Value{}).ok());
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint64_t> torn{0};
+  std::vector<std::thread> threads;
+  for (std::uint64_t writer = 0; writer < 2; ++writer) {
+    threads.emplace_back([&, writer] {
+      for (std::uint64_t round = 1; round <= 200000; ++round) {
+        const std::uint64_t key = (round * 2 + writer) % hot_keys;
+        map.update(key, [&](const std::uint64_t &, Value &value) { value.fill(round); });
+      }
+      stop.store(true);
+    });
+  }
+  for (int reader = 0; reader < 3; ++reader) {
+    threads.emplace_back([&] {
+      std::array<std::uint64_t, 64> keys;
+      for (std::size_t lane = 0; lane < keys.size(); ++lane) keys[lane] = lane % hot_keys;
+      std::array<std::optional<Value>, 64> values;
+      while (!stop.load()) {
+        map.get_many_copied(keys.data(), keys.size(), values.data());
+        for (const auto &value : values) {
+          CHECK(value.has_value());
+          for (const auto word : *value) torn.fetch_add(word != (*value)[0], std::memory_order_relaxed);
+        }
+        const auto whole = map.read(keys[3], [](const std::uint64_t &, const Value &value) {
+          for (const auto word : value) {
+            if (word != value[0]) return false;
+          }
+          return true;
+        });
+        CHECK(whole && *whole);
+      }
+    });
+  }
+  for (auto &thread : threads) thread.join();
+  CHECK_EQ(torn.load(), 0u);
+}
+
+// What a shard keeps for its optimistic readers goes back to the allocator
+// when the map is destroyed.
+TEST(shared_hash_map_returns_retained_memory_on_destruction) {
+  std::size_t budget = 1 << 20, bytes = 0;
+  {
+    bbtree::BBHashMap<int, int, bbtree::Hash<int>, std::equal_to<>, BudgetAllocator, 4> map(
+        bbtree::Hash<int>{}, std::equal_to<>{}, BudgetAllocator(&budget, &bytes));
+    for (int round = 0; round < 2; ++round) {
+      for (int key = 0; key < 50000; ++key) CHECK(map.insert(key, key + 1).ok());
+      for (int key = 0; key < 50000; key += 2) CHECK(map.remove(key));
+      CHECK(map.get_copied(1) == std::optional<int>(2));
+      map.clear();
+    }
+    CHECK(bytes != 0);
+  }
+  CHECK_EQ(bytes, 0u);
 }
 
 TEST_MAIN()

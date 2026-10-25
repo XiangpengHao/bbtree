@@ -12,6 +12,15 @@ race:load_racing_header
 race:load_racing_has_head
 race:load_racing_shared_prefix
 race:place_outside_racing
+# The shared hash map's optimistic readers (`hash_map.hpp`): the shard's
+# index array, page directory and entries, read while a writer that holds
+# the shard changes them, and checked against the shard's version after.
+race:bbtree::detail::HashProbeIndex*::racing_view
+race:bbtree::detail::HashProbeIndex*::racing_descriptor
+race:bbtree::detail::HashEntryStore*::racing_entry
+race:bbtree::detail::HashTable*::racing_hash
+race:bbtree::detail::HashTable*::racing_find_from
+race:bbtree::detail::HashTable*::RacingLookup
 # A latch word is only ever accessed atomically, by `NodeLatch`, which reads
 # and writes nothing else and calls nothing: a race reported inside it is with
 # a non-atomic write to a latch word, a fresh page's zeroing by its allocator.

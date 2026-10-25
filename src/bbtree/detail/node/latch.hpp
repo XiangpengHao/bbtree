@@ -112,6 +112,17 @@ class NodeLatch {
     return true;
   }
 
+  /// The node's version if no thread holds it exclusively now, by a relaxed
+  /// load: for a reader of many nodes, which fences once after reading all
+  /// their versions and before reading the nodes, so that one node's wait
+  /// for memory does not hold up the next one's.
+  inline bool try_read_version_relaxed(Version& version) const noexcept {
+    const std::uint64_t word = word_.load(std::memory_order_relaxed);
+    if ((word & exclusive_bit) != 0) return false;
+    version = Version(word & ~shared_mask);
+    return true;
+  }
+
   /// Takes the node exclusively if no thread holds it in either mode; the
   /// version to let go at, or false without waiting.
   inline bool try_lock_exclusive(Version& version) noexcept {

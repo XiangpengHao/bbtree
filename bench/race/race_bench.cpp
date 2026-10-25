@@ -12,12 +12,14 @@
 //   `flat_hash_map` and `std::unordered_map` behind a `std::shared_mutex`.
 //
 // Each map takes its best use, as upstream's harness gives it: bbtree's
-// batched lookups (`get_many_copied`, 64 keys a call) and its plain ones; a
+// batched lookups (`get_many_copied`, 64 keys a call) and its plain ones,
+// and Boost's bulk visitation (`cvisit` over 64 keys); a
 // shared map is built by every thread, a locked one by one thread, its
 // writers taking turns. Every thread then looks up its own run of the
 // probes, 64 at a time, until the time is up.
 //
-// usage: race_bench [entries] [threads] [seconds]; prints CSV.
+// usage: race_bench [entries] [threads] [seconds] [maps]; prints CSV. `maps`,
+// comma-separated, runs only the maps whose names contain one of them.
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <folly/ConcurrentSkipList.h>
@@ -26,6 +28,7 @@
 #include <oneapi/tbb/concurrent_map.h>
 #include <oneapi/tbb/concurrent_unordered_map.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <boost/unordered/concurrent_flat_map.hpp>
@@ -38,6 +41,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <shared_mutex>
 #include <thread>
@@ -358,9 +362,8 @@ class TbbConcurrentHashMap {
   Map map_;
 };
 
-class BBTreeHashMap {
+class BBTreeHashContestant {
  public:
-  static constexpr const char* name = "bbtree::BBHashMap";
   using Map = bbtree::BBHashMap<Uuid, Value, UuidKeys::Hash>;
 
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
@@ -370,6 +373,14 @@ class BBTreeHashMap {
       }
     });
   }
+
+ protected:
+  Map map_;
+};
+
+class BBTreeHashBatched : public BBTreeHashContestant {
+ public:
+  static constexpr const char* name = "bbtree::BBHashMap (batched)";
 
   class Reader {
    public:
@@ -386,9 +397,27 @@ class BBTreeHashMap {
     const Map& map_;
   };
   Reader reader() const { return Reader(map_); }
+};
 
- private:
-  Map map_;
+class BBTreeHashSingle : public BBTreeHashContestant {
+ public:
+  static constexpr const char* name = "bbtree::BBHashMap";
+
+  class Reader {
+   public:
+    explicit Reader(const Map& map) : map_(map) {}
+    Value look_up(const Uuid* probes) {
+      Value sum = 0;
+      for (std::size_t index = 0; index < lookups_per_call; ++index) {
+        sum += map_.get_copied(probes[index]).value_or(0);
+      }
+      return sum;
+    }
+
+   private:
+    const Map& map_;
+  };
+  Reader reader() const { return Reader(map_); }
 };
 
 class BoostConcurrentFlatMap {
@@ -407,10 +436,10 @@ class BoostConcurrentFlatMap {
    public:
     explicit Reader(const Map& map) : map_(map) {}
     Value look_up(const Uuid* probes) {
+      // Bulk visitation, which overlaps the keys' waits for memory, as
+      // bbtree's batches do.
       Value sum = 0;
-      for (std::size_t index = 0; index < lookups_per_call; ++index) {
-        map_.cvisit(probes[index], [&](const auto& entry) { sum += entry.second; });
-      }
+      map_.cvisit(probes, probes + lookups_per_call, [&](const auto& entry) { sum += entry.second; });
       return sum;
     }
 
@@ -427,11 +456,12 @@ class BoostConcurrentFlatMap {
 /// threads looking up the probes for a fixed time.
 class Race {
  public:
-  Race(std::size_t entries, std::size_t threads, double seconds)
-      : keys_(entries), threads_(threads), seconds_(seconds) {}
+  Race(std::size_t entries, std::size_t threads, double seconds, std::vector<std::string> only)
+      : keys_(entries), threads_(threads), seconds_(seconds), only_(std::move(only)) {}
 
   template <class Contestant>
   void run() {
+    if (!selected(Contestant::name)) return;
     auto contestant = std::make_unique<Contestant>();
     bbtree_bench::Stopwatch build_watch;
     contestant->build(keys_.present(), threads_);
@@ -494,9 +524,18 @@ class Race {
     }
   }
 
+  bool selected(const std::string& name) const {
+    if (only_.empty()) return true;
+    for (const auto& part : only_) {
+      if (name.find(part) != std::string::npos) return true;
+    }
+    return false;
+  }
+
   RaceKeys keys_;
   std::size_t threads_;
   double seconds_;
+  std::vector<std::string> only_;
 };
 
 }  // namespace
@@ -510,7 +549,16 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  Race race(entries, threads, seconds);
+  std::vector<std::string> only;
+  if (argc > 4) {
+    const std::string list = argv[4];
+    for (std::size_t start = 0; start <= list.size();) {
+      const std::size_t comma = std::min(list.find(',', start), list.size());
+      if (comma > start) only.push_back(list.substr(start, comma - start));
+      start = comma + 1;
+    }
+  }
+  Race race(entries, threads, seconds, std::move(only));
   std::printf("map,entries,threads,mops,build_seconds\n");
   race.run<BBTreeBatched>();
   race.run<BBTreeSingle>();
@@ -518,7 +566,8 @@ int main(int argc, char** argv) {
   race.run<FollyConcurrentSkipList>();
   race.run<AbslBtreeMap>();
   race.run<StdMap>();
-  race.run<BBTreeHashMap>();
+  race.run<BBTreeHashBatched>();
+  race.run<BBTreeHashSingle>();
   race.run<BoostConcurrentFlatMap>();
   race.run<FollyConcurrentHashMap>();
   race.run<TbbConcurrentHashMap>();

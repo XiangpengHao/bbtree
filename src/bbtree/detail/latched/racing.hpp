@@ -23,6 +23,7 @@
 
 #include "../config.hpp"
 #include "../node/internal.hpp"
+#include "../racing_copy.hpp"
 
 namespace bbtree::detail {
 
@@ -40,23 +41,6 @@ struct Routed {
   std::uint32_t edge;
   std::uint32_t len;
   std::uint8_t at_separator;
-};
-
-/// A copy of a value of type `T`, read as bytes from a slot a writer may be
-/// changing: a `T` only once a version check vouches for the read.
-template <class T>
-class RacingCopy {
- public:
-  BBTREE_RACING_READ void read_from(const void* slot) noexcept {
-    std::memcpy(static_cast<void*>(bytes_), slot, sizeof(T));
-  }
-  /// The value read, once the leaf's version vouched for the read.
-  const T& assume_read() const noexcept {
-    return *std::launder(reinterpret_cast<const T*>(bytes_));
-  }
-
- private:
-  alignas(T) unsigned char bytes_[sizeof(T)];
 };
 
 template <class K, class V, class S>

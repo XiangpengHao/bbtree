@@ -1,8 +1,14 @@
 // Eight-byte probe descriptors: a high 16-bit fingerprint and a low
 // 48-bit entry identifier. Empty and deleted are identifier encodings,
 // independent of the fingerprint (including an all-zero fingerprint).
+//
+// An array of descriptors begins with a header line that holds its
+// capacity, so that an optimistic reader of a shared map, which reaches the
+// array through a pointer it read racing, knows the bounds of that array
+// whatever array the pointer was (`racing_view`).
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -11,6 +17,7 @@
 
 #include "allocation.hpp"
 #include "../config.hpp"
+#include "../target.hpp"
 
 namespace bbtree::detail {
 
@@ -59,6 +66,24 @@ class HashProbeIndex {
     return static_cast<std::size_t>(hash) & (capacity_ - 1);
   }
   std::size_t next(std::size_t slot) const noexcept { return (slot + 1) & (capacity_ - 1); }
+
+  /// The descriptors as an optimistic reader finds them (PORTING.md, P7):
+  /// the array the index pointed to and that array's own capacity, zero if
+  /// none. Any array the index ever pointed to stays valid while a shared
+  /// map's readers may hold it (`RetainedBlocks`).
+  struct RacingView {
+    const std::uint64_t *descriptors;
+    std::size_t capacity;
+  };
+  BBTREE_RACING_READ RacingView racing_view() const noexcept {
+    const std::uint64_t *descriptors = RacingLoad::relaxed(&descriptors_);
+    if (!descriptors) return {nullptr, 0};
+    return {descriptors, static_cast<std::size_t>(RacingLoad::relaxed(descriptors - 1))};
+  }
+  BBTREE_RACING_READ static std::uint64_t racing_descriptor(const RacingView &view,
+                                                            std::size_t slot) noexcept {
+    return RacingLoad::relaxed(view.descriptors + slot);
+  }
 
   template <class Store, class Q, class Equal>
   std::size_t find(std::uint64_t hash, const Q &key, const Store &store, const Equal &equal) const {
@@ -154,7 +179,7 @@ class HashProbeIndex {
   }
 
   void clear() noexcept {
-    if (descriptors_) allocator_.deallocate(descriptors_, layout(capacity_));
+    if (descriptors_) allocator_.deallocate(descriptors_ - header_words, layout(capacity_));
     descriptors_ = nullptr;
     capacity_ = size_ = deleted_ = 0;
   }
@@ -186,17 +211,23 @@ class HashProbeIndex {
   std::size_t size_ = 0;
   std::size_t deleted_ = 0;
 
+  /// The header line before the descriptors; its last word is the capacity.
+  static constexpr std::size_t header_words = 64 / sizeof(std::uint64_t);
+
   static constexpr std::uint64_t identifier_mask() noexcept { return (std::uint64_t{1} << 48) - 1; }
   static std::size_t threshold(std::size_t capacity) noexcept { return capacity - capacity / 4; }
   static Layout layout(std::size_t capacity) noexcept {
-    return {capacity * sizeof(std::uint64_t), 64};
+    return {(header_words + capacity) * sizeof(std::uint64_t), 64};
   }
 
   template <class Store>
   void rebuild(std::size_t capacity, const Store &store) {
+    if (capacity == capacity_) return rebuild_in_place(store);
     HashProbeIndex replacement(allocator_);
-    replacement.descriptors_ =
+    auto *block =
         static_cast<std::uint64_t *>(HashAllocation::allocate(allocator_, layout(capacity)));
+    ::new (static_cast<void *>(block + header_words - 1)) std::uint64_t(capacity);
+    replacement.descriptors_ = block + header_words;
     replacement.capacity_ = capacity;
     for (std::size_t slot = 0; slot < capacity; ++slot)
       ::new (static_cast<void *>(replacement.descriptors_ + slot)) std::uint64_t(0);
@@ -205,7 +236,22 @@ class HashProbeIndex {
       replacement.descriptors_[slot] = (entry.hash & ~identifier_mask()) | identifier;
     });
     replacement.size_ = size_;
+    // A racing reader reaches the array through the pointer swapped in: its
+    // header and descriptors are stored before the pointer.
+    std::atomic_thread_fence(std::memory_order_release);
     swap(replacement);
+  }
+
+  // At the same capacity, drop the tombstones where they lie, allocating
+  // nothing: the entries' cached hashes place them again. Only the entry
+  // store rebuilds at the same capacity, and its walk runs no user code.
+  template <class Store>
+  void rebuild_in_place(const Store &store) {
+    for (std::size_t slot = 0; slot < capacity_; ++slot) descriptors_[slot] = 0;
+    store.for_each([&](std::uint64_t identifier, const auto &entry) {
+      descriptors_[vacant(entry.hash)] = (entry.hash & ~identifier_mask()) | identifier;
+    });
+    deleted_ = 0;
   }
 };
 

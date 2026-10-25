@@ -18,7 +18,7 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 - `bbtree::unsync::BBTreeMap` and `BBTreeSet`: single-threaded, with the
   `std::map`/`std::set` operations, entries, ranges and set algebra.
 - Experimental hash maps after DuckDB's aggregate hash table:
-  `bbtree::unsync::BBHashMap`, `bbtree::BBHashMap` (locked shards) and
+  `bbtree::unsync::BBHashMap`, `bbtree::BBHashMap` (shards read without locks) and
   `bbtree::unsync::BBHashIndex` for rows stored elsewhere
   ([PORTING.md](PORTING.md#hash-maps)).
 - SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
@@ -35,26 +35,30 @@ Millions of lookups per second:
 
 | tree maps (ordered) | M ops/s |
 |---|--:|
-| bbtree, batched (`get_many_copied`, 64 keys a call) | **149.6** |
-| bbtree (`get_copied`) | **79.3** |
-| oneTBB `tbb::concurrent_map` (skip list) | 7.8 |
-| folly `ConcurrentSkipList` | 7.3 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 1.9 |
-| `std::map` + `std::shared_mutex` | 1.3 |
+| bbtree, batched (`get_many_copied`, 64 keys a call) | **145.4** |
+| bbtree (`get_copied`) | **77.5** |
+| folly `ConcurrentSkipList` | 7.7 |
+| oneTBB `tbb::concurrent_map` (skip list) | 7.5 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
+| `std::map` + `std::shared_mutex` | 1.4 |
 
 | hash maps (unordered) | M ops/s |
 |---|--:|
-| bbtree `BBHashMap`, batched (shards behind `std::shared_mutex`) | **13.5** |
-| Boost `boost::concurrent_flat_map` | 191.6 |
-| oneTBB `tbb::concurrent_hash_map` | 128.5 |
-| folly `ConcurrentHashMap` | 116.0 |
-| oneTBB `tbb::concurrent_unordered_map` | 53.0 |
-| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 7.0 |
-| `std::unordered_map` + `std::shared_mutex` | 3.9 |
+| bbtree `BBHashMap`, batched (`get_many_copied`, 64 keys a call) | **237.7** |
+| bbtree `BBHashMap` (`get_copied`) | **119.0** |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 390.3 |
+| oneTBB `tbb::concurrent_hash_map` | 134.6 |
+| folly `ConcurrentHashMap` | 118.5 |
+| oneTBB `tbb::concurrent_unordered_map` | 58.9 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 5.7 |
+| `std::unordered_map` + `std::shared_mutex` | 3.8 |
 
-bbtree's tree maps lead their heat by 10–19×. Its hash map, young and
-experimental, trails: every lookup takes its shard's read lock, a write
-to a shared cache line, where the tree's readers write nothing.
+bbtree's tree maps lead their heat by 9–19×. Its hash map comes second to
+Boost's when batched, and level with oneTBB's and folly's one key at a
+time. Boost's keeps one byte of metadata per slot, which stays in cache,
+where bbtree's eight-byte descriptors miss it (PORTING.md, Hash maps).
+Readers of both bbtree maps write nothing shared: they check a version
+after reading.
 
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first

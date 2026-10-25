@@ -1,18 +1,25 @@
-// A shared map over the same paged hash table as unsync::BBHashMap.
-// Each operation protects one shard through key comparison and value access.
+// A shared map over the same paged hash table as unsync::BBHashMap, in
+// shards, each behind a latch the tree's nodes use too (`node/latch.hpp`).
+// Writers hold their shard's latch exclusively, bumping its version. Readers
+// of keys and values that copy as bytes write nothing: they read the version,
+// look the key up without the latch, copying the entry they find, and check
+// the version after, as the tree's optimistic readers do (PORTING.md, P7);
+// user code sees only that copy. Readers of other types hold the latch shared.
 // Callbacks must not re-enter this map or retain references to its entries.
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <type_traits>
 #include <utility>
 
+#include "detail/hash/retained.hpp"
 #include "detail/hash/table.hpp"
+#include "detail/node/latch.hpp"
+#include "detail/racing_copy.hpp"
 #include "hash.hpp"
 #include "insert_error.hpp"
 
@@ -24,10 +31,49 @@ class BBHashMap {
   static_assert(ShardCount != 0 && (ShardCount & (ShardCount - 1)) == 0 && ShardCount <= 65536,
                 "BBHashMap shard count must be a power of two, at most 65536");
 
+  using Table = detail::HashTable<K, V, detail::RetainingAllocator<A>>;
+  using Entry = typename Table::Entry;
+
+  /// Readers that copy entries as bytes, and so never hold a latch.
+  static constexpr bool reads_racing = std::is_trivially_copyable_v<K> && std::is_trivially_copyable_v<V>;
+  /// Optimistic reads of a key before it waits for its shard shared.
+  static constexpr int racing_attempts = 4;
+  /// Keys a batched read reads optimistically before checking their versions.
+  static constexpr std::size_t batch_width = 64;
+
   struct alignas(64) Shard {
-    mutable std::shared_mutex mutex;
-    detail::HashTable<K, V, A> table;
-    explicit Shard(A allocator) : table(std::move(allocator)) {}
+    detail::NodeLatch latch{};
+    // Before the table, so that it outlives the table's last deallocations.
+    detail::RetainedBlocks<A> retained;
+    Table table;
+    explicit Shard(A allocator)
+        : retained(allocator), table(detail::RetainingAllocator<A>(std::move(allocator), &retained)) {}
+    ~Shard() { retained.stop_retaining(); }
+  };
+
+  /// A shard held exclusively, for the lifetime of the guard.
+  class ExclusiveShard {
+   public:
+    explicit ExclusiveShard(Shard &shard) noexcept : shard_(shard), version_(shard.latch.lock_exclusive()) {}
+    ~ExclusiveShard() { shard_.latch.unlock_exclusive(version_); }
+    ExclusiveShard(const ExclusiveShard &) = delete;
+    ExclusiveShard &operator=(const ExclusiveShard &) = delete;
+
+   private:
+    Shard &shard_;
+    detail::Version version_;
+  };
+
+  /// A shard held shared, for the lifetime of the guard.
+  class SharedShard {
+   public:
+    explicit SharedShard(Shard &shard) noexcept : shard_(shard) { shard.latch.lock_shared(); }
+    ~SharedShard() { shard_.latch.unlock_shared(); }
+    SharedShard(const SharedShard &) = delete;
+    SharedShard &operator=(const SharedShard &) = delete;
+
+   private:
+    Shard &shard_;
   };
 
  public:
@@ -50,7 +96,7 @@ class BBHashMap {
   InsertOutcome<std::optional<V>, K, V> insert(K key, V value) const {
     const auto hash = hash_key(key);
     auto &shard = shard_for(hash);
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    ExclusiveShard held(shard);
     try {
       return InsertOutcome<std::optional<V>, K, V>::done(
           shard.table.insert(hash, std::move(key), std::move(value), equal_));
@@ -67,7 +113,19 @@ class BBHashMap {
                   "shared map callbacks return owned results");
     const auto hash = hash_key(key);
     auto &shard = shard_for(hash);
-    std::shared_lock<std::shared_mutex> lock(shard.mutex);
+    if constexpr (reads_racing) {
+      for (int attempt = 0; attempt < racing_attempts; ++attempt) {
+        const detail::Version version = shard.latch.read_version();
+        detail::RacingCopy<Entry> found;
+        const bool hit = shard.table.racing_find(hash, key, equal_, found);
+        if (!shard.latch.is_unchanged(version)) continue;
+        if (!hit) return std::optional<Result>{};
+        const Entry &entry = found.assume_read();
+        return std::optional<Result>(
+            std::in_place, detail::Returned<F, const K &, const V &>::call(visit, entry.key, entry.value));
+      }
+    }
+    SharedShard held(shard);
     const auto *entry = shard.table.find(hash, key, equal_);
     if (!entry) return std::optional<Result>{};
     return std::optional<Result>(std::in_place,
@@ -82,7 +140,7 @@ class BBHashMap {
                   "shared map callbacks return owned results");
     const auto hash = hash_key(key);
     auto &shard = shard_for(hash);
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    ExclusiveShard held(shard);
     auto *entry = shard.table.find(hash, key, equal_);
     if (!entry) return std::optional<Result>{};
     return std::optional<Result>(
@@ -106,7 +164,7 @@ class BBHashMap {
   std::optional<std::pair<K, V>> remove_entry(const Q &key) const {
     const auto hash = hash_key(key);
     auto &shard = shard_for(hash);
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    ExclusiveShard held(shard);
     return shard.table.remove_entry(hash, key, equal_);
   }
   template <class Q>
@@ -119,18 +177,18 @@ class BBHashMap {
   std::optional<std::pair<K, V>> remove_if(const Q &key, Condition condition) const {
     const auto hash = hash_key(key);
     auto &shard = shard_for(hash);
-    std::unique_lock<std::shared_mutex> lock(shard.mutex);
+    ExclusiveShard held(shard);
     const auto *entry = shard.table.find(hash, key, equal_);
     if (!entry || !condition(entry->key, std::as_const(entry->value))) return std::nullopt;
     return shard.table.remove_entry(hash, key, equal_);
   }
 
-  /// Visits shards one at a time. Each shard is consistent under its read
-  /// lock; the complete count/traversal is not an atomic map-wide snapshot.
+  /// Visits shards one at a time. Each shard is consistent while held
+  /// shared; the complete count/traversal is not an atomic map-wide snapshot.
   size_type size() const {
     size_type count = 0;
     for (auto &shard : shards_) {
-      std::shared_lock<std::shared_mutex> lock(shard.mutex);
+      SharedShard held(shard);
       count += shard.table.size();
     }
     return count;
@@ -140,27 +198,39 @@ class BBHashMap {
   template <class Visit>
   void for_each(Visit visit) const {
     for (auto &shard : shards_) {
-      std::shared_lock<std::shared_mutex> lock(shard.mutex);
+      SharedShard held(shard);
       for (auto [key, value] : std::as_const(shard.table)) visit(key, value);
     }
   }
 
   /// Clears shards one at a time. Concurrent inserts into an already cleared
   /// shard can survive; callers needing an empty map must exclude writers.
+  /// A shard keeps its memory for the entries to come, and gives it back
+  /// when the map is destroyed: an optimistic reader may still be reading it.
   void clear() const {
     for (auto &shard : shards_) {
-      std::unique_lock<std::shared_mutex> lock(shard.mutex);
-      shard.table.clear();
+      ExclusiveShard held(shard);
+      shard.table.clear_retain_capacity();
     }
   }
 
-  /// Shared batches take one lock per key, with separate-operation semantics.
+  /// Shared batches have separate-operation semantics. Keys and values that
+  /// copy as bytes are read optimistically `batch_width` at a time, their
+  /// versions checked once all are read, so that their memory waits overlap;
+  /// a key whose shard changed meanwhile is read again on its own.
   template <class Q>
   void get_many_copied(const Q *keys, size_type count, std::optional<V> *values) const {
-    for (size_type index = 0; index < count; ++index) {
-      auto result = get_copied(keys[index]);
-      values[index].reset();
-      if (result) values[index].emplace(std::move(*result));
+    if constexpr (reads_racing) {
+      for (size_type first = 0; first < count; first += batch_width) {
+        const size_type width = count - first < batch_width ? count - first : batch_width;
+        get_batch_copied(keys + first, width, values + first);
+      }
+    } else {
+      for (size_type index = 0; index < count; ++index) {
+        auto result = get_copied(keys[index]);
+        values[index].reset();
+        if (result) values[index].emplace(std::move(*result));
+      }
     }
   }
   template <class Q, class Visit>
@@ -187,7 +257,7 @@ class BBHashMap {
 
   void check_invariants() const {
     for (auto &shard : shards_) {
-      std::shared_lock<std::shared_mutex> lock(shard.mutex);
+      SharedShard held(shard);
       shard.table.check_invariants();
     }
   }
@@ -202,6 +272,47 @@ class BBHashMap {
       : hash_(std::move(hash)),
         equal_(std::move(equal)),
         shards_{{Shard((void(Indices), allocator))...}} {}
+
+  /// Up to `batch_width` keys read optimistically, then checked.
+  template <class Q>
+  void get_batch_copied(const Q *keys, size_type width, std::optional<V> *values) const {
+    std::array<Shard *, batch_width> shards;
+    std::array<detail::Version, batch_width> versions;
+    std::array<bool, batch_width> optimistic, hits;
+    std::array<typename Table::RacingLookup, batch_width> lookups;
+    std::array<detail::RacingCopy<Entry>, batch_width> found;
+    std::array<std::uint64_t, batch_width> hashes;
+    for (size_type lane = 0; lane < width; ++lane) {
+      hashes[lane] = hash_key(keys[lane]);
+      shards[lane] = &shard_for(hashes[lane]);
+      // A key whose shard a writer holds now is read again on its own, below.
+      optimistic[lane] = shards[lane]->latch.try_read_version_relaxed(versions[lane]);
+    }
+    // Fences, rather than acquire loads, order the versions before the
+    // entries and the entries before the checks: once a batch, so that the
+    // keys' waits for memory overlap.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    for (size_type lane = 0; lane < width; ++lane) {
+      if (optimistic[lane]) lookups[lane].start(shards[lane]->table, hashes[lane]);
+    }
+    for (size_type lane = 0; lane < width; ++lane) {
+      if (optimistic[lane]) lookups[lane].locate(shards[lane]->table);
+    }
+    for (size_type lane = 0; lane < width; ++lane) {
+      hits[lane] = optimistic[lane] && lookups[lane].finish(shards[lane]->table, keys[lane], equal_, found[lane]);
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    for (size_type lane = 0; lane < width; ++lane) {
+      values[lane].reset();
+      detail::Version now;
+      if (optimistic[lane] && shards[lane]->latch.try_read_version_relaxed(now) &&
+          now == versions[lane]) {
+        if (hits[lane]) values[lane].emplace(found[lane].assume_read().value);
+      } else if (auto result = get_copied(keys[lane])) {
+        values[lane].emplace(*result);
+      }
+    }
+  }
 
   template <class Q>
   std::uint64_t hash_key(const Q &key) const {

@@ -136,7 +136,8 @@ Rust paths are under `bbtree/src/` of upstream at `8adae97`.
 
 The C++ port also has an initial DuckDB-inspired hash map implementation.
 `bbtree::unsync::BBHashMap` owns a single-threaded table; `bbtree::BBHashMap`
-protects the same table implementation with independently locked shards.
+shares the same table implementation in shards, each behind the tree's
+latch, read without it ("Shared reads" below).
 Both are header-only C++17 with no external dependencies. This is a new
 implementation, with no Rust reference or established performance claims.
 
@@ -173,7 +174,9 @@ directory and probe index, goes through the supplied allocator's
 `allocate_zeroed`/`deallocate` interface.
 
 The index grows at 75% occupied-plus-deleted capacity. At that threshold,
-if live occupancy is below 50%, it rebuilds at the same capacity instead.
+if live occupancy is below 50%, it rebuilds at the same capacity instead,
+in place. An index array and the page directory each begin with their
+capacity (a 64-byte header line, a word), for optimistic readers.
 Index rebuilding is linear in allocated entry slots plus index capacity,
 but moves no keys or values and calls neither hash nor equality. Payload
 pages and holes remain allocated until `clear` or destruction.
@@ -220,19 +223,23 @@ Copy assignment constructs the replacement before changing the target.
 The shared map offers copied/cloned reads, scoped `read`/`update`, insertion,
 removal and conditional removal, traversal, clear, and batches. Hash and
 equality policies must allow simultaneous const calls; allocator copies
-must allow calls from different shards. Read callbacks hold a shared lock;
-updates hold an exclusive lock. Callbacks must neither re-enter the map nor
-retain entry references. Direct pointer/reference callback results are
-rejected. Callback exceptions release locks; changes an update made before
-throwing remain. Shared maps are neither copyable nor movable.
+must allow calls from different shards. Read callbacks run on a copy of the
+entry when keys and values are trivially copyable, and with the shard held
+shared otherwise; updates hold it exclusively. Callbacks must neither
+re-enter the map nor retain entry references. Direct pointer/reference
+callback results are rejected. Callback exceptions release the shard;
+changes an update made before throwing remain. Shared maps are neither
+copyable nor movable.
 
 Shared insertion returns an `InsertOutcome`, preserving the input entry on
 the allocator's refusal. Exceptions from user policies propagate, including
 `std::bad_alloc` thrown by a policy. Shard selection uses mixed bits 32–47,
 leaving the fingerprint and low 32 placement bits untouched. Growth pauses
 operations on its shard for a linear rebuild. Counts, traversal, clear and
-invariant checks lock one shard at a time, and are not map-wide snapshots.
+invariant checks hold one shard at a time, and are not map-wide snapshots.
 Exclude concurrent writers if `clear` must leave the entire map empty.
+`clear` keeps a shard's memory for later entries; the map gives it back
+when destroyed.
 
 Owned `get_many` advances bounded tiles of 128 queries through descriptor
 discovery and key comparison, writing pointers in input order. Completed
@@ -249,13 +256,63 @@ changes an existing one. Callbacks run in input order, including duplicates,
 and must not re-enter the map. Completed changes and modifications made by a
 throwing update remain. `for_each_hashed` walks dense page runs and exports the
 cached mixed hash without hashing again; that hash is local to the map's policy,
-not a persistent identifier. Shared batch
-reads take one lock per key. Insert batches process inputs sequentially,
+not a persistent identifier. Shared batch reads go 64 keys at a time
+("Shared reads"). Insert batches process inputs sequentially,
 including duplicates, and move from input arrays. Shared batches restore
 refused entries to their input slots and report `failed[i]`. Earlier
 operations remain committed on a later exception. Batch inputs/outputs
 must be valid disjoint arrays; zero count permits null pointers. No hash
 map path uses software prefetching.
+
+### Shared reads
+
+Readers of a shared map write nothing shared when keys and values are
+trivially copyable, as the latched tree's readers (D54, P7). A shard is
+the tree's `NodeLatch`: writers hold it exclusively and bump its version.
+A reader reads the version, probes the shard's index and copies the entry
+it finds without the latch (`HashTable::racing_find`), checks the version,
+and only then runs user code, on its copy; after four changed versions it
+holds the shard shared. Keys or values that are not trivially copyable are
+always read with the shard held shared: their copies could not be made
+from bytes a writer is changing.
+
+Whatever a writer does meanwhile, a racing reader stays in memory it may
+read. It learns an index array's or a directory's bounds from the array
+itself, never from a separate capacity it might read from another state;
+and a shard frees nothing a reader may still be reading while threads
+share it: an index array or directory that growth replaces stays with the
+shard (`RetainedBlocks`) until the map is destroyed, at most the size of
+the ones in use since each growth doubles; a same-capacity rebuild works
+in place; `clear` keeps pages. Release fences order a new array's, page's
+or directory's contents before the pointer that publishes it.
+
+`get_many_copied` reads 64 keys a call in steps, each step for every key
+before the next, so that the keys' waits for memory overlap (no
+prefetching): every shard's version by a relaxed load, then one fence; the
+descriptor at each key's home slot; the cached hash of the entry each
+leads to; the entries copied and keys compared; one fence, then every
+version checked. A key whose shard changed is read again on its own. The
+versions are loaded relaxed and fenced once because an acquire load per key
+held each key up behind the previous key's memory wait.
+
+Measured with `bench/race/race_bench.cpp` (10M random UUID keys, half the
+lookups missing, M4 Pro), batched, millions of lookups per second:
+
+| | 1 thread | 14 threads |
+|---|--:|--:|
+| shard behind `std::shared_mutex` | 8.6 | 13.5 |
+| optimistic, versions by acquire loads | 8.5 | 113.2 |
+| versions relaxed, one fence | 10.3 | |
+| in steps across the batch | 28.5 | 243.4 |
+| Boost `concurrent_flat_map`, bulk `cvisit` | 42.4 | 392.7 |
+
+Before the steps, a key cost 117 instructions and 412 cycles (IPC 0.28):
+the lookups waited on memory one after another. What separates the map
+from Boost's now is the first access: Boost's metadata, a byte a slot
+(about 12 MB here), stays in cache, while a miss here reads an eight-byte
+descriptor from an index of 128 MB. A compact fingerprint array in front
+of the descriptors would take that access out of most misses; it would
+change the index the owned map and `BBHashIndex` share.
 
 ### Verification
 
@@ -265,7 +322,11 @@ also cover borrowed strings, stable references, cached hashes, move-only
 and nonassignable values, over-aligned oversized entries, object lifetimes,
 copy failures, and allocator refusals. `shared_hash_map_test` checks racing
 writers/readers, atomic updates, scoped access, batch semantics, allocator
-failure/retry, and exception unwinding. Both participate in normal CTest
+failure/retry, and exception unwinding; optimistic readers against writers
+that grow, erase, rebuild and clear, and against writers that rewrite
+eight-word values (a reader without its version check sees words from two
+writes, and the test fails); and that what shards retain goes back to the
+allocator. Both participate in normal CTest
 and sanitizer builds. No benchmarks are run as part of tests.
 
 `bbtree::unsync::BBHashIndex<Handle, Allocator>`, in
