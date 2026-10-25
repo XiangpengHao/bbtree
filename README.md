@@ -20,6 +20,49 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 - SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
   and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
+## Performance against Rust
+
+The C++ benches (`bench/`) ran against the Rust crate at `8adae97` on the
+same workloads: same keys, same order. Setup: M4 Pro, system allocator,
+`-mcpu=native`, one run each. A range means the numbers spread across runs
+on a quiet machine. Full tables and the fixes behind them are in
+[PORTING.md](PORTING.md#measurements).
+
+Unsync map, ns per operation (lower is better):
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| 10M u64 insert, random | 246.6 | **224.8** |
+| 10M u64 insert, sequential | **8.6** | 8.8 |
+| 10M u64 get, hit / miss | 136.3 / 122.7 | **125.6 / 114.7** |
+| 10M u64 remove, random | 279.0 | **220.7** |
+| 1M path-string get, hit | 276 | **185** |
+| 10M u64 range of 64, per scan | 481 | **407** |
+| 10M u64 batch insert / hit / miss, per key | 92.1 / 49.4 / 42.3 | **87.5 / 46.1** / 42.3 |
+
+Unsync sets of u64, ns per element:
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| two 1M sets: difference / intersection / union | 7.1 / 6.8 / 6.6 | 6.8 / 6.8 / 6.9 |
+| 27K set into 1M: intersection / `is_subset` | 29.3 / 26.9 | **22.1 / 19.5** |
+
+Shared map, 10M u64, millions of operations per second (higher is better):
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| insert, 1 / 4 / 8 threads | 4.4 / 17.0–17.3 / 31.3–31.6 | 4.4 / 16.1–16.4 / 29.1–29.7 |
+| `get_copied`, 1 / 4 / 8 threads | 8.4 / 33.6–34.3 / 61.7–66.0 | 8.4–8.8 / 34.1–34.8 / 53.5–63.3 |
+| batched get, 1 thread | 17.5–17.7 | **18.0** |
+| batched get, 8 threads | 117.2–134.7 | 113.1–126.0 |
+
+The shared-map throughput rows predate the last round of fixes: inlining
+the lookup and insert paths, one acquire-release CAS per latch, and `isb`
+spin waits on Arm. Instruction counts since then: a shared get runs 341
+instructions against Rust's 357, and a shared insert 685 against 676, at
+parity in cycles. Multi-threaded throughput still needs a re-run on a quiet
+machine. MSVC builds are tested but not measured.
+
 ## Usage
 
 Add `src` to the include path, or with CMake:
