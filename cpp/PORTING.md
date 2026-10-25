@@ -210,10 +210,29 @@ The throughput rows predate the fixes below.
   `LatchedTree::insert` are force-inlined now, the descent fills the
   caller's `Descent`, and `Routed::at_separator` is a byte the descent ORs
   into its own.
+- **The exact-lookup chain inlines too.** Clang also left
+  `BBTreeMap::get_copied`, `Leaf::find`, `search_candidates` and
+  `ByteWindows::cmp_from`/`cmp_prefix` out of line, where LLVM inlines
+  Rust's; force-inlined, with the shared map's root loaded once in the
+  descent instead of twice before it, a shared get runs 341 instructions
+  against Rust's 357 (2M keys, by the `GET_ROUNDS` difference), and the
+  path-string `get_hit` that ran 4% more cycles than Rust's at fewer
+  instructions runs faster in time (185 against 276 ns at 1M, one run
+  each). A shared `HeldLeaf` also holds nothing now, as Rust's
+  `LatchMode::Held` does: `LeafFind` is 40 bytes, not 48.
+- **A latch is taken with one acquire-release CAS.** `try_lock_at` paired
+  an acquire CAS with a release fence; the CAS is acquire-release now,
+  whose acquire half says what the fence did, with no `dmb` after it on
+  Arm. The version check's fence stays: an acquire load would not order
+  the racing reads before it. Plumbing the descent's root-leaf fact to
+  `prefixed` in place of its `is_root` load was tried and reverted: 15
+  more instructions per insert, the flag round-tripping through the
+  stack where the load had been merged with the descent's own.
 
 Open:
 
-- Shared inserts run 18–23 more instructions than Rust's, within 1–3% of
-  its cycles; gets 19 more instructions, at parity in time. Measured by
-  counts only: wall-clock throughput at 4 and 8 threads still wants a quiet
-  machine.
+- Shared inserts run about 14 more instructions than Rust's (694 against
+  680 per insert at 10M, key setup included in both, by the same
+  difference count at `GET_ROUNDS=0`), at parity in cycles on the run
+  measured (923 against 936). Wall-clock throughput at 4 and 8 threads
+  still wants a quiet machine.
