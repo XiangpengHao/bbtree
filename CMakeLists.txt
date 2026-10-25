@@ -22,7 +22,9 @@ function(bbtree_target_options target)
   target_link_libraries(${target} PRIVATE bbtree)
   if(MSVC)
     # C4324: a structure padded for its alignment, as `CachePadded` means to be.
-    target_compile_options(${target} PRIVATE /W4 /WX /permissive- /Zc:__cplusplus /utf-8 /wd4324)
+    # C4702: "unreachable code", which MSVC reports after inlining a call that
+    # throws into its caller, as the hash maps' tests do on purpose.
+    target_compile_options(${target} PRIVATE /W4 /WX /permissive- /Zc:__cplusplus /utf-8 /wd4324 /wd4702)
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     # MSVC has no "native": pick an `/arch` in CMAKE_CXX_FLAGS instead.
     if(BBTREE_SANITIZE MATCHES "address")
@@ -89,5 +91,5 @@ if(BBTREE_RACE_BENCH)
   add_executable(race_bench ${CMAKE_CURRENT_SOURCE_DIR}/bench/race/race_bench.cpp)
   bbtree_target_options(race_bench)
   target_compile_options(race_bench PRIVATE -O3)
-  target_link_libraries(race_bench PRIVATE TBB::tbb Folly::folly absl::btree Boost::headers)
+  target_link_libraries(race_bench PRIVATE TBB::tbb Folly::folly absl::btree absl::flat_hash_map Boost::headers)
 endif()

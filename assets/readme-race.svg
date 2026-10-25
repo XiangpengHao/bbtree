@@ -1,61 +1,97 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="396" viewBox="0 0 760 396" role="img" aria-label="Concurrent get on 10M UUID keys, half missing, 14 threads, MacBook Pro M4 Pro, in million operations per second: bbtree, batched 158, bbtree 81.4, tbb concurrent_map 8.2, folly SkipList 8.2, absl btree + rwlock 2.1, std::map + rwlock 1.5, boost hash (unordered) 206.">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="680" viewBox="0 0 760 680" role="img" aria-label="Concurrent get on 10M UUID keys, half missing, 14 threads, MacBook Pro M4 Pro, in million operations per second: bbtree, batched 150, bbtree 79.3, tbb concurrent_map 7.8, folly SkipList 7.3, absl btree + rwlock 1.9, std::map + rwlock 1.3, bbtree hash 13.5, boost concurrent_flat_map 192, folly ConcurrentHashMap 116, tbb concurrent_hash_map 128, tbb concurrent_unordered 53.0, absl flat_hash + rwlock 7.0, std::unordered + rwlock 3.9.">
   <!-- bench/race/race_bench.cpp, drawn by bench/race/race_svg.py. -->
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; font-weight: 600; fill: #18181b; }
     .title { font-weight: 800; }
     .muted { fill: #52525b; }
-    .faint { fill: #71717a; }
+    .heat { fill: #52525b; font-size: 15px; font-weight: 700; letter-spacing: 0.04em; }
     .ours { font-weight: 800; }
     .value { text-anchor: end; }
     .highlight { fill: #ffd60a; }
     .track { stroke: #a1a1aa; stroke-width: 3; stroke-linecap: round; }
-    .dashed { stroke-dasharray: 4 6; }
+    .rule { stroke: #d4d4d8; stroke-width: 1.5; stroke-dasharray: 4 6; }
     .ball { animation: bounce linear infinite alternate; }
-    @keyframes bounce { to { transform: translateX(310px); } }
+    @keyframes bounce { to { transform: translateX(294px); } }
   </style>
-  <rect x="0.5" y="0.5" width="759" height="395" rx="12" fill="#fafafa" stroke="#d4d4d8"/>
+  <rect x="0.5" y="0.5" width="759" height="679" rx="12" fill="#fafafa" stroke="#d4d4d8"/>
 
   <text class="title" x="28" y="40">concurrent get, 14 threads</text>
   <text class="muted" x="28" y="66">10M UUID keys, half missing · MacBook Pro M4 Pro · M ops/s</text>
 
-  <rect class="highlight" x="22" y="86" width="177" height="26" rx="4"/>
-  <rect class="highlight" x="691" y="86" width="49" height="26" rx="4"/>
-  <text class="ours" x="28" y="106">bbtree, batched</text>
-  <line class="track" x1="318" y1="98" x2="650" y2="98"/>
-  <circle class="ball" cx="329" cy="98" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 0.60s"/>
-  <text class="ours value" x="732" y="106">158</text>
+  <text class="heat" x="28" y="102">TREE MAPS (ORDERED)</text>
 
-  <rect class="highlight" x="22" y="126" width="78" height="26" rx="4"/>
-  <rect class="highlight" x="680" y="126" width="60" height="26" rx="4"/>
-  <text class="ours" x="28" y="146">bbtree</text>
-  <line class="track" x1="318" y1="138" x2="650" y2="138"/>
-  <circle class="ball" cx="329" cy="138" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 1.17s"/>
-  <text class="ours value" x="732" y="146">81.4</text>
+  <rect class="highlight" x="22" y="116" width="177" height="26" rx="4"/>
+  <rect class="highlight" x="691" y="116" width="49" height="26" rx="4"/>
+  <text class="ours" x="28" y="136">bbtree, batched</text>
+  <line class="track" x1="334" y1="128" x2="650" y2="128"/>
+  <circle class="ball" cx="345" cy="128" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 0.77s"/>
+  <text class="ours value" x="732" y="136">150</text>
 
-  <text x="28" y="186">tbb concurrent_map</text>
-  <line class="track" x1="318" y1="178" x2="650" y2="178"/>
-  <circle class="ball" cx="329" cy="178" r="11" fill="#3f3f46" style="animation-duration: 11.59s"/>
-  <text class="value" x="732" y="186">8.2</text>
+  <rect class="highlight" x="22" y="156" width="78" height="26" rx="4"/>
+  <rect class="highlight" x="680" y="156" width="60" height="26" rx="4"/>
+  <text class="ours" x="28" y="176">bbtree</text>
+  <line class="track" x1="334" y1="168" x2="650" y2="168"/>
+  <circle class="ball" cx="345" cy="168" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 1.45s"/>
+  <text class="ours value" x="732" y="176">79.3</text>
 
-  <text x="28" y="226">folly SkipList</text>
-  <line class="track" x1="318" y1="218" x2="650" y2="218"/>
-  <circle class="ball" cx="329" cy="218" r="11" fill="#3f3f46" style="animation-duration: 11.59s"/>
-  <text class="value" x="732" y="226">8.2</text>
+  <text x="28" y="216">tbb concurrent_map</text>
+  <line class="track" x1="334" y1="208" x2="650" y2="208"/>
+  <circle class="ball" cx="345" cy="208" r="11" fill="#3f3f46" style="animation-duration: 14.74s"/>
+  <text class="value" x="732" y="216">7.8</text>
 
-  <text x="28" y="266">absl btree + rwlock</text>
-  <line class="track" x1="318" y1="258" x2="650" y2="258"/>
-  <circle class="ball" cx="329" cy="258" r="11" fill="#3f3f46" style="animation-duration: 45.26s"/>
-  <text class="value" x="732" y="266">2.1</text>
+  <text x="28" y="256">folly SkipList</text>
+  <line class="track" x1="334" y1="248" x2="650" y2="248"/>
+  <circle class="ball" cx="345" cy="248" r="11" fill="#3f3f46" style="animation-duration: 15.75s"/>
+  <text class="value" x="732" y="256">7.3</text>
 
-  <text x="28" y="306">std::map + rwlock</text>
-  <line class="track" x1="318" y1="298" x2="650" y2="298"/>
-  <circle class="ball" cx="329" cy="298" r="11" fill="#3f3f46" style="animation-duration: 63.36s"/>
-  <text class="value" x="732" y="306">1.5</text>
+  <text x="28" y="296">absl btree + rwlock</text>
+  <line class="track" x1="334" y1="288" x2="650" y2="288"/>
+  <circle class="ball" cx="345" cy="288" r="11" fill="#3f3f46" style="animation-duration: 60.51s"/>
+  <text class="value" x="732" y="296">1.9</text>
 
-  <line class="track dashed" x1="28" y1="322" x2="732" y2="322" stroke-width="1.5"/>
+  <text x="28" y="336">std::map + rwlock</text>
+  <line class="track" x1="334" y1="328" x2="650" y2="328"/>
+  <circle class="ball" cx="345" cy="328" r="11" fill="#3f3f46" style="animation-duration: 88.43s"/>
+  <text class="value" x="732" y="336">1.3</text>
 
-  <text class="faint" x="28" y="362">boost hash (unordered)</text>
-  <line class="track dashed" x1="318" y1="354" x2="650" y2="354"/>
-  <circle class="ball" cx="329" cy="354" r="11" fill="#a1a1aa" style="animation-duration: 0.46s"/>
-  <text class="faint value" x="732" y="362">206</text>
+  <line class="rule" x1="28" y1="350" x2="732" y2="350"/>
+
+  <text class="heat" x="28" y="372">HASH MAPS (UNORDERED)</text>
+
+  <rect class="highlight" x="22" y="386" width="133" height="26" rx="4"/>
+  <rect class="highlight" x="680" y="386" width="60" height="26" rx="4"/>
+  <text class="ours" x="28" y="406">bbtree hash</text>
+  <line class="track" x1="334" y1="398" x2="650" y2="398"/>
+  <circle class="ball" cx="345" cy="398" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 8.52s"/>
+  <text class="ours value" x="732" y="406">13.5</text>
+
+  <text x="28" y="446">boost concurrent_flat_map</text>
+  <line class="track" x1="334" y1="438" x2="650" y2="438"/>
+  <circle class="ball" cx="345" cy="438" r="11" fill="#3f3f46" style="animation-duration: 0.60s"/>
+  <text class="value" x="732" y="446">192</text>
+
+  <text x="28" y="486">tbb concurrent_hash_map</text>
+  <line class="track" x1="334" y1="478" x2="650" y2="478"/>
+  <circle class="ball" cx="345" cy="478" r="11" fill="#3f3f46" style="animation-duration: 0.89s"/>
+  <text class="value" x="732" y="486">128</text>
+
+  <text x="28" y="526">folly ConcurrentHashMap</text>
+  <line class="track" x1="334" y1="518" x2="650" y2="518"/>
+  <circle class="ball" cx="345" cy="518" r="11" fill="#3f3f46" style="animation-duration: 0.99s"/>
+  <text class="value" x="732" y="526">116</text>
+
+  <text x="28" y="566">tbb concurrent_unordered</text>
+  <line class="track" x1="334" y1="558" x2="650" y2="558"/>
+  <circle class="ball" cx="345" cy="558" r="11" fill="#3f3f46" style="animation-duration: 2.17s"/>
+  <text class="value" x="732" y="566">53.0</text>
+
+  <text x="28" y="606">absl flat_hash + rwlock</text>
+  <line class="track" x1="334" y1="598" x2="650" y2="598"/>
+  <circle class="ball" cx="345" cy="598" r="11" fill="#3f3f46" style="animation-duration: 16.42s"/>
+  <text class="value" x="732" y="606">7.0</text>
+
+  <text x="28" y="646">std::unordered + rwlock</text>
+  <line class="track" x1="334" y1="638" x2="650" y2="638"/>
+  <circle class="ball" cx="345" cy="638" r="11" fill="#3f3f46" style="animation-duration: 29.48s"/>
+  <text class="value" x="732" y="646">3.9</text>
 </svg>

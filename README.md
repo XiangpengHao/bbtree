@@ -28,19 +28,33 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 
 ## Against other C++ maps
 
-Upstream's README race, in C++: 10M random UUID keys, lookups of which half
-miss, on all 14 cores of a MacBook Pro M4 Pro (10 performance, 4
-efficiency), 2 seconds a map, one run. Millions of lookups per second:
+Upstream's README race, in C++, in two heats, tree maps and hash maps: 10M
+random UUID keys, lookups of which half miss, on all 14 cores of a MacBook
+Pro M4 Pro (10 performance, 4 efficiency), 2 seconds a map, one run.
+Millions of lookups per second:
 
-| map | M ops/s |
+| tree maps (ordered) | M ops/s |
 |---|--:|
-| bbtree, batched (`get_many_copied`, 64 keys a call) | **158.4** |
-| bbtree (`get_copied`) | **81.4** |
-| oneTBB `tbb::concurrent_map` (skip list) | 8.2 |
-| folly `ConcurrentSkipList` | 8.2 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
-| `std::map` + `std::shared_mutex` | 1.5 |
-| Boost `boost::concurrent_flat_map` (hash map, unordered) | 206.4 |
+| bbtree, batched (`get_many_copied`, 64 keys a call) | **149.6** |
+| bbtree (`get_copied`) | **79.3** |
+| oneTBB `tbb::concurrent_map` (skip list) | 7.8 |
+| folly `ConcurrentSkipList` | 7.3 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 1.9 |
+| `std::map` + `std::shared_mutex` | 1.3 |
+
+| hash maps (unordered) | M ops/s |
+|---|--:|
+| bbtree `BBHashMap`, batched (shards behind `std::shared_mutex`) | **13.5** |
+| Boost `boost::concurrent_flat_map` | 191.6 |
+| oneTBB `tbb::concurrent_hash_map` | 128.5 |
+| folly `ConcurrentHashMap` | 116.0 |
+| oneTBB `tbb::concurrent_unordered_map` | 53.0 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 7.0 |
+| `std::unordered_map` + `std::shared_mutex` | 3.9 |
+
+bbtree's tree maps lead their heat by 10–19×. Its hash map, young and
+experimental, trails: every lookup takes its shard's read lock, a write
+to a shared cache line, where the tree's readers write nothing.
 
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first

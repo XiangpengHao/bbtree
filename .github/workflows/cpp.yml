@@ -144,5 +144,10 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # Ubuntu's libc++ allocates an exception's message with `new` and its
+      # libc++abi frees it with `free`: ASan reports the mismatch inside the
+      # standard library whenever a test throws, as the hash maps' tests do.
       - name: Test
+        env:
+          ASAN_OPTIONS: alloc_dealloc_mismatch=0
         run: ctest --test-dir build --output-on-failure

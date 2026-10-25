@@ -1,8 +1,14 @@
 map,entries,threads,mops,build_seconds
-bbtree (batched),10000000,14,158.4,0.4
-bbtree,10000000,14,81.4,0.3
-tbb::concurrent_map,10000000,14,8.2,1.2
-folly::ConcurrentSkipList,10000000,14,8.2,1.4
-absl::btree_map + shared_mutex,10000000,14,2.1,4.4
-std::map + shared_mutex,10000000,14,1.5,10.4
-boost::concurrent_flat_map (unordered),10000000,14,206.4,0.7
+bbtree (batched),10000000,14,149.6,0.4
+bbtree,10000000,14,79.3,0.3
+tbb::concurrent_map,10000000,14,7.8,1.3
+folly::ConcurrentSkipList,10000000,14,7.3,1.4
+absl::btree_map + shared_mutex,10000000,14,1.9,4.6
+std::map + shared_mutex,10000000,14,1.3,10.8
+bbtree::BBHashMap,10000000,14,13.5,1.2
+boost::concurrent_flat_map,10000000,14,191.6,0.8
+folly::ConcurrentHashMap,10000000,14,116.0,1.2
+tbb::concurrent_hash_map,10000000,14,128.5,0.8
+tbb::concurrent_unordered_map,10000000,14,53.0,0.9
+absl::flat_hash_map + shared_mutex,10000000,14,7.0,0.3
+std::unordered_map + shared_mutex,10000000,14,3.9,2.3

@@ -1,11 +1,15 @@
 // The race: concurrent lookups on random UUID keys, half of which miss, as
 // upstream's README race (`design/assets/readme-race.svg`, `get-half`)
 // times the Rust maps. bbtree against the best-known C++ maps that threads
-// can share: oneTBB's `concurrent_map` and folly's `ConcurrentSkipList`
-// (skip lists), Abseil's `btree_map` and `std::map` behind a
-// `std::shared_mutex`; and, unordered, for reference, bbtree's hash map
-// (`bbtree::BBHashMap`, shards behind locks) and Boost's
-// `concurrent_flat_map`.
+// can share, in two heats:
+//
+// - tree maps (ordered): bbtree's `BBTreeMap`; oneTBB's `concurrent_map`
+//   and folly's `ConcurrentSkipList` (skip lists); Abseil's `btree_map` and
+//   `std::map` behind a `std::shared_mutex`.
+// - hash maps (unordered): bbtree's `BBHashMap` (shards behind locks);
+//   Boost's `concurrent_flat_map`; folly's `ConcurrentHashMap`; oneTBB's
+//   `concurrent_hash_map` and `concurrent_unordered_map`; Abseil's
+//   `flat_hash_map` and `std::unordered_map` behind a `std::shared_mutex`.
 //
 // Each map takes its best use, as upstream's harness gives it: bbtree's
 // batched lookups (`get_many_copied`, 64 keys a call) and its plain ones; a
@@ -15,8 +19,12 @@
 //
 // usage: race_bench [entries] [threads] [seconds]; prints CSV.
 #include <absl/container/btree_map.h>
+#include <absl/container/flat_hash_map.h>
 #include <folly/ConcurrentSkipList.h>
+#include <folly/concurrency/ConcurrentHashMap.h>
+#include <oneapi/tbb/concurrent_hash_map.h>
 #include <oneapi/tbb/concurrent_map.h>
+#include <oneapi/tbb/concurrent_unordered_map.h>
 
 #include <array>
 #include <atomic>
@@ -30,6 +38,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <shared_mutex>
 #include <thread>
 #include <type_traits>
@@ -171,11 +180,10 @@ class BBTreeSingle : public BBTreeContestant {
   Reader reader() const { return Reader(map_); }
 };
 
-class TbbConcurrentMap {
+/// A map whose `emplace` and `find` threads may call at once.
+template <class Map>
+class ConcurrentFindMap {
  public:
-  static constexpr const char* name = "tbb::concurrent_map";
-  using Map = tbb::concurrent_map<Uuid, Value>;
-
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
     ThreadTeam::run(threads, [&](std::size_t thread) {
       for (std::size_t index = thread; index < keys.size(); index += threads) map_.emplace(keys[index], index + 1);
@@ -189,7 +197,7 @@ class TbbConcurrentMap {
       Value sum = 0;
       for (std::size_t index = 0; index < lookups_per_call; ++index) {
         const auto found = map_.find(probes[index]);
-        if (found != map_.end()) sum += found->second;
+        if (found != map_.cend()) sum += found->second;
       }
       return sum;
     }
@@ -201,6 +209,11 @@ class TbbConcurrentMap {
 
  private:
   Map map_;
+};
+
+class TbbConcurrentMap : public ConcurrentFindMap<tbb::concurrent_map<Uuid, Value>> {
+ public:
+  static constexpr const char* name = "tbb::concurrent_map";
 };
 
 class FollyConcurrentSkipList {
@@ -285,9 +298,69 @@ class StdMap : public SharedMutexMap<std::map<Uuid, Value>> {
   static constexpr const char* name = "std::map + shared_mutex";
 };
 
+class AbslFlatHashMap : public SharedMutexMap<absl::flat_hash_map<Uuid, Value, UuidKeys::Hash>> {
+ public:
+  static constexpr const char* name = "absl::flat_hash_map + shared_mutex";
+};
+
+class StdUnorderedMap : public SharedMutexMap<std::unordered_map<Uuid, Value, UuidKeys::Hash>> {
+ public:
+  static constexpr const char* name = "std::unordered_map + shared_mutex";
+};
+
+class FollyConcurrentHashMap
+    : public ConcurrentFindMap<folly::ConcurrentHashMap<Uuid, Value, UuidKeys::Hash>> {
+ public:
+  static constexpr const char* name = "folly::ConcurrentHashMap";
+};
+
+class TbbConcurrentUnorderedMap
+    : public ConcurrentFindMap<tbb::concurrent_unordered_map<Uuid, Value, UuidKeys::Hash>> {
+ public:
+  static constexpr const char* name = "tbb::concurrent_unordered_map";
+};
+
+/// oneTBB's classic hash map: a lookup holds the bucket's read lock through
+/// an accessor.
+class TbbConcurrentHashMap {
+ public:
+  static constexpr const char* name = "tbb::concurrent_hash_map";
+  struct HashCompare {
+    std::size_t hash(const Uuid& key) const { return UuidKeys::Hash()(key); }
+    bool equal(const Uuid& left, const Uuid& right) const { return left == right; }
+  };
+  using Map = tbb::concurrent_hash_map<Uuid, Value, HashCompare>;
+
+  void build(const std::vector<Uuid>& keys, std::size_t threads) {
+    ThreadTeam::run(threads, [&](std::size_t thread) {
+      for (std::size_t index = thread; index < keys.size(); index += threads) map_.emplace(keys[index], index + 1);
+    });
+  }
+
+  class Reader {
+   public:
+    explicit Reader(const Map& map) : map_(map) {}
+    Value look_up(const Uuid* probes) {
+      Value sum = 0;
+      for (std::size_t index = 0; index < lookups_per_call; ++index) {
+        typename Map::const_accessor accessor;
+        if (map_.find(accessor, probes[index])) sum += accessor->second;
+      }
+      return sum;
+    }
+
+   private:
+    const Map& map_;
+  };
+  Reader reader() const { return Reader(map_); }
+
+ private:
+  Map map_;
+};
+
 class BBTreeHashMap {
  public:
-  static constexpr const char* name = "bbtree::BBHashMap (unordered)";
+  static constexpr const char* name = "bbtree::BBHashMap";
   using Map = bbtree::BBHashMap<Uuid, Value, UuidKeys::Hash>;
 
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
@@ -320,7 +393,7 @@ class BBTreeHashMap {
 
 class BoostConcurrentFlatMap {
  public:
-  static constexpr const char* name = "boost::concurrent_flat_map (unordered)";
+  static constexpr const char* name = "boost::concurrent_flat_map";
   using Map = boost::concurrent_flat_map<Uuid, Value, UuidKeys::Hash>;
 
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
@@ -447,5 +520,10 @@ int main(int argc, char** argv) {
   race.run<StdMap>();
   race.run<BBTreeHashMap>();
   race.run<BoostConcurrentFlatMap>();
+  race.run<FollyConcurrentHashMap>();
+  race.run<TbbConcurrentHashMap>();
+  race.run<TbbConcurrentUnorderedMap>();
+  race.run<AbslFlatHashMap>();
+  race.run<StdUnorderedMap>();
   return 0;
 }

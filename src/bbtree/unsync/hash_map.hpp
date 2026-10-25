@@ -61,9 +61,16 @@ class BBHashMap {
 
   /// Allocation failure throws std::bad_alloc; entries remain unchanged.
   /// Hash/equality exceptions propagate before changing any entry.
-  std::optional<V> insert(K key, V value) {
-    const auto hash = hash_key(key);
-    return table_.insert(hash, std::move(key), std::move(value), equal_);
+  /// Takes its arguments by reference: MSVC can't pass an over-aligned
+  /// key or value by value.
+  template <class KeyArg = K, class ValueArg = V,
+            std::enable_if_t<std::is_constructible_v<K, KeyArg &&> && std::is_constructible_v<V, ValueArg &&>,
+                             int> = 0>
+  std::optional<V> insert(KeyArg &&key, ValueArg &&value) {
+    K owned_key(std::forward<KeyArg>(key));
+    V owned_value(std::forward<ValueArg>(value));
+    const auto hash = hash_key(owned_key);
+    return table_.insert(hash, std::move(owned_key), std::move(owned_value), equal_);
   }
 
   template <class Q>
