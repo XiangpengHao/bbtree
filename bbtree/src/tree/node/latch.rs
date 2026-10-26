@@ -277,6 +277,25 @@ impl Backoff {
     }
 }
 
+/// A shared page hold, released on return or unwind. Keep a snapshot's hold
+/// shorter than the traversal: version checks validate the next page separately.
+pub(in crate::tree) struct SharedLatch<'a>(&'a NodeLatch);
+
+impl<'a> SharedLatch<'a> {
+    #[inline(always)]
+    pub(in crate::tree) fn lock(latch: &'a NodeLatch) -> Self {
+        latch.lock_shared();
+        Self(latch)
+    }
+}
+
+impl Drop for SharedLatch<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.unlock_shared();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::sync::atomic::AtomicU64;
@@ -313,24 +332,5 @@ mod tests {
         assert_eq!(held_at, after);
         latch.unlock_exclusive(held_at);
         assert_ne!(latch.read_version(), Version(after.0));
-    }
-}
-
-/// A shared page hold, released on return or unwind. Keep a snapshot's hold
-/// shorter than the traversal: version checks validate the next page separately.
-pub(in crate::tree) struct SharedLatch<'a>(&'a NodeLatch);
-
-impl<'a> SharedLatch<'a> {
-    #[inline(always)]
-    pub(in crate::tree) fn lock(latch: &'a NodeLatch) -> Self {
-        latch.lock_shared();
-        Self(latch)
-    }
-}
-
-impl Drop for SharedLatch<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        self.0.unlock_shared();
     }
 }
