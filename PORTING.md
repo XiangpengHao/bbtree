@@ -135,9 +135,10 @@ Rust paths are under `bbtree/src/` of upstream at `8adae97`.
 ## Hash maps
 
 The C++ port also has an initial DuckDB-inspired hash map implementation.
-`bbtree::unsync::BBHashMap` owns a single-threaded table; `bbtree::BBHashMap`
-shares the same table implementation in shards, each behind the tree's
-latch, read without it ("Shared reads" below).
+`bbtree::unsync::BBHashMap` owns a single-threaded paged table, whose
+entries never move; `bbtree::BBHashMap` keeps an inline-slot table in each
+of its shards, each behind the tree's latch, read without it ("Shared
+reads" below).
 Both are header-only C++17 with no external dependencies. This is a new
 implementation, with no Rust reference or established performance claims.
 
@@ -158,7 +159,7 @@ shared.update("one", [](const auto&, int& value) { ++value; });
 
 ### Layout and costs
 
-The inspiration is DuckDB's [two-part aggregate hash table](https://duckdb.org/2022/03/07/aggregate-hashtable):
+This section describes the owned map's paged table. The inspiration is DuckDB's [two-part aggregate hash table](https://duckdb.org/2022/03/07/aggregate-hashtable):
 a compact probe index filters candidates before following references into
 payload storage, and cached full hashes allow index growth without hashing
 keys again. Our descriptors use a 16-bit fingerprint and a 48-bit entry
@@ -182,9 +183,7 @@ directory and probe index, goes through the supplied allocator's
 
 The index grows at 75% occupied-plus-deleted capacity. At that threshold,
 if live occupancy is below 50%, it rebuilds at the same capacity instead,
-in place. An index array and the page directory each begin with their
-capacity (a 64-byte header line, a word), for optimistic readers.
-Index rebuilding is linear in allocated entry slots plus index capacity,
+in place. Index rebuilding is linear in allocated entry slots plus index capacity,
 but moves no keys or values and calls neither hash nor equality. Payload
 pages and holes remain allocated until `clear` or destruction.
 
@@ -196,7 +195,7 @@ For `u64 -> u64`, `E = 24`: at 75% index occupancy and full payload pages
 the estimate is 36 bytes per entry before bookkeeping. Small pairs pay a
 substantial overhead relative to flat hash maps. A hit also depends on
 descriptor, page pointer, entry, and any heap-owned key bytes; bulk reads
-overlaps independent queries but does not remove those dependencies.
+overlap independent queries but do not remove those dependencies.
 
 ### API and ownership
 
@@ -241,8 +240,9 @@ copyable nor movable.
 Shared insertion returns an `InsertOutcome`, preserving the input entry on
 the allocator's refusal. Exceptions from user policies propagate, including
 `std::bad_alloc` thrown by a policy. Shard selection uses mixed bits 32–47,
-leaving the fingerprint and low 32 placement bits untouched. Growth pauses
-operations on its shard for a linear rebuild. Counts, traversal, clear and
+leaving the tag and low 32 placement bits untouched. Growth pauses
+operations on its shard while it moves the entries to a block twice the
+size. Counts, traversal, clear and
 invariant checks hold one shard at a time, and are not map-wide snapshots.
 Exclude concurrent writers if `clear` must leave the entire map empty.
 `clear` keeps a shard's memory for later entries; the map gives it back
@@ -273,68 +273,75 @@ map path uses software prefetching.
 
 ### Shared reads
 
-Readers of a shared map write nothing shared when keys and values are
-trivially copyable, as the latched tree's readers (D54, P7). A shard is
-the tree's `NodeLatch`: writers hold it exclusively and bump its version.
-A reader reads the version, probes the shard's index and copies the entry
-it finds without the latch (`HashTable::racing_find`), checks the version,
-and only then runs user code, on its copy; after four changed versions it
-holds the shard shared. Keys or values that are not trivially copyable are
-always read with the shard held shared: their copies could not be made
-from bytes a writer is changing.
+A shard of the shared map is an inline-slot table
+(`detail/hash/inline_table.hpp`): open addressing with linear probing, the
+entries (cached hash, `K`, `V`) in the slots it probes, a tag a slot in
+front of them (empty, or the hash's top seven bits), all in one block: a
+header line with the capacity, the tags, the slots aligned to cache lines.
+A lookup walks the tags and reads the one slot whose tag matches: a miss
+reads no slot, a hit its own. It grows at 75% occupancy, moving the entries
+by their cached hashes, no user code run. A removal shifts the entries
+after the hole back into it (Knuth's Algorithm R), so there are no
+tombstones and no rebuild but growth. Memory is `(1 + E) / alpha` bytes per
+live entry for an aligned entry of `E` bytes: 54 for UUID keys and `u64`
+values at 61% occupancy, against about 47 in the paged table.
+
+The owned map keeps its paged table for stable references; the shared map
+hands out none that outlives a callback, so its entries may move. The
+paged layout made the shared map twice the work of Boost's: with every key
+in cache (100K keys) its bulk read cost 160 instructions and 96 cycles a key
+against Boost's 85 and 41, a hit walking shard, version, index header, tag,
+descriptor, directory, page, entry and version again; memory added the same
+to both at 10M keys (54 and 56 cycles).
+
+Readers write nothing shared when keys and values are trivially copyable,
+as the latched tree's readers (D54, P7). A shard is the tree's `NodeLatch`:
+writers hold it exclusively and bump its version. A reader reads the
+version, probes the shard's block and copies the entry it finds without
+the latch (`InlineHashTable::racing_find`), checks the version, and only
+then runs user code, on its copy; after four changed versions it holds the
+shard shared. Keys or values that are not trivially copyable are always
+read with the shard held shared: their copies could not be made from bytes
+a writer is changing.
 
 Whatever a writer does meanwhile, a racing reader stays in memory it may
-read. It learns an index array's or a directory's bounds from the array
-itself, never from a separate capacity it might read from another state;
-and a shard frees nothing a reader may still be reading while threads
-share it: an index array or directory that growth replaces stays with the
-shard (`RetainedBlocks`) until the map is destroyed, at most the size of
-the ones in use since each growth doubles; a same-capacity rebuild works
-in place; `clear` keeps pages. Release fences order a new array's, page's
-or directory's contents before the pointer that publishes it.
+read. It learns a block's bounds from the block's header, never from a
+separate capacity it might read from another state; and a shard frees no
+block while threads share it: a block that growth replaces stays with the
+shard (`RetainedBlocks`) until the map is destroyed, less than the block in
+use since each growth doubles; `clear` keeps the block. A release fence
+orders a new block's contents before the pointer that publishes it.
 
 `get_many_copied` reads 64 keys a call in steps, each step for every key
 before the next, so that the keys' waits for memory overlap (no
 prefetching): every shard's version by a relaxed load, then one fence; the
 tag at each key's home slot; the tags on to the first empty or matching
-one, and the descriptor there; the cached hash of the entry it leads to;
-the entries copied and keys compared; one fence, then every version
-checked. A key whose shard changed is read again on its own. The versions
-are loaded relaxed and fenced once because an acquire load per key held
-each key up behind the previous key's memory wait. A step branches only on
-what an earlier step loaded: merging the tag and descriptor steps, or the
-entry's hash and its copy, put a branch on a load still in flight, and its
-mispredictions threw away the next keys' loads (27.4 to 19.8 M/s).
+one, and that slot's hash; the entry copied and keys compared; one fence,
+then every version checked. A key whose shard changed is read again on its
+own. The versions are loaded relaxed and fenced once because an acquire
+load per key held each key up behind the previous key's memory wait. A step
+branches only on what an earlier step loaded: in the paged table, merging
+steps put a branch on a load still in flight, and its mispredictions threw
+away the next keys' loads (27.4 to 19.8 M/s).
 
 Measured with `bench/race/race_bench.cpp` (10M random UUID keys, half the
 lookups missing, M4 Pro), millions of lookups per second:
 
 | | bulk, 1 thread | bulk, 14 threads | one key, 14 threads |
 |---|--:|--:|--:|
-| shard behind `std::shared_mutex` | 8.6 | 13.5 | |
-| optimistic, versions by acquire loads | 8.5 | 113.2 | |
-| versions relaxed, one fence | 10.3 | | |
-| in steps across the bulk read | 28.5 | 247.9 | 120.0 |
-| tags before descriptors | 27.4 | 270.8 | 134.3 |
-| Boost `concurrent_flat_map` (bulk `cvisit`, `cvisit`) | 42.4 | 392.7 | 200.9 |
+| paged, shard behind `std::shared_mutex` | 8.6 | 13.5 | |
+| paged, optimistic, versions by acquire loads | 8.5 | 113.2 | |
+| paged, versions relaxed, one fence | 10.3 | | |
+| paged, in steps across the bulk read | 28.5 | 247.9 | 120.0 |
+| paged, tags before descriptors | 27.4 | 270.8 | 134.3 |
+| inline slots | 37.5 | 373.0 | 260.4 |
+| Boost `concurrent_flat_map` (bulk `cvisit`) | 42.2 | 381.2 | |
 
-The last two of ours ran back to back. Before the steps, a key cost 117
-instructions and 412 cycles (IPC 0.28): the lookups waited on memory one
-after another.
-
-Tags (see "Layout and costs") take the descriptor's line out of most
-misses. One thread, waiting on latency, doesn't see it; fourteen, sharing
-the memory's bandwidth, do. They were meant to close the gap to Boost on
-the assumption that Boost's lead was its metadata staying in cache. The
-counters say otherwise: with every key in cache (100K keys), a bulk read
-costs 160 instructions and 96 cycles a key here against Boost's 85 and 41,
-and at 10M keys memory adds 54 cycles to ours and 56 to Boost's. The gap
-is work, not memory: a hit here goes shard, version, index header, tag,
-descriptor, directory, page, entry and version again, about ten dependent
-loads where Boost goes from a group's metadata to the element stored in
-its slot. The paged entries, reached through descriptors, give the owned
-map stable references; the shared map hands out none, so an inline layout
-(entries in the probed slots, tags in front) would remove that walk there.
+Rows ran on different occasions; each of ours ran next to the one before
+it, and the last two side by side. With every key in cache the inline
+table still does half of Boost's work rate (54 against 106 M/s on one
+thread): what is left is the shard, its version checked twice, and the
+bulk read's passes.
 
 ### Verification
 

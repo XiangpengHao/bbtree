@@ -8,8 +8,6 @@
 #include <utility>
 
 #include "../config.hpp"
-#include "../racing_copy.hpp"
-#include "../target.hpp"
 #include "batch.hpp"
 
 namespace bbtree::detail {
@@ -23,11 +21,8 @@ class HashTable {
   static_assert(std::is_nothrow_move_constructible_v<A> && std::is_nothrow_swappable_v<A>,
                 "BBHashMap allocators must move and swap without throwing");
   using Store = HashEntryStore<K, V, A>;
-  using Index = HashProbeIndex<A>;
 
  public:
-  using Entry = typename Store::Entry;
-
   explicit HashTable(A allocator = A()) : index_(allocator), entries_(std::move(allocator)) {}
   HashTable(HashTable &&) noexcept = default;
   HashTable(const HashTable &) = delete;
@@ -86,75 +81,6 @@ class HashTable {
   typename Store::Entry *find(std::uint64_t hash, const Q &key, const Equal &equal) {
     return const_cast<typename Store::Entry *>(std::as_const(*this).find(hash, key, equal));
   }
-
-  /// Looks `key` up as an optimistic reader of a shared map (PORTING.md,
-  /// P7): reads the index and the entry it leads to without a latch, copying
-  /// the entry into `found`, and runs user code (`equal`) only on that copy.
-  /// What it returns means something only once the shard's version vouches
-  /// for the read; whatever writers do meanwhile, it stays within the arrays
-  /// it reads, and stops.
-  template <class Q, class Equal>
-  BBTREE_ALWAYS_INLINE bool racing_find(std::uint64_t hash, const Q &key, const Equal &equal,
-                                        RacingCopy<Entry> &found) const {
-    const auto view = index_.racing_view();
-    return racing_find_from(view, static_cast<std::size_t>(hash) & (view.capacity - 1), hash, key,
-                            equal, found);
-  }
-
-  /// One key's optimistic lookup in steps, which a bulk read takes for all
-  /// its keys before the next step, so that the keys' waits for memory
-  /// overlap. A step branches only on what an earlier step loaded: a branch
-  /// on a load still in flight, mispredicted, would throw away the loads of
-  /// the keys after it. The tag at the key's home slot; the tags from there
-  /// to the first that is empty or its own, and the descriptor there; the
-  /// cached hash of the entry it leads to; the entry copied and the keys
-  /// compared. A key that probes past that slot finishes as `racing_find`
-  /// does. The batch keeps each key's hash.
-  class RacingLookup {
-   public:
-    BBTREE_ALWAYS_INLINE void load_tag(const HashTable &table, std::uint64_t hash) noexcept {
-      view_ = table.index_.racing_view();
-      slot_ = static_cast<std::size_t>(hash) & (view_.capacity - 1);
-      tag_ = view_.capacity == 0 ? Index::empty_tag : Index::racing_tag(view_, slot_);
-    }
-    BBTREE_ALWAYS_INLINE void load_descriptor(std::uint64_t hash) noexcept {
-      descriptor_ = 0;
-      if (tag_ == Index::empty_tag) return;
-      const auto wanted = Index::wanted_tag(hash);
-      if (tag_ != wanted) {
-        slot_ = Index::racing_probe(view_, hash, slot_);
-        tag_ = Index::racing_tag(view_, slot_);
-        if (tag_ != wanted) return;
-      }
-      descriptor_ = Index::racing_descriptor(view_, slot_);
-    }
-    BBTREE_ALWAYS_INLINE void load_entry_hash(const HashTable &table, std::uint64_t hash) noexcept {
-      entry_ = nullptr;
-      if (!Index::descriptor_matches(descriptor_, hash)) return;
-      entry_ = table.entries_.racing_entry(Index::descriptor_identifier(descriptor_));
-      if (entry_) entry_hash_ = racing_hash(entry_);
-    }
-    template <class Q, class Equal>
-    BBTREE_ALWAYS_INLINE bool finish(const HashTable &table, std::uint64_t hash, const Q &key,
-                                     const Equal &equal, RacingCopy<Entry> &found) const {
-      // No descriptor: the probe met an empty tag, the key is absent.
-      if (descriptor_ == 0) return false;
-      if (entry_ && entry_hash_ == hash) {
-        found.read_from(entry_);
-        if (equal(found.assume_read().key, key)) return true;
-      }
-      return table.racing_find_from(view_, (slot_ + 1) & (view_.capacity - 1), hash, key, equal,
-                                    found);
-    }
-
-   private:
-    typename Index::RacingView view_;
-    std::size_t slot_;
-    std::uint64_t descriptor_;
-    const Entry *entry_;
-    std::uint64_t entry_hash_;
-    std::uint8_t tag_;
-  };
 
   template <class Equal>
   std::optional<V> insert(std::uint64_t hash, K &&key, V &&value, const Equal &equal) {
@@ -240,32 +166,6 @@ class HashTable {
  private:
   HashProbeIndex<A> index_;
   Store entries_;
-
-  BBTREE_RACING_READ static std::uint64_t racing_hash(const Entry *entry) noexcept {
-    return RacingLoad::relaxed(&entry->hash);
-  }
-
-  template <class Q, class Equal>
-  BBTREE_ALWAYS_INLINE bool racing_find_from(const typename Index::RacingView &view,
-                                             std::size_t slot, std::uint64_t hash, const Q &key,
-                                             const Equal &equal, RacingCopy<Entry> &found) const {
-    static_assert(std::is_trivially_copyable_v<Entry>, "racing reads copy entries as bytes");
-    const auto mask = view.capacity - 1;
-    for (std::size_t probes = 0; probes < view.capacity; ++probes) {
-      slot = Index::racing_probe(view, hash, slot);
-      if (Index::racing_tag(view, slot) != Index::wanted_tag(hash)) return false;
-      const auto descriptor = Index::racing_descriptor(view, slot);
-      if (Index::descriptor_matches(descriptor, hash)) {
-        if (const Entry *entry = entries_.racing_entry(Index::descriptor_identifier(descriptor))) {
-          found.read_from(entry);
-          const Entry &copy = found.assume_read();
-          if (copy.hash == hash && equal(copy.key, key)) return true;
-        }
-      }
-      slot = (slot + 1) & mask;
-    }
-    return false;
-  }
 
   template <class Q, class Hasher, class Equal, class Init, class Visit>
   void apply_many(const Q *keys, std::size_t count, const Hasher &hash, const Equal &equal,

@@ -1,10 +1,7 @@
 // Entries live in owned pages. Rebuilding the probe index or its page
 // directory never moves an entry; deleted slots form an identifier free list.
-// The page directory, like the probe index's arrays, begins with a header
-// word holding its capacity, for optimistic readers (`racing_entry`).
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -15,7 +12,6 @@
 
 #include "allocation.hpp"
 #include "../config.hpp"
-#include "../target.hpp"
 
 namespace bbtree::detail {
 
@@ -113,21 +109,6 @@ class HashEntryStore {
         .entry;
   }
 
-  /// Where entry `identifier` lies, as an optimistic reader finds it
-  /// (PORTING.md, P7): nullptr if the directory it reads has no page there.
-  /// Pages and directories stay valid while a shared map's readers may hold
-  /// them (`RetainedBlocks`); the entry's bytes mean something only once a
-  /// version check vouches for the read.
-  BBTREE_RACING_READ const Entry *racing_entry(std::size_t identifier) const noexcept {
-    Page *const *directory = RacingLoad::relaxed(&pages_);
-    if (!directory || identifier == 0) return nullptr;
-    const auto page_index = ordinal(identifier) / slots_per_page();
-    if (page_index >= RacingLoad::relaxed(directory_header(directory))) return nullptr;
-    const Page *page = RacingLoad::relaxed(directory + page_index);
-    if (!page) return nullptr;
-    return &page->slots[ordinal(identifier) % slots_per_page()].entry;
-  }
-
   bool live(std::size_t identifier) const noexcept {
     if (identifier == 0 || ordinal(identifier) / slots_per_page() >= page_count_) return false;
     return (pages_[ordinal(identifier) / slots_per_page()]->occupied &
@@ -201,8 +182,7 @@ class HashEntryStore {
       pages_[index]->~Page();
       allocator_.deallocate(pages_[index], Layout{sizeof(Page), alignof(Page)});
     }
-    if (pages_)
-      allocator_.deallocate(directory_header(pages_), directory_layout(directory_capacity_));
+    if (pages_) allocator_.deallocate(pages_, directory_layout(directory_capacity_));
     pages_ = nullptr;
     page_count_ = directory_capacity_ = free_head_ = next_unused_ = size_ = 0;
   }
@@ -216,19 +196,9 @@ class HashEntryStore {
   std::size_t next_unused_ = 0;
   std::size_t size_ = 0;
 
-  static_assert(sizeof(std::uintptr_t) == sizeof(Page *) && alignof(std::uintptr_t) == alignof(Page *),
-                "the directory's header word is pointer-sized");
-
   static std::size_t ordinal(std::size_t identifier) noexcept { return identifier - 1; }
-  /// A directory's block: its capacity, then its page pointers.
   static Layout directory_layout(std::size_t capacity) noexcept {
-    return {(1 + capacity) * sizeof(Page *), alignof(Page *)};
-  }
-  static std::uintptr_t *directory_header(Page **directory) noexcept {
-    return reinterpret_cast<std::uintptr_t *>(directory) - 1;
-  }
-  static const std::uintptr_t *directory_header(Page *const *directory) noexcept {
-    return reinterpret_cast<const std::uintptr_t *>(directory) - 1;
+    return {capacity * sizeof(Page *), alignof(Page *)};
   }
 
   void take(HashEntryStore &other) noexcept {
@@ -250,8 +220,6 @@ class HashEntryStore {
     if (page_count_ == directory_capacity_) grow_directory();
     void *memory = HashAllocation::allocate(allocator_, Layout{sizeof(Page), alignof(Page)});
     auto *page = ::new (memory) Page();
-    // A racing reader reaches the page through its directory entry.
-    std::atomic_thread_fence(std::memory_order_release);
     pages_[page_count_++] = page;
   }
 
@@ -266,17 +234,12 @@ class HashEntryStore {
     if (directory_capacity_ > std::numeric_limits<std::size_t>::max() / sizeof(Page *) / 2)
       throw std::length_error("BBHashMap page directory exhausted");
     const auto capacity = directory_capacity_ == 0 ? 4 : directory_capacity_ * 2;
-    auto *block = static_cast<std::uintptr_t *>(
-        HashAllocation::allocate(allocator_, directory_layout(capacity)));
-    ::new (static_cast<void *>(block)) std::uintptr_t(capacity);
-    auto **directory = reinterpret_cast<Page **>(block + 1);
+    auto **directory =
+        static_cast<Page **>(HashAllocation::allocate(allocator_, directory_layout(capacity)));
     for (std::size_t index = 0; index < capacity; ++index)
       ::new (static_cast<void *>(directory + index))
           Page *(index < page_count_ ? pages_[index] : nullptr);
-    if (pages_)
-      allocator_.deallocate(directory_header(pages_), directory_layout(directory_capacity_));
-    // A racing reader reaches the directory through `pages_`.
-    std::atomic_thread_fence(std::memory_order_release);
+    if (pages_) allocator_.deallocate(pages_, directory_layout(directory_capacity_));
     pages_ = directory;
     directory_capacity_ = capacity;
   }

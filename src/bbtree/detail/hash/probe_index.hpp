@@ -4,17 +4,13 @@
 //
 // Beside them, a byte a slot, its tag: empty, deleted, or occupied with the
 // hash's top seven bits. Lookups walk the tags, a ninth of the index's
-// bytes, which stay in cache where the descriptors don't: a key that is
-// absent costs no descriptor, and a present one only its own. Descriptors
+// bytes, and read a descriptor only where a tag matches: a key that is
+// absent reads no descriptor, and a present one only its own. Descriptors
 // stay the truth; every write of one writes its tag (`write_descriptor`).
 //
-// A block holds a header line with the capacity, the descriptors, then the
-// tags, so that an optimistic reader of a shared map, which reaches the
-// block through a pointer it read racing, knows the bounds of that block
-// whatever block the pointer was (`racing_view`).
+// One block holds the descriptors, then the tags.
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -23,7 +19,6 @@
 
 #include "allocation.hpp"
 #include "../config.hpp"
-#include "../target.hpp"
 
 namespace bbtree::detail {
 
@@ -91,42 +86,6 @@ class HashProbeIndex {
     return static_cast<std::size_t>(hash) & (capacity_ - 1);
   }
   std::size_t next(std::size_t slot) const noexcept { return (slot + 1) & (capacity_ - 1); }
-
-  /// The descriptors as an optimistic reader finds them (PORTING.md, P7):
-  /// the array the index pointed to and that array's own capacity, zero if
-  /// none. Any array the index ever pointed to stays valid while a shared
-  /// map's readers may hold it (`RetainedBlocks`).
-  struct RacingView {
-    const std::uint64_t *descriptors;
-    const std::uint8_t *tags;
-    std::size_t capacity;
-  };
-  BBTREE_RACING_READ RacingView racing_view() const noexcept {
-    const std::uint64_t *descriptors = RacingLoad::relaxed(&descriptors_);
-    if (!descriptors) return {nullptr, nullptr, 0};
-    const auto capacity = static_cast<std::size_t>(RacingLoad::relaxed(descriptors - 1));
-    return {descriptors, reinterpret_cast<const std::uint8_t *>(descriptors + capacity), capacity};
-  }
-  BBTREE_RACING_READ static std::uint64_t racing_descriptor(const RacingView &view,
-                                                            std::size_t slot) noexcept {
-    return RacingLoad::relaxed(view.descriptors + slot);
-  }
-  /// From `slot` on, the first slot that is empty or whose tag is `hash`'s,
-  /// as `probe`, in a view; it gives up after a lap, which only a view a
-  /// writer is changing could need.
-  BBTREE_RACING_READ static std::size_t racing_probe(const RacingView &view, std::uint64_t hash,
-                                                     std::size_t slot) noexcept {
-    const auto wanted = wanted_tag(hash);
-    for (std::size_t probes = 0; probes < view.capacity; ++probes) {
-      const auto tag = RacingLoad::relaxed(view.tags + slot);
-      if (tag == empty_tag || tag == wanted) return slot;
-      slot = (slot + 1) & (view.capacity - 1);
-    }
-    return slot;
-  }
-  BBTREE_RACING_READ static std::uint8_t racing_tag(const RacingView &view, std::size_t slot) noexcept {
-    return RacingLoad::relaxed(view.tags + slot);
-  }
 
   template <class Store, class Q, class Equal>
   std::size_t find(std::uint64_t hash, const Q &key, const Store &store, const Equal &equal) const {
@@ -218,7 +177,7 @@ class HashProbeIndex {
   }
 
   void clear() noexcept {
-    if (descriptors_) allocator_.deallocate(descriptors_ - header_words, layout(capacity_));
+    if (descriptors_) allocator_.deallocate(descriptors_, layout(capacity_));
     descriptors_ = nullptr;
     capacity_ = size_ = deleted_ = 0;
   }
@@ -250,12 +209,10 @@ class HashProbeIndex {
   std::size_t size_ = 0;
   std::size_t deleted_ = 0;
 
-  /// The header line before the descriptors; its last word is the capacity.
-  static constexpr std::size_t header_words = 64 / sizeof(std::uint64_t);
   static constexpr std::uint64_t identifier_mask() noexcept { return (std::uint64_t{1} << 48) - 1; }
   static std::size_t threshold(std::size_t capacity) noexcept { return capacity - capacity / 4; }
   static Layout layout(std::size_t capacity) noexcept {
-    return {header_words * sizeof(std::uint64_t) + capacity * (sizeof(std::uint64_t) + 1), 64};
+    return {capacity * (sizeof(std::uint64_t) + 1), 64};
   }
   /// The tags, after the descriptors in the block.
   std::uint8_t *tags() const noexcept { return reinterpret_cast<std::uint8_t *>(descriptors_ + capacity_); }
@@ -274,10 +231,8 @@ class HashProbeIndex {
   void rebuild(std::size_t capacity, const Store &store) {
     if (capacity == capacity_) return rebuild_in_place(store);
     HashProbeIndex replacement(allocator_);
-    auto *block =
+    replacement.descriptors_ =
         static_cast<std::uint64_t *>(HashAllocation::allocate(allocator_, layout(capacity)));
-    ::new (static_cast<void *>(block + header_words - 1)) std::uint64_t(capacity);
-    replacement.descriptors_ = block + header_words;
     replacement.capacity_ = capacity;
     for (std::size_t slot = 0; slot < capacity; ++slot) {
       ::new (static_cast<void *>(replacement.descriptors_ + slot)) std::uint64_t(0);
@@ -287,9 +242,6 @@ class HashProbeIndex {
       replacement.write_descriptor(replacement.vacant(entry.hash), (entry.hash & ~identifier_mask()) | identifier);
     });
     replacement.size_ = size_;
-    // A racing reader reaches the array through the pointer swapped in: its
-    // header and descriptors are stored before the pointer.
-    std::atomic_thread_fence(std::memory_order_release);
     swap(replacement);
   }
 

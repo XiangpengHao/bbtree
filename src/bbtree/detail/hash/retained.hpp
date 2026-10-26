@@ -1,11 +1,10 @@
 // Blocks a shared hash map's shard lets go of while threads share it. An
-// optimistic reader follows the pointers to the shard's index array and page
-// directory without a latch and checks what it read only afterwards, as the
-// latched tree's readers do (`latched/pages.hpp`): so an array or directory
-// the shard replaced must stay readable until the map is destroyed. Only
-// growth replaces them, doubling, so what the shard keeps is smaller than
-// what it uses; pages are never let go of while shared (`BBHashMap::clear`
-// keeps them).
+// optimistic reader follows the pointer to the shard's block without a latch
+// and checks what it read only afterwards, as the latched tree's readers do
+// (`latched/pages.hpp`): so a block the shard replaced must stay readable
+// until the map is destroyed. Only growth replaces it, doubling, so what the
+// shard keeps is smaller than what it uses; `BBHashMap::clear` keeps the
+// block it has.
 #pragma once
 
 #include <array>
@@ -48,9 +47,9 @@ class RetainedBlocks {
   };
 
   A allocator_;
-  // Each block is one doubling of an index (from 16 slots) or a directory
-  // (from 4 pages): fewer than 48 of each before identifiers run out.
-  std::array<Block, 96> blocks_{};
+  // Each block is one doubling of a shard's table, from 16 slots: fewer than
+  // 64 before its size overflows.
+  std::array<Block, 64> blocks_{};
   std::size_t count_ = 0;
   bool retaining_ = true;
 };

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "bbtree/hash_map.hpp"
@@ -244,6 +245,82 @@ TEST(shared_hash_map_callback_exception_releases_lock) {
   const auto copied = map.get_copied(1);
   CHECK_EQ(*copied, 3);
   CHECK(map.remove(1));
+}
+
+// A shard's table moves its entries: growing, and closing the hole a
+// removal leaves (Algorithm R). Checked against std::unordered_map on one
+// shard, with a hash that sends every eighth key to the same slot, so that
+// probe runs are long and wrap, and with an ordinary one; values are strings,
+// so that the sanitizers see every move and destruction.
+template <class Hasher>
+void check_against_unordered_map(std::uint64_t seed) {
+  bbtree::BBHashMap<std::uint64_t, std::string, Hasher, std::equal_to<>, bbtree::Global, 1> map;
+  std::unordered_map<std::uint64_t, std::string> model;
+  bbtree_test::Rng rng(seed);
+  for (int step = 0; step < 60000; ++step) {
+    const std::uint64_t key = rng.below(4000);
+    const std::uint64_t choice = rng.below(100);
+    if (choice < 45) {
+      const auto value = std::to_string(step);
+      auto inserted = map.insert(key, value);
+      CHECK(inserted.ok());
+      auto at = model.find(key);
+      CHECK_EQ(inserted.value().has_value(), at != model.end());
+      if (at != model.end()) {
+        CHECK(*inserted.value() == at->second);
+        at->second = value;
+      } else {
+        model.emplace(key, value);
+      }
+    } else if (choice < 80) {
+      const auto removed = map.remove(key);
+      auto at = model.find(key);
+      CHECK_EQ(removed.has_value(), at != model.end());
+      if (at != model.end()) {
+        CHECK(*removed == at->second);
+        model.erase(at);
+      }
+    } else if (choice < 85) {
+      const auto removed = map.remove_if(key, [](const std::uint64_t &, const std::string &value) {
+        return value.size() % 2 == 0;
+      });
+      auto at = model.find(key);
+      const bool expected = at != model.end() && at->second.size() % 2 == 0;
+      CHECK_EQ(removed.has_value(), expected);
+      if (expected) model.erase(at);
+    } else {
+      const auto copied = map.get_copied(key);
+      auto at = model.find(key);
+      CHECK_EQ(copied.has_value(), at != model.end());
+      if (copied) CHECK(*copied == at->second);
+    }
+    if (step % 5000 == 0) {
+      map.check_invariants();
+      CHECK_EQ(map.size(), model.size());
+    }
+  }
+  map.check_invariants();
+  std::size_t visited = 0;
+  map.for_each([&](const std::uint64_t &key, const std::string &value) {
+    CHECK(model.at(key) == value);
+    ++visited;
+  });
+  CHECK_EQ(visited, model.size());
+  map.clear();
+  CHECK(map.empty());
+  map.check_invariants();
+}
+
+struct EighthsCollide {
+  std::uint64_t operator()(std::uint64_t key) const noexcept { return key % 8; }
+};
+
+TEST(shared_hash_map_agrees_with_unordered_map_on_colliding_keys) {
+  check_against_unordered_map<EighthsCollide>(1);
+}
+
+TEST(shared_hash_map_agrees_with_unordered_map) {
+  check_against_unordered_map<bbtree::Hash<std::uint64_t>>(2);
 }
 
 // Keys and values that copy as bytes are read without a latch. Readers race

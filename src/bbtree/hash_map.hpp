@@ -1,5 +1,6 @@
-// A shared map over the same paged hash table as unsync::BBHashMap, in
-// shards, each behind a latch the tree's nodes use too (`node/latch.hpp`).
+// A shared hash map in shards, each an inline-slot table
+// (`detail/hash/inline_table.hpp`) behind a latch the tree's nodes use too
+// (`node/latch.hpp`).
 // Writers hold their shard's latch exclusively, bumping its version. Readers
 // of keys and values that copy as bytes write nothing: they read the version,
 // look the key up without the latch, copying the entry they find, and check
@@ -17,7 +18,7 @@
 #include <utility>
 
 #include "detail/hash/retained.hpp"
-#include "detail/hash/table.hpp"
+#include "detail/hash/inline_table.hpp"
 #include "detail/node/latch.hpp"
 #include "detail/racing_copy.hpp"
 #include "hash.hpp"
@@ -31,7 +32,7 @@ class BBHashMap {
   static_assert(ShardCount != 0 && (ShardCount & (ShardCount - 1)) == 0 && ShardCount <= 65536,
                 "BBHashMap shard count must be a power of two, at most 65536");
 
-  using Table = detail::HashTable<K, V, detail::RetainingAllocator<A>>;
+  using Table = detail::InlineHashTable<K, V, detail::RetainingAllocator<A>>;
   using Entry = typename Table::Entry;
 
   /// Readers that copy entries as bytes, and so never hold a latch.
@@ -199,7 +200,7 @@ class BBHashMap {
   void for_each(Visit visit) const {
     for (auto &shard : shards_) {
       SharedShard held(shard);
-      for (auto [key, value] : std::as_const(shard.table)) visit(key, value);
+      shard.table.for_each(visit);
     }
   }
 
@@ -210,7 +211,7 @@ class BBHashMap {
   void clear() const {
     for (auto &shard : shards_) {
       ExclusiveShard held(shard);
-      shard.table.clear_retain_capacity();
+      shard.table.clear();
     }
   }
 
@@ -296,10 +297,7 @@ class BBHashMap {
       if (optimistic[lane]) lookups[lane].load_tag(shards[lane]->table, hashes[lane]);
     }
     for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].load_descriptor(hashes[lane]);
-    }
-    for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].load_entry_hash(shards[lane]->table, hashes[lane]);
+      if (optimistic[lane]) lookups[lane].load_hash(hashes[lane]);
     }
     for (size_type lane = 0; lane < width; ++lane) {
       hits[lane] = optimistic[lane] && lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane],
