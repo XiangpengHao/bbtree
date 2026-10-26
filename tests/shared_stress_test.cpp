@@ -363,13 +363,11 @@ struct BudgetAlloc {
     std::size_t cur = state->in_use.load(std::memory_order_relaxed);
     while (cur < limit) {
       if (state->in_use.compare_exchange_weak(cur, cur + 1, std::memory_order_acq_rel)) {
-        std::size_t align = layout.align < sizeof(void*) ? sizeof(void*) : layout.align;
-        void* block = nullptr;
-        if (posix_memalign(&block, align, layout.size) != 0 || block == nullptr) {
+        void* block = shoal::Global{}.allocate_zeroed(layout);
+        if (block == nullptr) {
           state->in_use.fetch_sub(1, std::memory_order_relaxed);
           return nullptr;
         }
-        std::memset(block, 0, layout.size);
         std::lock_guard<std::mutex> lock(state->mu);
         CHECK(state->live.insert(block).second);
         return block;
@@ -378,14 +376,14 @@ struct BudgetAlloc {
     return nullptr;
   }
 
-  void deallocate(void* block, Layout) noexcept {
+  void deallocate(void* block, Layout layout) noexcept {
     if (block == nullptr) return;
     {
       std::lock_guard<std::mutex> lock(state->mu);
       CHECK_EQ(state->live.erase(block), 1u);
     }
     state->in_use.fetch_sub(1, std::memory_order_relaxed);
-    std::free(block);
+    shoal::Global{}.deallocate(block, layout);
   }
 };
 

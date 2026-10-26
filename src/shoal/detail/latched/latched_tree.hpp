@@ -731,9 +731,8 @@ class LatchedTree {
   SHOAL_ALWAYS_INLINE LeafOutcome<typename Policy::Output> try_append(
       K& key, V& value, Policy& policy, std::optional<Layout>& refused) const noexcept {
     using Output = typename Policy::Output;
-    // Not const. Returning this moves it, and a move-only value (a `unique_ptr`,
-    // D7) makes `LeafOutcome` movable but not copyable. A const local would
-    // be copied on return, so `insert` would not compile for that value.
+    // Not const: a const local is copied on return, and a move-only value
+    // (D7) makes the outcome move-only.
     LeafOutcome<Output> not_appended = LeafOutcome<Output>::refused(Layout{0, 0});
     const Ptr last = Ptr::from_tagged(rightmost_leaf_.value.load(std::memory_order_acquire));
     if (last.is_null()) return not_appended;
