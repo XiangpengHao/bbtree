@@ -756,6 +756,42 @@ fn copied_firsts_from_outside_the_shared_prefix_race_a_shrink() {
     });
 }
 
+/// Copied firsts from a separator key while the key is removed and its
+/// successor becomes the leaf's head: a first whose bound matched the
+/// separator confirms the head it reads, and one that excludes the bound
+/// must not skip the new head, which is present throughout.
+#[test]
+fn copied_firsts_at_a_separator_race_its_removal() {
+    let shapes = PlainShapes::probe();
+    Exploration {
+        random: 20_000,
+        pct: 20_000,
+    }
+    .run(move || {
+        let len = 2 * shapes.capacity;
+        let mut map = plain_map_of(len);
+        let leaf = map.leaf_keys()[1].clone();
+        assert!(leaf.len() >= 3, "a second leaf of a few keys");
+        let (separator, next) = (leaf[0], leaf[1]);
+        thread::scope(|scope| {
+            scope.spawn(|| assert!(map.remove(&separator).is_some()));
+            scope.spawn(|| {
+                assert_eq!(
+                    map.first_copied((Bound::Excluded(separator), Bound::Unbounded)),
+                    Some((next, next))
+                );
+                let found = map.first_copied(separator..);
+                assert!(
+                    found == Some((separator, separator)) || found == Some((next, next)),
+                    "{found:?} from {separator}"
+                );
+                assert_eq!(map.first_copied(next..), Some((next, next)));
+            });
+        });
+        map.check_invariants(len as usize - 1);
+    });
+}
+
 /// Appends while a removal merges the last leaf into its sibling, frees it,
 /// and lowers the tree into the root leaf: an append that read the pointer
 /// to the last leaf before must not insert into the freed page.

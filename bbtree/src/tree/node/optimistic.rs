@@ -626,19 +626,6 @@ impl<K, V> RacingEntry<K, V> {
             )
         }
     }
-
-    /// The key and value read, in place: a scan over many copies reads them
-    /// where they are instead of moving each out.
-    ///
-    /// # Safety
-    ///
-    /// As [`Self::assume_read`].
-    #[inline(always)]
-    pub(in crate::tree) unsafe fn assume_read_ref(&self) -> (&K, &V) {
-        // SAFETY: the slots held the entry's key and value throughout the
-        // read (caller).
-        unsafe { (self.key.assume_init_ref(), self.value.assume_init_ref()) }
-    }
 }
 
 /// One of the reads above, while it lasts: a TSan build (`--cfg tsan`,
