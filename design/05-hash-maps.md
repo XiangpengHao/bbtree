@@ -49,27 +49,31 @@ at a time, but a single key tests its home tag alone first (D27).
 Descriptors stay the truth; every write of one writes its tag
 (`HashProbeIndex::write_descriptor`).
 
-`bench/hash_bench.cpp` times it, at 0.69 load, one run each (M4 Pro,
-ns a key): the walk a tag at a time it replaced (`eb7fcdc`), word groups
-for every probe, and groups after the home tag for a single key, as now.
+A batch probes in steps (D28): every key's tags, then, in the loop that
+reads candidates, each key's descriptor where its tag matched, so that the
+keys' waits for tags overlap, then their waits for descriptors.
 
-| entries | operation | tag at a time | groups only | now |
+`bench/hash_bench.cpp` times it, at 0.69 load, one pass, one run each (M4
+Pro, ns a key): the walk a tag at a time it replaced (`eb7fcdc`), word
+groups in one step for every probe, and now.
+
+| entries | operation | tag at a time | groups, one step | now |
 |---|---|---:|---:|---:|
-| 90k, in cache | insert | 18.1 | 16.2 | 16.3 |
-| | hit | 8.1 | 4.6 | 6.4 |
-| | miss | 13.0 | 5.0 | 8.0 |
-| | 64-key hit | 8.7 | 5.1 | 5.4 |
-| | 64-key miss | 12.4 | 5.2 | 5.1 |
-| 11.5M, out of cache | insert | 61.0 | 53.1 | 56.1 |
-| | hit | 23.5 | 35.2 | 24.4 |
-| | miss | 46.3 | 8.6 | 13.1 |
-| | 64-key hit | 23.5 | 31.0 | 32.0 |
-| | 64-key miss | 40.5 | 10.5 | 10.9 |
+| 90k, in cache | insert | 18.0 | 16.4 | 15.6 |
+| | hit | 8.1 | 4.5 | 6.2 |
+| | miss | 13.3 | 4.9 | 8.1 |
+| | 64-key hit | 8.7 | 5.0 | 4.8 |
+| | 64-key miss | 12.8 | 5.4 | 5.4 |
+| 11.5M, out of cache | insert | 56.5 | 54.3 | 56.0 |
+| | hit | 22.2 | 33.9 | 23.1 |
+| | miss | 38.2 | 8.4 | 13.0 |
+| | 64-key hit | 23.2 | 30.4 | 23.2 |
+| | 64-key miss | 41.3 | 10.0 | 10.1 |
 
-Out of cache, 64-key hits stay a third slower than the byte walk: each
-key's descriptor waits for its tags, and the batch overlaps fewer keys
-than that wait costs. Splitting the batch's tag step from its descriptor
-step, as the shared map's bulk read does (D28), is the next step.
+A single key's hit costs a little in cache for the home tag's branch
+(D27), which out of cache saves a third. A miss that walked the tags a
+byte at a time mispredicted where its cluster ended, and threw away the
+loads after; a group's test ends where no branch has to guess.
 
 Entries hold the full mixed hash, `K` and `V`. Pages hold at most 64
 entries and aim for 4 KiB when entry size permits; oversized entries get
@@ -328,11 +332,20 @@ it, while the tags lose about a tenth: a hit loads its tag word before
 its descriptor, where the descriptor walk loads one word that holds the
 fingerprint. `tiny_groups` never reaches the index and is the control.
 
-`HashIndex` probes only in batches, so it reads groups from the first
-tag (D27). With the home tag tested first in every probe instead, in a
-pass of its own on a busier machine, `large_groups` at one thread took
-23.8–24.8 ms against 19.6–21.6 for groups only and 29.8–32.4 for the
-pointer table, and 5M groups 125–160 against 113–130 and 191–206.
+`HashIndex` probes only in batches: by groups from the first tag (D27),
+every row's tags before any descriptor (D28). The table above probes each
+row's tags and descriptor in one step. None of its cells holds hits in an
+index out of cache, where that one step costs most: 20M rows of
+`hash(range) % 2000000` into their 2M groups, `count(*)`, `min` and `max`,
+took 361–390 ms at one thread, against the pointer table's 294–313; in
+steps, 265–306. At eight threads, each thread's index stays small and the
+three took 45–59 ms alike. In the same pass on the cells above, steps cost
+at most a few percent (`medium_groups` 66.6–68.6 against 64.3–67.9 ms).
+
+With the home tag tested first in every probe instead, in a pass of its
+own on a busier machine, `large_groups` at one thread took 23.8–24.8 ms
+against 19.6–21.6 for groups only and 29.8–32.4 for the pointer table,
+and 5M groups 125–160 against 113–130 and 191–206.
 
 ## Verification
 

@@ -70,6 +70,41 @@ TEST(external_duplicates_collisions_and_tiles) {
     CHECK_EQ(rows.stored.size(), 37u);
   }
 }
+// All keys share a home, five fingerprints between them, and come new in one
+// batch: a row's empty slot is taken by an earlier row's claim of the same
+// round, of its fingerprint (a candidate) or another, past which it probes on
+// instead of reaching `compare`.
+TEST(claims_of_one_round_send_later_rows_on) {
+  std::vector<unsigned> keys, stored;
+  for (unsigned i = 0; i < 300; ++i) keys.push_back(i % 23);
+  const auto hash_of_key = [](unsigned key) { return (std::uint64_t{key % 5 + 1} << 48) | 3; };
+  const auto hash_at = [&](std::uint32_t row) { return hash_of_key(keys[row]); };
+  const auto stored_hash = [&](std::uint64_t handle) { return hash_of_key(stored[handle - 1]); };
+  const auto compare = [&](std::uint32_t *rows, std::size_t count, std::uint64_t *results,
+                           std::uint32_t *rejected) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+      CHECK_EQ(hash_of_key(stored[results[rows[i]] - 1]) >> 48, hash_at(rows[i]) >> 48);
+      if (keys[rows[i]] != stored[results[rows[i]] - 1]) rejected[n++] = rows[i];
+    }
+    return n;
+  };
+  const auto create = [&](const std::uint32_t *rows, std::size_t count, std::uint64_t *handles) {
+    for (std::size_t i = 0; i < count; ++i) {
+      stored.push_back(keys[rows[i]]);
+      handles[i] = stored.size();
+    }
+  };
+  std::vector<std::uint64_t> results(keys.size());
+  Index index;
+  Index::ProbeState scratch;
+  index.find_or_create_many(scratch, keys.size(), hash_at, stored_hash, compare, create, results.data());
+  CHECK_EQ(index.size(), 23u);
+  CHECK_EQ(stored.size(), 23u);
+  for (std::size_t i = 0; i < keys.size(); ++i) CHECK_EQ(stored[results[i] - 1], keys[i]);
+  index.check_invariants(stored_hash);
+}
+
 TEST(claim_rollback_and_empty_lookup) {
   Index index;
   Index::ProbeState scratch;
