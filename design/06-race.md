@@ -49,24 +49,25 @@ bouncing-ball chart; the README shows three runs, their CSVs in
 ## Results
 
 MacBook Pro M4 Pro (10 performance and 4 efficiency cores), one clean run
-each (no swapping), millions of lookups per second.
+each (no swapping out), millions of lookups per second, after D28's
+select was kept a conditional move (`b1ca9c8`).
 
 | | 14 threads, 50% hit | 1 thread, 50% hit | 14 threads, 90% hit |
 |---|--:|--:|--:|
-| shoal `HashMap`, bulk | **469.7** | **43.1** | **416.2** |
-| shoal `HashMap`, one key | **306.1** | 25.2 | **225.4** |
-| Boost `concurrent_flat_map`, bulk | 427.1 | 42.3 | 291.8 |
-| oneTBB `concurrent_hash_map` | 144.1 | 10.5 | 125.1 |
-| folly `ConcurrentHashMap` | 135.1 | 12.1 | 122.4 |
-| oneTBB `concurrent_unordered_map` | 65.0 | 4.4 | 66.1 |
-| `absl::flat_hash_map` + lock | 6.4 | 17.8 | 5.7 |
-| `std::unordered_map` + lock | 3.8 | 6.2 | 3.8 |
-| shoal `TreeMap`, bulk | **158.9** | **13.6** | **157.6** |
-| shoal `TreeMap`, one key | **84.5** | **7.3** | **77.5** |
-| oneTBB `concurrent_map` | 8.7 | 0.7 | 6.7 |
-| folly `ConcurrentSkipList` | 8.4 | 0.6 | 7.9 |
-| `absl::btree_map` + lock | 2.2 | 2.4 | 1.9 |
-| `std::map` + lock | 1.5 | 0.8 | 1.4 |
+| shoal `HashMap`, bulk | **471.0** | **45.6** | **442.7** |
+| shoal `HashMap`, one key | **310.2** | 25.1 | **249.8** |
+| Boost `concurrent_flat_map`, bulk | 402.6 | 43.5 | 320.6 |
+| oneTBB `concurrent_hash_map` | 143.4 | 11.1 | 134.7 |
+| folly `ConcurrentHashMap` | 121.7 | 12.4 | 133.7 |
+| oneTBB `concurrent_unordered_map` | 46.3 | 3.5 | 73.1 |
+| `absl::flat_hash_map` + lock | 8.1 | 18.7 | 6.0 |
+| `std::unordered_map` + lock | 4.5 | 6.4 | 3.4 |
+| shoal `TreeMap`, bulk | **152.4** | **14.2** | **171.2** |
+| shoal `TreeMap`, one key | **83.9** | **8.0** | **81.0** |
+| oneTBB `concurrent_map` | 7.6 | 0.7 | 8.1 |
+| folly `ConcurrentSkipList` | 8.5 | 0.7 | 8.6 |
+| `absl::btree_map` + lock | 2.1 | 2.7 | 2.1 |
+| `std::map` + lock | 1.4 | 0.8 | 1.5 |
 
 The full rows are in `bench/race/m4-pro-14-threads.csv`,
 `m4-pro-1-thread.csv` and `m4-pro-14-threads-90-hit.csv`.
@@ -75,18 +76,18 @@ The full rows are in `bench/race/m4-pro-14-threads.csv`,
   writing shared memory (OG-D54, D26): at 14 threads the tree map leads
   its heat 10–18×. On one thread nothing contends and a lock costs
   little: Abseil's locked maps move up (its hash map to third, its B-tree
-  to the tree map's nearest rival, 5.7× behind), and the skip lists fall
+  to the tree map's nearest rival, 5.3× behind), and the skip lists fall
   to the bottom.
 - **Boost and the hit rate.** From 50% to 90% hits Boost's bulk read drops
-  and shoal's barely moves. Boost's `unprotected_bulk_visit`
+  and shoal's moves little. Boost's `unprotected_bulk_visit`
   (`boost/unordered/detail/foa/concurrent_table.hpp`) works in chunks of
   16 keys, and takes the group's lock shared for each key whose group
   holds a candidate: every hit writes shared memory, the write that sank
-  shoal's own map behind `shared_mutex`. More hits, more writes: −12% on
-  one thread (each write's barrier), −25% at 14 (the lock's line pulled
-  between cores). shoal's readers write nothing for a hit or a miss: −2%
-  at 14 threads, and +10% on one, where hits and misses run the same
-  instructions (D28) and the extra slot reads overlap.
+  shoal's own map behind `shared_mutex`. More hits, more writes, back to
+  back: −14% on one thread (each write's barrier), −26% at 14 (the lock's
+  line pulled between cores). shoal's readers write nothing for a hit or
+  a miss: +4% at 14 threads, −6% on one, where hits and misses run the
+  same instructions (D28) and only a hit reads its slot from memory.
 - **Cached workloads.** With every key in cache (100K keys, one thread)
   shoal's bulk read leads Boost's too: 120 against 110 M/s at 50% hits,
   164 against 158 at 90%. It trailed (80 against 99) until the select
@@ -97,10 +98,11 @@ The full rows are in `bench/race/m4-pro-14-threads.csv`,
 
 - **Ratios, not absolutes, across runs.** The same maps measured on
   another day under a load of 5 ran 7–13% lower (409 against 470 for
-  shoal's bulk hash map), both maps alike. "427 → 292" for Boost compares
-  two runs and two binaries (the 50% run predates the `hit_percent`
-  option, whose generator picks hits differently): back to back, the drop
-  is 25%, not 32%, and shoal leads by 40% at 90% hits (400 against 285).
+  shoal's bulk hash map), both maps alike. Boost's bulk read moves more
+  from run to run than shoal's: over four runs of one binary at 14
+  threads and 50% hits, Boost 403–433, shoal 448–474, shoal ahead by
+  5–17%. The table's "403 → 321" for Boost compares two runs; back to
+  back, its drop is 26%.
 - **A quiet machine.** Runs under memory pressure took 9 and 16 minutes
   instead of one, with rows at 0.0 M/s; a run is kept only with no swap
   activity over it, the load average low.

@@ -38,40 +38,44 @@ Millions of lookups per second:
 
 | tree maps (ordered) | M ops/s |
 |---|--:|
-| shoal `TreeMap`, bulk (`get_many_copied`, 64 keys a call) | **158.9** |
-| shoal `TreeMap` (`get_copied`) | **84.5** |
-| oneTBB `tbb::concurrent_map` (skip list) | 8.7 |
-| folly `ConcurrentSkipList` | 8.4 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 2.2 |
-| `std::map` + `std::shared_mutex` | 1.5 |
+| shoal `TreeMap`, bulk (`get_many_copied`, 64 keys a call) | **152.4** |
+| shoal `TreeMap` (`get_copied`) | **83.9** |
+| folly `ConcurrentSkipList` | 8.5 |
+| oneTBB `tbb::concurrent_map` (skip list) | 7.6 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
+| `std::map` + `std::shared_mutex` | 1.4 |
 
 | hash maps (unordered) | M ops/s |
 |---|--:|
-| shoal `HashMap`, bulk (`get_many_copied`, 64 keys a call) | **469.7** |
-| shoal `HashMap` (`get_copied`) | **306.1** |
-| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 427.1 |
-| oneTBB `tbb::concurrent_hash_map` | 144.1 |
-| folly `ConcurrentHashMap` | 135.1 |
-| oneTBB `tbb::concurrent_unordered_map` | 65.0 |
-| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 6.4 |
-| `std::unordered_map` + `std::shared_mutex` | 3.8 |
+| shoal `HashMap`, bulk (`get_many_copied`, 64 keys a call) | **471.0** |
+| shoal `HashMap` (`get_copied`) | **310.2** |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 402.6 |
+| oneTBB `tbb::concurrent_hash_map` | 143.4 |
+| folly `ConcurrentHashMap` | 121.7 |
+| oneTBB `tbb::concurrent_unordered_map` | 46.3 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 8.1 |
+| `std::unordered_map` + `std::shared_mutex` | 4.5 |
 
-shoal leads both heats: its tree map by 10–18×, its hash map by 10% over
-Boost's in bulk and 2× over the rest one key at a time. Readers of both
-shoal maps write nothing shared: they check a version after reading
+shoal leads both heats: its tree map by 10–18×, its hash map by 17% over
+Boost's in bulk (5–17% over four runs of the same binary) and 2× over the
+rest one key at a time. Readers of both shoal maps write nothing shared: they check a version after reading
 ([design/05-hash-maps.md](design/05-hash-maps.md)). The UUID hash declares `is_avalanching`, which
 both shoal and Boost read as leave to use it unmixed.
 
 On one thread nothing contends, and a locked map's lock costs it little:
-shoal's hash map in bulk runs level with Boost's (43.1 against 42.3 M/s),
-one key at a time ahead of every other (25.2), and its tree map leads
-Abseil's B-tree 5.7× (13.6 against 2.4):
+shoal's hash map in bulk runs 5% ahead of Boost's (45.6 against 43.5
+M/s), one key at a time ahead of every other (25.1), and its tree map
+leads Abseil's B-tree 5.3× (14.2 against 2.7):
 
 ![shoal against C++ maps: lookups on one thread on a MacBook Pro M4 Pro](assets/readme-race-1-thread.svg)
 
+With every key in cache (100K keys), shoal's hash map in bulk leads
+Boost's too: 120 against 110 M/s, 164 against 158 with 90% found
+([design/06-race.md](design/06-race.md)).
+
 With 90% of the lookups finding their key, every hit reads its slot:
-shoal's hash map in bulk leads Boost's by 43% (416 against 292 M/s), and
-its tree map holds its lead (158 against folly's 7.9):
+shoal's hash map in bulk leads Boost's by 38% (443 against 321 M/s), and
+its tree map holds its lead (171 against folly's 8.6):
 
 ![shoal against C++ concurrent maps: lookups at 14 threads, 90% present, on a MacBook Pro M4 Pro](assets/readme-race-90-hit.svg)
 
