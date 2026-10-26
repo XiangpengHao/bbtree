@@ -369,6 +369,15 @@ time instead. In the paged table descriptors stay the truth and every
 write of one writes its tag, but for a claim's commit: its claim already
 wrote the entry's tag, and the fingerprint does not change.
 
+The paged table's lookup of one key tests its home tag alone first, by a
+branch, and only then reads groups. A slot found in a group is a value
+computed from the tags, so its descriptor's load waits for theirs; a
+predicted branch lets that load start beside the tag's, which overlaps
+two cache misses where an index is out of cache. A batch overlaps its
+keys' loads already, and probes by groups from the first: there the
+branch only mispredicts. With the branch in every probe, `HashIndex`
+under DuckDB lost a third of its win on new groups (doc 05).
+
 **D28. Bulk reads go in steps, and branch on no outcome.** (2026-10-26)
 `get_many_copied` reads 64 keys a call, each step for every key before the
 next, so that their waits for memory overlap without prefetching: every

@@ -89,6 +89,17 @@ class HashProbeIndex {
       slot = scan_tags(next(slot), stops, first_stop);
     return slot;
   }
+  /// `probe` from `hash`'s home, for one key at a time: the home tag first,
+  /// alone, by a branch (D27). Predicted, the branch lets the home
+  /// descriptor's load start beside the tag's, where a slot found in a group
+  /// is known only once its tags arrive. A batch overlaps its keys' loads
+  /// instead, and the branch would only mispredict there.
+  std::size_t probe_home(std::uint64_t hash) const noexcept {
+    const auto slot = home(hash);
+    const auto first = tag(slot);
+    if (first == empty_tag || (first == wanted_tag(hash) && fingerprint(slot) == hash >> 48)) return slot;
+    return probe(hash, slot);
+  }
   std::size_t home(std::uint64_t hash) const noexcept {
     return static_cast<std::size_t>(hash) & (capacity_ - 1);
   }
@@ -97,7 +108,7 @@ class HashProbeIndex {
   template <class Store, class Q, class Equal>
   std::size_t find(std::uint64_t hash, const Q &key, const Store &store, const Equal &equal) const {
     if (capacity_ == 0) return capacity_;
-    for (auto slot = probe(hash, home(hash)); tag(slot) != empty_tag; slot = probe(hash, next(slot)))
+    for (auto slot = probe_home(hash); tag(slot) != empty_tag; slot = probe(hash, next(slot)))
       if (equal(store.at(identifier(slot)).key, key)) return slot;
     return capacity_;
   }

@@ -44,9 +44,32 @@ empty descriptor.
 A slot also has a tag (D27), a byte beside the descriptors in the same
 block: empty, deleted, or occupied with the hash's top seven bits. Lookups
 walk the tags (a ninth of the index's bytes) and read a descriptor only
-where the tag matches, so a miss reads no descriptor. Descriptors stay the
-truth; every write of one writes its tag
+where the tag matches, so a miss reads no descriptor. Tags are read eight
+at a time, but a single key tests its home tag alone first (D27).
+Descriptors stay the truth; every write of one writes its tag
 (`HashProbeIndex::write_descriptor`).
+
+`bench/hash_bench.cpp` times it, at 0.69 load, one run each (M4 Pro,
+ns a key): the walk a tag at a time it replaced (`eb7fcdc`), word groups
+for every probe, and groups after the home tag for a single key, as now.
+
+| entries | operation | tag at a time | groups only | now |
+|---|---|---:|---:|---:|
+| 90k, in cache | insert | 18.1 | 16.2 | 16.3 |
+| | hit | 8.1 | 4.6 | 6.4 |
+| | miss | 13.0 | 5.0 | 8.0 |
+| | 64-key hit | 8.7 | 5.1 | 5.4 |
+| | 64-key miss | 12.4 | 5.2 | 5.1 |
+| 11.5M, out of cache | insert | 61.0 | 53.1 | 56.1 |
+| | hit | 23.5 | 35.2 | 24.4 |
+| | miss | 46.3 | 8.6 | 13.1 |
+| | 64-key hit | 23.5 | 31.0 | 32.0 |
+| | 64-key miss | 40.5 | 10.5 | 10.9 |
+
+Out of cache, 64-key hits stay a third slower than the byte walk: each
+key's descriptor waits for its tags, and the batch overlaps fewer keys
+than that wait costs. Splitting the batch's tag step from its descriptor
+step, as the shared map's bulk read does (D28), is the next step.
 
 Entries hold the full mixed hash, `K` and `V`. Pages hold at most 64
 entries and aim for 4 KiB when entry size permits; oversized entries get
@@ -304,6 +327,12 @@ settles at 56–61 ms after its first run and the descriptor walk matches
 it, while the tags lose about a tenth: a hit loads its tag word before
 its descriptor, where the descriptor walk loads one word that holds the
 fingerprint. `tiny_groups` never reaches the index and is the control.
+
+`HashIndex` probes only in batches, so it reads groups from the first
+tag (D27). With the home tag tested first in every probe instead, in a
+pass of its own on a busier machine, `large_groups` at one thread took
+23.8–24.8 ms against 19.6–21.6 for groups only and 29.8–32.4 for the
+pointer table, and 5M groups 125–160 against 113–130 and 191–206.
 
 ## Verification
 
