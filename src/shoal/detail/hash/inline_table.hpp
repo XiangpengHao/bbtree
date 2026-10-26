@@ -178,8 +178,9 @@ class InlineHashTable {
   /// overlap. No step branches on whether the key is there: half the keys
   /// of a lookup mix are absent, and each mispredicted branch would also
   /// throw away the loads of the keys after it. The eight tags from the
-  /// key's home slot; the first of them that matches before an empty one,
-  /// and that slot's cached hash, or `NoEntry`'s; the entry copied and the
+  /// key's home slot; whether they hold a match before an empty one, or
+  /// neither: a key whose tags show it absent stops there; the first
+  /// match's cached hash, or `NoEntry`'s; the entry copied and the
   /// keys compared. A key whose first match was another key's, or whose
   /// eight tags held neither its own nor an empty one, finishes as
   /// `racing_find` does.
@@ -190,11 +191,15 @@ class InlineHashTable {
       home_ = static_cast<std::size_t>(hash) & (view_.capacity - 1);
       group_ = view_.capacity == 0 ? 0 : racing_group(view_, home_);
     }
-    SHOAL_ALWAYS_INLINE void load_hash(std::uint64_t hash, const NoEntry &none) noexcept {
+    /// Whether the key takes the steps after: false if its tags show it absent.
+    SHOAL_ALWAYS_INLINE bool match(std::uint64_t hash) noexcept {
       const TagGroup group(group_, tag_of(hash));
       candidate_ = group.first_match() < group.first_empty();
       overflow_ = group.first_empty() == group_width && group.first_match() == group_width;
       slot_ = (home_ + group.first_match()) & (view_.capacity - 1);
+      return candidate_ | overflow_;
+    }
+    SHOAL_ALWAYS_INLINE void load_hash(const NoEntry &none) noexcept {
       // The slot's address comes before the select, as an integer (a block
       // of no capacity has no slots): with work in one of its arms, clang
       // makes the select a branch (D28).

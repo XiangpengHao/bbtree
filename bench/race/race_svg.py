@@ -2,7 +2,8 @@
 """Draws race_bench's CSV as the README's race, in the style of upstream's
 `OG-design/assets/readme-race.svg`: one bouncing ball per map, in two heats,
 tree maps and hash maps. Each ball's trip takes 0.6 s times the fastest
-map's throughput over its own, so balls compare across heats.
+map's throughput over its own, so balls compare across heats. A gold
+medal marks each heat's fastest map.
 
 usage: race_bench ... | race_svg.py "<machine>" > race.svg
 """
@@ -35,6 +36,8 @@ WIDTH = 760
 ROW = 40
 HEAT_GAP = 30
 TRACK_START, TRACK_END, VALUE_X = 334, 650, 732
+# The medal's center: past the longest label, before the track.
+MEDAL_X = TRACK_START - 26
 CHAR_WIDTH = 11
 STYLE = """  <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; font-weight: 600; fill: #18181b; }
@@ -46,6 +49,9 @@ STYLE = """  <style>
     .highlight { fill: #ffd60a; }
     .track { stroke: #a1a1aa; stroke-width: 3; stroke-linecap: round; }
     .rule { stroke: #d4d4d8; stroke-width: 1.5; stroke-dasharray: 4 6; }
+    .medal-ribbon { fill: #2563eb; }
+    .medal { fill: #f5b301; stroke: #a16207; stroke-width: 1.5; }
+    .medal-rank { font-size: 10px; font-weight: 800; fill: #713f12; text-anchor: middle; }
     .ball { animation: bounce linear infinite alternate; }
     @keyframes bounce { to { transform: translateX(%dpx); } }
   </style>""" % (TRACK_END - TRACK_START - 22)
@@ -88,7 +94,24 @@ class RaceChart:
                         key=lambda row: -float(row["mops"]))
         return ours + theirs
 
-    def row_lines(self, row, y):
+    @staticmethod
+    def winners(rows):
+        """The rows that ran fastest: the heat's gold, ties included."""
+        fastest = max(float(row["mops"]) for row in rows)
+        return [row for row in rows if float(row["mops"]) == fastest]
+
+    @staticmethod
+    def medal_lines(y):
+        """A gold medal on its ribbon, centered on the row's track line."""
+        cy = y - 6
+        return [
+            f'  <path class="medal-ribbon" d="M{MEDAL_X - 6} {cy - 15} h5 l3 8 -3 3 z '
+            f'M{MEDAL_X + 6} {cy - 15} h-5 l-3 8 3 3 z"/>',
+            f'  <circle class="medal" cx="{MEDAL_X}" cy="{cy}" r="8"/>',
+            f'  <text class="medal-rank" x="{MEDAL_X}" y="{cy + 3.5}">1</text>',
+        ]
+
+    def row_lines(self, row, y, winner):
         label, _, ours = LABELS[row["map"]]
         mops = float(row["mops"])
         value = self.value_text(mops)
@@ -110,6 +133,8 @@ class RaceChart:
             f'style="animation-duration: {trip:.2f}s"/>',
             f'  <text class="{value_class}" x="{VALUE_X}" y="{y}">{value}</text>',
         ]
+        if winner:
+            lines += self.medal_lines(y)
         return lines
 
     def svg(self):
@@ -117,12 +142,14 @@ class RaceChart:
         height = 84 + sum(HEAT_GAP + ROW * len(rows) for _, rows in heats) + 16
         summary = ", ".join(f"{LABELS[row['map']][0]} {self.value_text(float(row['mops']))}"
                             for row in self.rows)
+        gold = "; ".join(f"{name}, {' and '.join(LABELS[row['map']][0] for row in self.winners(rows))}"
+                         for name, rows in heats)
         keys = self.keys_text()
         out = [
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" '
             f'viewBox="0 0 {WIDTH} {height}" role="img" aria-label="{self.title_text().capitalize()} '
             f'on {keys}, {escape(self.machine)}, in million operations per second: '
-            f'{escape(summary)}.">',
+            f'{escape(summary)}. Fastest in {escape(gold)}.">',
             "  <!-- bench/race/race_bench.cpp, drawn by bench/race/race_svg.py. -->",
             STYLE,
             f'  <rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="12" '
@@ -137,8 +164,9 @@ class RaceChart:
                 out += ["", f'  <line class="rule" x1="28" y1="{y - 4}" x2="{VALUE_X}" y2="{y - 4}"/>']
             out += ["", f'  <text class="heat" x="28" y="{y + 18}">{escape(name.upper())}</text>']
             y += HEAT_GAP
+            winners = self.winners(rows)
             for row in rows:
-                out += self.row_lines(row, y + 22)
+                out += self.row_lines(row, y + 22, row in winners)
                 y += ROW
         out.append("</svg>")
         return "\n".join(out)
