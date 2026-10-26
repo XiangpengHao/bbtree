@@ -384,6 +384,13 @@ equal`, and a miss's value is written and dropped.
   away the following keys' loads: 78 cycles a key against Boost's 40.
   Branch-free, 46. Merging steps instead saved instructions and cost time
   (27.4 to 19.8 M/s), for the same reason.
+- **Why the slot's address comes before the select:** written as
+  `candidate ? slot : NoEntry`, clang compiled the select to a branch,
+  the slot's address being work in one of its arms (`__builtin_unpredictable`
+  alone didn't stop it). Computed first, as an integer, the select is a
+  conditional move (`SHOAL_UNPREDICTABLE` says so to the compiler as well):
+  cached (100K keys, one thread), 80 to 120 M/s at 50% hits, against
+  Boost's 110; 150 to 164 at 90%, against 158.
 
 **D29. Removal shifts back, no tombstones.** (2026-10-26)
 An inline table's removal shifts the entries after the hole back into it

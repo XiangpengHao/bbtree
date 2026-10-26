@@ -8,6 +8,10 @@
 //   constant must fold into its caller (OG-D41, OG-D47), and where clang
 //   would leave out of line what LLVM inlines of Rust's (D17).
 //   `SHOAL_NOINLINE` and `SHOAL_COLD` are `#[inline(never)]` and `#[cold]`.
+// - `SHOAL_UNPREDICTABLE` marks a condition that a `?:` must select on, as a
+//   conditional move, rather than branch on: clang otherwise turns a select
+//   whose operand costs work into a branch, which mispredicts as often as
+//   the condition is a coin toss.
 #pragma once
 
 #include <cstdio>
@@ -31,6 +35,15 @@
 #define SHOAL_COLD
 #define SHOAL_LIKELY(condition) (condition)
 #define SHOAL_UNLIKELY(condition) (condition)
+#endif
+
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_unpredictable)
+#define SHOAL_UNPREDICTABLE(condition) __builtin_unpredictable(!!(condition))
+#endif
+#endif
+#if !defined(SHOAL_UNPREDICTABLE)
+#define SHOAL_UNPREDICTABLE(condition) (condition)
 #endif
 
 #if defined(__has_feature)

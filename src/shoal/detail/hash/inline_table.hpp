@@ -195,7 +195,13 @@ class InlineHashTable {
       candidate_ = group.first_match() < group.first_empty();
       overflow_ = group.first_empty() == group_width && group.first_match() == group_width;
       slot_ = (home_ + group.first_match()) & (view_.capacity - 1);
-      entry_ = candidate_ ? slot_in(view_, slot_) : none.entry();
+      // The slot's address comes before the select, as an integer (a block
+      // of no capacity has no slots): with work in one of its arms, clang
+      // makes the select a branch (D28).
+      const auto slot_address = slot_address_in(view_, slot_);
+      entry_ = reinterpret_cast<const Entry *>(SHOAL_UNPREDICTABLE(candidate_)
+                                                   ? slot_address
+                                                   : reinterpret_cast<std::uintptr_t>(none.entry()));
       entry_hash_ = racing_hash(entry_);
     }
     template <class Q, class Equal>
@@ -318,6 +324,9 @@ class InlineHashTable {
   }
   static const Entry *slot_in(const RacingView &view, std::size_t slot) noexcept {
     return reinterpret_cast<const Entry *>(view.block + slots_offset(view.capacity)) + slot;
+  }
+  static std::uintptr_t slot_address_in(const RacingView &view, std::size_t slot) noexcept {
+    return reinterpret_cast<std::uintptr_t>(view.block) + slots_offset(view.capacity) + slot * sizeof(Entry);
   }
   /// Eight tags as a word, the first at the low byte, and where in them the
   /// first tag equal to a wanted one and the first empty one are: a zero

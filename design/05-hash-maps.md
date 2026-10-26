@@ -116,8 +116,10 @@ turning the key away. A key whose shard changed is read again on its own.
 No step branches on whether a key is there. A key with no candidate reads
 its hash from, and copies, a zeroed entry (`NoEntry`) in its place; a hit
 is `candidate & hash equal & keys equal`; a miss's value is written and
-dropped. Only a key whose first match was another's, or whose eight tags
-held neither its own nor an empty one, takes a branch, rarely.
+dropped. The compiler must agree: the slot's address is computed before
+the select between it and `NoEntry`, which clang otherwise makes a branch.
+Only a key whose first match was another's, or whose eight tags held
+neither its own nor an empty one, takes a branch, rarely.
 
 ## How the shared map got there
 
@@ -134,6 +136,7 @@ different occasions; each ran next to the one before it.
 | paged, tags before descriptors (D27) | 27.4 | 270.8 | 134.3 |
 | inline slots (D25, D29) | 37.5 | 373.0 | 260.4 |
 | inline, eight tags a word, no branch on the outcome (D27, D28) | 44.6 | 469.7 | 306.1 |
+| the slot's address before the select (D28) | 45.5 | 474.4 | |
 | Boost `concurrent_flat_map` (bulk `cvisit`) | 40.2 | 427.1 | |
 
 Each step answered what the one before it measured:
@@ -161,15 +164,18 @@ Each step answered what the one before it measured:
   mispredicted half the time, and each misprediction threw away the
   following keys' loads too. Branch-free, 46. Merging steps had saved
   instructions and cost time (27.4 to 19.8 M/s) for the same reason.
+- **The select kept (D28).** With every key in cache (100K keys) on one
+  thread, Boost still led, 99 against 80 M/s, and shoal's bulk read at
+  50% hits ran half as fast as at 90%: the outcome branch was back. clang had
+  compiled `candidate ? slot : NoEntry` to a branch, the slot's address
+  being work in one arm. Computed before the select, the address leaves a
+  conditional move: 80 to 120 M/s cached at 50% hits (Boost 110), 150 to
+  164 at 90% (Boost 158); uncached, 43.8 to 45.5 on one thread and 457 to
+  474 at 14, back to back with the binary before.
 
 A policy that declares `is_avalanching` is used unmixed (D30): the race's
 UUID hash declares it, and both shoal's and Boost's maps skip their mix
 for it.
-
-Open: with every key in cache (100K keys) on one thread, the bulk read
-costs 127 instructions and 46 cycles a key against Boost's 85 and 40 (90
-against 107 M/s): what is left is the shard, its version checked twice,
-and the bulk read's passes.
 
 ## API and ownership
 

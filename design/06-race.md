@@ -87,6 +87,11 @@ The full rows are in `bench/race/m4-pro-14-threads.csv`,
   between cores). shoal's readers write nothing for a hit or a miss: −2%
   at 14 threads, and +10% on one, where hits and misses run the same
   instructions (D28) and the extra slot reads overlap.
+- **Cached workloads.** With every key in cache (100K keys, one thread)
+  shoal's bulk read leads Boost's too: 120 against 110 M/s at 50% hits,
+  164 against 158 at 90%. It trailed (80 against 99) until the select
+  that skips a miss's slot read compiled to a conditional move rather than
+  a branch (D28).
 
 ## Reading these numbers (D31)
 
@@ -102,7 +107,4 @@ The full rows are in `bench/race/m4-pro-14-threads.csv`,
 
 ## Open
 
-- **Cached workloads:** with every key in cache (100K keys) on one thread,
-  Boost's bulk read is faster (107 against 90 M/s): shoal's sharding and
-  its version checked twice (05-hash-maps.md).
 - **One machine:** no x86 runs, no MSVC runs.
