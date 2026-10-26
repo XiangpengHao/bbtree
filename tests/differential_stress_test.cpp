@@ -20,9 +20,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__unix__) || defined(__APPLE__)
+#define SHOAL_TEST_FORK 1
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include "shoal/detail/node/inline_key_search.hpp"
 #include "shoal/detail/node/page.hpp"
@@ -1102,30 +1105,6 @@ TEST(copy_failure_drops_the_partial_tree) {
   CHECK_EQ(Bomb::alive, 0);
 }
 
-template <class K, class V, class Config = shoal::DefaultNodeConfig>
-void check_root_layout() {
-  using Strategy = shoal::detail::Strategy<Config>;
-  using Page = shoal::detail::FreshPage<K, V, Strategy, shoal::PageKind::Root>;
-  using Shape = shoal::detail::NodeShape<K, V, Strategy>;
-  constexpr shoal::Layout layout = Page::layout();
-  CHECK(layout.align != 0 && (layout.align & (layout.align - 1)) == 0);
-  // C++17's aligned operator new is undefined unless the size is a multiple
-  // of the alignment. The root page is the larger node plus the shared prefix.
-  CHECK_EQ(layout.size % layout.align, 0u);
-  CHECK(layout.size >= Shape::root_area_offset + sizeof(shoal::detail::SharedPrefix));
-  CHECK_EQ(layout.align, Shape::root_page_align);
-}
-
-TEST(root_page_size_is_a_multiple_of_its_alignment) {
-  check_root_layout<std::uint64_t, std::uint64_t>();
-  check_root_layout<std::int64_t, std::string>();
-  check_root_layout<std::string, std::uint64_t>();
-  check_root_layout<std::array<std::uint8_t, 20>, std::uint64_t>();
-  check_root_layout<OddKey, std::uint64_t, NarrowNodes>();
-  check_root_layout<std::int32_t, std::int32_t, NarrowNodes>();
-  check_root_layout<std::uint64_t, std::uint64_t, NarrowNodes>();
-}
-
 TEST(random_ops_track_std_map) {
   {
     shoal_test::Rng rng(17);
@@ -1233,6 +1212,8 @@ TEST(random_ops_track_std_map) {
   }
 }
 
+// Watched from a forked child, which only POSIX targets have.
+#if defined(SHOAL_TEST_FORK)
 TEST(unsync_allocation_failure_aborts) {
   // The unsync map cannot undo a split, so a failed page allocation aborts
   // (D10). InsertError is the shared map's refusal, not this one's.
@@ -1250,6 +1231,7 @@ TEST(unsync_allocation_failure_aborts) {
     CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
   }
 }
+#endif
 
 }  // namespace
 

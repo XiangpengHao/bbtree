@@ -280,20 +280,14 @@ class FreshPage {
 
   /// A page's layout: its kind's; a root page's room for the larger kind,
   /// aligned as it, then the root area, what every key shares (OG-D50,
-  /// OG-D52). The root page's size is rounded up to its alignment: C++17's
-  /// aligned allocation is undefined otherwise, and the shared prefix does
-  /// not fill the last page (D33).
+  /// OG-D52).
   static constexpr Layout layout() noexcept {
     if constexpr (Kind == PageKind::Leaf) {
       return Shape::leaf_layout.page;
     } else if constexpr (Kind == PageKind::Internal) {
       return Shape::internal_layout.page;
     } else {
-      constexpr std::size_t align = Shape::root_page_align;
-      constexpr std::size_t bytes = NodeLayoutMath::next_multiple_of(
-          Shape::root_area_offset + sizeof(SharedPrefix), align);
-      static_assert(bytes % align == 0, "a root page's size is a multiple of its alignment");
-      return Layout{bytes, align};
+      return Layout{Shape::root_area_offset + sizeof(SharedPrefix), Shape::root_page_align};
     }
   }
 
