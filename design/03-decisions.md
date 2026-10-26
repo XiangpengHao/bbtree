@@ -360,11 +360,23 @@ with the shard held shared.
 Both tables keep a byte a slot, in front of what they probe: empty (and,
 in the paged table, deleted), or occupied with the hash's top seven bits.
 A lookup reads a descriptor or slot only where the tag matches, so a miss
-reads none. The inline table reads its tags eight at a time as one word
-(the first seven cloned past the last, so that a group never wraps), and
-a zero-byte test finds the first match and the first empty one. In the
-paged table descriptors stay the truth and every write of one writes its
-tag.
+reads none; `HashIndex` probes the paged table's index the same way. Both
+read their tags eight at a time as one word (`TagGroup`), where a
+zero-byte test finds the first match and the first empty one. The inline
+table clones its first seven tags past the last, so that a group never
+wraps; the paged table reads the last seven before its end a byte at a
+time instead. In the paged table descriptors stay the truth and every
+write of one writes its tag, but for a claim's commit: its claim already
+wrote the entry's tag, and the fingerprint does not change.
+
+The paged table's lookup of one key tests its home tag alone first, by a
+branch, and only then reads groups. A slot found in a group is a value
+computed from the tags, so its descriptor's load waits for theirs; a
+predicted branch lets that load start beside the tag's, which overlaps
+two cache misses where an index is out of cache. A batch overlaps its
+keys' loads already, in steps (D28), and probes by groups from the first:
+there the branch only mispredicts. With the branch in every probe, `HashIndex`
+under DuckDB lost a third of its win on new groups (doc 05).
 
 **D28. Bulk reads go in steps, and branch on no outcome.** (2026-10-26)
 `get_many_copied` reads 64 keys a call, each step for every key before the
@@ -379,6 +391,14 @@ list's end and moving the end by whether it goes on; a key with eight full
 tags and no match reads a zeroed `NoEntry` in its slot's place; a hit is
 `candidate & hash equal & keys equal`, and a miss's value is written and
 dropped.
+
+The owned map's batch and `HashIndex` probe in steps too
+(`HashProbeIndex::probe_tags`, then `confirm`): every key's tags, then each
+key's descriptor in the loop that reads candidates. `HashIndex` claims in
+that loop, so a key whose empty slot a key before it claimed this round
+probes on from there, rather than reach `compare` with another
+fingerprint. In one step, a hit out of cache read its descriptor only once
+its tags came, and the batch overlapped too few keys to hide that.
 
 - **Why one fence:** an acquire load per key held each key up behind the
   previous key's wait for memory (8.5 to 10.3 M/s on one thread).

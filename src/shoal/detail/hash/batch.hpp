@@ -68,16 +68,15 @@ class HashLookupBatch {
         }
         auto remaining = width;
         while (remaining != 0) {
-          // Tags first (in cache), then the descriptors and payloads of the
-          // slots whose tags match: an absent key reads no descriptor.
+          // Every key's tags, then the descriptors where a tag matched, then
+          // the payloads (D28): an absent key reads no descriptor.
+          index.probe_tags(
+              pending.data(), remaining, [&](std::uint8_t row) { return hashes[row]; },
+              [&](std::uint8_t row) -> std::size_t & { return slots[row]; });
           std::size_t candidate_count = 0;
           for (std::size_t lane = 0; lane < remaining; ++lane) {
             const auto row = pending[lane];
-            auto slot = index.probe(hashes[row], slots[row]);
-            while (index.tag(slot) != Index::empty_tag &&
-                   !Index::descriptor_matches(index.descriptor(slot), hashes[row]))
-              slot = index.probe(hashes[row], index.next(slot));
-            slots[row] = slot;
+            const auto slot = slots[row] = index.confirm(hashes[row], slots[row]);
             if (index.tag(slot) == Index::empty_tag)
               values[row] = nullptr;
             else {

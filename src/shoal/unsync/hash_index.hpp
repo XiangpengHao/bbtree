@@ -110,20 +110,27 @@ class HashIndex {
       const auto width = std::min(maximum_batch_size(), count - base);
       auto *working_positions = positions ? positions + base : state.slots_;
       initialize(state, working_positions, base, width, hash_at);
+      if (!capacity()) {
+        for (std::size_t row = base; row < base + width; ++row) {
+          results[row] = Handle{};
+          if (positions) positions[row] = missing_position();
+        }
+        base += width;
+        continue;
+      }
       auto pending = width;
       while (pending) {
+        probe_tags(state, working_positions, base, pending);
         std::size_t candidates = 0;
         for (std::size_t i = 0; i < pending; ++i) {
           const auto row = state.pending_[i];
           auto &slot = working_positions[row - base];
-          const auto fingerprint = state.fingerprints_[row - base];
-          while (capacity() && index_.descriptor(slot) && index_.fingerprint(slot) != fingerprint)
-            slot = index_.next(slot);
-          if (!capacity() || !index_.descriptor(slot)) {
+          slot = index_.confirm(std::uint64_t{state.fingerprints_[row - base]} << 48, static_cast<std::size_t>(slot));
+          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
             results[row] = Handle{};
             if (positions) positions[row] = missing_position();
           } else {
-            results[row] = decode(index_.identifier(slot));
+            results[row] = decode(index_.identifier(static_cast<std::size_t>(slot)));
             state.candidates_[candidates++] = row;
           }
         }
@@ -157,15 +164,18 @@ class HashIndex {
       initialize(state, working_positions, base, width, hash_at);
       auto pending = width;
       while (pending) {
+        probe_tags(state, working_positions, base, pending);
         PendingClaims claims(index_, state.new_rows_, working_positions, base);
         std::size_t candidates = 0;
         for (std::size_t i = 0; i < pending; ++i) {
           const auto row = state.pending_[i];
           auto &slot = working_positions[row - base];
           const auto fingerprint = state.fingerprints_[row - base];
-          while (index_.descriptor(slot) && index_.fingerprint(slot) != fingerprint)
-            slot = index_.next(slot);
-          if (!index_.descriptor(slot)) {
+          // Also past a claim of this round, by a row before this one, on the
+          // empty slot this one found: of its fingerprint it is a candidate,
+          // past another it probes on rather than reach `compare`.
+          slot = index_.confirm(std::uint64_t{fingerprint} << 48, static_cast<std::size_t>(slot));
+          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
             index_.claim_empty(slot, std::uint64_t{fingerprint} << 48);
             claims.add(row);
           } else
@@ -196,8 +206,10 @@ class HashIndex {
   void check_invariants(StoredHash stored_hash) const {
     std::size_t occupied = 0;
     for (std::size_t slot = 0; slot < capacity(); ++slot) {
+      if (index_.descriptor(slot) && !index_.occupied(slot))
+        throw std::logic_error("HashIndex unpublished claim");
+      if (!index_.tag_agrees(slot)) throw std::logic_error("HashIndex tag mismatch");
       if (!index_.descriptor(slot)) continue;
-      if (!index_.occupied(slot)) throw std::logic_error("HashIndex unpublished claim");
       ++occupied;
       const auto hash = stored_hash(decode(index_.identifier(slot)));
       if (index_.fingerprint(slot) != hash >> 48)
@@ -298,6 +310,14 @@ class HashIndex {
     std::size_t base_;
     std::size_t count_ = 0;
   };
+  // Every pending row's slot to the first empty one or with its tag (D28).
+  void probe_tags(ProbeState &state, position_type *positions, std::size_t base,
+                  std::size_t pending) const noexcept {
+    index_.probe_tags(
+        state.pending_, pending,
+        [&](row_type row) { return std::uint64_t{state.fingerprints_[row - base]} << 48; },
+        [&](row_type row) -> position_type & { return positions[row - base]; });
+  }
   template <class HashAt>
   void initialize(ProbeState &state, position_type *positions, std::size_t base, std::size_t width,
                   HashAt &hash_at) const {

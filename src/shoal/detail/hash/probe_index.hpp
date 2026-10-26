@@ -6,18 +6,22 @@
 // the hash's top seven bits. Lookups walk the tags, a ninth of the index's
 // bytes, and read a descriptor only where a tag matches: a key that is absent
 // reads no descriptor, and a present one only its own. Descriptors stay the
-// truth; every write of one writes its tag (`write_descriptor`).
+// truth; every write of one writes its tag (`write_descriptor`), except a
+// claim's commit, which keeps the occupied tag its claim already wrote: the
+// fingerprint, and so the tag, does not change when a claim is published.
 //
 // One block holds the descriptors, then the tags.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
 
 #include "allocation.hpp"
+#include "tag_group.hpp"
 #include "../config.hpp"
 
 namespace shoal::detail {
@@ -58,9 +62,6 @@ class HashProbeIndex {
   static std::uint64_t descriptor_identifier(std::uint64_t descriptor) noexcept {
     return descriptor & identifier_mask();
   }
-  static bool descriptor_matches(std::uint64_t descriptor, std::uint64_t hash) noexcept {
-    return descriptor >> 48 == hash >> 48 && (descriptor & identifier_mask()) != identifier_mask();
-  }
   std::uint64_t identifier(std::size_t slot) const noexcept {
     return descriptors_[slot] & identifier_mask();
   }
@@ -70,17 +71,50 @@ class HashProbeIndex {
   }
   std::uint64_t fingerprint(std::size_t slot) const noexcept { return descriptors_[slot] >> 48; }
   std::uint8_t tag(std::size_t slot) const noexcept { return tags()[slot]; }
+  /// Whether the slot's tag is its descriptor's; a pending claim's is not.
+  bool tag_agrees(std::size_t slot) const noexcept { return tag(slot) == tag_of(descriptors_[slot]); }
   /// The tag of a slot whose descriptor holds this hash's entry.
   static std::uint8_t wanted_tag(std::uint64_t hash) noexcept {
     return static_cast<std::uint8_t>(occupied_tag | (hash >> 57));
   }
-  /// From `slot` on, the first slot that is empty or whose tag is
-  /// `hash`'s: where a lookup reads a descriptor, if any.
+  /// From `slot` on, the first slot that is empty or holds `hash`'s
+  /// fingerprint, a claim's included: where a lookup compares a key, if
+  /// anywhere. It reads a descriptor only where the tag matches.
   std::size_t probe(std::uint64_t hash, std::size_t slot) const noexcept {
     const auto wanted = wanted_tag(hash);
-    const std::uint8_t *tags = this->tags();
-    while (tags[slot] != empty_tag && tags[slot] != wanted) slot = next(slot);
+    slot = empty_or_wanted(wanted, slot);
+    while (tag(slot) != empty_tag && fingerprint(slot) != hash >> 48) slot = empty_or_wanted(wanted, next(slot));
     return slot;
+  }
+  /// The tags step of `probe` for many keys, every key's before any
+  /// descriptor is read (D28), so that their waits for memory overlap: each
+  /// row's slot moves to the first that is empty or whose tag is its hash's.
+  /// `hash_of(row)` is a row's hash, `slot_of(row)` a reference to its slot.
+  /// `confirm` is the descriptors step, a row at a time in the caller's next
+  /// loop over them.
+  template <class Row, class HashOf, class SlotOf>
+  void probe_tags(const Row *rows, std::size_t count, const HashOf &hash_of, const SlotOf &slot_of) const noexcept {
+    for (std::size_t i = 0; i < count; ++i) {
+      auto &slot = slot_of(rows[i]);
+      slot = empty_or_wanted(wanted_tag(hash_of(rows[i])), static_cast<std::size_t>(slot));
+    }
+  }
+  /// `probe`'s answer from a slot that is empty or whose tag is `hash`'s:
+  /// that slot, unless it holds another fingerprint, one tag match in a
+  /// hundred or so; then on from it.
+  std::size_t confirm(std::uint64_t hash, std::size_t slot) const noexcept {
+    return tag(slot) == empty_tag || fingerprint(slot) == hash >> 48 ? slot : probe(hash, slot);
+  }
+  /// `probe` from `hash`'s home, for one key at a time: the home tag first,
+  /// alone, by a branch (D27). Predicted, the branch lets the home
+  /// descriptor's load start beside the tag's, where a slot found in a group
+  /// is known only once its tags arrive. A batch overlaps its keys' loads
+  /// instead, and the branch would only mispredict there.
+  std::size_t probe_home(std::uint64_t hash) const noexcept {
+    const auto slot = home(hash);
+    const auto first = tag(slot);
+    if (first == empty_tag || (first == wanted_tag(hash) && fingerprint(slot) == hash >> 48)) return slot;
+    return probe(hash, slot);
   }
   std::size_t home(std::uint64_t hash) const noexcept {
     return static_cast<std::size_t>(hash) & (capacity_ - 1);
@@ -90,9 +124,8 @@ class HashProbeIndex {
   template <class Store, class Q, class Equal>
   std::size_t find(std::uint64_t hash, const Q &key, const Store &store, const Equal &equal) const {
     if (capacity_ == 0) return capacity_;
-    for (auto slot = probe(hash, home(hash)); tag(slot) != empty_tag; slot = probe(hash, next(slot))) {
-      if (fingerprint(slot) == hash >> 48 && equal(store.at(identifier(slot)).key, key)) return slot;
-    }
+    for (auto slot = probe_home(hash); tag(slot) != empty_tag; slot = probe(hash, next(slot)))
+      if (equal(store.at(identifier(slot)).key, key)) return slot;
     return capacity_;
   }
 
@@ -101,9 +134,8 @@ class HashProbeIndex {
   }
 
   std::size_t vacant(std::uint64_t hash) const noexcept {
-    auto slot = home(hash);
-    while (tag(slot) & occupied_tag) slot = next(slot);
-    return slot;
+    return scan_tags(
+        home(hash), [](std::uint8_t tag) { return !(tag & occupied_tag); }, &TagGroup::first_unoccupied);
   }
 
   template <class Store, class Q, class Equal>
@@ -134,11 +166,12 @@ class HashProbeIndex {
   // to tombstone accounting. They must be committed or released before return.
   void claim_empty(std::size_t slot, std::uint64_t hash) noexcept {
     SHOAL_ASSERT(identifier(slot) == 0);
-    write_descriptor(slot, (hash & ~identifier_mask()) | identifier_mask());
+    descriptors_[slot] = (hash & ~identifier_mask()) | identifier_mask();
+    tags()[slot] = wanted_tag(hash);
   }
   void commit_claim(std::size_t slot, std::uint64_t identifier) noexcept {
     SHOAL_ASSERT(this->identifier(slot) == identifier_mask());
-    write_descriptor(slot, (descriptors_[slot] & ~identifier_mask()) | identifier);
+    descriptors_[slot] = (descriptors_[slot] & ~identifier_mask()) | identifier;
     ++size_;
   }
   void release_claim(std::size_t slot) noexcept {
@@ -198,7 +231,8 @@ class HashProbeIndex {
   }
 
   void reset() noexcept {
-    for (std::size_t slot = 0; slot < capacity_; ++slot) write_descriptor(slot, 0);
+    // Zero is an empty descriptor and an empty tag.
+    if (descriptors_) std::memset(descriptors_, 0, layout(capacity_).size);
     size_ = deleted_ = 0;
   }
 
@@ -226,6 +260,34 @@ class HashProbeIndex {
     descriptors_[slot] = descriptor;
     tags()[slot] = tag_of(descriptor);
   }
+  /// From `slot` on, the first slot whose tag is empty or `wanted`.
+  std::size_t empty_or_wanted(std::uint8_t wanted, std::size_t slot) const noexcept {
+    return scan_tags(
+        slot, [wanted](std::uint8_t tag) { return tag == empty_tag || tag == wanted; },
+        [wanted](std::uint64_t tags) { return TagGroup(tags, wanted).first_match_or_empty(); });
+  }
+  /// From `slot` on, the first slot whose tag `stops`, a group of tags at a
+  /// time (`first_stop` gives the first in a group, `TagGroup::width` if
+  /// none); the last few before the end, where a group would cross it, one
+  /// at a time. Some tag must stop it.
+  template <class Stops, class FirstStop>
+  std::size_t scan_tags(std::size_t slot, const Stops &stops, const FirstStop &first_stop) const noexcept {
+    SHOAL_ASSERT(capacity_ != 0);
+    const std::uint8_t *tags = this->tags();
+    for (;;) {
+      if (capacity_ - slot >= TagGroup::width) {
+        std::uint64_t group;
+        std::memcpy(&group, tags + slot, sizeof(group));
+        const auto found = first_stop(group);
+        if (found < TagGroup::width) return slot + found;
+        slot = (slot + TagGroup::width) & (capacity_ - 1);
+      } else {
+        for (; slot < capacity_; ++slot)
+          if (stops(tags[slot])) return slot;
+        slot = 0;
+      }
+    }
+  }
 
   template <class Store>
   void rebuild(std::size_t capacity, const Store &store) {
@@ -234,10 +296,8 @@ class HashProbeIndex {
     replacement.descriptors_ =
         static_cast<std::uint64_t *>(HashAllocation::allocate(allocator_, layout(capacity)));
     replacement.capacity_ = capacity;
-    for (std::size_t slot = 0; slot < capacity; ++slot) {
-      ::new (static_cast<void *>(replacement.descriptors_ + slot)) std::uint64_t(0);
-      ::new (static_cast<void *>(replacement.tags() + slot)) std::uint8_t(empty_tag);
-    }
+    // The block comes zeroed (`HashAllocation`): every descriptor and tag
+    // empty.
     store.for_each([&](std::uint64_t identifier, const auto &entry) {
       replacement.write_descriptor(replacement.vacant(entry.hash), (entry.hash & ~identifier_mask()) | identifier);
     });
@@ -250,7 +310,7 @@ class HashProbeIndex {
   // store rebuilds at the same capacity, and its walk runs no user code.
   template <class Store>
   void rebuild_in_place(const Store &store) {
-    for (std::size_t slot = 0; slot < capacity_; ++slot) write_descriptor(slot, 0);
+    if (descriptors_) std::memset(descriptors_, 0, layout(capacity_).size);
     store.for_each([&](std::uint64_t identifier, const auto &entry) {
       write_descriptor(vacant(entry.hash), (entry.hash & ~identifier_mask()) | identifier);
     });

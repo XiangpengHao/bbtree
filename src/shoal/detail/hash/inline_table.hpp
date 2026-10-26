@@ -38,6 +38,7 @@
 #include "../racing_copy.hpp"
 #include "../target.hpp"
 #include "allocation.hpp"
+#include "tag_group.hpp"
 
 namespace shoal::detail {
 
@@ -238,7 +239,7 @@ class InlineHashTable {
   /// The header line before the tags; its first word is the capacity.
   static constexpr std::size_t header_bytes = 64;
   static constexpr std::size_t block_align = alignof(Entry) > 64 ? alignof(Entry) : 64;
-  static constexpr std::size_t group_width = 8;
+  static constexpr std::size_t group_width = TagGroup::width;
 
   A allocator_;
   unsigned char *block_ = nullptr;
@@ -333,31 +334,6 @@ class InlineHashTable {
   static std::uintptr_t slot_address_in(const RacingView &view, std::size_t slot) noexcept {
     return reinterpret_cast<std::uintptr_t>(view.block) + slots_offset(view.capacity) + slot * sizeof(Entry);
   }
-  /// Eight tags as a word, the first at the low byte, and where in them the
-  /// first tag equal to a wanted one and the first empty one are: a zero
-  /// byte test (`(x - 0x01..) & ~x & 0x80..`), whose lowest flag is always
-  /// a true zero byte.
-  class TagGroup {
-   public:
-    TagGroup(std::uint64_t tags, std::uint8_t wanted) noexcept
-        : matches_(zero_bytes(tags ^ (wanted * low_bits))), empties_(zero_bytes(tags)) {}
-    /// Index of the first match, `group_width` if none.
-    std::size_t first_match() const noexcept { return Bits::trailing_zeros(matches_) / 8; }
-    std::size_t first_empty() const noexcept { return Bits::trailing_zeros(empties_) / 8; }
-    /// The matches before the first empty tag, as flags (bit 7 of a byte).
-    std::uint64_t matches_before_empty() const noexcept {
-      return empties_ == 0 ? matches_ : matches_ & ((empties_ & (~empties_ + 1)) - 1);
-    }
-
-   private:
-    static constexpr std::uint64_t low_bits = 0x0101010101010101ull;
-    static constexpr std::uint64_t high_bits = 0x8080808080808080ull;
-    static std::uint64_t zero_bytes(std::uint64_t x) noexcept { return (x - low_bits) & ~x & high_bits; }
-
-    std::uint64_t matches_;
-    std::uint64_t empties_;
-  };
-
   SHOAL_RACING_READ static std::uint64_t racing_group(const RacingView &view, std::size_t slot) noexcept {
     std::uint64_t group;
     std::memcpy(&group, view.block + header_bytes + slot, sizeof(group));
