@@ -1,0 +1,15 @@
+map,entries,hit_percent,threads,mops,build_seconds
+shoal::TreeMap (bulk),10000000,50,14,152.4,0.4
+shoal::TreeMap,10000000,50,14,83.9,0.3
+tbb::concurrent_map,10000000,50,14,7.6,1.2
+folly::ConcurrentSkipList,10000000,50,14,8.5,1.5
+absl::btree_map + shared_mutex,10000000,50,14,2.1,4.1
+std::map + shared_mutex,10000000,50,14,1.4,9.9
+shoal::HashMap (bulk),10000000,50,14,471.0,0.5
+shoal::HashMap,10000000,50,14,310.2,0.4
+boost::concurrent_flat_map,10000000,50,14,402.6,0.7
+folly::ConcurrentHashMap,10000000,50,14,121.7,0.8
+tbb::concurrent_hash_map,10000000,50,14,143.4,0.8
+tbb::concurrent_unordered_map,10000000,50,14,46.3,1.0
+absl::flat_hash_map + shared_mutex,10000000,50,14,8.1,0.3
+std::unordered_map + shared_mutex,10000000,50,14,4.5,2.2

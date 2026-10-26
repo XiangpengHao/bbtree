@@ -1,73 +1,83 @@
-Blessed B-tree is designed to be a drop-in replacement of Rust's `std::collections::BTreeMap`, `BBTreeMap` and `BBTreeSet`.
+# 00 — Init: a C++ fork of bbtree, for DuckDB
 
-So the hard constraints are that we want to keep almost the same API as Rust's, and we should promose almost the same behavior. Unless there's a strong reason to deviate, in that case, we explicitly document in the README.md.
+Status: done (2026-10-24 to 2026-10-26). The asks that started each phase
+of this fork, and the constraints they set. The decisions they led to are
+in 03-decisions.md.
 
-What makes bbtree different is that we are more performant and more memory efficient.
+## The port (2026-10-24)
 
-## First principles
+> can we port this fork to CPP 17? make sure you keep the same performance
+> objectives. The goal is to embed it in DuckDB later.
 
-- Design BBTree with the mindset that any exsiting users of std BTreeMap/BTreeSet should be able to switch to BBTree without any code changes. But not the other way around.
+Asked before starting, the answers that set the scope:
 
-- High performance is our differentiator; correctness is the long term value proposition.
+- **Scope: the core maps.** The node code, the unsync map, the shared map
+  with optimistic lock coupling, and the batch API; not the file maps,
+  `bbtree-mmap`, `bbtree-store`, the visualizer, fuzzing or the Verus
+  proofs (D3). The rest of the map API (entries, sets, leaf annexes)
+  followed once the core met Rust's performance.
+- **Keys: fully generic.** An `InlineKey` trait mirroring Rust's, for
+  integers, `std::string` and byte vectors; DuckDB picks (D6).
+- **Layout: replace Rust.** The Rust crates stay only as the reference for
+  differential tests and side-by-side benchmarks, and go once C++ meets
+  their performance (D2, D4).
+- **Build: header-only with CMake.** No dependencies; the allocator a
+  template parameter, for DuckDB (D1).
 
-- Large data first, small data not ugly. People whose data is small don't care about performance, so they won't bother switching to bbtree; only people with sufficiently large data will. So our goal is to make large data very, very efficient, and meanwhile not make small data too ugly: when the two conflict, large data wins, as long as small data stays reasonably close to std.
+"The same performance objectives" means upstream's: the cost model of
+OG-design/06-cost-model.md, and the Rust crate's own numbers on the same
+workloads as the bar (02-rust-parity.md).
 
-## Design
+## Building where DuckDB builds (2026-10-25)
 
-- BBTree is zero-dependency, with optional features like `serde` and `rand`.
+> ensure the github CI tests all archi
 
-- BBTree supports `no_std` (might need alloc?).
+CI for every architecture and SIMD path, then MSVC (D23, D24). A test-only
+string shaped like Rust's `String` was reverted on review:
 
-- Every allocation in BBTree is counted, known before hand, no runtime surprises. We support system allocator, and custom allocator. Basically we have our own allocator trait.
+> i don't think `struct RustString {` is the way to go - this should be a
+> port, but not this way
 
-- BBTree design is very much like the high-performance b-tree in databases: nodes are 4KB in size. We might need to use Rust's unsafe for some of the memory packing etc, but it's fine. I think this is one of the primary gain of performance. But we need to consider where the generic K/V is larger than 4KB.
+The layout tests check `std::string` itself (D7).
 
-- For now BBTree is single threaded, just like Rust's.
+## Closing the gaps to Rust (2026-10-25)
 
-- Author of BBTree, Xiangpeng Hao, is author of [bf-tree](https://github.com/microsoft/bf-tree/), so be professional.
+> check now how to address the [...] Shared inserts at 4 and 8 threads
 
-## Correctness
+Profiling against the Rust binary, down to single instructions (D31), and
+the code-generation decisions D17–D22. Asked whether to build without the
+stack protector, since the sanitizers run: no (D22).
 
-- We are obessed with correctness, as BBTree is designed to "offload" accountability. Dealing with low level datastructure is hard, and that's what we are good at, and that's the spine of our value proposition.
+## A C++-only fork (2026-10-25)
 
-- Fuzzing is of course a must. We do differential fuzzing with Rust's btree.
+> time has come to update this fork and keep only the C++ version [...]
+> I assume we don't need any Rust code anymore here.
 
-- Formal verification with verus is optional, but welcomed.
+The Rust crates and upstream's design notes leave; the C++ code moves to
+the root (D4). Upstream's notes are cited as OG-; this folder records the
+fork's own design.
 
-## Marketing
+## The race, and hash maps (2026-10-25, 2026-10-26)
 
-- We're going to compare with Rust's btree, as well as other b-tree implementations.
+Asked for: upstream's README race (`OG-design/assets/readme-race.svg`),
+with the well-known C++ tree maps, on the M4 Pro at hand. The race against C++ concurrent maps (D32, 06-race.md), then two heats,
+tree maps and hash maps, once the hash maps came over from the
+`codex/hashmap` branch: the shared hash map, last in its heat, made
+competitive in five steps (D25–D30, 05-hash-maps.md).
 
-- We're going to compare with hash tables and adaptive radix trees (even though it's not a fair comparison).
+## The name (2026-10-26)
 
-- We need to compare integration with some AI stuff, like codex-cli open source?
+With hash maps beside the tree, bbtree, the Blessed B-tree, no longer
+fits: the library becomes shoal (D5).
 
-- We want to integrate with DataFusion sortmerge join, the SlateDB, and other LSM-tree or B-Tree based systems. 
+## The notes
 
-- We want to measure memory usage, latency, and latency variance.
-
-- When we say drop-in replacement, we're going to replace every std BTree in top 100 crates on crates.io, run their test cases, and confirm they all compile and pass.
-
-## Pitch
-
-- The agent's memory
-- Rebuilt data infra for AI agents
-
-## Before release checklist
-
-- [ ] Optimized on Apple M-series chips.
-- [x] Optimized on x86-64 with AVX512.
-- [x] Good visualization for both tree layout and the batch interleaved search.
-- [x] Compare with std Btree, Hashbrown.
-- [ ] Workload sort: fastest sorting is to build a bbtree. 
-- [ ] Workload sort-merge join: no need to pre-sort.
-- [ ] Workload hashjoin: bbtree is faster than hashbrown in hash join.
-- [ ] Workload aggregation (not sure). bbtree is faster on high cardinality aggregation. maybe is't faster only when we need a later sort?
-- [ ] Workload LSM-tree: bbtree is the best memtable. (not sure, because we are not multi-threaded yet, but we can probably wrap a large rw-lock)
-- [ ] Specialize key for: UUID, IP address, etc. But need to under a feature gate.
-
-#### Debating
-
-- Should we make it concurrent? Let's see what the batched version can do. If it's good enough and clost to a hash table, we don't need to make it concurrent for the initial release.
-
-
+| | |
+|---|---|
+| 00-init.md | this file: the asks and the scope |
+| 01-port.md | how the Rust crate was ported: method, module map, layout |
+| 02-rust-parity.md | the C++ maps against the Rust crate: measurements, and how the gaps closed |
+| 03-decisions.md | the decisions, `D<n>`; upstream's are `OG-D<n>` |
+| 04-portability.md | compilers, standard libraries, SIMD paths, CI |
+| 05-hash-maps.md | the owned and the shared hash map |
+| 06-race.md | the race against C++ concurrent maps |

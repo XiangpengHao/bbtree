@@ -1,8 +1,9 @@
-# The C++17 port (cpp/): its tests on every architecture and SIMD path it
-# has, and under the sanitizers. Named for its README badge.
+# The C++17 port: its tests on every architecture and SIMD path it
+# has, and under the sanitizers (design/03-decisions.md, D24). Named for
+# its README badge.
 #
 # Not yet here: GCC with libstdc++, whose std::string the map refuses as a
-# key (cpp/PORTING.md, P2) and the tests still use.
+# key (D7) and the tests still use.
 name: cpp
 
 on:
@@ -63,8 +64,8 @@ jobs:
         env:
           CXX: ${{ runner.os == 'Linux' && 'clang++' || 'c++' }}
         run: >
-          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSHOAL_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build
@@ -110,7 +111,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S cpp -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+        run: cmake -S . -B build -A ${{ matrix.platform }} -DSHOAL_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build --config RelWithDebInfo --parallel
@@ -137,12 +138,17 @@ jobs:
         env:
           CXX: clang++
         run: >
-          cmake -S cpp -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DBBTREE_NATIVE=OFF "-DBBTREE_SANITIZE=${{ matrix.sanitizer }}"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSHOAL_NATIVE=OFF "-DSHOAL_SANITIZE=${{ matrix.sanitizer }}"
           -DCMAKE_CXX_FLAGS=-stdlib=libc++
 
       - name: Build
         run: cmake --build build
 
+      # Ubuntu's libc++ allocates an exception's message with `new` and its
+      # libc++abi frees it with `free`: ASan reports the mismatch inside the
+      # standard library whenever a test throws, as the hash maps' tests do.
       - name: Test
+        env:
+          ASAN_OPTIONS: alloc_dealloc_mismatch=0
         run: ctest --test-dir build --output-on-failure

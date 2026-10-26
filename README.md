@@ -1,77 +1,246 @@
-# bbtree
+# shoal
 
-[![crates.io](https://img.shields.io/crates/v/bbtree.svg)](https://crates.io/crates/bbtree)
-[![docs.rs](https://img.shields.io/docsrs/bbtree)](https://docs.rs/bbtree)\
-[![test](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/ci.yml?branch=main&label=test)](https://github.com/XiangpengHao/bbtree/actions/workflows/ci.yml?query=branch%3Amain)
-[![miri](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/miri.yml?branch=main&label=miri)](https://github.com/XiangpengHao/bbtree/actions/workflows/miri.yml?query=branch%3Amain)
-[![sanitizer](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/sanitizer.yml?branch=main&label=sanitizer)](https://github.com/XiangpengHao/bbtree/actions/workflows/sanitizer.yml?query=branch%3Amain)
-[![DST](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/shuttle.yml?branch=main&label=DST)](https://github.com/XiangpengHao/bbtree/actions/workflows/shuttle.yml?query=branch%3Amain)
-[![fuzzing](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/fuzz.yml?branch=main&label=fuzzing)](https://github.com/XiangpengHao/bbtree/actions/workflows/fuzz.yml?query=branch%3Amain)
-[![verification](https://img.shields.io/github/actions/workflow/status/XiangpengHao/bbtree/verus.yml?branch=main&label=verification)](https://github.com/XiangpengHao/bbtree/actions/workflows/verus.yml?query=branch%3Amain)
+[![cpp](https://img.shields.io/github/actions/workflow/status/redox/shoal/cpp.yml?branch=main&label=cpp)](https://github.com/redox/shoal/actions/workflows/cpp.yml?query=branch%3Amain)
 
-> B-trees are by far the most important access path structure in database and file systems.
-> — [Jim Gray](https://en.wikipedia.org/wiki/Jim_Gray_(computer_scientist))
+Header-only C++17 maps that many threads read at once: an ordered tree map
+and a hash map, whose readers write nothing shared.
 
+The tree map is a port of [bbtree](https://github.com/XiangpengHao/bbtree),
+the Blessed B-tree by [Xiangpeng Hao](https://xiangpeng.systems), a Rust
+B+ tree. The port keeps its data structure, node layouts and algorithms,
+and was measured against the Rust crate on the same workloads
+([design/02-rust-parity.md](design/02-rust-parity.md)); the Rust crate, its formal verification,
+fuzzing and visualizer live upstream. How the tree works:
+[bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post) and the
+upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design) at `8adae97`, where this fork branched. The fork's own
+design notes and decisions are in [design/](design/00-init.md).
 
-bbtree is by far the fastest btree (ordered map):
-1. 5x faster than std's `BTreeMap` at single thread, 12x faster than `crossbeam-skiplist` at 96 threads.
-2. 30% lower memory usage, 5x lower p99 latency.
-3. Zero dependencies, `no_std` compatible.
-4. `unsync::BBTreeMap` is a **drop-in replacement** for std's `BTreeMap`/`BTreeSet`.
-5. Production-ready by formal verification, model checking, deterministic simulation, fuzzing, and lots of testing.
-6. Brought to you by decades of database research and careful curation by [Xiangpeng Hao](https://xiangpeng.systems).
+- Header-only C++17, zero dependencies, built to be embedded in DuckDB.
+- `shoal::TreeMap`: a concurrent ordered map, latched nodes with optimistic
+  reads.
+- `shoal::unsync::TreeMap` and `TreeSet`: single-threaded, with the
+  `std::map`/`std::set` operations, entries, ranges and set algebra.
+- `shoal::HashMap`: a concurrent hash map, entries in the slots it probes,
+  read without locks; `shoal::unsync::HashMap`, single-threaded with stable
+  references, and `shoal::unsync::HashIndex` for rows stored elsewhere,
+  after DuckDB's aggregate hash table ([design/05-hash-maps.md](design/05-hash-maps.md)).
+- SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
+  and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
+![shoal against C++ concurrent maps: lookups at 14 threads on a MacBook Pro M4 Pro](assets/readme-race.svg)
 
-![bbtree vs other concurrent maps, get throughput at 96 threads](https://github.com/XiangpengHao/bbtree/raw/main/design/assets/readme-race.svg)
+## Against other C++ maps
 
-Checkout how it works at [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post).
+Upstream's README race, in C++, in two heats, tree maps and hash maps: 10M
+random UUID keys, lookups of which half miss, on all 14 cores of a MacBook
+Pro M4 Pro (10 performance, 4 efficiency), 2 seconds a map, one run.
+Millions of lookups per second:
+
+| tree maps (ordered) | M ops/s |
+|---|--:|
+| shoal `TreeMap`, bulk (`get_many_copied`, 64 keys a call) | **152.4** |
+| shoal `TreeMap` (`get_copied`) | **83.9** |
+| folly `ConcurrentSkipList` | 8.5 |
+| oneTBB `tbb::concurrent_map` (skip list) | 7.6 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
+| `std::map` + `std::shared_mutex` | 1.4 |
+
+| hash maps (unordered) | M ops/s |
+|---|--:|
+| shoal `HashMap`, bulk (`get_many_copied`, 64 keys a call) | **471.0** |
+| shoal `HashMap` (`get_copied`) | **310.2** |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 402.6 |
+| oneTBB `tbb::concurrent_hash_map` | 143.4 |
+| folly `ConcurrentHashMap` | 121.7 |
+| oneTBB `tbb::concurrent_unordered_map` | 46.3 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 8.1 |
+| `std::unordered_map` + `std::shared_mutex` | 4.5 |
+
+shoal leads both heats: its tree map by 10–18×, its hash map by 17% over
+Boost's in bulk (5–17% over four runs of the same binary) and 2× over the
+rest one key at a time. Readers of both shoal maps write nothing shared: they check a version after reading
+([design/05-hash-maps.md](design/05-hash-maps.md)). The UUID hash declares `is_avalanching`, which
+both shoal and Boost read as leave to use it unmixed.
+
+On one thread nothing contends, and a locked map's lock costs it little:
+shoal's hash map in bulk runs 5% ahead of Boost's (45.6 against 43.5
+M/s), one key at a time ahead of every other (25.1), and its tree map
+leads Abseil's B-tree 5.3× (14.2 against 2.7):
+
+![shoal against C++ maps: lookups on one thread on a MacBook Pro M4 Pro](assets/readme-race-1-thread.svg)
+
+With every key in cache (100K keys), shoal's hash map in bulk leads
+Boost's too: 120 against 110 M/s, 164 against 158 with 90% found
+([design/06-race.md](design/06-race.md)).
+
+With 90% of the lookups finding their key, every hit reads its slot:
+shoal's hash map in bulk leads Boost's by 38% (443 against 321 M/s), and
+its tree map holds its lead (171 against folly's 8.6):
+
+![shoal against C++ concurrent maps: lookups at 14 threads, 90% present, on a MacBook Pro M4 Pro](assets/readme-race-90-hit.svg)
+
+The shared maps are built by every thread; a locked map by one thread, and
+it takes its lock for every lookup. Every map must answer the same first
+65,536 lookups right before it races. The bench is
+[bench/race/race_bench.cpp](bench/race/race_bench.cpp); the runs' output is
+in [bench/race/m4-pro-14-threads.csv](bench/race/m4-pro-14-threads.csv),
+[m4-pro-1-thread.csv](bench/race/m4-pro-1-thread.csv) and
+[m4-pro-14-threads-90-hit.csv](bench/race/m4-pro-14-threads-90-hit.csv),
+one run each. To build it (it needs oneTBB, folly, Abseil and Boost, e.g.
+from Homebrew):
+
+```bash
+cmake -B build-race -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHOAL_RACE_BENCH=ON && cmake --build build-race --target race_bench
+```
+
+Then each chart: entries, threads, seconds a map, maps to run (`""` for
+all), and the percentage of lookups that find their key:
+
+```bash
+./build-race/race_bench 10000000 14 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race.svg
+```
+
+```bash
+./build-race/race_bench 10000000 1 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-1-thread.svg
+```
+
+```bash
+./build-race/race_bench 10000000 14 2 "" 90 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-90-hit.svg
+```
+
+## The tree map against the Rust bbtree
+
+The C++ benches (`bench/`) ran against the Rust crate at `8adae97` on the
+same workloads: same keys, same order. Setup: M4 Pro, system allocator,
+`-mcpu=native`, one run each. A range means the numbers spread across runs
+on a quiet machine. Full tables and the fixes behind them are in
+[design/02-rust-parity.md](design/02-rust-parity.md); the race, in [design/06-race.md](design/06-race.md).
+
+Unsync map, ns per operation (lower is better):
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| 10M u64 insert, random | 246.6 | **224.8** |
+| 10M u64 insert, sequential | **8.6** | 8.8 |
+| 10M u64 get, hit / miss | 136.3 / 122.7 | **125.6 / 114.7** |
+| 10M u64 remove, random | 279.0 | **220.7** |
+| 1M path-string get, hit | 276 | **185** |
+| 10M u64 range of 64, per scan | 481 | **407** |
+| 10M u64 bulk insert / hit / miss, per key | 92.1 / 49.4 / 42.3 | **87.5 / 46.1** / 42.3 |
+
+Unsync sets of u64, ns per element:
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| two 1M sets: difference / intersection / union | 7.1 / 6.8 / 6.6 | 6.8 / 6.8 / 6.9 |
+| 27K set into 1M: intersection / `is_subset` | 29.3 / 26.9 | **22.1 / 19.5** |
+
+Shared map, 10M u64, millions of operations per second (higher is better):
+
+| workload | Rust | C++ |
+|---|--:|--:|
+| insert, 1 / 4 / 8 threads | 4.4 / 17.0–17.3 / 31.3–31.6 | 4.4 / 16.1–16.4 / 29.1–29.7 |
+| `get_copied`, 1 / 4 / 8 threads | 8.4 / 33.6–34.3 / 61.7–66.0 | 8.4–8.8 / 34.1–34.8 / 53.5–63.3 |
+| bulk get, 1 thread | 17.5–17.7 | **18.0** |
+| bulk get, 8 threads | 117.2–134.7 | 113.1–126.0 |
+
+The shared-map throughput rows predate the last round of fixes: inlining
+the lookup and insert paths, one acquire-release CAS per latch, and `isb`
+spin waits on Arm. Instruction counts since then: a shared get runs 341
+instructions against Rust's 357, and a shared insert 685 against 676, at
+parity in cycles. Multi-threaded throughput still needs a re-run on a quiet
+machine. MSVC builds are tested but not measured.
 
 ## Usage
 
-```bash
-cargo add bbtree
+Add `src` to the include path, or with CMake:
+
+```cmake
+add_subdirectory(shoal)
+target_link_libraries(your_target PRIVATE shoal)
 ```
 
-### Concurrent bbtree
+### Concurrent tree map
 
-```rust
-use bbtree::BBTreeMap;
+```cpp
+#include <shoal/map.hpp>
 
-let map = BBTreeMap::new();
+shoal::TreeMap<std::uint64_t, std::uint64_t> map;
 
-std::thread::scope(|scope| {
-    scope.spawn(|| map.insert(1_u64, 10_u64));
-    scope.spawn(|| map.insert(2, 20));
-});
+std::thread a([&] { map.insert(1, 10); });
+std::thread b([&] { map.insert(2, 20); });
+a.join();
+b.join();
 
-assert_eq!(map.get_copied(&1), Some(10));
-assert_eq!(map.read(&2, |_, value| value + 1), Some(21));
-assert_eq!(map.get_many_copied([&1, &2, &3]), [Some(10), Some(20), None]);
+assert(map.get_copied(1) == 10u);
+assert(map.read(2, [](const auto&, const auto& value) { return value + 1; }) == 21u);
+map.scan(shoal::Bound<std::uint64_t>::unbounded(), shoal::Bound<std::uint64_t>::unbounded(),
+         [](const auto& key, const auto& value) { return true; /* keep going */ });
 ```
 
-### Single thread
+`insert` returns an `InsertOutcome`: the previous value, or an
+`InsertError` when allocation failed, leaving the map unchanged.
 
-```rust
-use bbtree::unsync::BBTreeMap;
+### Single-threaded tree map
 
-let mut map = BBTreeMap::new();
+```cpp
+#include <shoal/unsync/map.hpp>
+
+shoal::unsync::TreeMap<std::uint64_t, std::string> map;
 map.insert(1, "one");
 map.insert(2, "two");
-assert_eq!(map.get(&1), Some(&"one"));
+assert(*map.get(1) == "one");
+for (const auto& [key, value] : map) { /* in key order */ }
 ```
 
-### Agent's guide
+### Concurrent hash map
 
-1. Implement `InlinkeKey` trait for best performance, check how String and Vec<u8> implement it. 
-2. Consider using batching api if semantically appropriate.
-3. Create an issue here if you see any performance regression.
+```cpp
+#include <shoal/hash_map.hpp>
 
-## license
+shoal::HashMap<std::uint64_t, std::uint64_t> map;
+map.insert(1, 10);
+map.update(1, [](const auto&, auto& value) { ++value; });
+assert(map.get_copied(1) == 11u);
+
+std::uint64_t keys[] = {1, 2};
+std::optional<std::uint64_t> values[2];
+map.get_many_copied(keys, 2, values);  // bulk: {11, none}
+```
+
+Lookups of keys and values that are trivially copyable take no lock; other
+types hold the key's shard shared.
+
+### Keys and values
+
+- Keys and values must be trivially relocatable: the nodes move them as
+  bytes. Trivially copyable types are; `std::vector`, `std::unique_ptr`,
+  `std::shared_ptr` and the `std::string` of libc++ and MSVC are declared
+  so. libstdc++'s `std::string` is not: use `std::vector<uint8_t>` or a
+  `std::string_view` into stable storage.
+- Keys order by `operator<`. Comparisons must not throw.
+- Specialize `shoal::InlineKey<K>` for the fastest lookups on your own key
+  types; the byte strings and 64/128-bit integers come specialized.
+- Bulk lookups and inserts (`get_many_copied`, `read_many`,
+  `insert_many`) overlap their keys' memory latency: use them when the
+  semantics allow.
+
+## Build and test
+
+```bash
+cmake -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+`-DSHOAL_SANITIZE="address;undefined"` (or `thread`) builds the tests
+under sanitizers; `-DSHOAL_NATIVE=OFF` drops `-march=native`. The
+benchmarks are `bench/*_bench.cpp`.
+
+## License
 
 Licensed under either of Apache License, Version 2.0 or MIT license, at
 your option; [LICENSE](LICENSE) holds both texts.
 
 Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in bbtree by you, as defined in the Apache-2.0
+submitted for inclusion in shoal by you, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
 conditions.

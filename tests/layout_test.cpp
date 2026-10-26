@@ -1,0 +1,148 @@
+// The node layouts, against the numbers `tree/node/layout.rs`'s tests work out
+// by hand from OG-D13, OG-D15, OG-D18, OG-D21, OG-D29, OG-D36 and OG-D49.
+#include <array>
+#include <cstdint>
+#include <string>
+
+#include "shoal/detail/node/plan.hpp"
+#include "test_harness.hpp"
+
+using shoal::detail::KeySearch;
+using shoal::detail::NodeShape;
+using shoal::detail::Strategy;
+
+namespace {
+
+/// A 64-bit key without inline keys.
+struct PlainU64 {
+  std::uint64_t value;
+  bool operator<(const PlainU64& other) const { return value < other.value; }
+};
+
+/// A 24-byte key without inline keys, as a `String` without them.
+struct Plain24 {
+  std::uint64_t words[3];
+  bool operator<(const Plain24& other) const { return words[0] < other.words[0]; }
+};
+
+struct Unit {};
+
+/// Whether this standard library's `std::string` has the 24 bytes of Rust's
+/// `String`, which the string numbers below are worked out for: libc++'s
+/// does; MSVC's has 32, for which Rust has no numbers to check against. The
+/// layout math checks its invariants at compile time for any size.
+constexpr bool string_has_rust_size = sizeof(std::string) == 24;
+
+struct ExpectedNode {
+  std::size_t size, align, capacity, keys_offset, trailing_offset;
+
+  static ExpectedNode one_page(std::size_t capacity, std::size_t keys_offset,
+                               std::size_t trailing_offset) {
+    return {1024, 1024, capacity, keys_offset, trailing_offset};
+  }
+  static ExpectedNode keyless(std::size_t capacity, std::size_t keys_offset,
+                              std::size_t trailing_offset) {
+    return {512, 512, capacity, keys_offset, trailing_offset};
+  }
+};
+
+template <class K, class V, class S = Strategy<>>
+void check_leaf(ExpectedNode expected) {
+  constexpr auto layout = NodeShape<K, V, S>::leaf_layout;
+  CHECK_EQ(layout.page.size, expected.size);
+  CHECK_EQ(layout.page.align, expected.align);
+  CHECK_EQ(layout.keys.capacity, expected.capacity);
+  CHECK_EQ(layout.keys.keys_offset, expected.keys_offset);
+  CHECK_EQ(layout.head_offset, expected.trailing_offset);
+}
+
+template <class K, class V, class S = Strategy<>>
+void check_internal(ExpectedNode expected) {
+  constexpr auto layout = NodeShape<K, V, S>::internal_layout;
+  CHECK_EQ(layout.page.size, expected.size);
+  CHECK_EQ(layout.page.align, expected.align);
+  CHECK_EQ(layout.keys.capacity, expected.capacity);
+  CHECK_EQ(layout.keys.keys_offset, expected.keys_offset);
+  CHECK_EQ(layout.edges_offset, expected.trailing_offset);
+}
+
+}  // namespace
+
+TEST(u64_to_u64_without_inline_keys_fills_one_page) {
+  check_leaf<PlainU64, std::uint64_t>(ExpectedNode::one_page(63, 8, 512));
+  check_internal<PlainU64, std::uint64_t>(ExpectedNode::one_page(63, 8, 512));
+}
+
+TEST(string_sized_keys_without_inline_keys_fill_one_page) {
+  check_leaf<Plain24, std::uint64_t>(ExpectedNode::one_page(31, 8, 752));
+  check_internal<Plain24, std::uint64_t>(ExpectedNode::one_page(31, 8, 752));
+}
+
+TEST(u64_to_u64_with_two_byte_inline_keys) {
+  check_leaf<std::uint64_t, std::uint64_t>(ExpectedNode::one_page(55, 144, 136));
+  check_internal<std::uint64_t, std::uint64_t>(ExpectedNode::keyless(49, 106, 112));
+  using Shape = NodeShape<std::uint64_t, std::uint64_t, Strategy<>>;
+  CHECK_EQ(Shape::leaf_plan.inline_width, 2u);
+  CHECK(Shape::leaf_plan.all_keys_search == KeySearch::Branchless);
+  CHECK(!Shape::leaf_plan.hash_tags);
+}
+
+#if defined(__SIZEOF_INT128__)
+TEST(u128_to_u64_with_two_byte_inline_keys) {
+  check_leaf<unsigned __int128, std::uint64_t>(ExpectedNode::one_page(28, 96, 80));
+  check_internal<unsigned __int128, std::uint64_t>(ExpectedNode::keyless(49, 106, 112));
+}
+#endif
+
+TEST(set_of_i64_with_two_byte_inline_keys) {
+  check_leaf<std::int64_t, Unit>(ExpectedNode::one_page(100, 216, 216));
+}
+
+TEST(string_to_u64_with_hash_tags_in_the_padding) {
+  using Shape = NodeShape<std::string, std::uint64_t, Strategy<>>;
+  CHECK(Shape::leaf_plan.hash_tags);
+  CHECK(Shape::leaf_layout.has_hash_tags());
+  CHECK_EQ(Shape::leaf_plan.inline_width, 8u);
+  // Heap byte strings keep 4 bytes inside (OG-D43).
+  CHECK(Shape::internal_plan.rehydrates_windows);
+  CHECK(!Shape::internal_plan.inlines_node_search);
+  if constexpr (string_has_rust_size) {
+    check_leaf<std::string, std::uint64_t>(ExpectedNode::one_page(24, 256, 248));
+    CHECK_EQ(Shape::leaf_layout.keys.key_stride, 32u);
+    check_internal<std::string, std::uint64_t>(ExpectedNode::keyless(41, 172, 176));
+  }
+}
+
+TEST(string_to_string_gives_up_an_entry_for_hash_tags) {
+  if constexpr (string_has_rust_size) {
+    check_leaf<std::string, std::string>(ExpectedNode::one_page(16, 200, 176));
+    using Shape = NodeShape<std::string, std::string, Strategy<>>;
+    CHECK_EQ(Shape::leaf_layout.keys.key_stride, 48u);
+  }
+}
+
+TEST(sets_of_strings_have_no_room_for_hash_tags) {
+  // A 32-byte string leaves room for them.
+  using Shape = NodeShape<std::string, Unit, Strategy<>>;
+  if constexpr (string_has_rust_size) CHECK(!Shape::leaf_plan.hash_tags);
+}
+
+TEST(byte_arrays_keep_two_bytes_in_both_kinds) {
+  using Key = std::array<std::uint8_t, 32>;
+  using Shape = NodeShape<Key, std::uint64_t, Strategy<>>;
+  CHECK_EQ(Shape::leaf_plan.inline_width, 2u);
+  CHECK_EQ(Shape::internal_plan.inline_width, 2u);
+  CHECK(Shape::leaf_plan.whole_key_equality);
+  CHECK(Shape::leaf_plan.candidate_search == KeySearch::EarlyExit);
+  check_internal<Key, std::uint64_t>(ExpectedNode::keyless(49, 106, 112));
+}
+
+TEST(latched_string_leaves_give_up_an_entry_for_hash_tags) {
+  using Shape = NodeShape<std::string, std::uint64_t, Strategy<shoal::DefaultNodeConfig,
+                                                               shoal::NoLeafAnnex, true>>;
+  CHECK(Shape::leaf_plan.hash_tags);
+  CHECK_EQ(Shape::leaf_layout.keys.inline_keys_offset, 16u);
+  if constexpr (string_has_rust_size) CHECK_EQ(Shape::leaf_layout.keys.capacity, 23u);
+}
+
+TEST_MAIN()

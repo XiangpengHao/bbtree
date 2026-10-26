@@ -1,5 +1,0 @@
-map,page_cache,entries,file_mb,load_us,build_us,first_answer_us
-std-btree,cold,10000000,160.0,65394.2,36130.0,101525.3
-bbtree-mmap,cold,10000000,184.7,243.8,0.0,617.7
-std-btree,warm,10000000,160.0,9641.4,35506.6,45149.3
-bbtree-mmap,warm,10000000,184.7,8.4,0.0,18.3
