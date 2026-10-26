@@ -8,14 +8,14 @@
 #include <unordered_map>
 #include <vector>
 
-#include "bbtree/hash_map.hpp"
+#include "shoal/hash_map.hpp"
 #include "test_harness.hpp"
 
 namespace {
 
 struct RefusingAllocator {
-  void *allocate_zeroed(bbtree::Layout) noexcept { return nullptr; }
-  void deallocate(void *, bbtree::Layout) noexcept { CHECK(false); }
+  void *allocate_zeroed(shoal::Layout) noexcept { return nullptr; }
+  void deallocate(void *, shoal::Layout) noexcept { CHECK(false); }
 };
 
 struct ThrowingHash {
@@ -39,16 +39,16 @@ class BudgetAllocator {
  public:
   BudgetAllocator(std::size_t *budget, std::size_t *bytes) noexcept
       : budget_(budget), bytes_(bytes) {}
-  void *allocate_zeroed(bbtree::Layout layout) noexcept {
+  void *allocate_zeroed(shoal::Layout layout) noexcept {
     if (*budget_ == 0) return nullptr;
     --*budget_;
-    auto *memory = bbtree::Global{}.allocate_zeroed(layout);
+    auto *memory = shoal::Global{}.allocate_zeroed(layout);
     if (memory) *bytes_ += layout.size;
     return memory;
   }
-  void deallocate(void *memory, bbtree::Layout layout) noexcept {
+  void deallocate(void *memory, shoal::Layout layout) noexcept {
     *bytes_ -= layout.size;
-    bbtree::Global{}.deallocate(memory, layout);
+    shoal::Global{}.deallocate(memory, layout);
   }
 
  private:
@@ -59,7 +59,7 @@ class BudgetAllocator {
 }  // namespace
 
 TEST(shared_hash_map_scoped_access_and_removal) {
-  const bbtree::BBHashMap<std::string, int> map;
+  const shoal::HashMap<std::string, int> map;
   CHECK(map.insert("one", 1).ok());
   auto previous = map.insert("one", 2);
   CHECK(previous.ok());
@@ -84,7 +84,7 @@ TEST(shared_hash_map_scoped_access_and_removal) {
 }
 
 TEST(shared_hash_map_readers_and_writers_agree_on_disjoint_keys) {
-  bbtree::BBHashMap<int, int> map;
+  shoal::HashMap<int, int> map;
   std::vector<std::thread> threads;
   for (int thread = 0; thread < 6; ++thread) {
     threads.emplace_back([&, thread] {
@@ -110,7 +110,7 @@ TEST(shared_hash_map_readers_and_writers_agree_on_disjoint_keys) {
 }
 
 TEST(shared_hash_map_updates_same_key_without_losing_writes) {
-  bbtree::BBHashMap<int, int> map;
+  shoal::HashMap<int, int> map;
   CHECK(map.insert(7, 0));
   std::vector<std::thread> threads;
   for (int thread = 0; thread < 6; ++thread) {
@@ -126,7 +126,7 @@ TEST(shared_hash_map_updates_same_key_without_losing_writes) {
 }
 
 TEST(shared_hash_map_reports_allocator_refusals_without_swallowing_user_exceptions) {
-  bbtree::BBHashMap<int, std::unique_ptr<int>, bbtree::Hash<int>, std::equal_to<>,
+  shoal::HashMap<int, std::unique_ptr<int>, shoal::Hash<int>, std::equal_to<>,
                     RefusingAllocator>
       map;
   auto result = map.insert(8, std::make_unique<int>(9));
@@ -136,7 +136,7 @@ TEST(shared_hash_map_reports_allocator_refusals_without_swallowing_user_exceptio
   CHECK(result.error().layout().size != 0);
   CHECK(map.empty());
 
-  bbtree::BBHashMap<int, int, ThrowingHash> throwing;
+  shoal::HashMap<int, int, ThrowingHash> throwing;
   bool threw = false;
   try {
     throwing.insert(1, 2);
@@ -148,7 +148,7 @@ TEST(shared_hash_map_reports_allocator_refusals_without_swallowing_user_exceptio
 }
 
 TEST(shared_hash_map_batch_results_have_input_order) {
-  bbtree::BBHashMap<int, int> map;
+  shoal::HashMap<int, int> map;
   std::array<int, 67> keys{}, values{};
   std::array<std::optional<int>, 67> previous{};
   std::array<bool, 67> failed{};
@@ -179,7 +179,7 @@ TEST(shared_hash_map_batch_results_have_input_order) {
 }
 
 TEST(shared_hash_map_batches_accept_values_without_assignment) {
-  bbtree::BBHashMap<int, MoveConstructOnly> map;
+  shoal::HashMap<int, MoveConstructOnly> map;
   int keys[] = {1, 1};
   MoveConstructOnly values[] = {MoveConstructOnly(10), MoveConstructOnly(20)};
   std::optional<MoveConstructOnly> previous[2];
@@ -190,7 +190,7 @@ TEST(shared_hash_map_batches_accept_values_without_assignment) {
   map.get_many_copied(keys, 2, previous);
   CHECK_EQ(previous[0]->value(), 20);
 
-  bbtree::BBHashMap<int, MoveConstructOnly, bbtree::Hash<int>, std::equal_to<>, RefusingAllocator>
+  shoal::HashMap<int, MoveConstructOnly, shoal::Hash<int>, std::equal_to<>, RefusingAllocator>
       refused;
   MoveConstructOnly refused_values[] = {MoveConstructOnly(10), MoveConstructOnly(20)};
   refused.insert_many(keys, refused_values, 2, previous, failed);
@@ -200,12 +200,12 @@ TEST(shared_hash_map_batches_accept_values_without_assignment) {
 }
 
 TEST(shared_hash_map_refusals_during_growth_return_the_entry_and_allow_retry) {
-  using Map = bbtree::BBHashMap<int, std::unique_ptr<int>, bbtree::Hash<int>, std::equal_to<>,
+  using Map = shoal::HashMap<int, std::unique_ptr<int>, shoal::Hash<int>, std::equal_to<>,
                                 BudgetAllocator, 1>;
   for (std::size_t allocations = 0; allocations < 20; ++allocations) {
     std::size_t budget = allocations, bytes = 0;
     {
-      Map map(bbtree::Hash<int>{}, std::equal_to<>{}, BudgetAllocator(&budget, &bytes));
+      Map map(shoal::Hash<int>{}, std::equal_to<>{}, BudgetAllocator(&budget, &bytes));
       for (int key = 0; key < 1000; ++key) {
         auto inserted = map.insert(key, std::make_unique<int>(key + 1));
         if (inserted.ok()) continue;
@@ -230,7 +230,7 @@ TEST(shared_hash_map_refusals_during_growth_return_the_entry_and_allow_retry) {
 }
 
 TEST(shared_hash_map_callback_exception_releases_lock) {
-  bbtree::BBHashMap<int, int> map;
+  shoal::HashMap<int, int> map;
   CHECK(map.insert(1, 2));
   bool threw = false;
   try {
@@ -254,9 +254,9 @@ TEST(shared_hash_map_callback_exception_releases_lock) {
 // so that the sanitizers see every move and destruction.
 template <class Hasher>
 void check_against_unordered_map(std::uint64_t seed) {
-  bbtree::BBHashMap<std::uint64_t, std::string, Hasher, std::equal_to<>, bbtree::Global, 1> map;
+  shoal::HashMap<std::uint64_t, std::string, Hasher, std::equal_to<>, shoal::Global, 1> map;
   std::unordered_map<std::uint64_t, std::string> model;
-  bbtree_test::Rng rng(seed);
+  shoal_test::Rng rng(seed);
   for (int step = 0; step < 60000; ++step) {
     const std::uint64_t key = rng.below(4000);
     const std::uint64_t choice = rng.below(100);
@@ -320,7 +320,7 @@ TEST(shared_hash_map_agrees_with_unordered_map_on_colliding_keys) {
 }
 
 TEST(shared_hash_map_agrees_with_unordered_map) {
-  check_against_unordered_map<bbtree::Hash<std::uint64_t>>(2);
+  check_against_unordered_map<shoal::Hash<std::uint64_t>>(2);
 }
 
 // Keys and values that copy as bytes are read without a latch. Readers race
@@ -329,8 +329,8 @@ TEST(shared_hash_map_agrees_with_unordered_map) {
 // A value is two words derived from its key: a torn read would split them.
 TEST(shared_hash_map_optimistic_readers_see_whole_entries_while_writers_change_the_table) {
   using Value = std::array<std::uint64_t, 2>;
-  using Map = bbtree::BBHashMap<std::uint64_t, Value, bbtree::Hash<std::uint64_t>, std::equal_to<>,
-                                bbtree::Global, 2>;
+  using Map = shoal::HashMap<std::uint64_t, Value, shoal::Hash<std::uint64_t>, std::equal_to<>,
+                                shoal::Global, 2>;
   const auto value_of = [](std::uint64_t key) { return Value{key * 3 + 1, ~key}; };
   constexpr std::uint64_t key_space = 1 << 15;
   Map map;
@@ -380,8 +380,8 @@ TEST(shared_hash_map_optimistic_readers_see_whole_entries_while_writers_change_t
 // words from two writes: the version check must turn such a copy away.
 TEST(shared_hash_map_optimistic_readers_never_see_a_value_half_written) {
   using Value = std::array<std::uint64_t, 8>;
-  using Map = bbtree::BBHashMap<std::uint64_t, Value, bbtree::Hash<std::uint64_t>, std::equal_to<>,
-                                bbtree::Global, 4>;
+  using Map = shoal::HashMap<std::uint64_t, Value, shoal::Hash<std::uint64_t>, std::equal_to<>,
+                                shoal::Global, 4>;
   constexpr std::uint64_t hot_keys = 16;
   Map map;
   for (std::uint64_t key = 0; key < hot_keys; ++key) CHECK(map.insert(key, Value{}).ok());
@@ -427,8 +427,8 @@ TEST(shared_hash_map_optimistic_readers_never_see_a_value_half_written) {
 TEST(shared_hash_map_returns_retained_memory_on_destruction) {
   std::size_t budget = 1 << 20, bytes = 0;
   {
-    bbtree::BBHashMap<int, int, bbtree::Hash<int>, std::equal_to<>, BudgetAllocator, 4> map(
-        bbtree::Hash<int>{}, std::equal_to<>{}, BudgetAllocator(&budget, &bytes));
+    shoal::HashMap<int, int, shoal::Hash<int>, std::equal_to<>, BudgetAllocator, 4> map(
+        shoal::Hash<int>{}, std::equal_to<>{}, BudgetAllocator(&budget, &bytes));
     for (int round = 0; round < 2; ++round) {
       for (int key = 0; key < 50000; ++key) CHECK(map.insert(key, key + 1).ok());
       for (int key = 0; key < 50000; key += 2) CHECK(map.remove(key));

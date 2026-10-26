@@ -1,20 +1,25 @@
-# bbtree-cpp
+# shoal
 
-This repository is the C++ fork of [XiangpengHao/bbtree](https://github.com/XiangpengHao/bbtree):
-a header-only C++17 port of the Rust crate, with zero dependencies, built to
-be embedded in DuckDB. Only the C++ code lives here; the Rust crate, its
-design notes, proofs, fuzzing and visualizer stay upstream. This fork
-branched from upstream at `8adae97`.
+shoal is header-only C++17 maps, with zero dependencies, built to be
+embedded in DuckDB: a concurrent and a single-threaded tree map, and hash
+maps. The tree maps are the C++ fork of
+[XiangpengHao/bbtree](https://github.com/XiangpengHao/bbtree) (the Blessed
+B-tree), a port of the Rust crate; "bbtree" in this repository means that
+upstream crate. Only the C++ code lives here; the Rust crate, its design
+notes, proofs, fuzzing and visualizer stay upstream. This fork branched
+from upstream at `8adae97`.
 
-- `src/bbtree/` is the library, `tests/` its tests (CTest), `bench/` its
+- `src/shoal/` is the library, `tests/` its tests (CTest), `bench/` its
   benchmarks.
 - `design/NN-*.md`, "doc NN" and `D<n>` in comments refer to upstream's
   [design notes at `8adae97`](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design); `D<n>` is a decision in
   `design/03-decisions.md` there. `PORTING.md` holds the port's own
   decisions (`P<n>`), its status and its measurements; record new ones
   there.
-- Upstream is the reference for the data structure and its algorithms. When
-  the C++ code departs from the Rust crate, say why in `PORTING.md`.
+- Upstream is the reference for the tree maps' data structure and
+  algorithms. When the C++ code departs from the Rust crate, say why in
+  `PORTING.md`. The hash maps are this repository's own (`PORTING.md`,
+  Hash maps).
 
 ## Write code that requires minimal human attention 
 
@@ -37,7 +42,7 @@ branched from upstream at `8adae97`.
   Example 1: `Built build_chart(const DataModel& model)`, instead use a member function like: `Built DataModel::build_chart() const`. Even better, give the chart a constructor from the data model.
   Example 2: `void toggle_expand(views::codemap::CodeState& code, std::pair<uint32_t, uint32_t> key)` instead use a member function like: `void CodeState::toggle_expand(std::pair<uint32_t, uint32_t> key)`.
 
-- try to use minimal visibility for functions and variables: keep members `private` unless callers need them, and keep implementation details in `bbtree::detail` and out of the public headers' API. 
+- try to use minimal visibility for functions and variables: keep members `private` unless callers need them, and keep implementation details in `shoal::detail` and out of the public headers' API. 
 
 - try to avoid public data members, prefer to use getters and setters, unless the field is truly public (a plain aggregate).
 
@@ -50,12 +55,12 @@ branched from upstream at `8adae97`.
 - Reason then measure. Don't start with blind sweeping, or brainless micro/premature optimizations. Always first think about what is the bottleneck by profiling and measurements, reason the cost model. Benchmark is the last step, to verify that your reasoning is correct, if not, correct your model and repeat; benchmark is NOT a tool to guide the optimization.
 
 - Never do explicit prefetching: no software prefetch instructions or intrinsics (`_mm_prefetch`, `__builtin_prefetch`, inline `prefetcht0`, ...), not in the library, benchmarks, prototypes or A/B variants, and not behind a feature flag. Fix memory latency with layout instead: put what an operation needs in the cache lines it already loads (D46).
-  Exception: the batch lanes (doc 12, D53, P6) prefetch, only through `Prefetcher` in `src/bbtree/detail/tree/batch.hpp`, the line each lane reads next, the query window included. Never in single-key paths, and never whole keys or unchosen edges.
+  Exception: the batch lanes (doc 12, D53, P6) prefetch, only through `Prefetcher` in `src/shoal/detail/tree/batch.hpp`, the line each lane reads next, the query window included. Never in single-key paths, and never whole keys or unchosen edges.
 
 ## Verification
 
 - Local checks: build with warnings as errors and run the tests, `cmake -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure`.
-- Run the sanitizers on what you touched: `-DBBTREE_SANITIZE="address;undefined"` for memory and lifetimes, `-DBBTREE_SANITIZE=thread` for the shared map (`map.hpp`, `detail/latched/`). Use a build directory of their own (`build-asan`, `build-tsan`).
+- Run the sanitizers on what you touched: `-DSHOAL_SANITIZE="address;undefined"` for memory and lifetimes, `-DSHOAL_SANITIZE=thread` for the shared maps (`map.hpp`, `detail/latched/`, `hash_map.hpp`, `detail/hash/inline_table.hpp`). Use a build directory of their own (`build-asan`, `build-tsan`).
 - CI (`.github/workflows/cpp.yml`) builds and tests every SIMD path (SSE2, AVX2, AVX-512, NEON) on Linux, macOS and MSVC: code under `#if` for one instruction set must still compile on the others.
 - Tests are differential: check behaviour against `std::map`/`std::set` and the tree's invariants, with the zero-dependency harness in `tests/test_harness.hpp`.
 

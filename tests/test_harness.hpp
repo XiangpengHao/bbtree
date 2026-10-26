@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace bbtree_test {
+namespace shoal_test {
 
 class Registry {
  public:
@@ -92,32 +92,32 @@ class Rng {
   std::uint64_t state_;
 };
 
-}  // namespace bbtree_test
+}  // namespace shoal_test
 
-#define BBTREE_CONCAT_INNER(a, b) a##b
-#define BBTREE_CONCAT(a, b) BBTREE_CONCAT_INNER(a, b)
+#define SHOAL_CONCAT_INNER(a, b) a##b
+#define SHOAL_CONCAT(a, b) SHOAL_CONCAT_INNER(a, b)
 
 #define TEST(name)                                                              \
   static void name();                                                           \
-  static ::bbtree_test::Registration BBTREE_CONCAT(name, _registration)(#name, name); \
+  static ::shoal_test::Registration SHOAL_CONCAT(name, _registration)(#name, name); \
   static void name()
 
 #define CHECK(condition)                                                     \
   do {                                                                       \
-    if (!(condition)) ::bbtree_test::fail(__FILE__, __LINE__, #condition);   \
+    if (!(condition)) ::shoal_test::fail(__FILE__, __LINE__, #condition);   \
   } while (0)
 
 #define CHECK_EQ(actual, expected)                                                   \
   do {                                                                               \
-    const auto& bbtree_actual = (actual);                                            \
-    const auto& bbtree_expected = (expected);                                        \
-    if (!(bbtree_actual == bbtree_expected)) {                                       \
-      ::bbtree_test::fail(__FILE__, __LINE__,                                        \
+    const auto& shoal_actual = (actual);                                            \
+    const auto& shoal_expected = (expected);                                        \
+    if (!(shoal_actual == shoal_expected)) {                                       \
+      ::shoal_test::fail(__FILE__, __LINE__,                                        \
                           std::string(#actual " == " #expected ": ") +               \
-                              ::bbtree_test::show(bbtree_actual) + " vs " +          \
-                              ::bbtree_test::show(bbtree_expected));                 \
+                              ::shoal_test::show(shoal_actual) + " vs " +          \
+                              ::shoal_test::show(shoal_expected));                 \
     }                                                                                \
   } while (0)
 
 #define TEST_MAIN() \
-  int main(int argc, char** argv) { return ::bbtree_test::Registry::instance().run_all(argc, argv); }
+  int main(int argc, char** argv) { return ::shoal_test::Registry::instance().run_all(argc, argv); }

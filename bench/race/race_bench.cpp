@@ -1,17 +1,17 @@
 // The race: concurrent lookups on random UUID keys, half of which miss, as
 // upstream's README race (`design/assets/readme-race.svg`, `get-half`)
-// times the Rust maps. bbtree against the best-known C++ maps that threads
+// times the Rust maps. shoal against the best-known C++ maps that threads
 // can share, in two heats:
 //
-// - tree maps (ordered): bbtree's `BBTreeMap`; oneTBB's `concurrent_map`
+// - tree maps (ordered): shoal's `TreeMap`; oneTBB's `concurrent_map`
 //   and folly's `ConcurrentSkipList` (skip lists); Abseil's `btree_map` and
 //   `std::map` behind a `std::shared_mutex`.
-// - hash maps (unordered): bbtree's `BBHashMap` (shards behind locks);
+// - hash maps (unordered): shoal's `HashMap` (shards behind locks);
 //   Boost's `concurrent_flat_map`; folly's `ConcurrentHashMap`; oneTBB's
 //   `concurrent_hash_map` and `concurrent_unordered_map`; Abseil's
 //   `flat_hash_map` and `std::unordered_map` behind a `std::shared_mutex`.
 //
-// Each map takes its best use, as upstream's harness gives it: bbtree's
+// Each map takes its best use, as upstream's harness gives it: shoal's
 // bulk lookups (`get_many_copied`, 64 keys a call) and its plain ones,
 // and Boost's bulk visitation (`cvisit` over 64 keys); a
 // shared map is built by every thread, a locked one by one thread, its
@@ -50,15 +50,15 @@
 #include <vector>
 
 #include "../workload.hpp"
-#include "bbtree/hash_map.hpp"
-#include "bbtree/map.hpp"
+#include "shoal/hash_map.hpp"
+#include "shoal/map.hpp"
 
 namespace {
 
 using Uuid = std::array<std::uint8_t, 16>;
 using Value = std::uint64_t;
 
-/// Lookups go 64 keys at a time, as many as bbtree's bulk readers take.
+/// Lookups go 64 keys at a time, as many as shoal's bulk readers take.
 constexpr std::size_t lookups_per_call = 64;
 
 /// Random version-4 UUIDs, as upstream's `uuid` keys: `uuid(i)` for `i < n`
@@ -66,8 +66,8 @@ constexpr std::size_t lookups_per_call = 64;
 class UuidKeys {
  public:
   static Uuid uuid(std::uint64_t index) {
-    const std::uint64_t words[2] = {bbtree_bench::Keys::mix(2 * index),
-                                    bbtree_bench::Keys::mix(2 * index + 1)};
+    const std::uint64_t words[2] = {shoal_bench::Keys::mix(2 * index),
+                                    shoal_bench::Keys::mix(2 * index + 1)};
     Uuid key;
     std::memcpy(key.data(), words, sizeof(words));
     key[6] = static_cast<std::uint8_t>((key[6] & 0x0F) | 0x40);
@@ -93,7 +93,7 @@ class RaceKeys {
   explicit RaceKeys(std::size_t entries) : present_(entries), probes_(entries) {
     for (std::size_t index = 0; index < entries; ++index) present_[index] = UuidKeys::uuid(index);
     for (std::size_t index = 0; index < entries; ++index) {
-      const std::uint64_t draw = bbtree_bench::Keys::mix(index ^ 0x5555555555555555ull);
+      const std::uint64_t draw = shoal_bench::Keys::mix(index ^ 0x5555555555555555ull);
       const bool hit = (draw & 1) != 0;
       const std::size_t target = static_cast<std::size_t>((draw >> 1) % entries);
       probes_[index] = hit ? present_[target] : UuidKeys::uuid(entries + index);
@@ -128,7 +128,7 @@ class ThreadTeam {
 // The contestants. Each builds from the present keys, and hands every
 // thread a reader whose `look_up` sums the values of the keys it finds.
 
-class BBTreeContestant {
+class TreeMapContestant {
  public:
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
     ThreadTeam::run(threads, [&](std::size_t thread) {
@@ -139,16 +139,16 @@ class BBTreeContestant {
   }
 
  protected:
-  bbtree::BBTreeMap<Uuid, Value> map_;
+  shoal::TreeMap<Uuid, Value> map_;
 };
 
-class BBTreeBulk : public BBTreeContestant {
+class TreeMapBulk : public TreeMapContestant {
  public:
-  static constexpr const char* name = "bbtree (bulk)";
+  static constexpr const char* name = "shoal::TreeMap (bulk)";
 
   class Reader {
    public:
-    explicit Reader(const bbtree::BBTreeMap<Uuid, Value>& map) : map_(map) {}
+    explicit Reader(const shoal::TreeMap<Uuid, Value>& map) : map_(map) {}
     Value look_up(const Uuid* probes) {
       std::optional<Value> values[lookups_per_call];
       map_.get_many_copied(probes, lookups_per_call, values);
@@ -158,18 +158,18 @@ class BBTreeBulk : public BBTreeContestant {
     }
 
    private:
-    const bbtree::BBTreeMap<Uuid, Value>& map_;
+    const shoal::TreeMap<Uuid, Value>& map_;
   };
   Reader reader() const { return Reader(map_); }
 };
 
-class BBTreeSingle : public BBTreeContestant {
+class TreeMapSingle : public TreeMapContestant {
  public:
-  static constexpr const char* name = "bbtree";
+  static constexpr const char* name = "shoal::TreeMap";
 
   class Reader {
    public:
-    explicit Reader(const bbtree::BBTreeMap<Uuid, Value>& map) : map_(map) {}
+    explicit Reader(const shoal::TreeMap<Uuid, Value>& map) : map_(map) {}
     Value look_up(const Uuid* probes) {
       Value sum = 0;
       for (std::size_t index = 0; index < lookups_per_call; ++index) {
@@ -179,7 +179,7 @@ class BBTreeSingle : public BBTreeContestant {
     }
 
    private:
-    const bbtree::BBTreeMap<Uuid, Value>& map_;
+    const shoal::TreeMap<Uuid, Value>& map_;
   };
   Reader reader() const { return Reader(map_); }
 };
@@ -362,9 +362,9 @@ class TbbConcurrentHashMap {
   Map map_;
 };
 
-class BBTreeHashContestant {
+class HashMapContestant {
  public:
-  using Map = bbtree::BBHashMap<Uuid, Value, UuidKeys::Hash>;
+  using Map = shoal::HashMap<Uuid, Value, UuidKeys::Hash>;
 
   void build(const std::vector<Uuid>& keys, std::size_t threads) {
     ThreadTeam::run(threads, [&](std::size_t thread) {
@@ -378,9 +378,9 @@ class BBTreeHashContestant {
   Map map_;
 };
 
-class BBTreeHashBulk : public BBTreeHashContestant {
+class HashMapBulk : public HashMapContestant {
  public:
-  static constexpr const char* name = "bbtree::BBHashMap (bulk)";
+  static constexpr const char* name = "shoal::HashMap (bulk)";
 
   class Reader {
    public:
@@ -399,9 +399,9 @@ class BBTreeHashBulk : public BBTreeHashContestant {
   Reader reader() const { return Reader(map_); }
 };
 
-class BBTreeHashSingle : public BBTreeHashContestant {
+class HashMapSingle : public HashMapContestant {
  public:
-  static constexpr const char* name = "bbtree::BBHashMap";
+  static constexpr const char* name = "shoal::HashMap";
 
   class Reader {
    public:
@@ -437,7 +437,7 @@ class BoostConcurrentFlatMap {
     explicit Reader(const Map& map) : map_(map) {}
     Value look_up(const Uuid* probes) {
       // Bulk visitation, which overlaps the keys' waits for memory, as
-      // bbtree's bulk reads do.
+      // shoal's bulk reads do.
       Value sum = 0;
       map_.cvisit(probes, probes + lookups_per_call, [&](const auto& entry) { sum += entry.second; });
       return sum;
@@ -463,7 +463,7 @@ class Race {
   void run() {
     if (!selected(Contestant::name)) return;
     auto contestant = std::make_unique<Contestant>();
-    bbtree_bench::Stopwatch build_watch;
+    shoal_bench::Stopwatch build_watch;
     contestant->build(keys_.present(), threads_);
     const double build_seconds = build_watch.ns_per(1) / 1e9;
     check(*contestant);
@@ -496,7 +496,7 @@ class Race {
         if (++call == calls_in_probes) call = 0;
         ++calls;
       }
-      bbtree_bench::keep(sum);
+      shoal_bench::keep(sum);
       calls_by_thread[thread] = calls;
     });
     timer.join();
@@ -560,14 +560,14 @@ int main(int argc, char** argv) {
   }
   Race race(entries, threads, seconds, std::move(only));
   std::printf("map,entries,threads,mops,build_seconds\n");
-  race.run<BBTreeBulk>();
-  race.run<BBTreeSingle>();
+  race.run<TreeMapBulk>();
+  race.run<TreeMapSingle>();
   race.run<TbbConcurrentMap>();
   race.run<FollyConcurrentSkipList>();
   race.run<AbslBtreeMap>();
   race.run<StdMap>();
-  race.run<BBTreeHashBulk>();
-  race.run<BBTreeHashSingle>();
+  race.run<HashMapBulk>();
+  race.run<HashMapSingle>();
   race.run<BoostConcurrentFlatMap>();
   race.run<FollyConcurrentHashMap>();
   race.run<TbbConcurrentHashMap>();

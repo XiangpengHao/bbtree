@@ -10,11 +10,11 @@
 #include <utility>
 #include <vector>
 
-#include "bbtree/unsync/map.hpp"
+#include "shoal/unsync/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::Bound;
-using bbtree::unsync::BBTreeMap;
+using shoal::Bound;
+using shoal::unsync::TreeMap;
 
 namespace {
 
@@ -45,14 +45,14 @@ class Tracked {
 
 // `Tracked` points to no part of itself: moving its bytes moves it.
 template <>
-struct bbtree::is_trivially_relocatable<Tracked> : std::true_type {};
+struct shoal::is_trivially_relocatable<Tracked> : std::true_type {};
 
 namespace {
 
 std::string path_key(std::uint64_t index) { return "/data/" + std::to_string(index % 7) + "/" + std::to_string(index); }
 
 template <class K, class V>
-void check_same(const BBTreeMap<K, V>& map, const std::map<K, V>& model) {
+void check_same(const TreeMap<K, V>& map, const std::map<K, V>& model) {
   map.check_invariants();
   CHECK_EQ(map.size(), model.size());
   auto at = model.begin();
@@ -66,8 +66,8 @@ void check_same(const BBTreeMap<K, V>& map, const std::map<K, V>& model) {
 
 template <class K, class MakeKey>
 void check_entries(std::uint64_t seed, std::uint64_t key_space, MakeKey make_key) {
-  bbtree_test::Rng rng(seed);
-  BBTreeMap<K, std::uint64_t> map;
+  shoal_test::Rng rng(seed);
+  TreeMap<K, std::uint64_t> map;
   std::map<K, std::uint64_t> model;
   for (int round = 0; round < 20000; ++round) {
     const K key = make_key(rng.below(key_space));
@@ -134,7 +134,7 @@ TEST(entries_agree_with_std_map) {
 }
 
 TEST(an_empty_map_takes_its_first_entry) {
-  BBTreeMap<std::string, int> map;
+  TreeMap<std::string, int> map;
   CHECK(!map.first_entry().has_value());
   CHECK_EQ(std::move(map.entry("/a/b")).or_default(), 0);
   // A key that lacks what every key shares goes in at the tree's edge.
@@ -148,9 +148,9 @@ TEST(an_empty_map_takes_its_first_entry) {
 }
 
 TEST(extractions_agree_with_std_map) {
-  bbtree_test::Rng rng(3);
+  shoal_test::Rng rng(3);
   for (int round = 0; round < 200; ++round) {
-    BBTreeMap<std::uint64_t, std::uint64_t> map;
+    TreeMap<std::uint64_t, std::uint64_t> map;
     std::map<std::uint64_t, std::uint64_t> model;
     for (int index = 0; index < 3000; ++index) {
       const std::uint64_t key = rng.below(5000);
@@ -186,7 +186,7 @@ TEST(extractions_agree_with_std_map) {
     check_same(map, model);
   }
   // The upper bound's key is copied: a temporary bound outlives nothing.
-  BBTreeMap<std::uint64_t, std::uint64_t> map;
+  TreeMap<std::uint64_t, std::uint64_t> map;
   for (std::uint64_t key = 0; key < 100; ++key) map.insert(key, key);
   auto extraction = map.extract_if(Bound<std::uint64_t>::unbounded(), Bound<std::uint64_t>::excluded(std::uint64_t{50}),
                                    [](const std::uint64_t& key, std::uint64_t&) { return key % 2 == 0; });
@@ -201,13 +201,13 @@ TEST(extractions_agree_with_std_map) {
 }
 
 TEST(consuming_iterators_hand_out_every_entry_once) {
-  bbtree_test::Rng rng(4);
+  shoal_test::Rng rng(4);
   for (std::size_t count : {0u, 1u, 2u, 55u, 56u, 1000u, 30000u}) {
     for (int pattern = 0; pattern < 4; ++pattern) {
       int live = 0;
       std::vector<std::uint64_t> ids;
       {
-        BBTreeMap<std::string, Tracked> map;
+        TreeMap<std::string, Tracked> map;
         for (std::uint64_t index = 0; index < count; ++index) {
           map.insert(path_key(index * 13), Tracked(&live, index * 13));
         }
@@ -251,7 +251,7 @@ TEST(consuming_iterators_hand_out_every_entry_once) {
   for (std::size_t count : {1u, 2u, 57u}) {
     int live = 0;
     {
-      BBTreeMap<std::uint64_t, Tracked> map;
+      TreeMap<std::uint64_t, Tracked> map;
       for (std::uint64_t key = 0; key < count; ++key) map.insert(key, Tracked(&live, key));
       auto entries = std::move(map).into_iter();
       for (std::uint64_t key = 0; key + 1 < count; ++key) {
@@ -266,9 +266,9 @@ TEST(consuming_iterators_hand_out_every_entry_once) {
     }
     CHECK_EQ(live, 0);
   }
-  BBTreeMap<std::uint64_t, std::string> map;
+  TreeMap<std::uint64_t, std::string> map;
   for (std::uint64_t key = 0; key < 500; ++key) map.insert(key, std::to_string(key));
-  BBTreeMap<std::uint64_t, std::string> copy(map);
+  TreeMap<std::uint64_t, std::string> copy(map);
   std::uint64_t expected = 0;
   for (std::uint64_t key : std::move(map).into_keys()) CHECK_EQ(key, expected++);
   expected = 0;
@@ -277,9 +277,9 @@ TEST(consuming_iterators_hand_out_every_entry_once) {
 }
 
 TEST(append_agrees_with_std_map) {
-  bbtree_test::Rng rng(5);
+  shoal_test::Rng rng(5);
   for (int round = 0; round < 60; ++round) {
-    BBTreeMap<std::string, std::uint64_t> ours, theirs;
+    TreeMap<std::string, std::uint64_t> ours, theirs;
     std::map<std::string, std::uint64_t> model;
     const std::size_t our_count = rng.below(4) == 0 ? 0 : rng.below(5000);
     const std::size_t their_count = rng.below(4) == 0 ? 0 : rng.below(5000);
@@ -305,7 +305,7 @@ TEST(append_agrees_with_std_map) {
 }
 
 TEST(replace_key_keeps_the_value) {
-  BBTreeMap<std::string, int> map;
+  TreeMap<std::string, int> map;
   CHECK(!map.replace_key("/a", 1).has_value());
   CHECK(!map.replace_key("/b", 2).has_value());
   const std::optional<std::string> old = map.replace_key("/a", 9);

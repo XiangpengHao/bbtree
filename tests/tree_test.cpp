@@ -7,14 +7,14 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/allocator.hpp"
-#include "bbtree/detail/tree/invariants.hpp"
-#include "bbtree/detail/tree/remove.hpp"
-#include "bbtree/detail/tree/teardown.hpp"
+#include "shoal/allocator.hpp"
+#include "shoal/detail/tree/invariants.hpp"
+#include "shoal/detail/tree/remove.hpp"
+#include "shoal/detail/tree/teardown.hpp"
 #include "test_harness.hpp"
 
-using namespace bbtree;
-using namespace bbtree::detail;
+using namespace shoal;
+using namespace shoal::detail;
 
 namespace {
 
@@ -67,7 +67,7 @@ template <class K, class V, class MakeKey, class MakeValue, class SameValue>
 void differential(std::uint64_t seed, std::size_t operations, std::uint64_t key_space,
                   MakeKey make_key, MakeValue make_value, SameValue same_value,
                   std::size_t check_every) {
-  bbtree_test::Rng rng(seed);
+  shoal_test::Rng rng(seed);
   TestTree<K, V> tree;
   std::map<K, V> model;
   for (std::size_t step = 0; step < operations; ++step) {

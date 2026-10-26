@@ -10,13 +10,13 @@
 #include <type_traits>
 #include <vector>
 
-#include "bbtree/map.hpp"
+#include "shoal/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::AnnexedLeaf;
-using bbtree::BBTreeMap;
-using bbtree::Layout;
-using bbtree::LeafOutcome;
+using shoal::AnnexedLeaf;
+using shoal::TreeMap;
+using shoal::Layout;
+using shoal::LeafOutcome;
 
 namespace {
 
@@ -25,13 +25,13 @@ class CountingAlloc {
  public:
   explicit CountingAlloc(std::atomic<long>* live) noexcept : live_(live) {}
   void* allocate_zeroed(Layout layout) noexcept {
-    void* block = bbtree::Global().allocate_zeroed(layout);
+    void* block = shoal::Global().allocate_zeroed(layout);
     if (block != nullptr) live_->fetch_add(1, std::memory_order_relaxed);
     return block;
   }
   void deallocate(void* block, Layout layout) noexcept {
     live_->fetch_sub(1, std::memory_order_relaxed);
-    bbtree::Global().deallocate(block, layout);
+    shoal::Global().deallocate(block, layout);
   }
 
  private:
@@ -64,11 +64,11 @@ struct PagePerEntry {
 
 // A vector points to no part of itself: the annex moves with its leaf's bytes.
 template <>
-struct bbtree::is_trivially_relocatable<PagePerEntry> : std::true_type {};
+struct shoal::is_trivially_relocatable<PagePerEntry> : std::true_type {};
 
 namespace {
 
-using AnnexedMap = BBTreeMap<std::uint64_t, std::uint64_t, bbtree::DefaultNodeConfig, CountingAlloc, PagePerEntry>;
+using AnnexedMap = TreeMap<std::uint64_t, std::uint64_t, shoal::DefaultNodeConfig, CountingAlloc, PagePerEntry>;
 using Leaf = AnnexedMap::annexed_leaf;
 
 bool keys_sorted_and(const Leaf& leaf, std::uint64_t key, bool present) {
@@ -124,7 +124,7 @@ TEST(annexes_follow_their_leaves_through_splits_merges_and_teardown) {
   {
     CountingAlloc alloc(&live);
     AnnexedMap map(alloc);
-    bbtree_test::Rng rng(7);
+    shoal_test::Rng rng(7);
     std::map<std::uint64_t, std::uint64_t> model;
     for (std::uint64_t step = 0; step < 60000; ++step) {
       const std::uint64_t key = rng.below(4000);
@@ -182,7 +182,7 @@ TEST(threads_keep_annexes_whole) {
     for (std::size_t thread = 0; thread < threads; ++thread) {
       workers.emplace_back([&, thread] {
         CountingAlloc own(alloc);
-        bbtree_test::Rng rng(100 + thread);
+        shoal_test::Rng rng(100 + thread);
         for (int step = 0; step < 20000; ++step) {
           // Keys interleave between threads, so they share leaves.
           const std::uint64_t key = rng.below(3000) * threads + thread;
@@ -196,7 +196,7 @@ TEST(threads_keep_annexes_whole) {
     }
     for (auto& worker : workers) worker.join();
     std::size_t count = 0;
-    map.scan(bbtree::Bound<std::uint64_t>::unbounded(), bbtree::Bound<std::uint64_t>::unbounded(),
+    map.scan(shoal::Bound<std::uint64_t>::unbounded(), shoal::Bound<std::uint64_t>::unbounded(),
              [&](const std::uint64_t&, const std::uint64_t&) {
                ++count;
                return true;

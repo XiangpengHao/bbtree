@@ -1,4 +1,4 @@
-#include "bbtree/unsync/hash_index.hpp"
+#include "shoal/unsync/hash_index.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +12,7 @@
 #include "test_harness.hpp"
 
 namespace {
-using Index = bbtree::unsync::BBHashIndex<std::uint64_t>;
+using Index = shoal::unsync::HashIndex<std::uint64_t>;
 struct Rows {
   std::vector<unsigned> keys;
   std::vector<unsigned> stored;
@@ -173,7 +173,7 @@ TEST(global_positions_survive_tiles_and_cached_hash_rebuild) {
   for (std::size_t i = 0; i < count; ++i) CHECK_EQ(results[i], i + 1);
 }
 TEST(pointer_handles_and_compare_exception) {
-  bbtree::unsync::BBHashIndex<void *> index;
+  shoal::unsync::HashIndex<void *> index;
   decltype(index)::ProbeState scratch;
   int objects[3] = {};
   void *results[3];
@@ -225,16 +225,16 @@ struct AllocationState {
 class IndexAllocator {
  public:
   explicit IndexAllocator(AllocationState *state = nullptr) : state_(state) {}
-  void *allocate_zeroed(bbtree::Layout layout) noexcept {
+  void *allocate_zeroed(shoal::Layout layout) noexcept {
     ++state_->allocations;
     if (state_->fail) return nullptr;
-    auto memory = bbtree::Global{}.allocate_zeroed(layout);
+    auto memory = shoal::Global{}.allocate_zeroed(layout);
     if (memory) state_->bytes += layout.size;
     return memory;
   }
-  void deallocate(void *memory, bbtree::Layout layout) noexcept {
+  void deallocate(void *memory, shoal::Layout layout) noexcept {
     state_->bytes -= layout.size;
-    bbtree::Global{}.deallocate(memory, layout);
+    shoal::Global{}.deallocate(memory, layout);
   }
 
  private:
@@ -244,7 +244,7 @@ class IndexAllocator {
 TEST(allocation_refusal_preserves_index_and_reset_reuses_storage) {
   AllocationState allocation;
   {
-    bbtree::unsync::BBHashIndex<std::uint64_t, IndexAllocator> index{IndexAllocator(&allocation)};
+    shoal::unsync::HashIndex<std::uint64_t, IndexAllocator> index{IndexAllocator(&allocation)};
     decltype(index)::ProbeState scratch;
     Rows rows{{1, 2, 3}, {}, 0, 0};
     std::uint64_t results[3];
@@ -438,7 +438,7 @@ TEST(immutable_external_index_uses_independent_reader_scratch) {
 TEST(move_assignment_releases_each_index_through_its_original_allocator) {
   AllocationState first, second;
   {
-    using AllocatedIndex = bbtree::unsync::BBHashIndex<std::uint64_t, IndexAllocator>;
+    using AllocatedIndex = shoal::unsync::HashIndex<std::uint64_t, IndexAllocator>;
     AllocatedIndex destination{IndexAllocator(&first)}, source{IndexAllocator(&second)};
     AllocatedIndex::ProbeState scratch;
     Rows first_rows{{1}, {}, 0, 0}, second_rows{{2}, {}, 0, 0};
@@ -517,7 +517,7 @@ TEST(streamed_reserve_preserves_rows_and_rejects_failed_enumeration) {
 
 TEST(streamed_reserve_allocation_failure_preserves_positions) {
   AllocationState allocation;
-  using AllocatedIndex = bbtree::unsync::BBHashIndex<std::uint64_t, IndexAllocator>;
+  using AllocatedIndex = shoal::unsync::HashIndex<std::uint64_t, IndexAllocator>;
   AllocatedIndex index{IndexAllocator(&allocation)};
   AllocatedIndex::ProbeState scratch;
   Rows rows{{1, 2}, {}, 0, 0};

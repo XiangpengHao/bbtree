@@ -6,17 +6,17 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/unsync/map.hpp"
+#include "shoal/unsync/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::unsync::BBTreeMap;
+using shoal::unsync::TreeMap;
 
 namespace {
 
 template <class K, class MakeKey>
 void check_batches(std::uint64_t seed, std::size_t entries, std::uint64_t key_space, MakeKey make_key) {
-  bbtree_test::Rng rng(seed);
-  BBTreeMap<K, std::uint64_t> single, batched;
+  shoal_test::Rng rng(seed);
+  TreeMap<K, std::uint64_t> single, batched;
   // Build both, one by single inserts, the other by batches of every size.
   std::size_t inserted = 0;
   while (inserted < entries) {

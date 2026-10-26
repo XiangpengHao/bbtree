@@ -64,7 +64,7 @@ jobs:
           CXX: ${{ runner.os == 'Linux' && 'clang++' || 'c++' }}
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+          -DSHOAL_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -A ${{ matrix.platform }} -DBBTREE_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+        run: cmake -S . -B build -A ${{ matrix.platform }} -DSHOAL_NATIVE=OFF "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
 
       - name: Build
         run: cmake --build build --config RelWithDebInfo --parallel
@@ -138,7 +138,7 @@ jobs:
           CXX: clang++
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          -DBBTREE_NATIVE=OFF "-DBBTREE_SANITIZE=${{ matrix.sanitizer }}"
+          -DSHOAL_NATIVE=OFF "-DSHOAL_SANITIZE=${{ matrix.sanitizer }}"
           -DCMAKE_CXX_FLAGS=-stdlib=libc++
 
       - name: Build

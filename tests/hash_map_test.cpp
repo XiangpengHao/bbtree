@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "bbtree/unsync/hash_map.hpp"
+#include "shoal/unsync/hash_map.hpp"
 #include "test_harness.hpp"
 
 namespace {
@@ -33,15 +33,15 @@ struct AllocationState {
 class CountingAllocator {
  public:
   explicit CountingAllocator(AllocationState *state = nullptr) : state_(state) {}
-  void *allocate_zeroed(bbtree::Layout layout) noexcept {
+  void *allocate_zeroed(shoal::Layout layout) noexcept {
     if (state_ && state_->attempts++ == state_->fail_at) return nullptr;
-    void *memory = bbtree::Global{}.allocate_zeroed(layout);
+    void *memory = shoal::Global{}.allocate_zeroed(layout);
     if (memory && state_) state_->bytes += layout.size;
     return memory;
   }
-  void deallocate(void *memory, bbtree::Layout layout) noexcept {
+  void deallocate(void *memory, shoal::Layout layout) noexcept {
     if (state_) state_->bytes -= layout.size;
-    bbtree::Global{}.deallocate(memory, layout);
+    shoal::Global{}.deallocate(memory, layout);
   }
 
  private:
@@ -104,9 +104,9 @@ struct alignas(128) AlignedValue {
 
 template <class Hasher>
 void differential(Hasher hash, std::size_t operations, std::uint64_t key_space) {
-  bbtree::unsync::BBHashMap<int, std::uint64_t, Hasher> map(hash);
+  shoal::unsync::HashMap<int, std::uint64_t, Hasher> map(hash);
   std::unordered_map<int, std::uint64_t> model;
-  bbtree_test::Rng rng(71);
+  shoal_test::Rng rng(71);
   for (std::size_t step = 0; step < operations; ++step) {
     const auto key = static_cast<int>(rng.below(key_space));
     auto expected = model.find(key);
@@ -157,7 +157,7 @@ TEST(hash_map_matches_unordered_map_through_growth_and_churn) {
 
 TEST(hash_map_handles_collisions_tombstones_and_duplicate_updates) {
   differential(ConstantHash{}, 15000, 200);
-  bbtree::unsync::BBHashMap<int, int, ConstantHash> map;
+  shoal::unsync::HashMap<int, int, ConstantHash> map;
   for (int key = 0; key < 100; ++key) map.insert(key, key);
   for (int key = 0; key < 99; ++key) CHECK(map.remove(key));
   const auto previous = map.insert(99, 1000);
@@ -169,7 +169,7 @@ TEST(hash_map_handles_collisions_tombstones_and_duplicate_updates) {
 }
 
 TEST(hash_map_owns_strings_and_accepts_borrowed_queries) {
-  bbtree::unsync::BBHashMap<std::string, std::string> map;
+  shoal::unsync::HashMap<std::string, std::string> map;
   map.insert("alpha", "first");
   map.insert("beta", "second");
   CHECK_EQ(*map.get(std::string_view("alpha")), "first");
@@ -183,7 +183,7 @@ TEST(hash_map_owns_strings_and_accepts_borrowed_queries) {
 
 TEST(hash_map_growth_preserves_references_and_uses_cached_hashes) {
   std::size_t hash_calls = 0;
-  bbtree::unsync::BBHashMap<int, std::string, CountingHash> map(CountingHash{&hash_calls});
+  shoal::unsync::HashMap<int, std::string, CountingHash> map(CountingHash{&hash_calls});
   map.insert(7, "seven");
   const auto *stored = map.get(7);
   const auto before = hash_calls;
@@ -197,7 +197,7 @@ TEST(hash_map_growth_preserves_references_and_uses_cached_hashes) {
 
 TEST(hash_map_hashed_walk_visits_dense_sparse_and_empty_pages_without_hashing) {
   std::size_t hash_calls = 0;
-  bbtree::unsync::BBHashMap<int, int, CountingHash> map(CountingHash{&hash_calls});
+  shoal::unsync::HashMap<int, int, CountingHash> map(CountingHash{&hash_calls});
   std::unordered_map<int, int> expected;
   for (int key = 0; key < 500; ++key) {
     map.insert(key, key + 1);
@@ -230,7 +230,7 @@ TEST(hash_map_hashed_walk_visits_dense_sparse_and_empty_pages_without_hashing) {
 }
 
 TEST(hash_map_moves_copies_and_clears_owned_entries) {
-  bbtree::unsync::BBHashMap<int, std::string> source;
+  shoal::unsync::HashMap<int, std::string> source;
   for (int key = 0; key < 300; ++key) source.insert(key, std::to_string(key));
   auto copied = source;
   copied.insert(2, "changed");
@@ -254,7 +254,7 @@ TEST(hash_map_moves_copies_and_clears_owned_entries) {
 TEST(hash_map_destroys_each_owned_value_once) {
   auto live = std::make_shared<int>(0);
   {
-    bbtree::unsync::BBHashMap<int, LifetimeValue> map;
+    shoal::unsync::HashMap<int, LifetimeValue> map;
     for (int key = 0; key < 300; ++key) map.insert(key, LifetimeValue(live));
     CHECK_EQ(*live, 300);
     map.insert(4, LifetimeValue(live));
@@ -272,7 +272,7 @@ TEST(hash_map_destroys_each_owned_value_once) {
 TEST(hash_map_clear_retain_capacity_destroys_values_and_reuses_allocations) {
   AllocationState state;
   auto live = std::make_shared<int>(0);
-  using Map = bbtree::unsync::BBHashMap<int, LifetimeValue, std::hash<int>, std::equal_to<>,
+  using Map = shoal::unsync::HashMap<int, LifetimeValue, std::hash<int>, std::equal_to<>,
                                         CountingAllocator>;
   {
     Map map(std::hash<int>{}, std::equal_to<>{}, CountingAllocator(&state));
@@ -297,7 +297,7 @@ TEST(hash_map_clear_retain_capacity_destroys_values_and_reuses_allocations) {
 
 TEST(hash_map_allocation_failure_preserves_entries_and_releases_memory) {
   using Map =
-      bbtree::unsync::BBHashMap<int, int, std::hash<int>, std::equal_to<>, CountingAllocator>;
+      shoal::unsync::HashMap<int, int, std::hash<int>, std::equal_to<>, CountingAllocator>;
   for (std::size_t fail_at = 0; fail_at < 20; ++fail_at) {
     AllocationState state;
     {
@@ -320,7 +320,7 @@ TEST(hash_map_allocation_failure_preserves_entries_and_releases_memory) {
 }
 
 TEST(hash_map_batches_preserve_input_order_and_duplicate_insert_semantics) {
-  bbtree::unsync::BBHashMap<int, int, ConstantHash> map;
+  shoal::unsync::HashMap<int, int, ConstantHash> map;
   std::array<int, 131> keys{}, values{};
   std::array<std::optional<int>, 131> previous{};
   for (std::size_t index = 0; index < keys.size(); ++index) {
@@ -344,7 +344,7 @@ TEST(hash_map_batches_preserve_input_order_and_duplicate_insert_semantics) {
 }
 
 TEST(hash_map_string_batches_accept_borrowed_queries) {
-  bbtree::unsync::BBHashMap<std::string, int> map;
+  shoal::unsync::HashMap<std::string, int> map;
   map.insert("one", 1);
   map.insert("two", 2);
   const std::string_view keys[] = {"one", "absent", "two", "one"};
@@ -358,7 +358,7 @@ TEST(hash_map_string_batches_accept_borrowed_queries) {
 
 TEST(hash_map_batched_find_or_create_initializes_once_and_aliases_duplicate_keys) {
   std::size_t hash_calls = 0;
-  bbtree::unsync::BBHashMap<int, int, CountingConstantHash> map(CountingConstantHash{&hash_calls});
+  shoal::unsync::HashMap<int, int, CountingConstantHash> map(CountingConstantHash{&hash_calls});
   map.reserve(1000);  // Keep cached vacancies valid while colliding rows occupy them.
   map.insert(7, 10);
   std::array<int, 263> keys{};
@@ -387,7 +387,7 @@ TEST(hash_map_batched_find_or_create_initializes_once_and_aliases_duplicate_keys
 }
 
 TEST(hash_map_batches_handle_tombstones_and_missing_duplicate_keys) {
-  bbtree::unsync::BBHashMap<int, int, ConstantHash> map;
+  shoal::unsync::HashMap<int, int, ConstantHash> map;
   for (int key = 0; key < 100; ++key) map.insert(key, key);
   for (int key = 0; key < 100; key += 2) map.remove(key);
   std::array<int, 259> keys{};
@@ -404,7 +404,7 @@ TEST(hash_map_batches_handle_tombstones_and_missing_duplicate_keys) {
 }
 
 TEST(hash_map_batched_creation_allocation_failures_release_unpublished_values) {
-  using Map = bbtree::unsync::BBHashMap<int, LifetimeValue, std::hash<int>, std::equal_to<>,
+  using Map = shoal::unsync::HashMap<int, LifetimeValue, std::hash<int>, std::equal_to<>,
                                         CountingAllocator>;
   for (std::size_t failure = 0; failure < 15; ++failure) {
     AllocationState state;
@@ -437,7 +437,7 @@ TEST(hash_map_batched_creation_allocation_failures_release_unpublished_values) {
 }
 
 TEST(hash_map_batched_find_or_create_accepts_borrowed_keys_and_unwinds_factory_failure) {
-  bbtree::unsync::BBHashMap<std::string, std::unique_ptr<int>> map;
+  shoal::unsync::HashMap<std::string, std::unique_ptr<int>> map;
   const std::string_view keys[] = {"one", "two", "one", "stop"};
   std::unique_ptr<int> *values[4]{};
   bool threw = false;
@@ -459,7 +459,7 @@ TEST(hash_map_batched_find_or_create_accepts_borrowed_keys_and_unwinds_factory_f
 
 TEST(hash_map_batched_upsert_orders_callbacks_and_initializes_only_new_keys) {
   std::size_t calls = 0;
-  bbtree::unsync::BBHashMap<int, std::uint64_t, CountingConstantHash> map(
+  shoal::unsync::HashMap<int, std::uint64_t, CountingConstantHash> map(
       CountingConstantHash{&calls});
   map.reserve(1000);
   map.insert(5, 1000);
@@ -494,7 +494,7 @@ TEST(hash_map_batched_upsert_orders_callbacks_and_initializes_only_new_keys) {
 }
 
 TEST(hash_map_batched_upsert_preserves_completed_work_on_callback_exception) {
-  bbtree::unsync::BBHashMap<int, std::unique_ptr<int>> map;
+  shoal::unsync::HashMap<int, std::unique_ptr<int>> map;
   const int keys[] = {0, 1, 0, 2};
   bool threw = false;
   try {
@@ -520,7 +520,7 @@ TEST(hash_map_batched_upsert_preserves_completed_work_on_callback_exception) {
 
 TEST(hash_map_batch_replacement_only_requires_move_construction) {
   auto live = std::make_shared<int>(0);
-  bbtree::unsync::BBHashMap<int, LifetimeValue> map;
+  shoal::unsync::HashMap<int, LifetimeValue> map;
   int keys[] = {1, 1};
   LifetimeValue values[] = {LifetimeValue(live), LifetimeValue(live)};
   std::optional<LifetimeValue> previous[2];
@@ -535,7 +535,7 @@ TEST(hash_map_batch_replacement_only_requires_move_construction) {
 
 TEST(hash_map_policy_exceptions_leave_entries_unchanged) {
   bool fail = false;
-  bbtree::unsync::BBHashMap<int, int, ConstantHash, ThrowingEqual> map(ConstantHash{},
+  shoal::unsync::HashMap<int, int, ConstantHash, ThrowingEqual> map(ConstantHash{},
                                                                        ThrowingEqual{&fail});
   map.insert(1, 10);
   fail = true;
@@ -556,7 +556,7 @@ TEST(hash_map_policy_exceptions_leave_entries_unchanged) {
 TEST(hash_map_copy_failure_destroys_partial_copy_and_preserves_assignment_target) {
   int live = 0, copies_left = 100;
   {
-    bbtree::unsync::BBHashMap<int, CopyValue> source, target;
+    shoal::unsync::HashMap<int, CopyValue> source, target;
     for (int key = 0; key < 20; ++key) source.insert(key, CopyValue(&live, &copies_left));
     target.insert(100, CopyValue(&live, &copies_left));
     copies_left = 3;
@@ -577,7 +577,7 @@ TEST(hash_map_copy_failure_destroys_partial_copy_and_preserves_assignment_target
 
 TEST(hash_map_supports_oversized_overaligned_entries_and_empty_maps_allocate_nothing) {
   AllocationState state;
-  using Map = bbtree::unsync::BBHashMap<int, AlignedValue, std::hash<int>, std::equal_to<>,
+  using Map = shoal::unsync::HashMap<int, AlignedValue, std::hash<int>, std::equal_to<>,
                                         CountingAllocator>;
   {
     Map map(std::hash<int>{}, std::equal_to<>{}, CountingAllocator(&state));

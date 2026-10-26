@@ -1,4 +1,4 @@
-// `bbtree::BBTreeMap`, the map threads share: one thread against `std::map`,
+// `shoal::TreeMap`, the map threads share: one thread against `std::map`,
 // with the invariants checked as it goes, then threads racing on it, each
 // checking what it can know, and the whole map checked after.
 #include <atomic>
@@ -8,19 +8,19 @@
 #include <thread>
 #include <vector>
 
-#include "bbtree/map.hpp"
+#include "shoal/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::BBTreeMap;
-using bbtree::Bound;
+using shoal::TreeMap;
+using shoal::Bound;
 
 namespace {
 
 template <class K, class MakeKey>
 void single_thread_differential(std::uint64_t seed, std::size_t operations, std::uint64_t key_space,
                                 MakeKey make_key) {
-  bbtree_test::Rng rng(seed);
-  BBTreeMap<K, std::uint64_t> map;
+  shoal_test::Rng rng(seed);
+  TreeMap<K, std::uint64_t> map;
   std::map<K, std::uint64_t> model;
   for (std::size_t step = 0; step < operations; ++step) {
     const K key = make_key(rng.below(key_space));
@@ -121,12 +121,12 @@ TEST(string_shared_map_agrees_with_std_map) {
 }
 
 TEST(threads_insert_disjoint_keys) {
-  BBTreeMap<std::uint64_t, std::uint64_t> map;
+  TreeMap<std::uint64_t, std::uint64_t> map;
   constexpr std::size_t threads = 8, per_thread = 50000;
   std::vector<std::thread> workers;
   for (std::size_t thread = 0; thread < threads; ++thread) {
     workers.emplace_back([&, thread] {
-      bbtree_test::Rng rng(thread + 1);
+      shoal_test::Rng rng(thread + 1);
       for (std::size_t index = 0; index < per_thread; ++index) {
         // Interleaved keys, so that threads share leaves.
         const std::uint64_t key = (rng.next() % 1000000) * threads + thread;
@@ -151,7 +151,7 @@ TEST(threads_insert_disjoint_keys) {
 }
 
 TEST(threads_insert_and_remove_their_own_keys_while_others_read) {
-  BBTreeMap<std::uint64_t, std::uint64_t> map;
+  TreeMap<std::uint64_t, std::uint64_t> map;
   constexpr std::size_t writers = 6, readers = 2, rounds = 40000;
   std::atomic<bool> done{false};
   std::vector<std::thread> workers;
@@ -159,7 +159,7 @@ TEST(threads_insert_and_remove_their_own_keys_while_others_read) {
   std::vector<std::map<std::uint64_t, std::uint64_t>> models(writers);
   for (std::size_t id = 0; id < writers; ++id) {
     workers.emplace_back([&, id] {
-      bbtree_test::Rng rng(100 + id);
+      shoal_test::Rng rng(100 + id);
       auto& model = models[id];
       for (std::size_t round = 0; round < rounds; ++round) {
         const std::uint64_t key = rng.below(4000) * writers + id;
@@ -179,7 +179,7 @@ TEST(threads_insert_and_remove_their_own_keys_while_others_read) {
   }
   for (std::size_t id = 0; id < readers; ++id) {
     workers.emplace_back([&, id] {
-      bbtree_test::Rng rng(200 + id);
+      shoal_test::Rng rng(200 + id);
       while (!done.load(std::memory_order_relaxed)) {
         const std::uint64_t start = rng.below(4000 * writers);
         std::uint64_t previous = 0;
@@ -208,7 +208,7 @@ TEST(threads_insert_and_remove_their_own_keys_while_others_read) {
 }
 
 TEST(threads_share_string_keys) {
-  BBTreeMap<std::string, std::uint64_t> map;
+  TreeMap<std::string, std::uint64_t> map;
   constexpr std::size_t threads = 6, per_thread = 20000;
   std::vector<std::thread> workers;
   for (std::size_t id = 0; id < threads; ++id) {

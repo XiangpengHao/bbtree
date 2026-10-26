@@ -1,4 +1,4 @@
-// `bbtree::unsync::BBTreeMap` against `std::map`: iteration in both
+// `shoal::unsync::TreeMap` against `std::map`: iteration in both
 // directions, ranges of every kind of bound, values changed through ranges.
 #include <cstdint>
 #include <cstdio>
@@ -7,16 +7,16 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/unsync/map.hpp"
+#include "shoal/unsync/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::Bound;
-using bbtree::unsync::BBTreeMap;
+using shoal::Bound;
+using shoal::unsync::TreeMap;
 
 namespace {
 
 template <class K>
-Bound<K> random_bound(bbtree_test::Rng& rng, const K& key) {
+Bound<K> random_bound(shoal_test::Rng& rng, const K& key) {
   switch (rng.below(3)) {
     case 0: return Bound<K>::included(key);
     case 1: return Bound<K>::excluded(key);
@@ -44,8 +44,8 @@ std::vector<std::pair<K, V>> model_range(const std::map<K, V>& model, const Boun
 
 template <class K, class V, class MakeKey>
 void check_ranges(std::uint64_t seed, std::size_t entries, std::uint64_t key_space, MakeKey make_key) {
-  bbtree_test::Rng rng(seed);
-  BBTreeMap<K, V> map;
+  shoal_test::Rng rng(seed);
+  TreeMap<K, V> map;
   std::map<K, V> model;
   for (std::size_t index = 0; index < entries; ++index) {
     const K key = make_key(rng.below(key_space));
@@ -118,7 +118,7 @@ TEST(string_ranges_agree_with_std_map) {
 }
 
 TEST(empty_map_iterates_nothing) {
-  BBTreeMap<std::uint64_t, std::uint64_t> map;
+  TreeMap<std::uint64_t, std::uint64_t> map;
   for (auto entry : map) {
     (void)entry;
     CHECK(false);
@@ -132,10 +132,10 @@ TEST(empty_map_iterates_nothing) {
 }
 
 TEST(map_moves_and_reports_its_size) {
-  static_assert(sizeof(BBTreeMap<std::uint64_t, std::uint64_t>) == 24, "the map is 24 bytes");
-  BBTreeMap<std::string, std::string> map;
+  static_assert(sizeof(TreeMap<std::uint64_t, std::uint64_t>) == 24, "the map is 24 bytes");
+  TreeMap<std::string, std::string> map;
   for (int index = 0; index < 1000; ++index) map.insert(std::to_string(index), std::to_string(index * 2));
-  BBTreeMap<std::string, std::string> moved(std::move(map));
+  TreeMap<std::string, std::string> moved(std::move(map));
   CHECK_EQ(moved.size(), 1000u);
   CHECK_EQ(map.size(), 0u);
   CHECK(*moved.get(std::string("10")) == "20");
@@ -150,7 +150,7 @@ TEST(built_maps_agree_with_std_map) {
   for (std::size_t count : {0u, 1u, 12u, 55u, 56u, 1000u, 54321u}) {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> entries;
     for (std::uint64_t index = 0; index < count; ++index) entries.push_back({index * 3, index});
-    auto map = BBTreeMap<std::uint64_t, std::uint64_t>::from_sorted(entries.begin(), entries.end());
+    auto map = TreeMap<std::uint64_t, std::uint64_t>::from_sorted(entries.begin(), entries.end());
     map.check_invariants();
     CHECK_EQ(map.size(), count);
     std::size_t at = 0;
@@ -166,7 +166,7 @@ TEST(built_maps_agree_with_std_map) {
   }
   // Unsorted, with equal keys: the last kept.
   std::vector<std::pair<std::string, int>> entries = {{"b", 1}, {"a", 2}, {"b", 3}, {"c", 4}, {"a", 5}};
-  auto map = BBTreeMap<std::string, int>::from_entries(entries);
+  auto map = TreeMap<std::string, int>::from_entries(entries);
   map.check_invariants();
   CHECK_EQ(map.size(), 3u);
   CHECK_EQ(*map.get(std::string("a")), 5);
@@ -182,27 +182,27 @@ TEST(strings_build_with_shrinking_prefixes) {
     entries.push_back({key, index});
   }
   entries.insert(entries.begin(), {std::string("/"), 0});
-  auto map = BBTreeMap<std::string, std::uint64_t>::from_sorted(entries.begin(), entries.end());
+  auto map = TreeMap<std::string, std::uint64_t>::from_sorted(entries.begin(), entries.end());
   map.check_invariants();
   CHECK_EQ(map.size(), entries.size());
 }
 
 TEST(copies_split_and_retain_agree_with_std_map) {
-  bbtree_test::Rng rng(11);
-  BBTreeMap<std::string, std::uint64_t> map;
+  shoal_test::Rng rng(11);
+  TreeMap<std::string, std::uint64_t> map;
   std::map<std::string, std::uint64_t> model;
   for (int index = 0; index < 30000; ++index) {
     std::string key = "/k/" + std::to_string(rng.below(100000));
     map.insert(key, index);
     model[key] = index;
   }
-  BBTreeMap<std::string, std::uint64_t> copy(map);
+  TreeMap<std::string, std::uint64_t> copy(map);
   copy.check_invariants();
   copy.check_same_nodes(map);
   for (int round = 0; round < 20; ++round) {
-    BBTreeMap<std::string, std::uint64_t> working(copy);
+    TreeMap<std::string, std::uint64_t> working(copy);
     const std::string at = "/k/" + std::to_string(rng.below(100000));
-    BBTreeMap<std::string, std::uint64_t> upper = working.split_off(at);
+    TreeMap<std::string, std::uint64_t> upper = working.split_off(at);
     working.check_invariants();
     upper.check_invariants();
     const auto split = model.lower_bound(at);
@@ -218,7 +218,7 @@ TEST(copies_split_and_retain_agree_with_std_map) {
   CHECK_EQ(map.size(), model.size());
   for (const auto& [key, value] : model) CHECK(map.get(key) != nullptr && *map.get(key) == value);
   // Extend, past the batch cutoff, as separate inserts.
-  BBTreeMap<std::uint64_t, std::uint64_t> extended, single;
+  TreeMap<std::uint64_t, std::uint64_t> extended, single;
   std::vector<std::pair<std::uint64_t, std::uint64_t>> more;
   for (std::uint64_t index = 0; index < 100000; ++index) more.push_back({rng.next() % 300000, index});
   extended.extend(more.begin(), more.end());

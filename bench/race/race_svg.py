@@ -15,14 +15,14 @@ HASH_MAPS = "hash maps (unordered)"
 
 # race_bench's names: the chart's label, heat, and whether the map is ours.
 LABELS = {
-    "bbtree (bulk)": ("bbtree, bulk", TREE_MAPS, True),
-    "bbtree": ("bbtree", TREE_MAPS, True),
+    "shoal::TreeMap (bulk)": ("shoal tree, bulk", TREE_MAPS, True),
+    "shoal::TreeMap": ("shoal tree", TREE_MAPS, True),
     "tbb::concurrent_map": ("tbb concurrent_map", TREE_MAPS, False),
     "folly::ConcurrentSkipList": ("folly SkipList", TREE_MAPS, False),
     "absl::btree_map + shared_mutex": ("absl btree + rwlock", TREE_MAPS, False),
     "std::map + shared_mutex": ("std::map + rwlock", TREE_MAPS, False),
-    "bbtree::BBHashMap (bulk)": ("bbtree hash, bulk", HASH_MAPS, True),
-    "bbtree::BBHashMap": ("bbtree hash", HASH_MAPS, True),
+    "shoal::HashMap (bulk)": ("shoal hash, bulk", HASH_MAPS, True),
+    "shoal::HashMap": ("shoal hash", HASH_MAPS, True),
     "boost::concurrent_flat_map": ("boost flat_map, bulk", HASH_MAPS, False),
     "folly::ConcurrentHashMap": ("folly ConcurrentHashMap", HASH_MAPS, False),
     "tbb::concurrent_hash_map": ("tbb concurrent_hash_map", HASH_MAPS, False),

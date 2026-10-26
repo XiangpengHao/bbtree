@@ -4,12 +4,12 @@
 #include <cstdint>
 #include <string>
 
-#include "bbtree/detail/node/plan.hpp"
+#include "shoal/detail/node/plan.hpp"
 #include "test_harness.hpp"
 
-using bbtree::detail::KeySearch;
-using bbtree::detail::NodeShape;
-using bbtree::detail::Strategy;
+using shoal::detail::KeySearch;
+using shoal::detail::NodeShape;
+using shoal::detail::Strategy;
 
 namespace {
 
@@ -138,8 +138,8 @@ TEST(byte_arrays_keep_two_bytes_in_both_kinds) {
 }
 
 TEST(latched_string_leaves_give_up_an_entry_for_hash_tags) {
-  using Shape = NodeShape<std::string, std::uint64_t, Strategy<bbtree::DefaultNodeConfig,
-                                                               bbtree::NoLeafAnnex, true>>;
+  using Shape = NodeShape<std::string, std::uint64_t, Strategy<shoal::DefaultNodeConfig,
+                                                               shoal::NoLeafAnnex, true>>;
   CHECK(Shape::leaf_plan.hash_tags);
   CHECK_EQ(Shape::leaf_layout.keys.inline_keys_offset, 16u);
   if constexpr (string_has_rust_size) CHECK_EQ(Shape::leaf_layout.keys.capacity, 23u);

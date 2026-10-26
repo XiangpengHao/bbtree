@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace bbtree_bench {
+namespace shoal_bench {
 
 class Keys {
  public:
@@ -89,4 +89,4 @@ inline void keep(const T& value) {
 #endif
 }
 
-}  // namespace bbtree_bench
+}  // namespace shoal_bench

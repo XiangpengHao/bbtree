@@ -1,4 +1,4 @@
-// `bbtree::unsync::BBTreeSet` against `std::set`: single elements, batches,
+// `shoal::unsync::TreeSet` against `std::set`: single elements, batches,
 // ranges, extraction, and every operation on two sets, through `next` and
 // through `for_each`, for pairs of sets that reach each strategy.
 #include <algorithm>
@@ -9,16 +9,16 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/unsync/set.hpp"
+#include "shoal/unsync/set.hpp"
 #include "test_harness.hpp"
 
-using bbtree::Bound;
-using bbtree::unsync::BBTreeSet;
+using shoal::Bound;
+using shoal::unsync::TreeSet;
 
 namespace {
 
 template <class K>
-void check_same(const BBTreeSet<K>& set, const std::set<K>& model) {
+void check_same(const TreeSet<K>& set, const std::set<K>& model) {
   set.check_invariants();
   CHECK_EQ(set.size(), model.size());
   auto at = model.begin();
@@ -30,8 +30,8 @@ void check_same(const BBTreeSet<K>& set, const std::set<K>& model) {
 }
 
 template <class K>
-BBTreeSet<K> set_of(const std::set<K>& elements) {
-  return BBTreeSet<K>::from_sorted(elements.begin(), elements.end());
+TreeSet<K> set_of(const std::set<K>& elements) {
+  return TreeSet<K>::from_sorted(elements.begin(), elements.end());
 }
 
 /// An operation's elements, by `next` and by `for_each`.
@@ -59,7 +59,7 @@ void check_operation(Operation make, const std::vector<K>& expected) {
 
 template <class K>
 void check_algebra(const std::set<K>& a_model, const std::set<K>& b_model) {
-  const BBTreeSet<K> a = set_of(a_model), b = set_of(b_model);
+  const TreeSet<K> a = set_of(a_model), b = set_of(b_model);
   std::vector<K> expected;
   std::set_difference(a_model.begin(), a_model.end(), b_model.begin(), b_model.end(), std::back_inserter(expected));
   check_operation([&] { return a.difference(b); }, expected);
@@ -82,7 +82,7 @@ void check_algebra(const std::set<K>& a_model, const std::set<K>& b_model) {
   CHECK_EQ(a.is_superset(b), std::includes(a_model.begin(), a_model.end(), b_model.begin(), b_model.end()));
 }
 
-std::set<std::uint64_t> random_set(bbtree_test::Rng& rng, std::size_t count, std::uint64_t from, std::uint64_t to) {
+std::set<std::uint64_t> random_set(shoal_test::Rng& rng, std::size_t count, std::uint64_t from, std::uint64_t to) {
   std::set<std::uint64_t> elements;
   while (elements.size() < count && elements.size() < to - from) elements.insert(from + rng.below(to - from));
   return elements;
@@ -91,8 +91,8 @@ std::set<std::uint64_t> random_set(bbtree_test::Rng& rng, std::size_t count, std
 }  // namespace
 
 TEST(single_elements_agree_with_std_set) {
-  bbtree_test::Rng rng(1);
-  BBTreeSet<std::string> set;
+  shoal_test::Rng rng(1);
+  TreeSet<std::string> set;
   std::set<std::string> model;
   for (int round = 0; round < 30000; ++round) {
     const std::string element = "/s/" + std::to_string(rng.below(4000));
@@ -144,8 +144,8 @@ TEST(single_elements_agree_with_std_set) {
 }
 
 TEST(batches_ranges_and_extractions_agree_with_std_set) {
-  bbtree_test::Rng rng(2);
-  BBTreeSet<std::uint64_t> set, batched;
+  shoal_test::Rng rng(2);
+  TreeSet<std::uint64_t> set, batched;
   std::set<std::uint64_t> model;
   std::vector<std::uint64_t> elements;
   for (int index = 0; index < 120000; ++index) elements.push_back(rng.below(300000));
@@ -194,7 +194,7 @@ TEST(batches_ranges_and_extractions_agree_with_std_set) {
   set.retain([](const std::uint64_t& element) { return element % 3 != 0; });
   for (auto at = model.begin(); at != model.end();) at = *at % 3 == 0 ? model.erase(at) : std::next(at);
   check_same(set, model);
-  BBTreeSet<std::uint64_t> upper = set.split_off(std::uint64_t{150000});
+  TreeSet<std::uint64_t> upper = set.split_off(std::uint64_t{150000});
   std::set<std::uint64_t> upper_model(model.lower_bound(150000), model.end());
   model.erase(model.lower_bound(150000), model.end());
   check_same(set, model);
@@ -206,7 +206,7 @@ TEST(batches_ranges_and_extractions_agree_with_std_set) {
 }
 
 TEST(operations_agree_with_std_algorithms) {
-  bbtree_test::Rng rng(3);
+  shoal_test::Rng rng(3);
   // Similar sizes, overlapping: both walked side by side.
   for (int round = 0; round < 40; ++round) {
     check_algebra(random_set(rng, rng.below(3000), 0, 6000), random_set(rng, rng.below(3000), 0, 6000));

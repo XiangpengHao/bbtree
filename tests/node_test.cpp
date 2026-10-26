@@ -5,13 +5,13 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/allocator.hpp"
-#include "bbtree/detail/node/root_page.hpp"
-#include "bbtree/detail/node/siblings.hpp"
+#include "shoal/allocator.hpp"
+#include "shoal/detail/node/root_page.hpp"
+#include "shoal/detail/node/siblings.hpp"
 #include "test_harness.hpp"
 
-using namespace bbtree;
-using namespace bbtree::detail;
+using namespace shoal;
+using namespace shoal::detail;
 
 namespace {
 
@@ -79,7 +79,7 @@ TEST(windows_move_back_from_their_fill) {
 }
 
 TEST(byte_strings_compare_from_where_they_differ) {
-  bbtree_test::Rng rng(41);
+  shoal_test::Rng rng(41);
   const std::uint8_t alphabet[] = {0, 1, 'a', 0xff};
   for (int round = 0; round < 20000; ++round) {
     std::vector<std::uint8_t> a(rng.below(20)), b(rng.below(20));
@@ -105,7 +105,7 @@ TEST(u64_leaf_inserts_and_finds_in_order) {
   Global global;
   MapPages<Global> pages(global);
   const U64Leaf leaf = new_leaf<U64Leaf>(pages);
-  bbtree_test::Rng rng(7);
+  shoal_test::Rng rng(7);
   std::vector<std::uint64_t> expected;
   while (leaf.len() < U64Leaf::capacity()) {
     const std::uint64_t key = rng.below(1000);
@@ -151,7 +151,7 @@ TEST(string_leaf_keeps_hash_tags_and_finds_by_view) {
   MapPages<Global> pages(global);
   const StringLeaf leaf = new_leaf<StringLeaf>(pages);
   std::vector<std::string> expected;
-  bbtree_test::Rng rng(9);
+  shoal_test::Rng rng(9);
   while (leaf.len() < StringLeaf::capacity()) {
     std::string key = "/usr/share/" + std::string(rng.below(3), 'x') + std::to_string(rng.below(500));
     if (std::find(expected.begin(), expected.end(), key) != expected.end()) continue;

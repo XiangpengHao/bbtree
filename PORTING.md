@@ -1,4 +1,7 @@
-# bbtree C++17 port
+# shoal: porting notes
+
+How shoal's tree maps port the Rust bbtree to C++17, and the hash maps
+beside them.
 
 The Rust crate `bbtree/` of [XiangpengHao/bbtree](https://github.com/XiangpengHao/bbtree)
 is the reference: the C++ port keeps its data structure, layouts and
@@ -17,14 +20,18 @@ Target: header-only C++17, zero dependencies, embeddable in DuckDB.
 ## Layout
 
 ```
-src/bbtree/              the library, one header per feature
-  map.hpp                bbtree::BBTreeMap, the concurrent map (latched nodes)
-  unsync/map.hpp         bbtree::unsync::BBTreeMap, the single-threaded map
+src/shoal/               the library, one header per feature
+  map.hpp                shoal::TreeMap, the concurrent tree map (latched nodes)
+  hash_map.hpp           shoal::HashMap, the concurrent hash map (inline slots, sharded)
+  hash.hpp               shoal::Hash, the hash maps' default policy
+  unsync/hash_map.hpp    shoal::unsync::HashMap, the single-threaded hash map (paged)
+  unsync/hash_index.hpp  shoal::unsync::HashIndex, an index over rows stored elsewhere
+  unsync/map.hpp         shoal::unsync::TreeMap, the single-threaded map
   unsync/range.hpp       its ranges and iterators
   unsync/entry.hpp       its entries (Entry, OccupiedEntry, VacantEntry)
   unsync/extract_if.hpp  its extractions, and retain's walk
   unsync/into_iter.hpp   its iteration by value
-  unsync/set.hpp         bbtree::unsync::BBTreeSet
+  unsync/set.hpp         shoal::unsync::TreeSet
   unsync/set_algebra.hpp operations on two sets: difference, intersection, union, ...
   leaf_annex.hpp         AnnexedLeaf, and what a shared map's leaf annex provides
   bound.hpp              Bound<Q> for ranges
@@ -36,28 +43,30 @@ src/bbtree/              the library, one header per feature
   detail/node/           nodes: layouts, inline keys, SIMD search, leaves, internal nodes
   detail/tree/           the unsync tree: stacks, insert, remove, walks, batches, build
   detail/latched/        the latched tree: pages, racing reads, held nodes, batches
+  detail/hash/           the hash tables: paged (owned map), inline slots (shared map)
 tests/                   differential and unit tests (CTest)
 bench/                   benchmarks matching upstream bbtree/bench workloads
+bench/race/              the race against other C++ maps (opt-in: SHOAL_RACE_BENCH)
 ```
 
 ## Decisions specific to the port
 
 - **P1. Strategies become traits.** Rust's `Auto`/`WithInlineKey` exist
-  because Rust lacks specialization. C++ has it: `bbtree::InlineKey<K>` is a
+  because Rust lacks specialization. C++ has it: `shoal::InlineKey<K>` is a
   traits template; the primary template says "no inline keys", and the std
   byte strings and 64/128-bit integers are specialized as Rust's `Auto`
   recognizes them. A user key opts in by specializing it. The strategy
   parameter keeps only what is left: node config, leaf annex, latched.
 - **P2. Keys and values are trivially relocatable.** The node code moves
   keys, values and whole entries as bytes (shifts, splits, page moves), as
-  Rust moves everything. `bbtree::is_trivially_relocatable<T>` defaults to
+  Rust moves everything. `shoal::is_trivially_relocatable<T>` defaults to
   `std::is_trivially_copyable<T>` and is specialized for types known to be
   relocatable (`std::vector`, `std::unique_ptr`, `std::shared_ptr`, libc++'s
   `std::string`). A map static_asserts it. libstdc++'s `std::string` (SSO
   pointer into itself) is not relocatable: use `std::vector<uint8_t>`
   or a `std::string_view` into stable storage.
 - **P3. Ordering.** Keys order by `operator<`. The three-way compare a
-  search needs is `bbtree::detail::Order`; byte strings compare by bytes.
+  search needs is `shoal::detail::Order`; byte strings compare by bytes.
   Heterogeneous lookups: a byte-string key accepts any byte-string query
   (`std::string_view` for `std::string`), other keys need the key type or a
   type comparable with it by `operator<` (then without inline keys).
@@ -135,23 +144,23 @@ Rust paths are under `bbtree/src/` of upstream at `8adae97`.
 ## Hash maps
 
 The C++ port also has an initial DuckDB-inspired hash map implementation.
-`bbtree::unsync::BBHashMap` owns a single-threaded paged table, whose
-entries never move; `bbtree::BBHashMap` keeps an inline-slot table in each
+`shoal::unsync::HashMap` owns a single-threaded paged table, whose
+entries never move; `shoal::HashMap` keeps an inline-slot table in each
 of its shards, each behind the tree's latch, read without it ("Shared
 reads" below).
 Both are header-only C++17 with no external dependencies. This is a new
 implementation, with no Rust reference or established performance claims.
 
 ```cpp
-#include "bbtree/unsync/hash_map.hpp"
-#include "bbtree/hash_map.hpp"
+#include "shoal/unsync/hash_map.hpp"
+#include "shoal/hash_map.hpp"
 
-bbtree::unsync::BBHashMap<std::string, int> owned;
+shoal::unsync::HashMap<std::string, int> owned;
 owned.insert("one", 1);                       // optional previous value
 const int* value = owned.get("one");          // borrowed query, no string allocation
 owned.reserve(10000);                        // value's address stays valid
 
-bbtree::BBHashMap<std::string, int> shared;
+shoal::HashMap<std::string, int> shared;
 auto inserted = shared.insert("one", 1);      // InsertOutcome, as the shared tree
 auto copied = shared.get_copied("one");
 shared.update("one", [](const auto&, int& value) { ++value; });
@@ -206,7 +215,7 @@ Unlike the tree, byte relocatability is unnecessary: entries are constructed
 in place, so ordinary `std::string` works on either standard library.
 Replacement retains the original key and returns the previous value.
 
-Hashing defaults to `bbtree::Hash<K>` (based on `std::hash`); owning byte
+Hashing defaults to `shoal::Hash<K>` (based on `std::hash`); owning byte
 strings hash their borrowed string view. Both maps avalanche the policy's
 result before extracting placement/fingerprint bits. This is not a keyed
 hash or a collision-attack defense. Supply a suitable hasher for hostile
@@ -374,8 +383,8 @@ writes, and the test fails); and that what shards retain goes back to the
 allocator. Both participate in normal CTest
 and sanitizer builds. No benchmarks are run as part of tests.
 
-`bbtree::unsync::BBHashIndex<Handle, Allocator>`, in
-[`unsync/hash_index.hpp`](src/bbtree/unsync/hash_index.hpp), indexes rows
+`shoal::unsync::HashIndex<Handle, Allocator>`, in
+[`unsync/hash_index.hpp`](src/shoal/unsync/hash_index.hpp), indexes rows
 owned elsewhere: it consumes cached hashes unchanged, stores row handles
 directly, and does key matching and row creation in bulk, through callbacks. It
 shares descriptor storage with the owned map. `hash_index_test` covers it.
@@ -461,7 +470,7 @@ The throughput rows predate the fixes below.
   more instructions per insert than Rust's, on one thread as on eight: a
   per-insert cost, not contention. Single-stepping 90 inserts of each map
   under lldb, every instruction attributed to its inlined function and
-  line, found the excess: `BBTreeMap::insert` called out of line, saving
+  line, found the excess: `TreeMap::insert` called out of line, saving
   and restoring 13 registers and checking the stack protector on every
   insert (24 instructions); the descent's `std::optional<Descent>`, moved
   out and destroyed (5); `LatchedTree::insert` out of line (6); and the
@@ -471,7 +480,7 @@ The throughput rows predate the fixes below.
   caller's `Descent`, and `Routed::at_separator` is a byte the descent ORs
   into its own.
 - **The exact-lookup chain inlines too.** Clang also left
-  `BBTreeMap::get_copied`, `Leaf::find`, `search_candidates` and
+  `TreeMap::get_copied`, `Leaf::find`, `search_candidates` and
   `ByteWindows::cmp_from`/`cmp_prefix` out of line, where LLVM inlines
   Rust's; force-inlined, with the shared map's root loaded once in the
   descent instead of twice before it, a shared get runs 341 instructions

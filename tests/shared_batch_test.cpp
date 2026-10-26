@@ -1,7 +1,7 @@
 // The shared map's batches against single operations, with one thread and
 // with writers racing them: `get_many_copied` and `read_many` find what single
 // lookups find, `insert_many` makes the map single inserts make.
-#define BBTREE_TEST_BATCHES 1
+#define SHOAL_TEST_BATCHES 1
 
 #include <atomic>
 #include <cstdint>
@@ -11,18 +11,18 @@
 #include <thread>
 #include <vector>
 
-#include "bbtree/map.hpp"
+#include "shoal/map.hpp"
 #include "test_harness.hpp"
 
-using bbtree::BBTreeMap;
-using bbtree::Bound;
+using shoal::TreeMap;
+using shoal::Bound;
 
 namespace {
 
 template <class K, class MakeKey>
 void check_against_single(std::uint64_t seed, std::uint64_t key_space, MakeKey make_key) {
-  bbtree_test::Rng rng(seed);
-  BBTreeMap<K, std::uint64_t> map;
+  shoal_test::Rng rng(seed);
+  TreeMap<K, std::uint64_t> map;
   std::map<K, std::uint64_t> model;
   for (int round = 0; round < 3000; ++round) {
     const std::size_t count = 1 + rng.below(70);
@@ -90,14 +90,14 @@ TEST(shared_string_batches_agree_with_single_operations) {
 }
 
 TEST(batches_race_with_writers) {
-  BBTreeMap<std::uint64_t, std::uint64_t> map;
+  TreeMap<std::uint64_t, std::uint64_t> map;
   // Keys `k * 2` hold `k` throughout; writers churn the odd keys around them.
   for (std::uint64_t key = 0; key < 100000; ++key) map.insert(key * 2, key);
   std::atomic<bool> done{false};
   std::vector<std::thread> threads;
   for (int writer = 0; writer < 3; ++writer) {
     threads.emplace_back([&, writer] {
-      bbtree_test::Rng rng(writer + 10);
+      shoal_test::Rng rng(writer + 10);
       while (!done.load(std::memory_order_relaxed)) {
         const std::uint64_t odd = rng.below(100000) * 2 + 1;
         if (rng.below(2) == 0) {
@@ -110,7 +110,7 @@ TEST(batches_race_with_writers) {
   }
   for (int reader = 0; reader < 3; ++reader) {
     threads.emplace_back([&, reader] {
-      bbtree_test::Rng rng(reader + 20);
+      shoal_test::Rng rng(reader + 20);
       for (int round = 0; round < 20000; ++round) {
         std::uint64_t keys[48];
         for (auto& key : keys) key = rng.below(100000) * 2;

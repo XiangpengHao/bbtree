@@ -1,4 +1,4 @@
-// The shared `bbtree::BBTreeMap<uint64_t, uint64_t>` under threads: a
+// The shared `shoal::TreeMap<uint64_t, uint64_t>` under threads: a
 // parallel build by random inserts, then `get_copied` hits, at each thread
 // count, as the Rust reference's `shared` suite timed the Rust map.
 //
@@ -10,11 +10,11 @@
 #include <thread>
 #include <vector>
 
-#include "bbtree/map.hpp"
+#include "shoal/map.hpp"
 #include "workload.hpp"
 
-using bbtree_bench::Keys;
-using bbtree_bench::Stopwatch;
+using shoal_bench::Keys;
+using shoal_bench::Stopwatch;
 
 namespace {
 
@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   const std::vector<std::uint64_t> keys = Keys::present(entries);
   const std::vector<std::uint64_t> hits = Keys::hits(keys, entries);
   for (const std::size_t threads : thread_counts) {
-    bbtree::BBTreeMap<std::uint64_t, std::uint64_t> map;
+    shoal::TreeMap<std::uint64_t, std::uint64_t> map;
     {
       Stopwatch watch;
       on_threads(threads, [&](std::size_t thread) {
@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
         std::uint64_t sum = 0;
         for (std::size_t round = 0; round < rounds; ++round)
         for (std::size_t index = thread; index < entries; index += threads) sum += *map.get_copied(hits[index]);
-        bbtree_bench::keep(sum);
+        shoal_bench::keep(sum);
       });
       const double ns = watch.ns_per(entries);
       std::printf("shared get_hit  threads %2zu  %8.1f Mops/s\n", threads, 1000.0 / ns);
@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
           map.get_many_copied(hits.data() + call * per_call, per_call, values);
           for (const auto& value : values) sum += *value;
         }
-        bbtree_bench::keep(sum);
+        shoal_bench::keep(sum);
       });
       const double ns = watch.ns_per(calls * per_call);
       std::printf("shared batch_get_hit threads %2zu  %8.1f Mops/s\n", threads, 1000.0 / ns);

@@ -1,4 +1,4 @@
-// Point operations on `bbtree::unsync::BBTreeMap`: random and sequential
+// Point operations on `shoal::unsync::TreeMap`: random and sequential
 // inserts, hits, misses and random removals, for `uint64_t` and path-string
 // keys, as the Rust reference timed the Rust map.
 //
@@ -9,11 +9,11 @@
 #include <string>
 #include <vector>
 
-#include "bbtree/unsync/map.hpp"
+#include "shoal/unsync/map.hpp"
 #include "workload.hpp"
 
-using bbtree_bench::Keys;
-using bbtree_bench::Stopwatch;
+using shoal_bench::Keys;
+using shoal_bench::Stopwatch;
 
 namespace {
 
@@ -29,14 +29,14 @@ void run(const char* name, std::size_t entries, MakeKey make_key) {
   for (std::uint64_t id : miss_ids) misses.push_back(make_key(id));
   std::string cell;
 
-  bbtree::unsync::BBTreeMap<Key, std::uint64_t> map;
+  shoal::unsync::TreeMap<Key, std::uint64_t> map;
   {
     std::vector<Key> input = keys;
     Stopwatch watch;
     for (std::size_t index = 0; index < entries; ++index) {
       map.insert(std::move(input[index]), index);
     }
-    bbtree_bench::report((cell = std::string(name) + " insert_random").c_str(), entries,
+    shoal_bench::report((cell = std::string(name) + " insert_random").c_str(), entries,
                          watch.ns_per(entries));
   }
   {
@@ -49,24 +49,24 @@ void run(const char* name, std::size_t entries, MakeKey make_key) {
     for (std::size_t round = 0; round < rounds; ++round) {
       for (const Key& key : hits) sum += *map.get(key);
     }
-    bbtree_bench::keep(sum);
-    bbtree_bench::report((cell = std::string(name) + " get_hit").c_str(), entries,
+    shoal_bench::keep(sum);
+    shoal_bench::report((cell = std::string(name) + " get_hit").c_str(), entries,
                          watch.ns_per(entries));
   }
   {
     Stopwatch watch;
     std::size_t found = 0;
     for (const Key& key : misses) found += map.get(key) != nullptr;
-    bbtree_bench::keep(found);
-    bbtree_bench::report((cell = std::string(name) + " get_miss").c_str(), entries,
+    shoal_bench::keep(found);
+    shoal_bench::report((cell = std::string(name) + " get_miss").c_str(), entries,
                          watch.ns_per(entries));
   }
   {
     Stopwatch watch;
     std::size_t removed = 0;
     for (const Key& key : hits) removed += map.remove(key).has_value();
-    bbtree_bench::keep(removed);
-    bbtree_bench::report((cell = std::string(name) + " remove_random").c_str(), entries,
+    shoal_bench::keep(removed);
+    shoal_bench::report((cell = std::string(name) + " remove_random").c_str(), entries,
                          watch.ns_per(entries));
   }
   map.clear();
@@ -77,7 +77,7 @@ void run(const char* name, std::size_t entries, MakeKey make_key) {
     for (std::size_t index = 0; index < entries; ++index) {
       map.insert(std::move(sorted[index]), index);
     }
-    bbtree_bench::report((cell = std::string(name) + " insert_sequential").c_str(), entries,
+    shoal_bench::report((cell = std::string(name) + " insert_sequential").c_str(), entries,
                          watch.ns_per(entries));
   }
 }

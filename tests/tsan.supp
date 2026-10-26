@@ -3,11 +3,11 @@
 # while a writer that holds it changes it, and a version check afterwards
 # throws away what it read. Every entry names a reader-side function, so a
 # race between two writers, which the latches forbid, is still reported.
-race:bbtree::detail::Racing
-race:bbtree::detail::RacingCopy
-race:bbtree::detail::NodeInlineKeys
-race:bbtree::detail::VectorCount
-race:bbtree::detail::NeonLanes
+race:shoal::detail::Racing
+race:shoal::detail::RacingCopy
+race:shoal::detail::NodeInlineKeys
+race:shoal::detail::VectorCount
+race:shoal::detail::NeonLanes
 race:load_racing_header
 race:load_racing_has_head
 race:load_racing_shared_prefix
@@ -15,15 +15,15 @@ race:place_outside_racing
 # The shared hash map's optimistic readers (`hash_map.hpp`): a shard's
 # block, its tags and slots, read while a writer that holds the shard changes
 # them, and checked against the shard's version after.
-race:bbtree::detail::InlineHashTable*::racing_view
-race:bbtree::detail::InlineHashTable*::racing_group
-race:bbtree::detail::InlineHashTable*::racing_hash
-race:bbtree::detail::InlineHashTable*::racing_find_from
-race:bbtree::detail::InlineHashTable*::RacingLookup
+race:shoal::detail::InlineHashTable*::racing_view
+race:shoal::detail::InlineHashTable*::racing_group
+race:shoal::detail::InlineHashTable*::racing_hash
+race:shoal::detail::InlineHashTable*::racing_find_from
+race:shoal::detail::InlineHashTable*::RacingLookup
 # A latch word is only ever accessed atomically, by `NodeLatch`, which reads
 # and writes nothing else and calls nothing: a race reported inside it is with
 # a non-atomic write to a latch word, a fresh page's zeroing by its allocator.
 # A reader that reached the page through a racing edge read checks the latch
 # with a relaxed load, whose value the compare-and-swap after it settles, or
 # reads a version its parent's check throws away (P7).
-race:bbtree::detail::NodeLatch
+race:shoal::detail::NodeLatch
