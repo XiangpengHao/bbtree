@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="720" viewBox="0 0 760 720" role="img" aria-label="Concurrent get, 14 threads on 10M UUID keys, 10% missing, MacBook Pro M4 Pro, in million operations per second: shoal tree, bulk 158, shoal tree 77.5, tbb concurrent_map 6.7, folly SkipList 7.9, absl btree + rwlock 1.9, std::map + rwlock 1.4, shoal hash, bulk 416, shoal hash 225, boost flat_map, bulk 292, folly ConcurrentHashMap 122, tbb concurrent_hash_map 125, tbb concurrent_unordered 66.1, absl flat_hash + rwlock 5.7, std::unordered + rwlock 3.8.">
+  <!-- bench/race/race_bench.cpp, drawn by bench/race/race_svg.py. -->
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; font-weight: 600; fill: #18181b; }
+    .title { font-weight: 800; }
+    .muted { fill: #52525b; }
+    .heat { fill: #52525b; font-size: 15px; font-weight: 700; letter-spacing: 0.04em; }
+    .ours { font-weight: 800; }
+    .value { text-anchor: end; }
+    .highlight { fill: #ffd60a; }
+    .track { stroke: #a1a1aa; stroke-width: 3; stroke-linecap: round; }
+    .rule { stroke: #d4d4d8; stroke-width: 1.5; stroke-dasharray: 4 6; }
+    .ball { animation: bounce linear infinite alternate; }
+    @keyframes bounce { to { transform: translateX(294px); } }
+  </style>
+  <rect x="0.5" y="0.5" width="759" height="719" rx="12" fill="#fafafa" stroke="#d4d4d8"/>
+
+  <text class="title" x="28" y="40">concurrent get, 14 threads</text>
+  <text class="muted" x="28" y="66">10M UUID keys, 10% missing · MacBook Pro M4 Pro · M ops/s</text>
+
+  <text class="heat" x="28" y="102">TREE MAPS (ORDERED)</text>
+
+  <rect class="highlight" x="22" y="116" width="188" height="26" rx="4"/>
+  <rect class="highlight" x="691" y="116" width="49" height="26" rx="4"/>
+  <text class="ours" x="28" y="136">shoal tree, bulk</text>
+  <line class="track" x1="334" y1="128" x2="650" y2="128"/>
+  <circle class="ball" cx="345" cy="128" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 1.58s"/>
+  <text class="ours value" x="732" y="136">158</text>
+
+  <rect class="highlight" x="22" y="156" width="122" height="26" rx="4"/>
+  <rect class="highlight" x="680" y="156" width="60" height="26" rx="4"/>
+  <text class="ours" x="28" y="176">shoal tree</text>
+  <line class="track" x1="334" y1="168" x2="650" y2="168"/>
+  <circle class="ball" cx="345" cy="168" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 3.22s"/>
+  <text class="ours value" x="732" y="176">77.5</text>
+
+  <text x="28" y="216">folly SkipList</text>
+  <line class="track" x1="334" y1="208" x2="650" y2="208"/>
+  <circle class="ball" cx="345" cy="208" r="11" fill="#3f3f46" style="animation-duration: 31.61s"/>
+  <text class="value" x="732" y="216">7.9</text>
+
+  <text x="28" y="256">tbb concurrent_map</text>
+  <line class="track" x1="334" y1="248" x2="650" y2="248"/>
+  <circle class="ball" cx="345" cy="248" r="11" fill="#3f3f46" style="animation-duration: 37.27s"/>
+  <text class="value" x="732" y="256">6.7</text>
+
+  <text x="28" y="296">absl btree + rwlock</text>
+  <line class="track" x1="334" y1="288" x2="650" y2="288"/>
+  <circle class="ball" cx="345" cy="288" r="11" fill="#3f3f46" style="animation-duration: 131.43s"/>
+  <text class="value" x="732" y="296">1.9</text>
+
+  <text x="28" y="336">std::map + rwlock</text>
+  <line class="track" x1="334" y1="328" x2="650" y2="328"/>
+  <circle class="ball" cx="345" cy="328" r="11" fill="#3f3f46" style="animation-duration: 178.37s"/>
+  <text class="value" x="732" y="336">1.4</text>
+
+  <line class="rule" x1="28" y1="350" x2="732" y2="350"/>
+
+  <text class="heat" x="28" y="372">HASH MAPS (UNORDERED)</text>
+
+  <rect class="highlight" x="22" y="386" width="188" height="26" rx="4"/>
+  <rect class="highlight" x="691" y="386" width="49" height="26" rx="4"/>
+  <text class="ours" x="28" y="406">shoal hash, bulk</text>
+  <line class="track" x1="334" y1="398" x2="650" y2="398"/>
+  <circle class="ball" cx="345" cy="398" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 0.60s"/>
+  <text class="ours value" x="732" y="406">416</text>
+
+  <rect class="highlight" x="22" y="426" width="122" height="26" rx="4"/>
+  <rect class="highlight" x="691" y="426" width="49" height="26" rx="4"/>
+  <text class="ours" x="28" y="446">shoal hash</text>
+  <line class="track" x1="334" y1="438" x2="650" y2="438"/>
+  <circle class="ball" cx="345" cy="438" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 1.11s"/>
+  <text class="ours value" x="732" y="446">225</text>
+
+  <text x="28" y="486">boost flat_map, bulk</text>
+  <line class="track" x1="334" y1="478" x2="650" y2="478"/>
+  <circle class="ball" cx="345" cy="478" r="11" fill="#3f3f46" style="animation-duration: 0.86s"/>
+  <text class="value" x="732" y="486">292</text>
+
+  <text x="28" y="526">tbb concurrent_hash_map</text>
+  <line class="track" x1="334" y1="518" x2="650" y2="518"/>
+  <circle class="ball" cx="345" cy="518" r="11" fill="#3f3f46" style="animation-duration: 2.00s"/>
+  <text class="value" x="732" y="526">125</text>
+
+  <text x="28" y="566">folly ConcurrentHashMap</text>
+  <line class="track" x1="334" y1="558" x2="650" y2="558"/>
+  <circle class="ball" cx="345" cy="558" r="11" fill="#3f3f46" style="animation-duration: 2.04s"/>
+  <text class="value" x="732" y="566">122</text>
+
+  <text x="28" y="606">tbb concurrent_unordered</text>
+  <line class="track" x1="334" y1="598" x2="650" y2="598"/>
+  <circle class="ball" cx="345" cy="598" r="11" fill="#3f3f46" style="animation-duration: 3.78s"/>
+  <text class="value" x="732" y="606">66.1</text>
+
+  <text x="28" y="646">absl flat_hash + rwlock</text>
+  <line class="track" x1="334" y1="638" x2="650" y2="638"/>
+  <circle class="ball" cx="345" cy="638" r="11" fill="#3f3f46" style="animation-duration: 43.81s"/>
+  <text class="value" x="732" y="646">5.7</text>
+
+  <text x="28" y="686">std::unordered + rwlock</text>
+  <line class="track" x1="334" y1="678" x2="650" y2="678"/>
+  <circle class="ball" cx="345" cy="678" r="11" fill="#3f3f46" style="animation-duration: 65.72s"/>
+  <text class="value" x="732" y="686">3.8</text>
+</svg>

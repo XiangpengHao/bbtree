@@ -18,8 +18,9 @@
 // writers taking turns. Every thread then looks up its own run of the
 // probes, 64 at a time, until the time is up.
 //
-// usage: race_bench [entries] [threads] [seconds] [maps]; prints CSV. `maps`,
-// comma-separated, runs only the maps whose names contain one of them.
+// usage: race_bench [entries] [threads] [seconds] [maps] [hit_percent];
+// prints CSV. `maps`, comma-separated, runs only the maps whose names contain
+// one of them ("" for all); `hit_percent` of the lookups find their key (50).
 #include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <folly/ConcurrentSkipList.h>
@@ -87,15 +88,17 @@ class UuidKeys {
 };
 
 /// The keys every map holds, each with value `index + 1`, and the probes
-/// they all look up: half present keys, half absent ones, in random order.
+/// they all look up: `hit_percent` of them present keys, the others absent
+/// ones, in random order.
 class RaceKeys {
  public:
-  explicit RaceKeys(std::size_t entries) : present_(entries), probes_(entries) {
+  RaceKeys(std::size_t entries, unsigned hit_percent)
+      : present_(entries), probes_(entries), hit_percent_(hit_percent) {
     for (std::size_t index = 0; index < entries; ++index) present_[index] = UuidKeys::uuid(index);
     for (std::size_t index = 0; index < entries; ++index) {
       const std::uint64_t draw = shoal_bench::Keys::mix(index ^ 0x5555555555555555ull);
-      const bool hit = (draw & 1) != 0;
-      const std::size_t target = static_cast<std::size_t>((draw >> 1) % entries);
+      const bool hit = draw % 100 < hit_percent;
+      const std::size_t target = static_cast<std::size_t>((draw / 100) % entries);
       probes_[index] = hit ? present_[target] : UuidKeys::uuid(entries + index);
       if (index < check_count) expected_check_sum_ += hit ? target + 1 : 0;
     }
@@ -103,6 +106,7 @@ class RaceKeys {
 
   const std::vector<Uuid>& present() const { return present_; }
   const std::vector<Uuid>& probes() const { return probes_; }
+  unsigned hit_percent() const { return hit_percent_; }
 
   /// The first probes, which a map must answer right before it races.
   static constexpr std::size_t check_count = 1 << 16;
@@ -111,6 +115,7 @@ class RaceKeys {
  private:
   std::vector<Uuid> present_;
   std::vector<Uuid> probes_;
+  unsigned hit_percent_;
   Value expected_check_sum_ = 0;
 };
 
@@ -456,8 +461,9 @@ class BoostConcurrentFlatMap {
 /// threads looking up the probes for a fixed time.
 class Race {
  public:
-  Race(std::size_t entries, std::size_t threads, double seconds, std::vector<std::string> only)
-      : keys_(entries), threads_(threads), seconds_(seconds), only_(std::move(only)) {}
+  Race(std::size_t entries, unsigned hit_percent, std::size_t threads, double seconds,
+       std::vector<std::string> only)
+      : keys_(entries, hit_percent), threads_(threads), seconds_(seconds), only_(std::move(only)) {}
 
   template <class Contestant>
   void run() {
@@ -505,8 +511,8 @@ class Race {
     for (const std::uint64_t thread_calls : calls_by_thread) calls += thread_calls;
     const double elapsed = std::chrono::duration<double>(end - start).count();
     const double mops = static_cast<double>(calls * lookups_per_call) / elapsed / 1e6;
-    std::printf("%s,%zu,%zu,%.1f,%.1f\n", Contestant::name, keys_.present().size(), threads_, mops,
-                build_seconds);
+    std::printf("%s,%zu,%u,%zu,%.1f,%.1f\n", Contestant::name, keys_.present().size(), keys_.hit_percent(),
+                threads_, mops, build_seconds);
     std::fflush(stdout);
   }
 
@@ -558,8 +564,13 @@ int main(int argc, char** argv) {
       start = comma + 1;
     }
   }
-  Race race(entries, threads, seconds, std::move(only));
-  std::printf("map,entries,threads,mops,build_seconds\n");
+  const unsigned hit_percent = argc > 5 ? static_cast<unsigned>(std::strtoul(argv[5], nullptr, 10)) : 50;
+  if (hit_percent > 100) {
+    std::fprintf(stderr, "race_bench: hit_percent is at most 100\n");
+    return 1;
+  }
+  Race race(entries, hit_percent, threads, seconds, std::move(only));
+  std::printf("map,entries,hit_percent,threads,mops,build_seconds\n");
   race.run<TreeMapBulk>();
   race.run<TreeMapSingle>();
   race.run<TbbConcurrentMap>();

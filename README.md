@@ -61,15 +61,46 @@ shoal maps write nothing shared: they check a version after reading
 (PORTING.md, Hash maps). The UUID hash declares `is_avalanching`, which
 both shoal and Boost read as leave to use it unmixed.
 
+On one thread nothing contends, and a locked map's lock costs it little:
+shoal's hash map in bulk runs level with Boost's (43.1 against 42.3 M/s),
+one key at a time ahead of every other (25.2), and its tree map leads
+Abseil's B-tree 5.7× (13.6 against 2.4):
+
+![shoal against C++ maps: lookups on one thread on a MacBook Pro M4 Pro](assets/readme-race-1-thread.svg)
+
+With 90% of the lookups finding their key, every hit reads its slot:
+shoal's hash map in bulk leads Boost's by 43% (416 against 292 M/s), and
+its tree map holds its lead (158 against folly's 7.9):
+
+![shoal against C++ concurrent maps: lookups at 14 threads, 90% present, on a MacBook Pro M4 Pro](assets/readme-race-90-hit.svg)
+
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first
 65,536 lookups right before it races. The bench is
-[bench/race/race_bench.cpp](bench/race/race_bench.cpp), and this run's
-output [bench/race/m4-pro-14-threads.csv](bench/race/m4-pro-14-threads.csv).
-To run it (it needs oneTBB, folly, Abseil and Boost, e.g. from Homebrew):
+[bench/race/race_bench.cpp](bench/race/race_bench.cpp); the runs' output is
+in [bench/race/m4-pro-14-threads.csv](bench/race/m4-pro-14-threads.csv),
+[m4-pro-1-thread.csv](bench/race/m4-pro-1-thread.csv) and
+[m4-pro-14-threads-90-hit.csv](bench/race/m4-pro-14-threads-90-hit.csv),
+one run each. To build it (it needs oneTBB, folly, Abseil and Boost, e.g.
+from Homebrew):
 
 ```bash
-cmake -B build-race -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHOAL_RACE_BENCH=ON && cmake --build build-race --target race_bench && ./build-race/race_bench 10000000 14 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race.svg
+cmake -B build-race -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHOAL_RACE_BENCH=ON && cmake --build build-race --target race_bench
+```
+
+Then each chart: entries, threads, seconds a map, maps to run (`""` for
+all), and the percentage of lookups that find their key:
+
+```bash
+./build-race/race_bench 10000000 14 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race.svg
+```
+
+```bash
+./build-race/race_bench 10000000 1 2 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-1-thread.svg
+```
+
+```bash
+./build-race/race_bench 10000000 14 2 "" 90 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-90-hit.svg
 ```
 
 ## The tree map against the Rust bbtree

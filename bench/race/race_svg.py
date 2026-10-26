@@ -55,13 +55,25 @@ class RaceChart:
     def __init__(self, rows, machine):
         self.rows = rows
         self.machine = machine
-        self.threads = rows[0]["threads"]
+        self.threads = int(rows[0]["threads"])
         self.entries = int(rows[0]["entries"])
+        # Runs from before the column found half their keys.
+        self.hit_percent = int(rows[0].get("hit_percent") or 50)
         self.fastest = max(float(row["mops"]) for row in rows)
 
     @staticmethod
     def count_text(count):
         return f"{count // 1_000_000}M" if count >= 1_000_000 else f"{count // 1000}K"
+
+    def keys_text(self):
+        missing = 100 - self.hit_percent
+        share = "half" if missing == 50 else "none" if missing == 0 else f"{missing}%"
+        return f"{self.count_text(self.entries)} UUID keys, {share} missing"
+
+    def title_text(self):
+        if self.threads == 1:
+            return "get, 1 thread"
+        return f"concurrent get, {self.threads} threads"
 
     @staticmethod
     def value_text(mops):
@@ -105,18 +117,18 @@ class RaceChart:
         height = 84 + sum(HEAT_GAP + ROW * len(rows) for _, rows in heats) + 16
         summary = ", ".join(f"{LABELS[row['map']][0]} {self.value_text(float(row['mops']))}"
                             for row in self.rows)
-        keys = f"{self.count_text(self.entries)} UUID keys, half missing"
+        keys = self.keys_text()
         out = [
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" '
-            f'viewBox="0 0 {WIDTH} {height}" role="img" aria-label="Concurrent get on {keys}, '
-            f'{self.threads} threads, {escape(self.machine)}, in million operations per second: '
+            f'viewBox="0 0 {WIDTH} {height}" role="img" aria-label="{self.title_text().capitalize()} '
+            f'on {keys}, {escape(self.machine)}, in million operations per second: '
             f'{escape(summary)}.">',
             "  <!-- bench/race/race_bench.cpp, drawn by bench/race/race_svg.py. -->",
             STYLE,
             f'  <rect x="0.5" y="0.5" width="{WIDTH - 1}" height="{height - 1}" rx="12" '
             'fill="#fafafa" stroke="#d4d4d8"/>',
             "",
-            f'  <text class="title" x="28" y="40">concurrent get, {self.threads} threads</text>',
+            f'  <text class="title" x="28" y="40">{self.title_text()}</text>',
             f'  <text class="muted" x="28" y="66">{keys} · {escape(self.machine)} · M ops/s</text>',
         ]
         y = 84
