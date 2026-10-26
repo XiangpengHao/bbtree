@@ -52,7 +52,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     }
 
     /// A copy of each key's value, in input order, as separate calls to
-    /// [`Self::get_copied`] would give, and like it mostly without a latch.
+    /// [`Self::get_copied`] would give, using the same shared-latched snapshots.
     ///
     /// ```
     /// use bbtree::BBTreeMap;

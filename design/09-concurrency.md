@@ -44,8 +44,8 @@ place, as scc's maps do.
 impl<K: Ord, V> BBTreeMap<K, V> {
     /// Runs `f` on the entry while its leaf is latched shared.
     fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>;
-    /// A copy of the value, read without a latch where the leaf settles the
-    /// key (Lookups, below).
+    /// A copy of the value, read in shared-latched snapshots and validated
+    /// against the leaf version (Lookups, below).
     fn get_copied<Q>(&self, key: &Q) -> Option<V> where V: Copy;
     fn get_cloned<Q>(&self, key: &Q) -> Option<V> where V: Clone {
         self.read(key, |_, v| v.clone())
@@ -191,20 +191,14 @@ bit, a count of shared holders (20 bits), and a version (43 bits). One word
 serves both modes, so the root page keeps it when it turns from a leaf into
 an internal node and back.
 
-- **Inner nodes: optimistic.** A reader reads the version (waiting while
-  the exclusive bit is set), reads the node, and checks the version after
-  an acquire fence, ignoring the shared count. A writer takes the node by
-  compare-and-swap from the version its descent read, never waiting:
-  failure restarts the operation. Letting go bumps the version. bf-tree
-  does the same (`src/utils/inner_lock.rs`: `try_read`, `check_version`,
-  `upgrade`).
-- **Leaves: latched to change them, and to run a closure.** Shared for
-  `read`'s closure and scans, exclusive for `update` and `insert`,
-  spinning with exponential backoff. No scheduler hint: the crate is
-  `no_std` (D3). Releasing exclusively bumps the version too. Writers can
-  starve under a steady stream of readers. A lookup reads its leaf
-  optimistically first, as it reads internal nodes, and latches it only
-  where that doesn't settle it (Lookups, below).
+- **Internal nodes and leaves: shared snapshots, exclusive changes.**
+  Ordinary node reads hold the node's shared latch. Short snapshots release
+  it before reading another node; version checks validate the relationships
+  between snapshots. Writers take additional nodes with a nonblocking
+  compare-and-swap and restart if a node is busy or changed. Releasing an
+  exclusive hold bumps the version. Closures retain their leaf hold for
+  the callback: shared for reads, exclusive for updates. A steady stream
+  of readers can still starve writers.
 - **Descent** (`descent.rs`): a key that lacks what every key shares is in
   no node, which the descent says once the root's version vouches for the
   shared prefix it read, or with the root leaf latched. Optimistic through
@@ -226,13 +220,12 @@ hold it a moment, waiting on nothing.
 
 ## Optimistic lock coupling
 
-Readers read internal nodes in place, through raw pointers, while writers
-holding a node change it in place with the node code as it is; the version
-check throws away whatever a reader read meanwhile (`node/optimistic.rs`),
-as in C++ OLC B-trees (Leis et al., "The ART of Practical Synchronization").
-No copies on either side. A racing read forms no reference into the node,
-so the aliasing model is not involved; what it reads before its check must
-not crash it or run user code on garbage:
+Readers snapshot internal nodes under short shared latches, while writers
+hold exclusive latches to change them (`node/optimistic.rs`). Version checks
+still reject snapshots invalidated between stages. Ordinary reads must not
+overlap a writer: a raw pointer or `MaybeUninit` does not make a data race
+valid, even when a later version check would discard the result. No shared
+snapshot hold crosses a visit to another page or a batch lane's yield.
 
 - **Routing** reads `len` and `prefix_len` once each (relaxed atomic loads,
   so the compiler loads them once), clamps the length to the capacity, and
@@ -254,13 +247,10 @@ not crash it or run user code on garbage:
   version again before comparing. The latch keeps the head in place: a
   removal takes out a head with its leaf latched exclusively, and its key's
   memory may be freed at once. Keys ordered by their own bytes alone, the
-  std integers and byte arrays `Auto` recognizes, skip the latch: the walk
-  copies the head's key, compares the copy, and checks the node's version
-  after, as the head changes only while the node is held. `u64` keeps
-  2-byte windows in internal nodes, so lookups tie: 0.16 walks a lookup at
-  10M random keys; with the latch, each tie wrote two atomics to a leaf
-  every other thread's ties write too. A walk that meets a null edge, a leaf
-  without a head, or a changed version restarts.
+  std integers and byte arrays `Auto` recognizes, copy the head under a
+  short shared latch, compare the copy, and validate the parent version.
+  A walk that meets a null edge, a leaf without a head, or a changed
+  version restarts.
 - **A separator match** is checked at the leaf: the descent checks only
   the leaf's parent, and a separator matched higher up may have been
   removed since, its successor the leaf's head now. The latched leaf's head
@@ -268,16 +258,16 @@ not crash it or run user code on garbage:
 
 ## Lookups
 
-A lookup reads its leaf as it reads internal nodes, without the latch
+A lookup reads its leaf as it reads internal nodes, in shared-latched snapshots
 (`tree/latched/lookup.rs`, D57): the descent ends at the leaf with its
 version read, the parent checked after. Then, in place:
 
 - **The inline keys rule the key out:** absent, once the leaf's version,
-  unchanged, confirms the read. A miss writes nothing.
+  unchanged, confirms the read. The snapshot updates the latch count.
 - **A copy** (`get_copied`, `get_many_copied`, `contains_key`): where the
   leaf settles its one candidate without following a pointer, the lookup
-  copies the candidate's value out and checks the version after, as a
-  sequence lock reads (`RacingRead`). A key ordered by its own bytes, a
+  copies the candidate's value under a shared latch and checks the version
+  after releasing it (`RacingRead`). A key ordered by its own bytes, a
   std integer or byte array, is copied with the value and compared once
   the version holds; a byte string that ends within the leaf's 8-byte
   inline key is the candidate if their lengths are equal (D36), as the
@@ -294,13 +284,14 @@ A leaf that changed meanwhile sends the lookup the latched way
 (`read_latched`), which waits for a writer rather than race it again, so
 readers don't starve behind a hot leaf.
 
-Only a `Copy` value is read this way: a closure, or a clone of a value that
-owns memory, can't run on what an unlatched read saw, since a writer may
-free that memory before the check fails. A `Copy` value has no `Drop` and
-no interior mutability, so a torn copy is thrown away unused. Racing plain
-reads are formally a data race, as the internal nodes' are, and crossbeam's
-`AtomicCell` sequence lock's; the threads tests stay out of Miri for that
-(`.github/miri-nextest.toml`).
+Only a `Copy` value is interpreted after the shared hold ends. A closure,
+or a clone of an owned value, runs while the leaf remains held. Version
+checks additionally ensure that a copied slot still represents the candidate
+chosen earlier. The `concurrent_snapshots` regressions run under ThreadSanitizer
+in `.github/workflows/sanitizer.yml`, covering values, prefixes and page reuse.
+
+The following measurements describe the earlier unlatched implementation;
+they do not measure the shared-snapshot implementation.
 
 Measured (2026-10-17, 9900X, 10M `u64`, bbtree-eval's `bbtree-scaling`,
 against the latched lookups of 2026-10-16, millions a second): lookups half of which
@@ -605,14 +596,14 @@ latches its leaf, searches it, runs the closure and lets go within one
 poll. On the way down it reads the internal nodes as the descent does,
 optimistically, each stage after fetching the line it needs: the chosen
 edge, then the child's header, whose version it reads before checking the
-parent's. At the leaf it reads the inline keys, unlatched, at the version
+parent's. At the leaf it snapshots the inline keys under a shared latch at the version
 it read:
 
 - **No inline key equals the key's:** absent, if the leaf's version is
-  still the same. A miss writes nothing.
+  still the same.
 - **One candidate:** the lane fetches its entry. A lane that copies
   (`get_many_copied`) then settles it as a single lookup does (Lookups,
-  above), unlatched. Otherwise, for a heap key, it latches the leaf a
+  above), using shared snapshots. Otherwise, for a heap key, it latches the leaf a
   moment to read where the key's bytes are, lets go, and fetches them: a
   pointer into a key is read only under the latch, and a prefetch of a
   stale one is harmless. Then, latched shared, the leaf still at the

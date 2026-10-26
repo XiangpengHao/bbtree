@@ -456,7 +456,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                         }
                         // The separator the key matched above may have been
                         // removed since, and its successor be the head now:
-                        // the parent's version check may not catch that. An
+                        // the parent's version check may not catch that. A
                         // snapshot caller checks the head it reads itself.
                         if M::LATCHES && at_separator && !Self::is_head(leaf, key) {
                             continue 'restart;

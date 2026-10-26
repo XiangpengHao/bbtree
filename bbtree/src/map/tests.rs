@@ -1048,6 +1048,143 @@ fn copies_are_of_their_own_entries_while_others_change_the_map() {
     assert_copies_are_of_their_own_entries(|number| format!("{number:x}, past its inline key"));
 }
 
+/// Keep every word of a Copy value consistent while exercising both lookup
+/// paths. ThreadSanitizer must also accept reads discarded by version checks.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn concurrent_snapshots_copy_values_during_updates() {
+    let map = BBTreeMap::<u64, [u64; 8]>::new();
+    map.insert(0, [0; 8]).unwrap();
+    let start = Barrier::new(3);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            for version in 1..10_000 {
+                map.update(&0, |_, value| *value = [version; 8]).unwrap();
+            }
+        });
+        for batched in [false, true] {
+            let (map, start) = (&map, &start);
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..10_000 {
+                    let value = if batched {
+                        map.get_many_copied([&0, &0])[0].unwrap()
+                    } else {
+                        map.get_copied(&0).unwrap()
+                    };
+                    assert!(value.iter().all(|word| *word == value[0]));
+                }
+            });
+        }
+    });
+    assert_eq!(map.get_copied(&0), Some([9_999; 8]));
+}
+
+/// Repeated growth and contraction exercise snapshots of retained pages,
+/// including the inline-key slots reused for free-list links.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn concurrent_snapshots_survive_page_reuse() {
+    let map = BBTreeMap::<u64, u64>::new();
+    let start = Barrier::new(3);
+    thread::scope(|scope| {
+        for writer in 0..2 {
+            let (map, start) = (&map, &start);
+            scope.spawn(move || {
+                start.wait();
+                for _ in 0..4 {
+                    for number in 0..1024 {
+                        let key = number * 2 + writer;
+                        map.insert(key, key).unwrap();
+                    }
+                    for key in (writer..2048).step_by(2) {
+                        assert_eq!(map.remove(&key), Some(key));
+                    }
+                }
+            });
+        }
+        scope.spawn(|| {
+            start.wait();
+            for number in 0..10_000 {
+                let key = number * 1031 % 2048;
+                assert!(map.get_copied(&key).is_none_or(|value| value == key));
+                if number % 100 == 0 {
+                    let mut previous = None;
+                    map.scan(key..key + 64, |key, value| {
+                        assert_eq!(key, value);
+                        assert!(previous.is_none_or(|previous| previous < *key));
+                        previous = Some(*key);
+                        ControlFlow::<()>::Continue(())
+                    });
+                }
+            }
+        });
+    });
+    assert_eq!(map.scan(.., |_, _| ControlFlow::Break(())), None);
+}
+
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn concurrent_snapshots_survive_prefix_changes() {
+    let map = BBTreeMap::<String, String>::new();
+    let start = Barrier::new(2);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            for round in 0..4 {
+                for number in 0..512 {
+                    let key = format!("shared-long-prefix-{number:08}");
+                    map.insert(key.clone(), key).unwrap();
+                }
+                let boundary = format!("{round}");
+                map.insert(boundary.clone(), boundary.clone()).unwrap();
+                for number in 0..512 {
+                    let key = format!("shared-long-prefix-{number:08}");
+                    assert_eq!(map.remove(&key), Some(key));
+                }
+                assert_eq!(map.remove(&boundary), Some(boundary));
+            }
+        });
+        scope.spawn(|| {
+            start.wait();
+            for number in 0..10_000 {
+                let key = format!("shared-long-prefix-{:08}", number % 512);
+                map.read(&key, |stored, value| assert_eq!(stored, value));
+                map.read_many([&key, &key], |stored, value| assert_eq!(stored, value));
+            }
+        });
+    });
+}
+
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn concurrent_snapshots_allow_reads_of_another_leaf() {
+    let map = BBTreeMap::<u64, u64>::new();
+    for key in 0..4096 {
+        map.insert(key, key).unwrap();
+    }
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (read_tx, read_rx) = std::sync::mpsc::channel();
+    thread::scope(|scope| {
+        let map = &map;
+        scope.spawn(move || {
+            map.update(&0, |_, value| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                *value = 1;
+            });
+        });
+        held_rx.recv().unwrap();
+        scope.spawn(move || read_tx.send(map.get_copied(&4095)).unwrap());
+        let read = read_rx.recv_timeout(std::time::Duration::from_secs(1));
+        // Release the writer even on failure, so the scoped join can finish.
+        release_tx.send(()).unwrap();
+        assert_eq!(read.unwrap(), Some(4095));
+    });
+}
+
 fn assert_copies_are_of_their_own_entries<K: Ord + Send + Sync>(key_of: impl Fn(u64) -> K + Sync)
 where
     BBTreeMap<K, u64>: Default,

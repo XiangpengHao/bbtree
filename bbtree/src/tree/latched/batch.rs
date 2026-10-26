@@ -24,8 +24,7 @@
 //! - **Copies** ([`LatchedTree::get_many_copied`]): a lane that copies a
 //!   `Copy` value copies the candidate's in a shared-latched snapshot instead, then checks the
 //!   leaf's version. That works where the leaf settles the key, as for a
-//!   single [`LatchedTree::get_copied`] (`lookup.rs`); such a hit writes
-//!   nothing either.
+//!   single [`LatchedTree::get_copied`] (`lookup.rs`).
 //! - **Separators**: a key equal to one is its leaf's head, which the lane
 //!   checks with the leaf latched, as the descent does.
 
