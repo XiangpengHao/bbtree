@@ -27,7 +27,7 @@
   <rect class="highlight" x="691" y="116" width="49" height="26" rx="4"/>
   <text class="ours" x="28" y="136">shoal tree, bulk</text>
   <line class="track" x1="334" y1="128" x2="650" y2="128"/>
-  <circle class="ball" cx="345" cy="128" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 2.85s"/>
+  <circle class="ball" cx="345" cy="128" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 0.60s"/>
   <text class="ours value" x="732" y="136">196</text>
   <path class="medal-ribbon" d="M302 115 h5 l3 8 -3 3 z M314 115 h-5 l-3 8 3 3 z"/>
   <circle class="medal" cx="308" cy="130" r="8"/>
@@ -37,27 +37,27 @@
   <rect class="highlight" x="680" y="156" width="60" height="26" rx="4"/>
   <text class="ours" x="28" y="176">shoal tree</text>
   <line class="track" x1="334" y1="168" x2="650" y2="168"/>
-  <circle class="ball" cx="345" cy="168" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 5.81s"/>
+  <circle class="ball" cx="345" cy="168" r="11" fill="#ffd60a" stroke="#18181b" stroke-width="2.5" style="animation-duration: 1.22s"/>
   <text class="ours value" x="732" y="176">95.8</text>
 
   <text x="28" y="216">tbb concurrent_map</text>
   <line class="track" x1="334" y1="208" x2="650" y2="208"/>
-  <circle class="ball" cx="345" cy="208" r="11" fill="#3f3f46" style="animation-duration: 68.70s"/>
+  <circle class="ball" cx="345" cy="208" r="11" fill="#3f3f46" style="animation-duration: 14.48s"/>
   <text class="value" x="732" y="216">8.1</text>
 
   <text x="28" y="256">folly SkipList</text>
   <line class="track" x1="334" y1="248" x2="650" y2="248"/>
-  <circle class="ball" cx="345" cy="248" r="11" fill="#3f3f46" style="animation-duration: 73.22s"/>
+  <circle class="ball" cx="345" cy="248" r="11" fill="#3f3f46" style="animation-duration: 15.43s"/>
   <text class="value" x="732" y="256">7.6</text>
 
   <text x="28" y="296">absl btree + rwlock</text>
   <line class="track" x1="334" y1="288" x2="650" y2="288"/>
-  <circle class="ball" cx="345" cy="288" r="11" fill="#3f3f46" style="animation-duration: 264.97s"/>
+  <circle class="ball" cx="345" cy="288" r="11" fill="#3f3f46" style="animation-duration: 55.86s"/>
   <text class="value" x="732" y="296">2.1</text>
 
   <text x="28" y="336">std::map + rwlock</text>
   <line class="track" x1="334" y1="328" x2="650" y2="328"/>
-  <circle class="ball" cx="345" cy="328" r="11" fill="#3f3f46" style="animation-duration: 397.46s"/>
+  <circle class="ball" cx="345" cy="328" r="11" fill="#3f3f46" style="animation-duration: 83.79s"/>
   <text class="value" x="732" y="336">1.4</text>
 
   <line class="rule" x1="28" y1="350" x2="732" y2="350"/>

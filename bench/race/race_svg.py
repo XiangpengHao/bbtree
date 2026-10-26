@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Draws race_bench's CSV as the README's race, in the style of upstream's
 `OG-design/assets/readme-race.svg`: one bouncing ball per map, in two heats,
-tree maps and hash maps. Each ball's trip takes 0.6 s times the fastest
-map's throughput over its own, so balls compare across heats. A gold
-medal marks each heat's fastest map.
+tree maps and hash maps. Each ball's trip takes 0.6 s times its heat's
+fastest throughput over its own, so balls compare within a heat: the hash
+maps' speed would leave every tree crawling. A gold medal marks each
+heat's fastest map.
 
 usage: race_bench ... | race_svg.py "<machine>" > race.svg
 """
@@ -65,7 +66,6 @@ class RaceChart:
         self.entries = int(rows[0]["entries"])
         # Runs from before the column found half their keys.
         self.hit_percent = int(rows[0].get("hit_percent") or 50)
-        self.fastest = max(float(row["mops"]) for row in rows)
 
     @staticmethod
     def count_text(count):
@@ -111,11 +111,11 @@ class RaceChart:
             f'  <text class="medal-rank" x="{MEDAL_X}" y="{cy + 3.5}">1</text>',
         ]
 
-    def row_lines(self, row, y, winner):
+    def row_lines(self, row, y, heat_fastest, winner):
         label, _, ours = LABELS[row["map"]]
         mops = float(row["mops"])
         value = self.value_text(mops)
-        trip = 0.6 * self.fastest / mops
+        trip = 0.6 * heat_fastest / mops
         lines = [""]
         if ours:
             lines.append(f'  <rect class="highlight" x="22" y="{y - 20}" '
@@ -165,8 +165,9 @@ class RaceChart:
             out += ["", f'  <text class="heat" x="28" y="{y + 18}">{escape(name.upper())}</text>']
             y += HEAT_GAP
             winners = self.winners(rows)
+            heat_fastest = float(winners[0]["mops"])
             for row in rows:
-                out += self.row_lines(row, y + 22, row in winners)
+                out += self.row_lines(row, y + 22, heat_fastest, row in winners)
                 y += ROW
         out.append("</svg>")
         return "\n".join(out)

@@ -43,8 +43,9 @@ heats, each fastest first after shoal's:
 The competitors are dependencies (oneTBB, folly, Abseil, Boost, e.g. from
 Homebrew), so the race builds only with `-DSHOAL_RACE_BENCH=ON` and the
 library keeps zero (D1). `race_svg.py` draws a CSV as upstream's
-bouncing-ball chart; the README shows four runs, their CSVs in
-`bench/race/`.
+bouncing-ball chart, each heat on its own clock (its fastest ball crosses
+in 0.6 s), so the trees don't crawl beside the hash maps; the README
+shows four runs, their CSVs in `bench/race/`.
 
 ## Results
 
