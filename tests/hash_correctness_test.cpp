@@ -151,12 +151,22 @@ struct Wide {
   }
 };
 
-struct alignas(128) OverAligned {
+template <std::size_t Align>
+struct alignas(Align) AlignedValue {
   int id = 0;
   unsigned char pad[200]{};
-  explicit OverAligned(int id_in) noexcept : id(id_in) { pad[0] = pad[199] = 1; }
-  bool operator==(const OverAligned &other) const noexcept { return id == other.id; }
+  explicit AlignedValue(int id_in) noexcept : id(id_in) { pad[0] = pad[199] = 1; }
+  bool operator==(const AlignedValue &other) const noexcept { return id == other.id; }
 };
+using OverAligned = AlignedValue<128>;
+// The shared map's `insert` takes its value by value, and MSVC refuses an
+// over-aligned parameter (C2719): there the shared map's strict-allocator
+// test holds a value of fundamental alignment instead.
+#if defined(_MSC_VER)
+using SharedOverAligned = AlignedValue<alignof(std::max_align_t)>;
+#else
+using SharedOverAligned = OverAligned;
+#endif
 
 struct CountingHash {
   std::size_t *calls;
@@ -975,11 +985,11 @@ TEST(shared_policy_exception_releases_the_latch) {
 TEST(shared_strict_allocator_tracks_growth_clear_and_destruction) {
   auto state = std::make_shared<StrictState>();
   {
-    using Map = shoal::HashMap<int, OverAligned, std::hash<int>, std::equal_to<>, StrictAllocator, 1>;
+    using Map = shoal::HashMap<int, SharedOverAligned, std::hash<int>, std::equal_to<>, StrictAllocator, 1>;
     Map map(std::hash<int>{}, {}, StrictAllocator{state});
     CHECK_EQ(state->bytes, 0u);
     CHECK(state->live.empty());
-    for (int key = 0; key < 40; ++key) CHECK(map.insert(key, OverAligned(key)).ok());
+    for (int key = 0; key < 40; ++key) CHECK(map.insert(key, SharedOverAligned(key)).ok());
     const auto held = state->bytes;
     CHECK(held != 0);
     for (int key = 0; key < 40; key += 2) {
@@ -991,7 +1001,7 @@ TEST(shared_strict_allocator_tracks_growth_clear_and_destruction) {
     map.clear();
     CHECK(map.empty());
     CHECK_EQ(state->bytes, held);
-    CHECK(map.insert(1, OverAligned(7)).ok());
+    CHECK(map.insert(1, SharedOverAligned(7)).ok());
     const auto kept = map.get_copied(1);
     CHECK_EQ(kept->id, 7);
     CHECK_EQ(state->bytes, held);
