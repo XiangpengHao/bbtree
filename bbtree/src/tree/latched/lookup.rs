@@ -15,12 +15,12 @@ use super::LatchedTree;
 use super::descent::{HeldLeaf, Optimistic, Shared};
 use crate::inline_key::InlineKeyStrategy;
 
-/// A lookup that reading from short snapshots couldn't settle: the leaf changed, or the
-/// key's comparison needs it latched. It goes the latched way.
+/// A lookup the snapshots could not settle: the leaf changed, or the key
+/// needs a held comparison. Retry with one shared hold.
 pub(super) struct Unsettled;
 
-/// What a lookup read of its leaf from short snapshots, which holds only if the leaf's
-/// version is unchanged after ([`Self::settle`]).
+/// What a lookup copied from its leaf, valid only if the leaf's version
+/// is unchanged after the snapshots ([`Self::settle`]).
 pub(super) enum RacingRead<K, V> {
     /// The leaf's inline keys rule the key out.
     Absent,

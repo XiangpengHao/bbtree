@@ -4,9 +4,9 @@
 //! descends in its own lane, which prefetches the line it reads next and
 //! yields, so that one lane's wait for memory overlaps the others' searches.
 //!
-//! A suspended lane holds no latch. It reads the internal nodes and its leaf's
-//! inline keys optimistically, at versions it checks. It latches the leaf only
-//! in the poll that searches it, runs the closure and lets go. So no lane waits
+//! A suspended lane holds no latch. It snapshots internal nodes and leaf
+//! inline keys under short shared holds, at versions it checks. Each hold
+//! ends within the poll that acquired it. So no lane waits
 //! for a latch another lane of its batch holds, and a lane that another
 //! thread's change sends back starts over from the root alone.
 //!
@@ -15,15 +15,15 @@
 //!   header, read its version, check the node's again.
 //! - **The leaf**: its inline keys, read at the version the lane read,
 //!   either rule the key out or name its one candidate. A key ruled out is
-//!   absent once that version, unchanged, confirms it, with a short shared hold. A
+//!   absent once that version, unchanged, confirms the shared snapshot. A
 //!   candidate's entry the lane fetches before it latches the leaf. For a
 //!   heap key it fetches the key's bytes too, their address read with the
 //!   leaf latched a moment. Then, with the leaf latched shared and still at
 //!   that version, the lane compares the candidate and runs the closure.
 //!   Ties go to the leaf's search, latched.
 //! - **Copies** ([`LatchedTree::get_many_copied`]): a lane that copies a
-//!   `Copy` value copies the candidate's in a shared-latched snapshot instead, then checks the
-//!   leaf's version. That works where the leaf settles the key, as for a
+//!   `Copy` value copies the candidate under a shared hold, then checks
+//!   the leaf's version. That works where the leaf settles the key, as for a
 //!   single [`LatchedTree::get_copied`] (`lookup.rs`).
 //! - **Separators**: a key equal to one is its leaf's head, which the lane
 //!   checks with the leaf latched, as the descent does.
@@ -56,15 +56,15 @@ struct Restart;
 trait EntryVisit<K, V, S: InlineKeyStrategy<K>> {
     type Output;
 
-    /// Whether a lane copies its candidate's entry in a shared-latched snapshot and checks the
-    /// leaf's version after, for keys ordered by their own bytes, rather
-    /// than latch the leaf (`lookup.rs`).
+    /// Whether a lane copies its candidate under a short shared hold and
+    /// checks the version after, instead of retaining the hold for a callback
+    /// (`lookup.rs`).
     const COPIES: bool;
 
     /// What the batch returns for the entry `key` and `value`.
     fn visit(&mut self, key: &K, value: &V) -> Self::Output;
 
-    /// What the batch returns for `value`, copied out of the leaf in a shared-latched snapshot:
+    /// What the batch returns for `value`, copied under a shared hold:
     /// only where [`Self::COPIES`].
     fn copied(&mut self, value: ManuallyDrop<V>) -> Self::Output;
 
@@ -661,7 +661,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(result)
     }
 
-    /// What `visit` makes of the value `read`, read in a shared-latched snapshot from `leaf` (from
+    /// What `visit` makes of `read`, copied under a shared hold of `leaf` (from
     /// its head if `at_separator`). That takes the leaf still at `version`,
     /// which it was read at, and the entry read being `key`'s (`lookup.rs`);
     /// `None` for a candidate that isn't. [`Restart`] if the leaf changed, or
