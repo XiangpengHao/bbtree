@@ -1,8 +1,8 @@
 //! Type-stable pages: a latched tree's node pages stay node pages of their
 //! kind for as long as threads share the tree (`design/09-concurrency.md`).
 //!
-//! An optimistic reader follows pointers it read without a latch, and only
-//! later checks they were current. A node a merge emptied may be such a
+//! A reader follows pointers from earlier snapshots, and only later checks
+//! they were current. A node a merge emptied may be such a
 //! pointer's target, so its page can't go back to the allocator, which
 //! could hand it to anything. It goes on the tree's free list for its kind
 //! instead ([`FreeLists`]). It comes back only as a node of that kind, with
@@ -86,10 +86,15 @@ impl FreeList {
     /// any more, on the list.
     fn push(&self, page: NonNull<u8>) {
         self.with_locked(|| {
-            // SAFETY: the page is allocated, and no thread writes it: what
-            // it held is gone, and readers that still read it only read.
+            // A stale traversal can still snapshot this page. Its latch must
+            // also protect the free-list link, which overlaps inline keys.
+            // SAFETY: this retained node page keeps its initialized latch.
+            let latch = unsafe { LatchedNodeHeader::latch_of(page) };
+            let version = latch.lock_exclusive();
+            // SAFETY: the page is allocated and exclusively held.
             unsafe { Self::link(page).write(self.top.load(Ordering::Relaxed)) };
             self.top.store(page.as_ptr(), Ordering::Relaxed);
+            latch.unlock_exclusive(version);
         });
     }
 
