@@ -460,6 +460,13 @@ about 18 ns; comparisons per insert, counted through `Ord`, went 23.55 →
 so a regression in the cache shows as a test failure, not just a timing
 change. Accepted (D45).
 
+Nothing else pays: callgrind instruction counts of the same change over
+200k `u64` operations changed by −1.0 instructions per `get_mut` hit,
+0 for random inserts, −2.0 per random insert+`get_mut` pair, and −454 per
+ascending insert+`get_mut` pair. An insert after a kept leaf either
+appends, or fails the append check once and clears it, so no insert pays
+more than it did with the leaf forgotten.
+
 ### Scans
 
 **Cached range leaf run (D33).** `range(start..).take(64)` steps with

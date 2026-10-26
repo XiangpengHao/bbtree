@@ -986,6 +986,13 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   hit in a leaf, a hit at a separator, a miss inside the shared prefix and
   a query outside it all keep the leaf
   (`value_updates_keep_the_rightmost_leaf`).
+- **No other workload pays:** instruction counts (callgrind, 200k `u64`
+  operations, release) of the change: hits through `get_mut` on a 200k map
+  −1.0 per lookup, random inserts unchanged, random inserts each followed
+  by a `get_mut` −2.0 per pair, ascending inserts each followed by a
+  `get_mut` −454 per pair. A later insert either appends (cheaper) or pays
+  one failed append check, which clears the leaf, so at most one such
+  check per split. No other operation reads the leaf.
 
 **D46. No software prefetch.** (2026-10-10)
 
