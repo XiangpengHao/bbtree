@@ -15,6 +15,7 @@ use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
 use super::node::page::NodePtr;
 use super::node::{Child, Node};
+use super::node_stack::LastEdge;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 
@@ -35,6 +36,24 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             (None, None) => {}
             _ => panic!("only one tree has a root"),
         }
+    }
+
+    /// Panics unless the leaf remembered for the next append (D45) is the
+    /// tree's physically last leaf.
+    fn check_rightmost_leaf(&self) {
+        let Some(remembered) = self.remembered_rightmost_leaf() else {
+            return;
+        };
+        let last = self
+            .root_page()
+            .expect("a remembered leaf without a tree")
+            .node()
+            .border_leaf::<LastEdge>();
+        assert_eq!(
+            remembered.tagged(),
+            last.node_ptr().tagged(),
+            "the remembered leaf is not the tree's last leaf"
+        );
     }
 
     /// Panics unless this is a well-formed B+-tree of `length` entries

@@ -183,28 +183,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn remembers_rightmost_leaf(&self) -> bool {
-        self.rightmost_leaf.is_some()
+    /// The leaf the tree remembers for the next append, if any (D45): for
+    /// the check that it is the tree's physically last leaf
+    /// (`tree/invariants.rs`).
+    #[cfg(any(test, fuzzing))]
+    pub(in crate::tree) fn remembered_rightmost_leaf(&self) -> Option<NodePtr<K, V, S>> {
+        self.rightmost_leaf
     }
 
-    /// Panics unless the remembered leaf is the tree's physically last leaf,
-    /// as its invariant says.
-    #[cfg(any(test, fuzzing))]
-    pub(crate) fn check_rightmost_leaf(&self) {
-        let Some(remembered) = self.rightmost_leaf else {
-            return;
-        };
-        let last = self
-            .root_page
-            .expect("a remembered leaf without a tree")
-            .node()
-            .border_leaf::<super::node_stack::LastEdge>();
-        assert_eq!(
-            remembered.tagged(),
-            last.node_ptr().tagged(),
-            "the remembered leaf is not the tree's last leaf"
-        );
+    #[cfg(test)]
+    pub(crate) fn remembers_rightmost_leaf(&self) -> bool {
+        self.remembered_rightmost_leaf().is_some()
     }
 
     /// A new tree, on a root page from `alloc`: an empty root leaf, without
