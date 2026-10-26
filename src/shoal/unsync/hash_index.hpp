@@ -1,8 +1,9 @@
 // A prehashed index of externally owned rows. Keys, cached hashes, and handles
-// must remain stable until clear or clear_retain_capacity. Handles occupy 48 bits; zero and 2^48-1
+// must remain stable until clear or clear_retain_capacity, but for a handle
+// that replace_at repoints at a row of an equivalent key. Handles occupy 48 bits; zero and 2^48-1
 // are reserved. This index does not own rows, keys, or payloads, and uses supplied hashes unchanged
 // (without mixing). Positions remain valid throughout a batch call, then until reserve, growth,
-// clear, or clear_retain_capacity.
+// clear, or clear_retain_capacity; replace_at keeps them valid.
 #pragma once
 
 #include <algorithm>
@@ -69,6 +70,22 @@ class HashIndex {
     return index_.occupied(static_cast<std::size_t>(slot))
                ? decode(index_.identifier(static_cast<std::size_t>(slot)))
                : Handle{};
+  }
+  // Repoints the entry at a position from find_many or find_or_create_many at
+  // new_handle, and returns the handle it held (D33). Its key and hash stay:
+  // stored_hash(new_handle) must equal the replaced handle's, as for another
+  // row of an equivalent key. Position and handle are validated before the
+  // write: a position past capacity or not holding an entry throws
+  // std::out_of_range, a reserved handle std::invalid_argument. One descriptor
+  // write; no allocation, and positions stay valid. Not from callbacks.
+  Handle replace_at(position_type position, Handle new_handle) {
+    if (position >= capacity() || !index_.occupied(static_cast<std::size_t>(position)))
+      throw std::out_of_range("HashIndex position holds no entry");
+    validate_handle(new_handle);
+    const auto slot = static_cast<std::size_t>(position);
+    const auto previous = decode(index_.identifier(slot));
+    index_.replace_identifier(slot, encode(new_handle));
+    return previous;
   }
   void clear() noexcept { index_.clear(); }
   void clear_retain_capacity() noexcept { index_.reset(); }

@@ -302,6 +302,24 @@ owned elsewhere: it takes cached hashes unchanged, stores row handles
 directly, and does key matching and row creation in bulk, through
 callbacks. It shares the owned map's descriptor storage.
 
+| Operation | What it does |
+|---|---|
+| `find_many(state, n, hash_at, compare, results, positions)` | each row's handle and position, or a null handle and `UINT64_MAX` |
+| `find_or_create_many(..., stored_hash, compare, create, results, positions)` | the same, creating the rows it misses through `create` |
+| `handle_at(position)` | the handle at a position, or a null one |
+| `replace_at(position, handle)` | repoints an entry at a row of an equivalent key, and returns the handle it held (D33) |
+| `reserve`, `reserve_from` | grows, rehashing by `stored_hash` or by an enumeration of the rows |
+| `clear`, `clear_retain_capacity` | empties, releasing or keeping the block |
+
+A position stays valid until `reserve`, growth, `clear` or
+`clear_retain_capacity`; `replace_at` keeps it. Callbacks must not call
+back into the index, `replace_at` included: it is called between batch
+calls. A join build, which keeps every duplicate key, indexes each key's
+latest row and chains the rows of a key through their own next pointers:
+for each row `find_or_create_many` did not create, it links the row to
+what `replace_at(position, row)` returns, in input order, and probing
+then returns the latest row, from which the caller walks the rest.
+
 It probes as the owned map does (D27): tags first, eight at a time as
 one word, reading a descriptor only where a tag matches, so a key that
 is absent reads none. A new entry writes its tag once: its claim writes
@@ -394,5 +412,7 @@ and retry, exception unwinding; long, wrapping probe runs against
 readers against writers that grow, erase and clear, and against writers
 that rewrite eight-word values (without its version check a reader sees
 words from two writes, and the test fails); and that what shards retain
-goes back to the allocator. `hash_index_test` covers `HashIndex`. All run
+goes back to the allocator. `hash_index_test` covers `HashIndex`, and
+`replace_at` by a join build's chains of duplicates, checked from each
+key's head against every row of the key, through growth. All run
 in CTest and the sanitizer builds.

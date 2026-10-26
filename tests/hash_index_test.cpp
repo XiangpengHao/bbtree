@@ -582,4 +582,184 @@ TEST(probe_scratch_keeps_fingerprints_stops_and_one_position_array) {
   CHECK_EQ(sizeof(Index::ProbeState), 71680u);
 }
 
+namespace {
+// A join build's rows, after DuckDB's `JoinHashTable`: every row is kept, the
+// index holds each key's latest row, and a row's `next` is the handle of the
+// row of its key before it (0 at the chain's end). Handles are row number + 1.
+// Keys share four homes and five fingerprints, so entries are displaced and
+// sit in one another's probe chains.
+struct JoinRows {
+  struct Row {
+    unsigned key;
+    std::uint64_t next;
+  };
+  std::vector<Row> rows;
+  Index index;
+  Index::ProbeState scratch;
+
+  static std::uint64_t hash_of_key(unsigned key) {
+    return (std::uint64_t{key % 5 + 1} << 48) | (key % 4);
+  }
+  auto stored_hash() const {
+    return [this](std::uint64_t handle) { return hash_of_key(rows[handle - 1].key); };
+  }
+  // Compares keys[row] with the key of the row its result names.
+  auto compare(const std::vector<unsigned> &keys) const {
+    return [this, &keys](std::uint32_t *candidates, std::size_t count, std::uint64_t *results,
+                         std::uint32_t *rejected) {
+      std::size_t n = 0;
+      for (std::size_t i = 0; i < count; ++i)
+        if (rows[results[candidates[i]] - 1].key != keys[candidates[i]]) rejected[n++] = candidates[i];
+      return n;
+    };
+  }
+  // Materializes the keys' rows, then indexes them in one batch: a new key's
+  // row becomes its entry, and a duplicate's is linked to the head and
+  // replaces it, in input order.
+  void insert(const std::vector<unsigned> &keys) {
+    const std::uint64_t first = rows.size() + 1;
+    for (auto key : keys) rows.push_back({key, 0});
+    std::vector<std::uint64_t> results(keys.size()), positions(keys.size());
+    index.find_or_create_many(
+        scratch, keys.size(), [&](std::uint32_t row) { return hash_of_key(keys[row]); }, stored_hash(),
+        compare(keys),
+        [&](const std::uint32_t *created, std::size_t count, std::uint64_t *handles) {
+          for (std::size_t i = 0; i < count; ++i) handles[i] = first + created[i];
+        },
+        results.data(), positions.data());
+    for (std::size_t row = 0; row < keys.size(); ++row) {
+      const auto handle = first + row;
+      if (results[row] == handle) continue;
+      const auto capacity = index.capacity();
+      const auto size = index.size();
+      rows[handle - 1].next = index.replace_at(positions[row], handle);
+      CHECK_EQ(index.handle_at(positions[row]), handle);
+      CHECK_EQ(index.capacity(), capacity);
+      CHECK_EQ(index.size(), size);
+    }
+  }
+  // Each key's head and its position, by find_many.
+  std::pair<std::vector<std::uint64_t>, std::vector<std::uint64_t>> heads(
+      const std::vector<unsigned> &keys) {
+    std::vector<std::uint64_t> results(keys.size()), positions(keys.size());
+    index.find_many(
+        scratch, keys.size(), [&](std::uint32_t row) { return hash_of_key(keys[row]); }, compare(keys),
+        results.data(), positions.data());
+    return {results, positions};
+  }
+  // Every key's chain, walked from the head find_many returns, holds all its
+  // rows, latest first.
+  void check_chains() {
+    std::vector<unsigned> keys;
+    for (const auto &row : rows)
+      if (std::find(keys.begin(), keys.end(), row.key) == keys.end()) keys.push_back(row.key);
+    CHECK_EQ(index.size(), keys.size());
+    index.check_invariants(stored_hash());
+    const auto [results, positions] = heads(keys);
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      CHECK_EQ(index.handle_at(positions[i]), results[i]);
+      std::vector<std::uint64_t> chain, expected;
+      for (auto handle = results[i]; handle && chain.size() <= rows.size(); handle = rows[handle - 1].next)
+        chain.push_back(handle);
+      for (auto handle = rows.size(); handle; --handle)
+        if (rows[handle - 1].key == keys[i]) expected.push_back(handle);
+      CHECK(chain == expected);
+    }
+  }
+};
+}  // namespace
+
+// Every entry is replaced in turn, displaced ones and ones in the middle of
+// other keys' probe chains among them: the replaced entry keeps its slot, and
+// every key, its neighbours', is still found where it was.
+TEST(replace_at_repoints_one_entry_in_place) {
+  JoinRows join;
+  std::vector<unsigned> keys;
+  for (unsigned key = 0; key < 40; ++key) keys.push_back(key);
+  join.insert(keys);
+  const auto [first_heads, positions] = join.heads(keys);
+  std::size_t displaced = 0;
+  for (std::size_t i = 0; i < keys.size(); ++i)
+    displaced += positions[i] != (JoinRows::hash_of_key(keys[i]) & (join.index.capacity() - 1));
+  CHECK(displaced >= 30u);
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    join.insert({keys[i]});
+    const auto [heads, now] = join.heads(keys);
+    CHECK(now == positions);
+    for (std::size_t j = 0; j < keys.size(); ++j)
+      CHECK_EQ(heads[j], j <= i ? keys.size() + j + 1 : first_heads[j]);
+    join.check_chains();
+  }
+}
+
+// Duplicates come across batches and within one, where a later row's result
+// still names the key's first row: the handle replace_at returns is the head
+// as it is, the row just before.
+TEST(replace_at_prepends_duplicates_to_external_chains) {
+  JoinRows join;
+  join.insert({7, 1, 7, 2, 7, 7});
+  join.check_chains();
+  std::vector<unsigned> batch;
+  for (unsigned i = 0; i < 3000; ++i) batch.push_back(i % 3 ? 7 : i % 11);
+  join.insert(batch);
+  join.insert({2, 7, 99});
+  join.check_chains();
+  const auto [heads, positions] = join.heads({7});
+  CHECK_EQ(heads[0], join.rows.size() - 1);
+}
+
+TEST(replace_at_after_growth) {
+  JoinRows join;
+  join.insert({3, 4, 3, 5});
+  const auto capacity = join.index.capacity();
+  join.index.reserve(capacity * 4, join.stored_hash());
+  CHECK(join.index.capacity() > capacity);
+  join.check_chains();
+  join.insert({4, 3, 4});
+  join.check_chains();
+  const auto grown = join.index.capacity();
+  join.index.reserve_from(grown * 4, [&](auto visit) {
+    for (std::uint64_t handle = 1; handle <= join.rows.size(); ++handle) {
+      const auto [heads, positions] = join.heads({join.rows[handle - 1].key});
+      if (heads[0] == handle) visit(handle, JoinRows::hash_of_key(join.rows[handle - 1].key));
+    }
+  });
+  CHECK(join.index.capacity() > grown);
+  join.check_chains();
+  join.insert({5, 3, 6});
+  join.check_chains();
+}
+
+TEST(replace_at_rejects_empty_positions_and_reserved_handles) {
+  JoinRows join;
+  CHECK_EQ(join.index.capacity(), 0u);
+  const auto throws_out_of_range = [&](std::uint64_t position) {
+    try {
+      join.index.replace_at(position, 1);
+    } catch (const std::out_of_range &) {
+      return true;
+    }
+    return false;
+  };
+  CHECK(throws_out_of_range(0));
+  join.insert({1, 2});
+  const auto [heads, positions] = join.heads({1, 2});
+  std::uint64_t empty = 0;
+  while (join.index.handle_at(empty)) ++empty;
+  for (auto position : {empty, std::uint64_t{join.index.capacity()}, std::numeric_limits<std::uint64_t>::max()})
+    CHECK(throws_out_of_range(position));
+  for (auto reserved : {std::uint64_t{0}, (std::uint64_t{1} << 48) - 1, std::uint64_t{1} << 48}) {
+    bool threw = false;
+    try {
+      join.index.replace_at(positions[0], reserved);
+    } catch (const std::invalid_argument &) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
+  CHECK_EQ(join.index.handle_at(empty), 0u);
+  CHECK_EQ(join.index.handle_at(positions[0]), heads[0]);
+  join.check_chains();
+}
+
 TEST_MAIN()

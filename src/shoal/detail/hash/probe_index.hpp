@@ -187,6 +187,12 @@ class HashProbeIndex {
     descriptors_[slot] = (descriptors_[slot] & ~identifier_mask()) | identifier;
     ++size_;
   }
+  /// Repoints an occupied slot at another entry of the same fingerprint; like
+  /// a commit, it keeps the tag, which the fingerprint alone decides.
+  void replace_identifier(std::size_t slot, std::uint64_t identifier) noexcept {
+    SHOAL_ASSERT(occupied(slot) && identifier != 0 && identifier < identifier_mask());
+    descriptors_[slot] = (descriptors_[slot] & ~identifier_mask()) | identifier;
+  }
   void release_claim(std::size_t slot) noexcept {
     SHOAL_ASSERT(identifier(slot) == identifier_mask());
     write_descriptor(slot, 0);

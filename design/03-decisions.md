@@ -443,6 +443,36 @@ unless the policy declares `is_avalanching`, as Boost reads it
 (`HashBits::of`). The race's UUID hash declares it, and both shoal's and
 Boost's maps skip their mix for it.
 
+**D33. `HashIndex` repoints an entry; chains of duplicates stay the
+caller's.** (2026-10-26)
+`HashIndex::replace_at(position, handle)` writes another handle into the
+entry at a position that `find_many` or `find_or_create_many` returned,
+and returns the handle it held. The entry's key and hash stay, so its
+fingerprint, tag, slot, size and capacity do: one descriptor write, no
+allocation, and positions stay valid. The new handle must be a row of an
+equivalent key, `stored_hash` equal to the old one's; `check_invariants`
+catches one that isn't. A join build (DuckDB's `JoinHashTable`) keeps
+every duplicate: it indexes each key's latest row, links that row to the
+previous one through the row's own next pointer, and so repoints the
+entry on every duplicate.
+
+- **Why a primitive, not a bulk `find_or_prepend_many`:** the caller has
+  the find already, `find_or_create_many` with positions, and the chain
+  lives in its rows, which the index never writes. A bulk call would need
+  a link callback and would decide which rows were new, for what the
+  caller does in one loop of a store and a call per duplicate.
+- **Why it returns the old handle:** not only to save a `handle_at`. In
+  one batch, a duplicate's result names the key's first row of the batch,
+  not the head after the rows before it replaced it; the handle
+  `replace_at` returns is the head as it is, the row to link to.
+- **Why it throws:** a position past capacity, or one with no entry,
+  throws `std::out_of_range`, and a reserved handle `std::invalid_argument`
+  as `find_or_create_many`'s do, before anything is written. Checking the
+  position costs nothing: the descriptor it reads is the one it returns.
+  A stale position (one from before growth) that lands on another entry
+  is not caught. Unpublished claims never outlive a call, and `HashIndex`
+  erases nothing, so a position holds an entry or nothing.
+
 ## Measuring
 
 **D31. Parity is judged by counts, and ratios within one run.**
