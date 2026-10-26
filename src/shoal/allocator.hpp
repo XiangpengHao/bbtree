@@ -1,4 +1,4 @@
-// Where a map's memory comes from (D8): an allocator of pages, each of a
+// Where a map's memory comes from (OG-D8): an allocator of pages, each of a
 // kind and of the one layout every page of that kind has. By default every
 // kind comes from `allocate_zeroed`; an allocator that tells the kinds apart,
 // to budget, pool or place them apart, defines the kinds' own functions.

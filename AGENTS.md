@@ -11,15 +11,19 @@ from upstream at `8adae97`.
 
 - `src/shoal/` is the library, `tests/` its tests (CTest), `bench/` its
   benchmarks.
-- `design/NN-*.md`, "doc NN" and `D<n>` in comments refer to upstream's
-  [design notes at `8adae97`](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design); `D<n>` is a decision in
-  `design/03-decisions.md` there. `PORTING.md` holds the port's own
-  decisions (`P<n>`), its status and its measurements; record new ones
-  there.
+- `design/` holds this fork's design notes, as upstream's `design/` holds
+  the crate's: `design/NN-*.md` and "doc NN" name a note here, and `D<n>`
+  a decision in `design/03-decisions.md`. Record new decisions there, as
+  they hold now (edit an entry in place; it is not a history), and cite
+  them in the code as `(D<n>)` where the choice is made. Measurements go
+  in the note they belong to.
+- `OG-D<n>`, `OG-design/NN-*.md` and "OG-doc NN" name upstream's
+  decisions and notes, [at `8adae97`](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design).
+  Never write a bare `D<n>` for an upstream decision.
 - Upstream is the reference for the tree maps' data structure and
-  algorithms. When the C++ code departs from the Rust crate, say why in
-  `PORTING.md`. The hash maps are this repository's own (`PORTING.md`,
-  Hash maps).
+  algorithms. When the C++ code departs from the Rust crate, say why in a
+  decision. The hash maps are this repository's own
+  (`design/05-hash-maps.md`).
 
 ## Write code that requires minimal human attention 
 
@@ -54,8 +58,8 @@ from upstream at `8adae97`.
 
 - Reason then measure. Don't start with blind sweeping, or brainless micro/premature optimizations. Always first think about what is the bottleneck by profiling and measurements, reason the cost model. Benchmark is the last step, to verify that your reasoning is correct, if not, correct your model and repeat; benchmark is NOT a tool to guide the optimization.
 
-- Never do explicit prefetching: no software prefetch instructions or intrinsics (`_mm_prefetch`, `__builtin_prefetch`, inline `prefetcht0`, ...), not in the library, benchmarks, prototypes or A/B variants, and not behind a feature flag. Fix memory latency with layout instead: put what an operation needs in the cache lines it already loads (D46).
-  Exception: the batch lanes (doc 12, D53, P6) prefetch, only through `Prefetcher` in `src/shoal/detail/tree/batch.hpp`, the line each lane reads next, the query window included. Never in single-key paths, and never whole keys or unchosen edges.
+- Never do explicit prefetching: no software prefetch instructions or intrinsics (`_mm_prefetch`, `__builtin_prefetch`, inline `prefetcht0`, ...), not in the library, benchmarks, prototypes or A/B variants, and not behind a feature flag. Fix memory latency with layout instead: put what an operation needs in the cache lines it already loads (OG-D46).
+  Exception: the batch lanes (OG-doc 12, OG-D53, D11) prefetch, only through `Prefetcher` in `src/shoal/detail/tree/batch.hpp`, the line each lane reads next, the query window included. Never in single-key paths, and never whole keys or unchosen edges.
 
 ## Verification
 

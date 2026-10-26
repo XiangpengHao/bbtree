@@ -1,4 +1,4 @@
-// Search over a node's inline keys (D18) in explicit vectors
+// Search over a node's inline keys (OG-D18) in explicit vectors
 // (`tree/node/vector_count.rs`). The compiler's own count is poor at
 // capacities that aren't a multiple of the vector, and on AArch64 widens each
 // lane to 64 bits.
@@ -7,12 +7,13 @@
 //   compares per 64 bytes of slots, the masks gathered into a word, one
 //   `bzhi` by `len` and one `popcnt`.
 // - x86-64 without POPCNT: SSE2 compares; sorted slots make the masks for `<`
-//   and `<=` runs of low one-bits whose first zeros give the range (D40).
-// - AArch64: NEON counts every width (D56), slots past `len` included, which
-//   hold the greatest inline key (invariant 4).
+//   and `<=` runs of low one-bits whose first zeros give the range (OG-D40).
+// - AArch64: NEON counts every width (OG-D56), slots past `len` included,
+//   which hold the greatest inline key (invariant 4).
 //
 // Two equality searches too: an AVX-512 equality mask over 8-byte slots for
-// exact-key lookups (D41), and an SSE2 filter of a leaf's hash tags (D36).
+// exact-key lookups (OG-D41), and an SSE2 filter of a leaf's hash tags
+// (OG-D36).
 //
 // Every function takes the node kind's capacity as a template argument, a
 // constant, so that its loops unroll and its masks fold.

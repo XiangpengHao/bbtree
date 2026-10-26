@@ -56,7 +56,7 @@ class MapPages {
   A& allocator() const noexcept { return *alloc_; }
 
   /// Ends the program, as Rust's `handle_alloc_error` does: the tree is in
-  /// the middle of a change it can't undo (PORTING.md, P5).
+  /// the middle of a change it can't undo (D10).
   [[noreturn]] SHOAL_COLD static void handle_alloc_error(Layout layout) noexcept {
     std::fprintf(stderr, "shoal: memory allocation of %zu bytes failed\n", layout.size);
     std::abort();
@@ -69,8 +69,8 @@ class MapPages {
 /// A tagged pointer to an initialized node of a map with keys `K`, values `V`
 /// and strategy `S`, whose lowest bit says whether the node is a leaf. Every
 /// page leaves that bit 0, being aligned to at least 64 B. The tag is the
-/// only record of a node's kind (D52). Everything it offers is raw: the node
-/// handles, `Leaf` and `Internal`, are its users.
+/// only record of a node's kind (OG-D52). Everything it offers is raw: the
+/// node handles, `Leaf` and `Internal`, are its users.
 template <class K, class V, class S>
 class NodePtr {
  public:
@@ -230,20 +230,20 @@ class NodePtr {
     return KeyColumns<Kind>(page());
   }
 
-  /// A leaf's head key slot, in entry 0 before the head (D49).
+  /// A leaf's head key slot, in entry 0 before the head (OG-D49).
   K* head_key_slot() const noexcept {
     static_assert(Shape::has_inline_keys, "a leaf has a head key only with inline keys");
     return std::launder(reinterpret_cast<K*>(page() + Shape::leaf_layout.head_key_offset));
   }
 
-  /// A leaf's value slots: value `i` beside key `i` (D29).
+  /// A leaf's value slots: value `i` beside key `i` (OG-D29).
   Slots<V> value_slots() const noexcept {
     return Slots<V>(page() + Shape::leaf_layout.values_offset(), Shape::leaf_capacity,
                     Shape::leaf_layout.value_stride);
   }
 
   /// A leaf's head and value slots as one array: slot 0 the head, slot
-  /// `i + 1` value `i` (D17).
+  /// `i + 1` value `i` (OG-D17).
   Slots<V> head_and_value_slots() const noexcept {
     return Slots<V>(page() + Shape::leaf_layout.head_offset, Shape::leaf_capacity + 1,
                     Shape::leaf_layout.value_stride);
@@ -279,7 +279,8 @@ class FreshPage {
   using Shape = NodeShape<K, V, S>;
 
   /// A page's layout: its kind's; a root page's room for the larger kind,
-  /// aligned as it, then the root area, what every key shares (D50, D52).
+  /// aligned as it, then the root area, what every key shares (OG-D50,
+  /// OG-D52).
   static constexpr Layout layout() noexcept {
     if constexpr (Kind == PageKind::Leaf) {
       return Shape::leaf_layout.page;

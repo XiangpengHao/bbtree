@@ -1,10 +1,10 @@
 // The tree under the maps (`tree/root.rs`, `tree/search.rs`,
 // `tree/insert.rs`, `tree/prefix.rs`): a root page, if there is one, which
-// owns every node under it, and the last leaf an append went to (D45).
+// owns every node under it, and the last leaf an append went to (OG-D45).
 //
-// - `Tree`: lookups, inserts, and the shared prefix's upkeep (D50).
+// - `Tree`: lookups, inserts, and the shared prefix's upkeep (OG-D50).
 // - `MutStack`: an exclusive node stack, which inserts and removals climb,
-//   and the prefix fits that follow a change (D26).
+//   and the prefix fits that follow a change (OG-D26).
 // - `PrefixedKey`: a key that shares what every key of its tree shares.
 //
 // Removal is `remove.hpp`'s, teardown `teardown.hpp`'s.
@@ -22,7 +22,7 @@
 
 namespace shoal::detail {
 
-/// A key that shares what every key of its tree shares (D50): a search that
+/// A key that shares what every key of its tree shares (OG-D50): a search that
 /// skips each node's prefix unchecked needs one. Only the tree makes one, by
 /// shrinking the shared prefix for it or by checking it.
 template <class K>
@@ -50,7 +50,7 @@ class PrefixedKey {
 };
 
 /// Where a search found a key: in a leaf beside its value, or as a separator
-/// in an internal node, whose value is its head (D17).
+/// in an internal node, whose value is its head (OG-D17).
 template <class K, class V, class S>
 class Found {
  public:
@@ -85,7 +85,7 @@ class Found {
   Found(NodePtr<K, V, S> node, std::size_t index) noexcept : node_(node), index_(index) {}
 
   /// Out of line: a search rarely ends at a separator, and the walk down to
-  /// its head would otherwise sit in every descent's loop (D41).
+  /// its head would otherwise sit in every descent's loop (OG-D41).
   SHOAL_NOINLINE static std::pair<const K*, V*> separator_key_value(InternalNode internal,
                                                                      std::size_t index) noexcept {
     return internal.separator_key_value(index);
@@ -182,7 +182,7 @@ class Tree {
     return depth;
   }
 
-  /// What every key of the tree shares (D50).
+  /// What every key of the tree shares (OG-D50).
   SharedPrefix& shared_prefix() const noexcept {
     SHOAL_CHECK(has_root());
     return root_page_.shared_prefix();
@@ -192,7 +192,7 @@ class Tree {
   bool remembers_rightmost_leaf() const noexcept { return !rightmost_leaf_.is_null(); }
 
   /// Remembers `leaf`, the tree's physically last leaf, for the next insert
-  /// to append to (D45).
+  /// to append to (OG-D45).
   void remember_rightmost_leaf(LeafNode leaf) noexcept { rightmost_leaf_ = leaf.node_ptr(); }
 
   /// The root page; without a tree, that of a new one from `pages`.
@@ -238,7 +238,7 @@ class Tree {
   }
 
   /// The entry whose key equals `key`, if the tree holds one. A key that
-  /// lacks what every key shares (D50) is in none of its nodes.
+  /// lacks what every key shares (OG-D50) is in none of its nodes.
   template <class Q>
   SHOAL_ALWAYS_INLINE std::optional<std::pair<const K*, V*>> find(const Q& key) const noexcept {
     if (!has_root()) return std::nullopt;
@@ -252,7 +252,7 @@ class Tree {
 
   /// Searches down from `node` for the entry whose key equals `key`,
   /// keeping only the current node. `key` must share what every key shares.
-  /// `CallSite` compiles the single-key and batch lookups apart (D53).
+  /// `CallSite` compiles the single-key and batch lookups apart (OG-D53).
   template <class CallSite = void, class Q>
   SHOAL_ALWAYS_INLINE static std::optional<Found<K, V, S>> find_from(
       AnyNode node, const SearchKey<K, Q>& key) noexcept {
@@ -336,8 +336,8 @@ class Tree {
 
   /// Appends `key` and `value` to the remembered last leaf, if it has room
   /// and `key` is greater than its last key and shares what every key
-  /// shares (D45). Otherwise false, the key and value untouched. Forgets the
-  /// leaf before comparing.
+  /// shares (OG-D45). Otherwise false, the key and value untouched. Forgets
+  /// the leaf before comparing.
   SHOAL_ALWAYS_INLINE bool try_rightmost_append(K& key, V& value) noexcept {
     if (rightmost_leaf_.is_null()) return false;
     const LeafNode leaf = LeafNode::at(rightmost_leaf_);
@@ -527,7 +527,7 @@ class MutStack : public NodeStack<K, V, S> {
   }
 
   /// Finishes a plain insertion: remembers its leaf when the node stack shows
-  /// the new entry is physically last (D45).
+  /// the new entry is physically last (OG-D45).
   void finish_insertion() noexcept {
     const LeafNode leaf = this->leaf();
     if (this->index() + 1 != leaf.len()) return;
@@ -737,7 +737,7 @@ class MutStack : public NodeStack<K, V, S> {
       const K* child_low = edge > 0 ? &node.separator_key(edge - 1) : low;
       const K* child_high = edge < node.len() ? &node.separator_key(edge) : high;
       // A lying encoding may report less than the parent's prefix: keep the
-      // parent/child invariant (D44).
+      // parent/child invariant (OG-D44).
       std::size_t prefix_len = KeyInliner<K>::fence_prefix_len(child_low, child_high, shared_len);
       if (prefix_len < node.prefix_len()) prefix_len = node.prefix_len();
       child.refit_prefix(prefix_len);

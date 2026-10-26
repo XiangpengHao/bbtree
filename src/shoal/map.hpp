@@ -1,6 +1,6 @@
 // `shoal::TreeMap`: the ordered map that threads share (`map/mod.rs`,
-// D54, design/09-concurrency.md): the unsync tree, shared through optimistic
-// lock coupling.
+// OG-D54, OG-design/09-concurrency.md): the unsync tree, shared through
+// optimistic lock coupling.
 //
 // Closures, not handles: an operation that exposes a key or value runs the
 // caller's closure while the entry's leaf is latched, lets go, and returns
@@ -31,9 +31,10 @@
 namespace shoal {
 
 /// An ordered map of keys `K` to values `V` that threads share. Keys need
-/// inline keys (`InlineKey<K>`, D49): integers, byte strings, or a key type of
-/// your own that specializes it. `Annex` is what each leaf keeps for the code
-/// that owns where keys and values point (`leaf_annex.hpp`); none by default.
+/// inline keys (`InlineKey<K>`, OG-D49): integers, byte strings, or a key type
+/// of your own that specializes it. `Annex` is what each leaf keeps for the
+/// code that owns where keys and values point (`leaf_annex.hpp`); none by
+/// default.
 template <class K, class V, class Config = DefaultNodeConfig, class A = Global, class Annex = NoLeafAnnex>
 class TreeMap {
   static_assert(is_trivially_relocatable_v<K> && is_trivially_relocatable_v<V>,
@@ -59,7 +60,8 @@ class TreeMap {
   TreeMap& operator=(const TreeMap&) = delete;
   ~TreeMap() { tree_.destroy(alloc_); }
 
-  // Lookups.
+  // Lookups. The lookups and inserts inline into their callers, as Rust's
+  // do (D17).
 
   /// Runs `f(key, value)` on the entry whose key equals `key` while its leaf
   /// is latched shared, and returns what `f` returned; `nullopt` without one.
@@ -69,7 +71,7 @@ class TreeMap {
   }
 
   /// A copy of the value, read without a latch where the leaf settles the
-  /// key (D57): for trivially copyable values.
+  /// key (OG-D57): for trivially copyable values.
   template <class Q>
   SHOAL_ALWAYS_INLINE std::optional<V> get_copied(const Q& key) const noexcept {
     return tree_.get_copied(detail::Query<K>::of(key));
@@ -174,7 +176,7 @@ class TreeMap {
     return tree_.remove_entry(detail::Query<K>::of(key), condition, detail::NoLeafCallback(), alloc_);
   }
 
-  // Batches (D55): each key in a lane, the lanes' waits for memory
+  // Batches (OG-D55): each key in a lane, the lanes' waits for memory
   // overlapped, `batch_lanes` keys at a time. No lane holds a latch while
   // another runs.
 

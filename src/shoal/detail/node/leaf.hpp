@@ -1,9 +1,9 @@
 // Leaves: the nodes that hold the entries (`tree/node/leaf.rs`). A leaf's
-// page holds its keys and values, paired with inline keys (D29), the inline
-// keys a search runs over first (D18), and in a leaf of heap byte strings the
-// keys' hash tags (D36). It also holds a head: the value of the separator just
-// left of the leaf, and with inline keys that separator's key (D17, D49).
-// Every leaf but the tree's leftmost has one.
+// page holds its keys and values, paired with inline keys (OG-D29), the inline
+// keys a search runs over first (OG-D18), and in a leaf of heap byte strings
+// the keys' hash tags (OG-D36). It also holds a head: the value of the
+// separator just left of the leaf, and with inline keys that separator's key
+// (OG-D17, OG-D49). Every leaf but the tree's leftmost has one.
 //
 // `Leaf` is a handle with no access of its own, as every node handle: the
 // operation holding it keeps the contracts of `tree/node/mod.rs`.
@@ -47,7 +47,7 @@ struct CandidateLine {
 };
 
 /// What the leaf right of a separator being removed gives up and hands up
-/// (D17): its head's value, with inline keys its key, and its first key as
+/// (OG-D17): its head's value, with inline keys its key, and its first key as
 /// the separator that takes the removed one's place.
 template <class K, class V, class Sep>
 struct HeadSuccession {
@@ -147,7 +147,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
   // Searching.
 
   /// `key` searched for among the leaf's keys: the key equal to it, or the
-  /// edge where it belongs; over the inline keys first, if any (D18). In
+  /// edge where it belongs; over the inline keys first, if any (OG-D18). In
   /// bounds for any `operator<` and inline keys.
   template <class Q>
   SHOAL_ALWAYS_INLINE SearchResult search(const SearchKey<K, Q>& key) const noexcept {
@@ -158,13 +158,13 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
     }
   }
 
-  /// `search`, inlined or not as the compiler decides (D41).
+  /// `search`, inlined or not as the compiler decides (OG-D41).
   template <class Q>
   SearchResult search_maybe_inlined(const SearchKey<K, Q>& key) const noexcept {
     return search_always_inlined(key);
   }
 
-  /// `search`, always inlined: an insert's search uses it (D41).
+  /// `search`, always inlined: an insert's search uses it (OG-D41).
   template <class Q>
   SHOAL_ALWAYS_INLINE SearchResult search_always_inlined(const SearchKey<K, Q>& key) const noexcept {
     if constexpr (has_inline_keys && SearchKey<K, Q>::has_inline_target) {
@@ -179,9 +179,10 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
   }
 
   /// The index of the key equal to `key`, if the leaf holds one. As an
-  /// exact-key lookup it may reject candidates of other lengths (D36), and
-  /// confirm a lone candidate by equality alone (D38). `CallSite` compiles
-  /// the single-key and batch lookups apart (D53).
+  /// exact-key lookup it may reject candidates of other lengths (OG-D36), and
+  /// confirm a lone candidate by equality alone (OG-D38). `CallSite` compiles
+  /// the single-key and batch lookups apart (OG-D53). Always inlined, as
+  /// LLVM inlines Rust's (D17).
   template <class CallSite, class Q>
   SHOAL_ALWAYS_INLINE std::optional<std::size_t> find(const SearchKey<K, Q>& key) const noexcept {
     if constexpr (has_inline_keys && SearchKey<K, Q>::has_inline_target) {
@@ -288,7 +289,8 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
     return std::nullopt;
   }
 
-  // The head: the entry of the separator just left of the leaf (D17, D49).
+  // The head: the entry of the separator just left of the leaf (OG-D17,
+  // OG-D49).
 
   V& head_value() const noexcept {
     SHOAL_CHECK(has_head());
@@ -300,7 +302,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
     return node_.head_and_value_slots().slot(0);
   }
 
-  /// The head's key, which it has only with inline keys (D49).
+  /// The head's key, which it has only with inline keys (OG-D49).
   const K& head_key() const noexcept {
     SHOAL_CHECK(has_head());
     return *node_.head_key_slot();
@@ -344,7 +346,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
     return {std::move(key), std::move(value)};
   }
 
-  /// Replaces the head's key with `key` and returns the old one (D49).
+  /// Replaces the head's key with `key` and returns the old one (OG-D49).
   K replace_head_key(K&& key) const noexcept {
     SHOAL_CHECK(has_head());
     K* slot = node_.head_key_slot();
@@ -355,7 +357,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
   }
 
   /// How the leaf right of a separator being removed gives up its head and
-  /// hands up its first key to take the separator's place (D17); `nullopt`,
+  /// hands up its first key to take the separator's place (OG-D17); `nullopt`,
   /// changing nothing, if the leaf has no keys.
   std::optional<HeadSuccession<K, V, Sep>> take_head_and_first_key() const noexcept {
     SHOAL_CHECK(has_head());
@@ -397,7 +399,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
 
   /// Splits the full leaf and inserts `key`/`value` at edge `index`, on the
   /// side where that edge ended up. The separator goes up, and its entry
-  /// becomes the right leaf's head (D17, D49).
+  /// becomes the right leaf's head (OG-D17, OG-D49).
   Split<Sep, Leaf> split_insert(std::size_t index, Windowed&& key, V&& value,
                                 Page&& right_page) const noexcept {
     SHOAL_ASSERT(len() == Kind::capacity);
@@ -561,7 +563,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
 
   /// Moves the entries right of `separator_index` into `right`, a fresh leaf
   /// at this leaf's prefix length. Takes out key `separator_index`, whose
-  /// entry becomes `right`'s head (D49), and returns it as the parent's
+  /// entry becomes `right`'s head (OG-D49), and returns it as the parent's
   /// separator. Then the leaves' annexes split.
   Sep split_around(std::size_t separator_index, Leaf right) const noexcept {
     const std::size_t count = len();
@@ -586,7 +588,7 @@ class Leaf : public ChildBase<Leaf<K, V, S>, K, KindShape<K, V, S, true>> {
   }
 
   /// Whether the lone candidate `stored` is `key`: all of its bytes at once
-  /// for byte arrays (D38), past the tie otherwise.
+  /// for byte arrays (OG-D38), past the tie otherwise.
   template <class Q>
   SHOAL_ALWAYS_INLINE bool matches(const SearchKey<K, Q>& key, Window target,
                                     const K& stored) const noexcept {

@@ -1,8 +1,9 @@
 # The C++17 port: its tests on every architecture and SIMD path it
-# has, and under the sanitizers. Named for its README badge.
+# has, and under the sanitizers (design/03-decisions.md, D24). Named for
+# its README badge.
 #
 # Not yet here: GCC with libstdc++, whose std::string the map refuses as a
-# key (PORTING.md, P2) and the tests still use.
+# key (D7) and the tests still use.
 name: cpp
 
 on:

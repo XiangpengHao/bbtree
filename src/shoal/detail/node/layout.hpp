@@ -16,12 +16,12 @@
 //   offset in both kinds, and the trailing slots an array after them.
 // - With inline keys, `capacity` inline keys follow the header, from offset 8
 //   (16 in a latched tree). Leaves pair their keys and values in entries;
-//   entry 0 holds the head and its separator's key (D49), entry `i + 1` key
+//   entry 0 holds the head and its separator's key (OG-D49), entry `i + 1` key
 //   `i` and value `i`. Power-of-two entries up to a cache line start at a
-//   multiple of their size (D34). Internal nodes keep no keys, only inline
+//   multiple of their size (OG-D34). Internal nodes keep no keys, only inline
 //   keys and edges.
 // - A leaf whose plan keeps hash tags has a byte per key after its inline
-//   keys, where its layout has room for them (D36).
+//   keys, where its layout has room for them (OG-D36).
 // - Each kind is the smallest multiple of its page size that holds 12 keys.
 //
 // Every layout is computed at compile time, and every invariant the node code
@@ -42,8 +42,9 @@ namespace shoal::detail {
 struct NodeHeader {
   /// The number of keys.
   std::uint16_t len;
-  /// Whether a leaf holds a head (D17); its head slot is initialized exactly
-  /// when this is set, and so is its head key slot with inline keys (D49).
+  /// Whether a leaf holds a head (OG-D17); its head slot is initialized
+  /// exactly when this is set, and so is its head key slot with inline keys
+  /// (OG-D49).
   bool has_head;
 };
 
@@ -157,9 +158,9 @@ struct KindLayout {
 /// bytes aligned to `key_align`, every function evaluated at compile time.
 class NodeLayoutMath {
  public:
-  /// Entries up to this size start at a multiple of it (D34).
+  /// Entries up to this size start at a multiple of it (OG-D34).
   static constexpr std::size_t cache_line_size = 64;
-  /// Every node kind holds at least this many keys (D13).
+  /// Every node kind holds at least this many keys (OG-D13).
   static constexpr std::size_t min_capacity = 12;
   /// Upper bound on any node's capacity: indexes are `u16`, and this keeps
   /// search work bounded in nodes of nearly zero-sized slots.
@@ -195,7 +196,7 @@ class NodeLayoutMath {
   /// A leaf's layout, with inline keys of `inline_key_size` bytes (none if
   /// 0), with hash tags if `hash_tags` and there is room. Where tags fit only
   /// by also taking the head key's place, the leaf gives up an entry to keep
-  /// them; where they never fit, it keeps none (D36).
+  /// them; where they never fit, it keeps none (OG-D36).
   constexpr LeafLayout compute_leaf(std::size_t page_size, std::size_t inline_key_size,
                                     bool hash_tags, HeaderShape header,
                                     TrailingSlot value) const {
@@ -212,7 +213,7 @@ class NodeLayoutMath {
   }
 
   /// An internal node's layout: its keys, if it keeps them, and its edges.
-  /// With inline keys it keeps no keys (D49), on pages of
+  /// With inline keys it keeps no keys (OG-D49), on pages of
   /// `inline_page_size`; without, of `plain_page_size`.
   constexpr InternalLayout compute_internal(std::size_t inline_page_size,
                                             std::size_t plain_page_size,
@@ -242,7 +243,7 @@ class NodeLayoutMath {
   }
 
   /// Where entry 0 is in a leaf of paired entries: its key's place, which the
-  /// head's key takes (D49), then the head.
+  /// head's key takes (OG-D49), then the head.
   constexpr std::size_t entries_offset(KindLayout layout, TrailingSlot value) const {
     return layout.trailing_offset - entry_trailing_offset(value);
   }

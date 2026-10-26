@@ -1,5 +1,5 @@
 // The workloads the C++ benches shared with the Rust reference they were
-// measured against (PORTING.md, Measurements), so that both timed the same
+// measured against (design/02-rust-parity.md), so that both timed the same
 // operations on the same keys: keys are a bijective mix of their index, so
 // `mix(i)` for `i < n` are `n` distinct keys in random order, and
 // `mix(n + i)` are absent ones.

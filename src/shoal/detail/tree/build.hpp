@@ -4,7 +4,7 @@
 // - `TreeBuilder` builds a tree from entries in ascending key order,
 //   comparing no keys: each node fills before the next starts beside it, and
 //   `finish` tops up the right border past the minimum from the full left
-//   siblings (D25).
+//   siblings (OG-D25).
 // - `TreeReshape::split_off_at` cuts a tree in two where a search went: each
 //   node on the node stack keeps what lies left of it, what lies right goes
 //   into a new node; then both sides of the cut are brought back to the
@@ -34,10 +34,10 @@ class TreeReshape {
 
   // Borders (`cut.rs`).
 
-  /// Brings the nodes along the tree's `End` edge up to their minimum (D22),
-  /// from the top down, reading no key: each border node gets one key more
-  /// than its minimum, by a merge with its sibling or keys moved over from
-  /// it, so that a merge below leaves it at its minimum.
+  /// Brings the nodes along the tree's `End` edge up to their minimum
+  /// (OG-D22), from the top down, reading no key: each border node gets one
+  /// key more than its minimum, by a merge with its sibling or keys moved over
+  /// from it, so that a merge below leaves it at its minimum.
   template <class End, class Pages>
   static void fix_border(TreeType& tree, const Pages& pages) noexcept {
     lower_while_root_empty(tree, pages);
@@ -208,7 +208,7 @@ class TreeReshape {
   }
 };
 
-/// A tree being built from entries in ascending key order (D25).
+/// A tree being built from entries in ascending key order (OG-D25).
 template <class K, class V, class S, class Pages>
 class TreeBuilder {
  public:
@@ -278,7 +278,7 @@ class TreeBuilder {
   }
 
   /// Starts a new rightmost leaf after a full one, its head `value` and with
-  /// inline keys `separator`'s key (D49), going in after `separator` in the
+  /// inline keys `separator`'s key (OG-D49), going in after `separator` in the
   /// rightmost internal node one level up if it has room, else in a new node
   /// there, and so on up, raising the root if need be. Returns the node stack
   /// up the right border, at the node that took the separator, at the edge

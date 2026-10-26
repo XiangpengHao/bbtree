@@ -1,5 +1,5 @@
 # ThreadSanitizer suppressions for the optimistic reads of the shared map
-# (PORTING.md, P7; `tree/node/optimistic.rs`): a reader reads a node in place
+# (D12; `tree/node/optimistic.rs`): a reader reads a node in place
 # while a writer that holds it changes it, and a version check afterwards
 # throws away what it read. Every entry names a reader-side function, so a
 # race between two writers, which the latches forbid, is still reported.
@@ -25,5 +25,5 @@ race:shoal::detail::InlineHashTable*::RacingLookup
 # a non-atomic write to a latch word, a fresh page's zeroing by its allocator.
 # A reader that reached the page through a racing edge read checks the latch
 # with a relaxed load, whose value the compare-and-swap after it settles, or
-# reads a version its parent's check throws away (P7).
+# reads a version its parent's check throws away (D12).
 race:shoal::detail::NodeLatch

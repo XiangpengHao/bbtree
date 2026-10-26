@@ -1,13 +1,13 @@
-// Node stacks (`tree/node_stack.rs`, D11, D24): the nodes from a tree's root
-// down to a position in one of them, and the index taken at each. Iterators
-// move them through the tree, inserts and removals climb the one that led to
-// the key, splitting or fixing the nodes on it.
+// Node stacks (`tree/node_stack.rs`, OG-D11, OG-D24): the nodes from a tree's
+// root down to a position in one of them, and the index taken at each.
+// Iterators move them through the tree, inserts and removals climb the one
+// that led to the key, splitting or fixing the nodes on it.
 //
 // A node stack has a slot for every level of the tallest possible tree,
 // about 250 bytes, the root's first. Nothing records how tall a tree is: a
 // node stack counts the levels it goes down. It is made detached and started
 // in place, writing only the levels in use, and never moved once written: a
-// copy's wide loads would wait on the narrow stores that wrote it (D23).
+// copy's wide loads would wait on the narrow stores that wrote it (OG-D23).
 #pragma once
 
 #include <cstddef>
@@ -22,11 +22,11 @@
 namespace shoal::detail {
 
 /// The deepest a leaf can be below the root: a non-root internal node has at
-/// least 5 children, and a leaf takes at least 1 KiB (D22, D59).
+/// least 5 children, and a leaf takes at least 1 KiB (OG-D22, OG-D59).
 inline constexpr std::size_t max_depth = 23;
 
 /// An end of a node, where a node stack goes down to its first or last
-/// entries: a type, so that the code for one end holds no choice (D28).
+/// entries: a type, so that the code for one end holds no choice (OG-D28).
 struct FirstEdge {
   static constexpr bool is_last = false;
   template <class AnyNode>
@@ -192,9 +192,9 @@ class NodeStack {
   }
 
   /// Goes down from the bottom node, the root of a tree whose keys share
-  /// `shared` (D50), searching each node for `key`. If it is there, the node
-  /// stack ends at it, in whichever node holds it; if not, at the leaf edge
-  /// where it belongs. A key outside what every key shares belongs at the
+  /// `shared` (OG-D50), searching each node for `key`. If it is there, the
+  /// node stack ends at it, in whichever node holds it; if not, at the leaf
+  /// edge where it belongs. A key outside what every key shares belongs at the
   /// tree's first or last edge, reached without searching.
   template <class Q>
   bool search(const SearchKey<K, Q>& key, const SharedPrefix& shared) noexcept {
@@ -228,7 +228,7 @@ class NodeStack {
 
   /// Goes down to the leaf edge just before or after `key`, or where it would
   /// be. A separator stands between the end of the leaf left of it and the
-  /// start of the leaf right of it (D17).
+  /// start of the leaf right of it (OG-D17).
   template <class Q>
   void search_to_edge(const SearchKey<K, Q>& key, KeySide side, const SharedPrefix& shared) noexcept {
     if (!search(key, shared)) return;

@@ -21,7 +21,8 @@ namespace shoal::detail {
 
 /// How a leaf is latched: shared, exclusive, or not at all (read at a
 /// version, checked after). `Held` is what letting go needs, as Rust's
-/// `LatchMode::Held`: nothing for a shared hold, the version otherwise.
+/// `LatchMode::Held`: nothing for a shared hold, the version otherwise
+/// (D18).
 struct SharedMode {
   struct Held {};
   static constexpr bool latches = true;

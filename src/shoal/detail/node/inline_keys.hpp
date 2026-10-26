@@ -1,4 +1,4 @@
-// Inline keys inside the nodes (D18): what a node stores beside each key,
+// Inline keys inside the nodes (OG-D18): what a node stores beside each key,
 // and what a search looks for (`tree/node/inline_keys.rs`).
 //
 // A node's prefix is the bytes its fences share, and so every key in it
@@ -47,7 +47,7 @@ struct InlineSlot {
   }
 };
 
-/// Three-way comparison by `operator<`, as Rust's `Ord::cmp`.
+/// Three-way comparison by `operator<`, as Rust's `Ord::cmp` (D8).
 struct Order {
   template <class A, class B>
   static Ordering cmp(const A& a, const B& b) noexcept {
@@ -155,10 +155,10 @@ class WindowedKey {
   Window window_;
 };
 
-/// A separator outside its internal node (D17): on its way up from a split,
+/// A separator outside its internal node (OG-D17): on its way up from a split,
 /// between internal nodes, or into a merged leaf. Without inline keys
 /// (`WithKey`), internal nodes keep their separator keys, and a separator is
-/// its key. With inline keys (D49), it is the key's window alone; the key
+/// its key. With inline keys (OG-D49), it is the key's window alone; the key
 /// stays a leaf head.
 template <class K, bool WithKey>
 class Separator;
@@ -251,7 +251,7 @@ class SearchKey {
   }
 
   /// Whether the query equals `stored`, comparing their bytes all at once: an
-  /// exact-key lookup's lone candidate (D38). Only `by_bytes`.
+  /// exact-key lookup's lone candidate (OG-D38). Only `by_bytes`.
   SHOAL_ALWAYS_INLINE bool equals_whole_bytes(const K& stored) const noexcept {
     static_assert(by_bytes);
     return ByteWindows(query_bytes()).equals(KInliner::bytes(stored));
@@ -272,7 +272,7 @@ class SearchKey {
   /// Whether the query has a hash tag the nodes compare with theirs.
   static constexpr bool has_hash_tag = by_bytes || (by_impl && KInliner::impl_has_hash_tag);
 
-  /// The query's hash tag (D36); only with `has_hash_tag`.
+  /// The query's hash tag (OG-D36); only with `has_hash_tag`.
   std::uint8_t hash_tag() const noexcept {
     if constexpr (by_bytes) {
       return ByteWindows(query_bytes()).hash_tag();
@@ -282,7 +282,7 @@ class SearchKey {
   }
 
   /// How the query orders against every key of a tree whose encodings all
-  /// start with `shared` (D50): before or after them if it differs in those
+  /// start with `shared` (OG-D50): before or after them if it differs in those
   /// bytes or, as a byte string, ends inside them; `Equal` if it has them.
   /// `nullopt` if the nodes can't compare its encoding.
   inline std::optional<Ordering> cmp_shared_prefix(const std::uint8_t* shared,

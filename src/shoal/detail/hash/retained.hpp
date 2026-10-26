@@ -1,10 +1,10 @@
 // Blocks a shared hash map's shard lets go of while threads share it. An
 // optimistic reader follows the pointer to the shard's block without a latch
 // and checks what it read only afterwards, as the latched tree's readers do
-// (`latched/pages.hpp`): so a block the shard replaced must stay readable
+// (`latched/pages.hpp`, D26): so a block the shard replaced must stay readable
 // until the map is destroyed. Only growth replaces it, doubling, so what the
-// shard keeps is smaller than what it uses; `HashMap::clear` keeps the
-// block it has.
+// shard keeps is smaller than what it uses; `HashMap::clear` keeps the block
+// it has.
 #pragma once
 
 #include <array>

@@ -1,12 +1,12 @@
-// Inline keys (design/04-inline-key.md, D18): register-sized windows of a
-// key's encoding that nodes store beside their keys and search first. A
+// Inline keys (OG-design/04-inline-key.md, OG-D18): register-sized windows of
+// a key's encoding that nodes store beside their keys and search first. A
 // search then reads the full keys, and the heap bytes behind them, only where
 // inline keys tie.
 //
-// `InlineKey<K>` says whether keys `K` have inline keys and how (PORTING.md,
-// P1). Its primary template says they have none: the map then compares full
-// keys with `operator<`. It is specialized for what Rust's `Auto` recognizes:
-// byte strings (`std::string`, `std::string_view`, `std::vector<uint8_t>`,
+// `InlineKey<K>` says whether keys `K` have inline keys and how (D6). Its
+// primary template says they have none: the map then compares full keys with
+// `operator<`. It is specialized for what Rust's `Auto` recognizes: byte
+// strings (`std::string`, `std::string_view`, `std::vector<uint8_t>`,
 // `std::vector<char>`, `std::array<uint8_t, 16 | 20 | 32>`) and the 64- and
 // 128-bit integers. A key type of your own opts in by specializing it,
 // deriving from `InlineKeyBase`.
@@ -65,14 +65,14 @@ class ByteWindows {
     return shift == 8 ? 0 : load_be64(bytes_.data + last_start) << (8 * shift);
   }
 
-  /// The byte string's hash tag: its length, saturated at 255 (D36).
+  /// The byte string's hash tag: its length, saturated at 255 (OG-D36).
   std::uint8_t hash_tag() const noexcept {
     return bytes_.size < 255 ? static_cast<std::uint8_t>(bytes_.size) : 255;
   }
 
   /// How the bytes, padded with zeros, order against `prefix` in its first
-  /// `prefix_len` bytes (D50): whole 32-byte chunks for equality first, then a
-  /// window at a time.
+  /// `prefix_len` bytes (OG-D50): whole 32-byte chunks for equality first,
+  /// then a window at a time.
   SHOAL_ALWAYS_INLINE Ordering cmp_prefix(const std::uint8_t* prefix, std::size_t prefix_len) const noexcept {
     constexpr std::size_t chunk = 32;
     std::size_t offset = 0;
@@ -194,7 +194,7 @@ struct InlineKey {
 /// `b`'s, both padded with zeros, then `a < b`; `inline_key_at(key, offset)`
 /// is that encoding's bytes `offset..offset + 8`, big-endian, zero past its
 /// end. A wrong impl gives wrong answers, never undefined behavior. Hooks must
-/// not throw (PORTING.md, P4).
+/// not throw (D9).
 template <class K, class Self>
 struct InlineKeyBase {
   static constexpr bool enabled = true;
@@ -204,7 +204,7 @@ struct InlineKeyBase {
   /// Whether leaves keep each key's `Self::hash_tag`, where they have room.
   static constexpr bool has_hash_tag = false;
   /// Whether ties compare with `Self::cmp_from`, past the bytes known equal;
-  /// internal nodes then keep 4 bytes of 8-byte inline keys (D43).
+  /// internal nodes then keep 4 bytes of 8-byte inline keys (OG-D43).
   static constexpr bool has_cmp_from = false;
 
   static std::uint8_t hash_tag(const K&) noexcept { return 0; }
@@ -231,10 +231,11 @@ struct InlineKeyBase {
 };
 
 /// A byte string's inline keys: windows of its bytes; its hash tag its
-/// length; ties compared from where keys differ (D36, D43). `Bytes::of(key)`
-/// gives the bytes. A byte string that holds its bytes, a fixed array, keeps 2
-/// bytes of each inline key in both node kinds and compares a lone candidate
-/// whole (D32, D38); one that points to them keeps 8 in leaves, 4 inside.
+/// length; ties compared from where keys differ (OG-D36, OG-D43).
+/// `Bytes::of(key)` gives the bytes. A byte string that holds its bytes, a
+/// fixed array, keeps 2 bytes of each inline key in both node kinds and
+/// compares a lone candidate whole (OG-D32, OG-D38); one that points to them
+/// keeps 8 in leaves, 4 inside.
 template <class K, bool HoldsItsBytes>
 struct ByteStringInlineKey {
   static constexpr bool enabled = true;
@@ -280,7 +281,7 @@ struct InlineKey<std::array<std::uint8_t, N>, std::enable_if_t<N == 16 || N == 2
 /// The 64-bit integers, whichever of `long` and `long long` they are: their
 /// big-endian bytes, a signed one's with the sign bit flipped so that
 /// negatives sort first. Nodes keep 2 of them, past the bytes a node's keys
-/// share (D31).
+/// share (OG-D31).
 template <class T>
 struct InlineKey<T, std::enable_if_t<std::is_integral_v<T> && sizeof(T) == 8>>
     : InlineKeyBase<T, InlineKey<T>> {

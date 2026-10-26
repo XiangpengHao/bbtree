@@ -1,10 +1,10 @@
-// A shared hash map in shards, each an inline-slot table
+// A shared hash map in shards, each an inline-slot table (D25)
 // (`detail/hash/inline_table.hpp`) behind a latch the tree's nodes use too
 // (`node/latch.hpp`).
 // Writers hold their shard's latch exclusively, bumping its version. Readers
 // of keys and values that copy as bytes write nothing: they read the version,
 // look the key up without the latch, copying the entry they find, and check
-// the version after, as the tree's optimistic readers do (PORTING.md, P7);
+// the version after, as the tree's optimistic readers do (D12, D26);
 // user code sees only that copy. Readers of other types hold the latch shared.
 // Callbacks must not re-enter this map or retain references to its entries.
 #pragma once
@@ -218,7 +218,7 @@ class HashMap {
   /// Shared batches have separate-operation semantics. Keys and values that
   /// copy as bytes are read optimistically `batch_width` at a time, their
   /// versions checked once all are read, so that their memory waits overlap;
-  /// a key whose shard changed meanwhile is read again on its own.
+  /// a key whose shard changed meanwhile is read again on its own (D28).
   template <class Q>
   void get_many_copied(const Q *keys, size_type count, std::optional<V> *values) const {
     if constexpr (reads_racing) {

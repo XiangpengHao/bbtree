@@ -1,9 +1,9 @@
 // Taking an owned tree apart (`tree/teardown.rs`): every key and value
 // destroyed once, in ascending key order, each key before its value, as
 // std's `BTreeMap` drops them, and every page given back once. A separator's
-// value is its head (D17), destroyed right after the separator's key. Keys and
-// values without destructors are skipped a leaf at a time (D23). A shared
-// map's leaf annexes are released to its allocator with their leaves.
+// value is its head (OG-D17), destroyed right after the separator's key. Keys
+// and values without destructors are skipped a leaf at a time (OG-D23). A
+// shared map's leaf annexes are released to its allocator with their leaves.
 #pragma once
 
 #include <cstddef>

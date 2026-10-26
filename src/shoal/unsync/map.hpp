@@ -1,6 +1,6 @@
 // `shoal::unsync::TreeMap`: the ordered map for one thread
-// (`unsync/map/mod.rs`, D4), over the tree both maps use. Its API follows
-// Rust's `BTreeMap`, whose semantics the Rust crate keeps (D1), in C++
+// (`unsync/map/mod.rs`, OG-D4), over the tree both maps use. Its API follows
+// Rust's `BTreeMap`, whose semantics the Rust crate keeps (OG-D1), in C++
 // spelling where std has a name for it: `size`, `empty`, `clear`, `begin`.
 #pragma once
 
@@ -33,7 +33,7 @@ class TreeSet;
 
 /// An ordered map of keys `K` to values `V`, for one thread. Keys order by
 /// `operator<`; `InlineKey<K>` gives them inline keys where it is specialized
-/// (PORTING.md, P1). Keys and values are trivially relocatable (P2).
+/// (D6). Keys and values are trivially relocatable (D7).
 template <class K, class V, class Config = DefaultNodeConfig, class A = Global>
 class TreeMap {
   static_assert(is_trivially_relocatable_v<K>,
@@ -91,9 +91,9 @@ class TreeMap {
   }
 
   /// A map of entries whose keys strictly ascend, built node by node, every
-  /// node full but along the right border (D25), comparing no keys. Keys out
-  /// of order make a map whose searches give wrong answers, never undefined
-  /// behavior.
+  /// node full but along the right border (OG-D25), comparing no keys. Keys
+  /// out of order make a map whose searches give wrong answers, never
+  /// undefined behavior.
   template <class Iterator>
   static TreeMap from_sorted(Iterator first, Iterator last, A alloc = A()) {
     TreeMap map(std::move(alloc));
@@ -207,7 +207,7 @@ class TreeMap {
     return detail::TreeRemoval<K, V, Strategy>::pop_last(state_.tree, pages(), state_.length);
   }
 
-  // Batches (D53, design/12-batch-api.md).
+  // Batches (OG-D53, OG-design/12-batch-api.md).
 
   /// Each key's value, `values[i]` for `keys[i]`, null for a key the map
   /// lacks: as `count` separate `get`s give them, with their waits for memory
@@ -269,7 +269,7 @@ class TreeMap {
   }
 
   /// Hands every entry to `visit(key, value)` in key order, a counted loop
-  /// per leaf (D32).
+  /// per leaf (OG-D32).
   template <class Visit>
   void for_each(Visit visit) const noexcept {
     iter().for_each(visit);
@@ -277,7 +277,7 @@ class TreeMap {
 
   /// Inserts every entry of a range, as separate `insert`s do: once the map
   /// is past the batch cutoff, sixteen at a time through `insert_many`
-  /// (doc 12).
+  /// (OG-doc 12).
   template <class Iterator>
   void extend(Iterator first, Iterator last) {
     constexpr std::size_t chunk = 16;
@@ -303,7 +303,7 @@ class TreeMap {
   }
 
   /// Splits the map at `key`: this map keeps the entries before it, the
-  /// returned one the entries from it on (`tree/cut.rs`, D25), in
+  /// returned one the entries from it on (`tree/cut.rs`, OG-D25), in
   /// O(log n) plus counting the shorter part.
   template <class Q>
   TreeMap split_off(const Q& key) noexcept {
@@ -319,7 +319,7 @@ class TreeMap {
   }
 
   /// Keeps only the entries for which `keep(key, value)` holds, in key
-  /// order, removing the others in place (D25).
+  /// order, removing the others in place (OG-D25).
   template <class Keep>
   void retain(Keep keep) noexcept {
     auto drop = [&](const K& key, V& value) { return !keep(key, value); };
@@ -474,7 +474,7 @@ class TreeMap {
   friend class TreeSet;
 
   /// The allocator, the tree and its count; an empty allocator takes no
-  /// room, so that the map is 24 bytes, as the Rust map (D52).
+  /// room, so that the map is 24 bytes, as the Rust map (OG-D52).
   struct State : A {
     TreeType tree;
     size_type length = 0;

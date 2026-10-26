@@ -1,7 +1,7 @@
 // Ranges and iterators over an unsync map (`unsync/map/iter.rs`): a range is
-// a walk (D23) between two positions, in key order or reversed. Iterating one
-// with range-for never copies its walk: `begin()` hands out a cursor into it.
-// A map's own `begin()` returns an iterator that holds its walk, built in
+// a walk (OG-D23) between two positions, in key order or reversed. Iterating
+// one with range-for never copies its walk: `begin()` hands out a cursor into
+// it. A map's own `begin()` returns an iterator that holds its walk, built in
 // place.
 #pragma once
 
@@ -14,7 +14,8 @@
 
 namespace shoal::unsync {
 
-/// A walk's end, which an iterator compares with to stop.
+/// A walk's end, which an iterator compares with to stop: a sentinel, so
+/// that range-for never copies a cursor (D13).
 struct RangeEnd {};
 
 /// The entries of a map between two bounds, forward or `Reverse`, values
@@ -30,7 +31,7 @@ class Range {
   using item = std::pair<const K&, value_ref>;
 
   /// The entries of `tree` within `lower` and `upper`, the walk made in
-  /// place: a range is returned as it is made, never moved (D23).
+  /// place: a range is returned as it is made, never moved (OG-D23).
   template <class L, class U>
   Range(const detail::Tree<K, V, S>& tree, const Bound<L>& lower, const Bound<U>& upper) noexcept {
     walk_.start_range(tree, lower, upper);

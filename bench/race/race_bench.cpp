@@ -1,12 +1,12 @@
 // The race: concurrent lookups on random UUID keys, half of which miss, as
-// upstream's README race (`design/assets/readme-race.svg`, `get-half`)
-// times the Rust maps. shoal against the best-known C++ maps that threads
-// can share, in two heats:
+// upstream's README race (`OG-design/assets/readme-race.svg`, `get-half`)
+// times the Rust maps (D32). shoal against the best-known C++ maps that
+// threads can share, in two heats:
 //
 // - tree maps (ordered): shoal's `TreeMap`; oneTBB's `concurrent_map`
 //   and folly's `ConcurrentSkipList` (skip lists); Abseil's `btree_map` and
 //   `std::map` behind a `std::shared_mutex`.
-// - hash maps (unordered): shoal's `HashMap` (shards behind locks);
+// - hash maps (unordered): shoal's `HashMap` (shards read without locks);
 //   Boost's `concurrent_flat_map`; folly's `ConcurrentHashMap`; oneTBB's
 //   `concurrent_hash_map` and `concurrent_unordered_map`; Abseil's
 //   `flat_hash_map` and `std::unordered_map` behind a `std::shared_mutex`.

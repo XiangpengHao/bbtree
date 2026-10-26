@@ -1,24 +1,23 @@
 // The table of a shared hash map's shard (`hash_map.hpp`): open addressing
 // with linear probing, the entries in the slots it probes, a tag a slot in
-// front of them. A tag is empty or the top seven bits of its entry's hash
-// with the high bit set. One block holds it all: a header line with the
+// front of them (D25). A tag is empty or the top seven bits of its entry's
+// hash with the high bit set. One block holds it all: a header line with the
 // capacity, the tags, then the slots, aligned to cache lines.
 //
-// A lookup reads the tags eight at a time, as one word: the first that
-// matches and the first that is empty come out of a few bit operations, no
-// branch a tag. It reads the one slot whose tag matches: a miss reads no
-// slot, a hit its own. The first seven tags are cloned past the last, so that
-// a group of eight never wraps. The owned map's paged
-// table (`table.hpp`) reaches its entries through descriptors and pages
-// instead, so that they never move; the shared map hands out no reference
-// that outlives a callback, so its entries may move, and live where the
-// probe finds them.
+// A lookup reads the tags eight at a time, as one word: the first that matches
+// and the first that is empty come out of a few bit operations, no branch a
+// tag (D27). It reads the one slot whose tag matches: a miss reads no slot, a
+// hit its own. The first seven tags are cloned past the last, so that a group
+// of eight never wraps. The owned map's paged table (`table.hpp`) reaches its
+// entries through descriptors and pages instead, so that they never move; the
+// shared map hands out no reference that outlives a callback, so its entries
+// may move, and live where the probe finds them.
 //
-// Removal shifts the entries after the hole back into it (Knuth's
-// Algorithm R): no tombstones, so the table only ever reallocates to grow.
-// Growth moves the entries by their cached hashes, running no user code.
+// Removal shifts the entries after the hole back into it (Knuth's Algorithm R,
+// D29): no tombstones, so the table only ever reallocates to grow. Growth
+// moves the entries by their cached hashes, running no user code.
 //
-// Optimistic readers (PORTING.md, P7) read a shard's block without its
+// Optimistic readers (D12, D26) read a shard's block without its
 // latch: they learn the block's bounds from its header, whichever block the
 // pointer they read was, and the shard keeps every block it replaced until
 // the map is destroyed (`RetainedBlocks`).

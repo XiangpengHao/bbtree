@@ -26,7 +26,7 @@ struct InsertionSide {
   /// Where a full node of `capacity` entries splits for an insertion at edge
   /// `insertion_index`, and where the new entry goes then. An insertion at
   /// either end leaves that side `min(2 * minimum, capacity / 2)` entries and
-  /// the other denser; one in the middle divides evenly (D32). Returns the
+  /// the other denser; one in the middle divides evenly (OG-D32). Returns the
   /// separator's index.
   static constexpr std::size_t of_split(std::size_t capacity, std::size_t insertion_index,
                                         std::size_t minimum, InsertionSide& side) noexcept {
@@ -45,7 +45,7 @@ struct InsertionSide {
 
 /// A full node split in two: the node keeps its lower entries, `separator`
 /// goes up to the parent, `right` is the new node with the upper entries,
-/// whose leftmost leaf has the separator as its head (D17, D49).
+/// whose leftmost leaf has the separator as its head (OG-D17, OG-D49).
 template <class Sep, class Handle>
 struct Split {
   Sep separator;
@@ -58,7 +58,7 @@ class ChildBase {
  public:
   /// The most keys a node of this kind holds.
   static constexpr std::size_t capacity() noexcept { return Kind::capacity; }
-  /// The fewest keys a node below the root holds between removals (D22).
+  /// The fewest keys a node below the root holds between removals (OG-D22).
   static constexpr std::size_t min_len() noexcept { return Kind::min_len; }
   /// Whether two siblings of `left_len` and `right_len` keys and their
   /// separator fit in one node: then a removal's fixing merges them.
@@ -66,7 +66,7 @@ class ChildBase {
     return left_len + 1 + right_len <= Kind::capacity;
   }
 
-  /// The node's inline keys, read in place (D18).
+  /// The node's inline keys, read in place (OG-D18).
   typename Kind::InlineKeys inline_keys() const noexcept {
     static_assert(Kind::has_inline_keys);
     return typename Kind::InlineKeys(columns().inline_key_slots(), self().len());

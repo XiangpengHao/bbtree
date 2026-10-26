@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Draws race_bench's CSV as the README's race, in the style of upstream's
-`design/assets/readme-race.svg`: one bouncing ball per map, in two heats,
+`OG-design/assets/readme-race.svg`: one bouncing ball per map, in two heats,
 tree maps and hash maps. Each ball's trip takes 0.6 s times the fastest
 map's throughput over its own, so balls compare across heats.
 

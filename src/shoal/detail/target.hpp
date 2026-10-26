@@ -1,9 +1,9 @@
 // What the target machine provides: its architecture and instruction sets,
-// as macros the node code picks its search with (D41), and the few
+// as macros the node code picks its search with (OG-D41), and the few
 // instructions the tree needs that C++17 has no word for: bit counts, byte
 // swaps, a spin wait and racing loads. GCC and clang (clang-cl too) spell
 // them as builtins, MSVC as intrinsics; everything else in the headers is
-// standard C++17.
+// standard C++17 (D23).
 #pragma once
 
 #include <cstddef>
@@ -126,7 +126,8 @@ struct ByteOrder {
 };
 
 /// One wait of a spinning thread, as Rust's `core::hint::spin_loop`: `pause`
-/// on x86, `isb` on Arm, where `yield` waits for nothing on most cores.
+/// on x86, `isb` on Arm, where `yield` waits for nothing on most cores
+/// (D19).
 struct SpinWait {
   static inline void relax() noexcept {
 #if defined(SHOAL_X86_64)
@@ -141,7 +142,7 @@ struct SpinWait {
 
 /// A load of a word that writers may be storing meanwhile, as a relaxed
 /// atomic load: what an optimistic reader reads before its version check
-/// (PORTING.md, P7). `T` is an integer or pointer of 1, 2, 4 or 8 bytes.
+/// (D12). `T` is an integer or pointer of 1, 2, 4 or 8 bytes.
 struct RacingLoad {
   template <class T>
   static inline T relaxed(const T* word) noexcept {

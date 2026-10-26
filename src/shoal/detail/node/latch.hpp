@@ -1,4 +1,4 @@
-// Latches for a tree that threads share (design/09-concurrency.md,
+// Latches for a tree that threads share (OG-design/09-concurrency.md,
 // `tree/node/latch.rs`): a word in every node's header. One word serves both
 // ways the tree is latched, so the root page, which changes kind, keeps one
 // word through the change:
@@ -9,7 +9,7 @@
 //   version as it lets go: optimistic lock coupling.
 // - **Leaves, pessimistically.** Shared for reads, exclusive for changes,
 //   spinning with backoff. Letting go exclusively bumps the version too, so a
-//   lookup can also read a leaf optimistically (D57).
+//   lookup can also read a leaf optimistically (OG-D57).
 //
 // The word, from the low bit: the exclusive bit, a count of shared holders,
 // and the version. A version is the word without its count, read while the
@@ -96,7 +96,7 @@ class NodeLatch {
     // Acquire-release, not acquire with a release fence after (Rust's
     // spelling): the acquire half keeps writes made under the latch from
     // being seen before the latch taken, which is what the fence paired
-    // with a reader's acquire fence to say; one `casal`, no `dmb`.
+    // with a reader's acquire fence to say; one `casal`, no `dmb` (D20).
     return word_.compare_exchange_strong(expected, version.word() | exclusive_bit,
                                          std::memory_order_acq_rel,
                                          std::memory_order_relaxed);

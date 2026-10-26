@@ -1,13 +1,13 @@
 // Removing from a tree (`tree/remove.rs`). The entry comes out where a node
 // stack to it ends: out of a leaf, or out of an internal node as a separator.
 // Going back up, each node fixes the child it leads to if the removal left it
-// underfull: it merges it with a sibling, or moves one entry over (D22). A
+// underfull: it merges it with a sibling, or moves one entry over (OG-D22). A
 // merge takes a separator out of the node itself, for its parent to check in
 // turn. A root left without separators lowers the tree.
 //
 // Removing a separator takes its head out; the first key of the head's leaf,
 // its successor, takes its place, and the successor's value becomes the new
-// head (D17). Once the entry is out and counted, the nodes whose fences
+// head (OG-D17). Once the entry is out and counted, the nodes whose fences
 // changed are fit to them; those along the right border left of a removed
 // separator are fit before anything changes.
 #pragma once

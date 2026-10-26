@@ -1,17 +1,19 @@
-// Node plans (D47, design/07-node-plan.md): every choice that depends on the
-// key type, made in one place, at compile time (`tree/node/node_plan.rs`).
+// Node plans (OG-D47, OG-design/07-node-plan.md): every choice that depends on
+// the key type, made in one place, at compile time (`tree/node/node_plan.rs`).
 //
 // | keys | inline keys, leaf / internal | also stored | ties |
 // |---|---|---|---|
-// | without inline keys | none | nothing | `operator<` (D19) |
+// | without inline keys | none | nothing | `operator<` (OG-D19) |
 // | std integers | the impl's width in both | nothing | `operator<` |
-// | a key's own impl | the impl's width; 8 / 4 with `cmp_from` (D43) | leaf hash tags if any and they fit (D36) | `operator<`, or `cmp_from` past the tie |
-// | byte arrays | 2 / 2 (D32) | nothing | bytes; a lone candidate whole (D38) |
-// | heap byte strings | 8 / 4 (D43) | leaf hash tags where they fit | bytes, past the tie |
+// | a key's own impl | the impl's width; 8 / 4 with `cmp_from` (OG-D43) | leaf
+// hash tags if any and they fit (OG-D36) | `operator<`, or `cmp_from` past the
+// tie | | byte arrays | 2 / 2 (OG-D32) | nothing | bytes; a lone candidate
+// whole (OG-D38) | | heap byte strings | 8 / 4 (OG-D43) | leaf hash tags where
+// they fit | bytes, past the tie |
 //
 // With inline keys, separator keys are leaf heads, and internal nodes keep only
-// inline keys and children (D49). Layouts, slots, searches and prefix upkeep
-// read the plan; none asks what the key type is.
+// inline keys and children (OG-D49). Layouts, slots, searches and prefix
+// upkeep read the plan; none asks what the key type is.
 #pragma once
 
 #include <cstddef>
@@ -32,7 +34,7 @@ namespace detail {
 
 /// What a map tells its nodes besides its key and value types: its node
 /// config, its leaves' annex, and whether threads share it (the Rust
-/// strategy's `Config`, `LeafAnnex` and `LATCHED`; PORTING.md, P1).
+/// strategy's `Config`, `LeafAnnex` and `LATCHED`; D6).
 template <class Config = DefaultNodeConfig, class Annex = NoLeafAnnex, bool Latched = false>
 struct Strategy {
   using config = Config;
@@ -48,7 +50,7 @@ struct SlotShape {
   static constexpr std::size_t align = alignof(T);
 };
 
-/// How a search runs over keys by comparing them (D19).
+/// How a search runs over keys by comparing them (OG-D19).
 enum class KeySearch : std::uint8_t {
   /// A binary search with no early exit, a conditional move per step.
   Branchless,
@@ -107,7 +109,7 @@ struct KeyInliner {
 
   /// Whether `K` is ordered by its own bytes alone, every bit pattern of them
   /// a `K`: std integers and byte arrays. A copy read while a writer changes
-  /// it compares without reading anything else (optimistic reads, D57).
+  /// it compares without reading anything else (optimistic reads, OG-D57).
   static constexpr bool orders_by_own_bytes = is_std_integer || holds_its_bytes;
 
   /// The key's bytes, for a byte string.
@@ -123,7 +125,8 @@ struct KeyInliner {
     }
   }
 
-  /// `key`'s hash tag (D36): a byte string's length, saturated; an impl's own.
+  /// `key`'s hash tag (OG-D36): a byte string's length, saturated; an impl's
+  /// own.
   static inline std::uint8_t hash_tag(const K& key) noexcept {
     if constexpr (is_byte_string) {
       return ByteWindows(Traits::bytes(key)).hash_tag();
@@ -159,7 +162,7 @@ struct KeyInliner {
 
   /// The prefix length of a node whose fences are `low` and `high`: what they
   /// share. Along the tree's borders, where one is missing, `shared_len`, what
-  /// every key of the tree shares (D50).
+  /// every key of the tree shares (OG-D50).
   static std::size_t fence_prefix_len(const K* low, const K* high, std::size_t shared_len) noexcept {
     if (low != nullptr && high != nullptr) return common_prefix_len(*low, *high);
     return shared_len;
@@ -235,26 +238,26 @@ struct NodePlan {
   /// How many bytes of each inline key the node stores; 0 for none.
   std::size_t inline_width;
   /// Whether a window the node hands out is read from its key again, as the
-  /// node stores fewer bytes of it than a leaf (D43).
+  /// node stores fewer bytes of it than a leaf (OG-D43).
   bool rehydrates_windows;
-  /// Whether the node stores each key's hash tag (D36).
+  /// Whether the node stores each key's hash tag (OG-D36).
   bool hash_tags;
   /// The search over the candidates, the keys whose inline keys tie.
   KeySearch candidate_search;
   /// The search over all keys, without an inline key to compare.
   KeySearch all_keys_search;
   /// Whether an exact-key lookup confirms its lone candidate by all of its
-  /// bytes at once (D38).
+  /// bytes at once (OG-D38).
   bool whole_key_equality;
   /// Whether every lookup's node search is inlined, or left to the compiler,
-  /// as for heap byte strings (D41).
+  /// as for heap byte strings (OG-D41).
   bool inlines_node_search;
 
   constexpr bool has_inline_keys() const { return inline_width != 0; }
 };
 
 /// The plans and layouts of the nodes of a map with keys `K`, values `V` and
-/// strategy `S`, each a constant (D47, D59).
+/// strategy `S`, each a constant (OG-D47, OG-D59).
 template <class K, class V, class S>
 struct NodeShape {
   using Inliner = KeyInliner<K>;
@@ -336,7 +339,7 @@ struct NodeShape {
       math().compute_internal(internal_page_size, plain_internal_page_size,
                               internal_plan.inline_width, internal_header(), edge_slot());
 
-  /// Whether a leaf pairs its keys with its values in entries (D29), which
+  /// Whether a leaf pairs its keys with its values in entries (OG-D29), which
   /// then move whole: with inline keys, unless the values take no room.
   static constexpr bool paired_leaf_entries = leaf_layout.keys.key_stride != sizeof(K);
 
@@ -352,7 +355,7 @@ struct NodeShape {
                                                           : internal_layout.page.align;
 
   /// The fewest keys a node of `capacity` below the root holds between
-  /// removals (D22): an eighth, at least 4.
+  /// removals (OG-D22): an eighth, at least 4.
   static constexpr std::size_t min_len(std::size_t capacity) {
     return capacity / 8 > 4 ? capacity / 8 : 4;
   }

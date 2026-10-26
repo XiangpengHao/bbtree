@@ -1,4 +1,4 @@
-// What every key of a tree shares, from its first byte (D50,
+// What every key of a tree shares, from its first byte (OG-D50,
 // `tree/shared_prefix.rs`). It is the prefix of the nodes along the tree's
 // borders, which lack a fence on one side, and of its root, which lacks both.
 // A search checks a query against it once, at the top, so that every node may

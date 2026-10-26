@@ -1,17 +1,18 @@
 // Reads of a latched tree's nodes while other threads write them
 // (`tree/node/optimistic.rs`): internal nodes always, by optimistic lock
-// coupling, and leaves for lookups and hints (D57). A racing reader reads the
-// node's version, reads the node in place, and checks the version after; a
+// coupling, and leaves for lookups and hints (OG-D57). A racing reader reads
+// the node's version, reads the node in place, and checks the version after; a
 // writer changing it meanwhile fails the check. So a read here:
 //
 // - reads the length once and clamps it to the capacity, so that the search
-//   stays in bounds whatever it read (D14);
+//   stays in bounds whatever it read (OG-D14);
 // - follows no edge before the node's version vouches for it;
 // - runs no user code on what it read: where inline keys tie, it compares a
-//   separator's key, a leaf's head (D49), with that leaf latched shared; keys
+//   separator's key, a leaf's head (OG-D49), with that leaf latched shared;
+// keys
 //   ordered by their own bytes alone it compares as an unlatched copy.
 //
-// These reads race with writers by design (PORTING.md, P7): ThreadSanitizer
+// These reads race with writers by design (D12): ThreadSanitizer
 // ignores them.
 #pragma once
 
@@ -29,10 +30,11 @@ namespace shoal::detail {
 
 /// Where a key goes from an internal node read optimistically: down `edge`,
 /// with the node's `len` as read; `at_separator` if the key equals separator
-/// `edge - 1`, whose entry is the head of the leftmost leaf below (D17).
+/// `edge - 1`, whose entry is the head of the leftmost leaf below (OG-D17).
 /// 12 bytes, so that `std::optional<Routed>` returns in registers;
 /// `at_separator` a byte, 0 or 1, that a descent ORs into its own without
-/// converting it from the register it came back in, as a `bool` would.
+/// converting it from the register it came back in, as a `bool` would
+/// (D18).
 struct Routed {
   Routed() = default;
   Routed(std::size_t edge, bool at_separator, std::size_t len) noexcept
@@ -117,8 +119,8 @@ class Racing {
 
   /// Whether candidate `index` is `key`, decided by the leaf alone, read in
   /// place: for a byte string that ends within its inline key, an exact hash
-  /// tag tells the length, and equal lengths the key (D36, D57). `nullopt`
-  /// where only the keys' bytes can tell.
+  /// tag tells the length, and equal lengths the key (OG-D36, OG-D57).
+  /// `nullopt` where only the keys' bytes can tell.
   template <class Q>
   SHOAL_RACING_READ static std::optional<bool> candidate_is(
       LeafNode leaf, const SearchKey<K, Q>& key, std::size_t index, std::size_t prefix_len) noexcept {
@@ -164,7 +166,7 @@ class Racing {
     if constexpr (SearchKey<K, Q>::has_inline_target) {
       const Window target = key.inline_target(read.prefix_len);
       const IndexRange candidates = read.inline_keys.equal_range(target.inline_key());
-      // Most searches tie with no separator: they stop here (D49).
+      // Most searches tie with no separator: they stop here (OG-D49).
       if (candidates.empty()) return Routed{candidates.start, false, read.len};
       return route_tied<true>(node, candidates, read.len, target, version, key);
     } else {
@@ -194,7 +196,7 @@ class Racing {
 
  private:
   /// A binary search among the separators that tie, each key read in its
-  /// leaf's head (D49): past the inline keys at `target`'s window if
+  /// leaf's head (OG-D49): past the inline keys at `target`'s window if
   /// `ByWindow`, by whole keys otherwise.
   template <bool ByWindow, class Q>
   SHOAL_NOINLINE static std::optional<Routed> route_tied(InternalNode node, IndexRange candidates,

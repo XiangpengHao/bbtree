@@ -2,7 +2,7 @@
 // `OccupiedEntry` and `VacantEntry`, as Rust's `BTreeMap::entry` gives them.
 //
 // An occupied entry is a node stack at its key, in a leaf or at a separator
-// whose value is a leaf's head (D17); a vacant one is a node stack at the
+// whose value is a leaf's head (OG-D17); a vacant one is a node stack at the
 // leaf edge where its key goes, or, for a map without a tree, no stack yet.
 // Every comparison of keys happens when the map makes the entry: the entry's
 // operations compare none. References an entry hands out stay valid until

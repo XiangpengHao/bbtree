@@ -92,7 +92,7 @@ class NodeInlineKeys {
   }
 };
 
-/// A leaf's hash tags (D36, invariant 5), every slot up to `Capacity`, each
+/// A leaf's hash tags (OG-D36, invariant 5), every slot up to `Capacity`, each
 /// live one its key's tag. Tags never order keys.
 template <std::size_t Capacity>
 class HashTags {

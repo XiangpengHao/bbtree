@@ -28,7 +28,7 @@ namespace detail {
 // collision resistance; applications needing those supply a keyed policy.
 // A policy that declares `is_avalanching` (other than `std::false_type`),
 // as Boost's unordered containers read it, says its every bit already
-// depends on every bit of the key: its result is taken as is.
+// depends on every bit of the key: its result is taken as is (D30).
 struct HashBits {
   static std::uint64_t mix(std::uint64_t hash) noexcept {
     hash ^= hash >> 30;

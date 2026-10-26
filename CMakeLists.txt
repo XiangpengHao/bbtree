@@ -32,6 +32,9 @@ function(shoal_target_options target)
     endif()
     return()
   endif()
+  # No -fno-stack-protector: the embedder compiles the headers with its own
+  # flags, and the benchmarks measure what it ships (design/03-decisions.md,
+  # D22).
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
   if(SHOAL_NATIVE)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")

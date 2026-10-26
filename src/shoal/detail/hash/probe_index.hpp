@@ -2,11 +2,11 @@
 // 48-bit entry identifier. Empty and deleted are identifier encodings,
 // independent of the fingerprint (including an all-zero fingerprint).
 //
-// Beside them, a byte a slot, its tag: empty, deleted, or occupied with the
-// hash's top seven bits. Lookups walk the tags, a ninth of the index's
-// bytes, and read a descriptor only where a tag matches: a key that is
-// absent reads no descriptor, and a present one only its own. Descriptors
-// stay the truth; every write of one writes its tag (`write_descriptor`).
+// Beside them, a byte a slot, its tag (D27): empty, deleted, or occupied with
+// the hash's top seven bits. Lookups walk the tags, a ninth of the index's
+// bytes, and read a descriptor only where a tag matches: a key that is absent
+// reads no descriptor, and a present one only its own. Descriptors stay the
+// truth; every write of one writes its tag (`write_descriptor`).
 //
 // One block holds the descriptors, then the tags.
 #pragma once

@@ -1,10 +1,10 @@
-// Batched lookups and inserts in a tree that threads share (D55,
+// Batched lookups and inserts in a tree that threads share (OG-D55,
 // `tree/latched/batch.rs`): each key descends in its own lane, which
 // prefetches the line it reads next before its next step, so that one lane's
 // wait for memory overlaps the others'. Lanes step round-robin, one step each
-// per round, as the unsync batch's levels do (`tree/batch.hpp`); unlike there,
-// another thread's split may change the tree's height under a lane, so each
-// lane keeps its own stage.
+// per round, as the unsync batch's levels do (`tree/batch.hpp`, D11); unlike
+// there, another thread's split may change the tree's height under a lane, so
+// each lane keeps its own stage.
 //
 // A lane holds no latch between its steps. It reads the internal nodes and its
 // leaf's inline keys optimistically, at versions it checks; it latches the leaf
@@ -94,7 +94,7 @@ class LatchedBatch {
   };
 
   /// Whether the tree is large enough for batches to pay for their lanes:
-  /// three internal levels, about an L2 of leaves (doc 12, D55); read
+  /// three internal levels, about an L2 of leaves (OG-doc 12, OG-D55); read
   /// optimistically, so a hint.
   static bool batches(const TreeType& tree) noexcept {
     if (!tree.has_root()) return false;
@@ -263,7 +263,7 @@ class LatchedBatch {
                                                  LaneArray<SearchKey<K, Q>, batch_lanes>& keys,
                                                  LiveLanes& live) noexcept {
     // The count and each lane's index are locals: the lanes' fences would
-    // make the code read them again from `live` after each.
+    // make the code read them again from `live` after each (D18).
     std::size_t count = live.len;
     for (std::size_t at = 0; at < count; ++at) {
       const std::size_t id = live.lanes[at];

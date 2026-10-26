@@ -1,6 +1,6 @@
 // `shoal::unsync::TreeSet`: an ordered set for one thread
 // (`unsync/set/mod.rs`), with the API and behavior of Rust's `BTreeSet`
-// (D1). Like std's set, it is a map of zero-sized values, a `TreeMap` of
+// (OG-D1). Like std's set, it is a map of zero-sized values, a `TreeMap` of
 // `Unit`: each method hands its work to the map's method of the same job, and
 // the iterators wrap the map's walks. The operations on two sets are in
 // `set_algebra.hpp`; their operators build the resulting set into full nodes
@@ -133,8 +133,8 @@ class SetExtractIf {
 };
 
 /// An ordered set of `K`, for one thread: keys order by `operator<`, with
-/// inline keys where `InlineKey<K>` is specialized (PORTING.md, P1), and move
-/// as bytes (P2).
+/// inline keys where `InlineKey<K>` is specialized (D6), and move
+/// as bytes (D7).
 template <class K, class Config = DefaultNodeConfig, class A = Global>
 class TreeSet {
   using Map = TreeMap<K, Unit, Config, A>;
@@ -242,7 +242,7 @@ class TreeSet {
     return std::move(entry->first);
   }
 
-  // Batches (D53).
+  // Batches (OG-D53).
 
   /// Whether the set holds each element: `found[i]` for `elements[i]`, as
   /// `count` separate `contains` say, with their waits for memory overlapped.

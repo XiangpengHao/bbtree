@@ -1,4 +1,4 @@
-// Batched lookups and inserts (D53, design/12-batch-api.md): many keys
+// Batched lookups and inserts (OG-D53, OG-design/12-batch-api.md): many keys
 // descend at once, so that one key's wait for memory overlaps the others'
 // searches. A lookup is a chain of dependent misses, and one operation's
 // chain doesn't overlap the next one's; lanes overlap them.
@@ -7,14 +7,14 @@
 // measure a level-by-level scheduler 12-19% faster per key (10M `u64` hits
 // 60.8 against 74.8 ns), which it gave up only because async lanes extend
 // more easily; C++17 has no coroutines. So here the lanes go level by level
-// (PORTING.md, P6): each step searches every live lane at one depth, then
+// (D11): each step searches every live lane at one depth, then
 // follows every lane's chosen edge. Every leaf of the unsync tree is equally
-// deep (D17), so the first live lane's edge decides the next level's kind for
-// all of them.
+// deep (OG-D17), so the first live lane's edge decides the next level's kind
+// for all of them.
 //
-// Only `Prefetcher` prefetches, and only the line each lane reads next (D46's
-// exception, AGENTS.md): the query's window, the chosen edge, a child's
-// header, a leaf's lone candidate's entry and the first key bytes its
+// Only `Prefetcher` prefetches, and only the line each lane reads next
+// (OG-D46's exception, AGENTS.md): the query's window, the chosen edge, a
+// child's header, a leaf's lone candidate's entry and the first key bytes its
 // comparison reads, or the slot an insertion shifts.
 #pragma once
 
@@ -31,7 +31,7 @@
 
 namespace shoal::detail {
 
-/// The only software prefetch (D46): a hint about the line a lane reads
+/// The only software prefetch (OG-D46): a hint about the line a lane reads
 /// next, which reads nothing and can't fault.
 struct Prefetcher {
   SHOAL_ALWAYS_INLINE static void hint(const void* line) noexcept {
@@ -47,7 +47,7 @@ struct Prefetcher {
 };
 
 /// A call-site marker that compiles the batch's leaf searches apart from the
-/// single-key `get`'s (D53).
+/// single-key `get`'s (OG-D53).
 struct BatchSearch {};
 
 /// How many keys a batch takes at once: as many lanes as its arrays hold.
@@ -102,7 +102,7 @@ class TreeBatch {
 
   /// Whether a tree of `length` entries is large enough for batches to pay
   /// for their lanes: below about an L2 of leaf pages, at 70% fill, there
-  /// are too few misses to overlap (doc 12).
+  /// are too few misses to overlap (OG-doc 12).
   static constexpr bool batches(std::size_t length) noexcept {
     constexpr std::size_t pages_in_l2 =
         1024 * 1024 / Shape::leaf_layout.page.size > 0 ? 1024 * 1024 / Shape::leaf_layout.page.size : 1;
@@ -177,7 +177,7 @@ class TreeBatch {
   };
 
   /// Starts a lane per key at the root, all live but those whose keys lack
-  /// what every key shares (D50), which no node holds.
+  /// what every key shares (OG-D50), which no node holds.
   template <class Keys>
   static void start_lanes(const TreeType& tree, Keys keys, std::size_t count,
                           Lanes<BatchKey<Keys>>& lanes) noexcept {
@@ -285,7 +285,7 @@ class TreeBatch {
   };
 
   /// Descends for every key first, then inserts in input order, each at its
-  /// destination while that is still valid (doc 12, "Insertion and
+  /// destination while that is still valid (OG-doc 12, "Insertion and
   /// staleness"): an insertion that fit makes later keys in its leaf search
   /// again; a split drops that leaf's destinations and every separator's.
   template <class Pages>

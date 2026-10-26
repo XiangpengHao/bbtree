@@ -5,8 +5,9 @@
 // - `SHOAL_CHECK` checks one off the hot path always, as Rust's `assert!`:
 //   a broken one ends the program.
 // - `SHOAL_ALWAYS_INLINE` is Rust's `#[inline(always)]`: where a plan's
-//   constant must fold into its caller (D41, D47); `SHOAL_NOINLINE` and
-//   `SHOAL_COLD` are `#[inline(never)]` and `#[cold]`.
+//   constant must fold into its caller (OG-D41, OG-D47), and where clang
+//   would leave out of line what LLVM inlines of Rust's (D17).
+//   `SHOAL_NOINLINE` and `SHOAL_COLD` are `#[inline(never)]` and `#[cold]`.
 #pragma once
 
 #include <cstdio>
@@ -42,7 +43,7 @@
 #endif
 
 /// A function whose loads race with writers by design, checked by a version
-/// afterwards (optimistic reads, PORTING.md P7), always inlined. Under
+/// afterwards (optimistic reads, D12), always inlined. Under
 /// ThreadSanitizer it is kept out of line and uninstrumented instead: the
 /// sanitizer instruments code after inlining, by the function it lands in.
 #if defined(SHOAL_TSAN)

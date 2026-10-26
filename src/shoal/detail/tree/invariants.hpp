@@ -1,7 +1,7 @@
 // Checks that a tree is well formed (`tree/invariants.rs`): its shape, order
 // and counts, and on every node that its inline keys and hash tags match its
 // keys and its prefix length is what its fences share, or along the borders,
-// what every key shares (D50). For tests; a broken invariant ends the
+// what every key shares (OG-D50). For tests; a broken invariant ends the
 // program with the condition that failed.
 #pragma once
 
@@ -22,7 +22,7 @@ class TreeChecker {
   using InternalNode = Internal<K, V, S>;
   using Shape = NodeShape<K, V, S>;
 
-  /// Checks that `tree` is a well-formed B+-tree of `length` entries (D17):
+  /// Checks that `tree` is a well-formed B+-tree of `length` entries (OG-D17):
   /// keys strictly increase in order, within their separators' bounds;
   /// leaves at one depth; nodes below the root at least at their minimum;
   /// every leaf but the leftmost with a head; inline keys the keys' windows
@@ -41,9 +41,9 @@ class TreeChecker {
     check_prefix_lens(tree);
   }
 
-  /// Checks that no node's prefix is shorter than its parent's (D44), and
-  /// every node along the borders has the shared prefix (D50). Calls neither
-  /// `operator<` nor any encoding.
+  /// Checks that no node's prefix is shorter than its parent's (OG-D44), and
+  /// every node along the borders has the shared prefix (OG-D50). Calls
+  /// neither `operator<` nor any encoding.
   static void check_prefix_lens(const TreeType& tree) {
     if (!tree.has_root()) return;
     const std::size_t shared_len = tree.shared_prefix().size();

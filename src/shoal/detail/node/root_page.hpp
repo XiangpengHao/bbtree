@@ -1,7 +1,7 @@
 // The root page (`tree/node/root_page.rs`): the root node, of either kind, in
 // room for the larger, and after it the root area, which holds what every key
-// shares (D50). A tree keeps its root page for life; the root node's kind
-// changes in place (D52). Raising the tree moves the root node to a fresh
+// shares (OG-D50). A tree keeps its root page for life; the root node's kind
+// changes in place (OG-D52). Raising the tree moves the root node to a fresh
 // page of its kind and makes the root internal above it; lowering it moves
 // the root's only child up and frees the child's page. The tree's pointer to
 // its root page is the root's edge: its tag tells the root's kind.
@@ -65,7 +65,7 @@ class RootPage {
   /// The root node, of the kind the tag tells.
   AnyNode node() const noexcept { return AnyNode(node_); }
 
-  /// What every key of the tree shares (D50).
+  /// What every key of the tree shares (OG-D50).
   SharedPrefix& shared_prefix() const noexcept { return *area(); }
 
   /// The shared prefix of a latched tree, read while a thread holding the
@@ -82,7 +82,8 @@ class RootPage {
   /// Where `key` sorts against every key of the tree, read in place while
   /// a thread holding the root may be changing the prefix: `place_outside`
   /// without the 65-byte copy above. The bytes read may be mid-change;
-  /// the caller's version check vouches for them, as it does for a copy.
+  /// the caller's version check vouches for them, as it does for a copy
+  /// (D21).
   template <class Q>
   SHOAL_RACING_READ std::optional<Ordering> place_outside_racing(
       const SearchKey<K, Q>& key) const noexcept {
@@ -96,7 +97,7 @@ class RootPage {
 
   /// Makes the tree a level taller: moves the root node to a fresh page of
   /// its kind and makes the root internal above it, at the tree's shared
-  /// prefix length (D50). Returns the page's new handle.
+  /// prefix length (OG-D50). Returns the page's new handle.
   template <class Pages>
   RootPage raise(const Pages& pages) const noexcept {
     const AnyNode child = move_node_out(pages);

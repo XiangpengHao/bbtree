@@ -1,8 +1,8 @@
-// Trivial relocation (PORTING.md, P2): a type whose objects may move to
+// Trivial relocation (D7): a type whose objects may move to
 // another address as their bytes, the source then treated as gone, without
 // its move constructor or destructor running. The nodes move keys and values
 // that way: shifts within a node, runs between siblings, whole pages
-// (design/03-decisions.md, D9, D14).
+// (OG-D9, OG-D14).
 #pragma once
 
 #include <memory>

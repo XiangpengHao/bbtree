@@ -2,7 +2,7 @@
 // separator between them (`tree/node/siblings.rs`). A removal that leaves a
 // child underfull fixes it here, as does a cut or a build that leaves a border
 // short: they merge the two, or move entries from one to the other through
-// the separator (D22).
+// the separator (OG-D22).
 #pragma once
 
 #include <cstddef>

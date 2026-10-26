@@ -1,4 +1,4 @@
-// Node configs (D59): what a map may tune about its nodes, the sizes of
+// Node configs (OG-D59): what a map may tune about its nodes, the sizes of
 // their pages, as constants of one type. A config derives from
 // `DefaultNodeConfig` and redefines the constants it changes:
 //

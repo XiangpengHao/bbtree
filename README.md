@@ -9,10 +9,11 @@ The tree map is a port of [bbtree](https://github.com/XiangpengHao/bbtree),
 the Blessed B-tree by [Xiangpeng Hao](https://xiangpeng.systems), a Rust
 B+ tree. The port keeps its data structure, node layouts and algorithms,
 and was measured against the Rust crate on the same workloads
-([PORTING.md](PORTING.md)); the Rust crate, its formal verification,
+([design/02-rust-parity.md](design/02-rust-parity.md)); the Rust crate, its formal verification,
 fuzzing and visualizer live upstream. How the tree works:
 [bbtree.xiangpeng.systems](https://bbtree.xiangpeng.systems/post) and the
-upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design) at `8adae97`, where this fork branched.
+upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed97e5c98fa2790312eb0aec9719846/design) at `8adae97`, where this fork branched. The fork's own
+design notes and decisions are in [design/](design/00-init.md).
 
 - Header-only C++17, zero dependencies, built to be embedded in DuckDB.
 - `shoal::TreeMap`: a concurrent ordered map, latched nodes with optimistic
@@ -22,7 +23,7 @@ upstream [design notes](https://github.com/XiangpengHao/bbtree/tree/8adae97a0ed9
 - `shoal::HashMap`: a concurrent hash map, entries in the slots it probes,
   read without locks; `shoal::unsync::HashMap`, single-threaded with stable
   references, and `shoal::unsync::HashIndex` for rows stored elsewhere,
-  after DuckDB's aggregate hash table ([PORTING.md](PORTING.md#hash-maps)).
+  after DuckDB's aggregate hash table ([design/05-hash-maps.md](design/05-hash-maps.md)).
 - SIMD node search on SSE2, AVX2, AVX-512 and NEON; tested on Linux, macOS
   and Windows (MSVC), and under AddressSanitizer, UBSan and ThreadSanitizer.
 
@@ -58,7 +59,7 @@ Millions of lookups per second:
 shoal leads both heats: its tree map by 10–18×, its hash map by 10% over
 Boost's in bulk and 2× over the rest one key at a time. Readers of both
 shoal maps write nothing shared: they check a version after reading
-(PORTING.md, Hash maps). The UUID hash declares `is_avalanching`, which
+([design/05-hash-maps.md](design/05-hash-maps.md)). The UUID hash declares `is_avalanching`, which
 both shoal and Boost read as leave to use it unmixed.
 
 On one thread nothing contends, and a locked map's lock costs it little:
@@ -109,7 +110,7 @@ The C++ benches (`bench/`) ran against the Rust crate at `8adae97` on the
 same workloads: same keys, same order. Setup: M4 Pro, system allocator,
 `-mcpu=native`, one run each. A range means the numbers spread across runs
 on a quiet machine. Full tables and the fixes behind them are in
-[PORTING.md](PORTING.md#measurements).
+[design/02-rust-parity.md](design/02-rust-parity.md); the race, in [design/06-race.md](design/06-race.md).
 
 Unsync map, ns per operation (lower is better):
 
@@ -210,8 +211,8 @@ types hold the key's shard shared.
 
 - Keys and values must be trivially relocatable: the nodes move them as
   bytes. Trivially copyable types are; `std::vector`, `std::unique_ptr`,
-  `std::shared_ptr` and libc++'s `std::string` are declared so.
-  libstdc++'s `std::string` is not: use `std::vector<uint8_t>` or a
+  `std::shared_ptr` and the `std::string` of libc++ and MSVC are declared
+  so. libstdc++'s `std::string` is not: use `std::vector<uint8_t>` or a
   `std::string_view` into stable storage.
 - Keys order by `operator<`. Comparisons must not throw.
 - Specialize `shoal::InlineKey<K>` for the fastest lookups on your own key

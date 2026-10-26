@@ -1,5 +1,5 @@
 // A copy an optimistic reader makes of a slot that writers may be changing
-// meanwhile (PORTING.md, P7): bytes, which the reader takes for a value only
+// meanwhile (D12): bytes, which the reader takes for a value only
 // once a version check vouches for the read. The tree's leaves and the hash
 // maps' entries are read this way.
 #pragma once

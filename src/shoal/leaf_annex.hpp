@@ -6,7 +6,7 @@
 // `remove_with_leaf` hand their closures an `AnnexedLeaf`.
 //
 // An annex type `Annex` is default-constructible, trivially relocatable (it
-// moves with its leaf's bytes, PORTING.md P2), and has
+// moves with its leaf's bytes, D7), and has
 //
 //   void split(Annex& right) noexcept;       // its leaf split; `right`'s leaf,
 //                                            // new, took the entries right of it
@@ -46,7 +46,7 @@ class AnnexedLeaf {
   std::size_t key_count() const noexcept { return leaf_.len() + (leaf_.has_head() ? 1 : 0); }
 
   /// Hands the leaf's keys to `visit(key)` in order: its head's first, if it
-  /// has one, the separator's left of it (D49).
+  /// has one, the separator's left of it (OG-D49).
   template <class Visit>
   void for_each_key(Visit visit) const noexcept {
     if (leaf_.has_head()) visit(static_cast<const K&>(leaf_.head_key()));

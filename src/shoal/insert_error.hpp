@@ -1,6 +1,6 @@
 // What an insert into a shared `TreeMap` returns (`allocator.rs`,
 // `InsertError`): what it did, or, if its allocator had no page to give, the
-// entry back, with the map as it was (D8).
+// entry back, with the map as it was (OG-D8).
 #pragma once
 
 #include <optional>

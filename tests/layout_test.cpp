@@ -1,5 +1,5 @@
 // The node layouts, against the numbers `tree/node/layout.rs`'s tests work out
-// by hand from D13, D15, D18, D21, D29, D36 and D49.
+// by hand from OG-D13, OG-D15, OG-D18, OG-D21, OG-D29, OG-D36 and OG-D49.
 #include <array>
 #include <cstdint>
 #include <string>
@@ -103,7 +103,7 @@ TEST(string_to_u64_with_hash_tags_in_the_padding) {
   CHECK(Shape::leaf_plan.hash_tags);
   CHECK(Shape::leaf_layout.has_hash_tags());
   CHECK_EQ(Shape::leaf_plan.inline_width, 8u);
-  // Heap byte strings keep 4 bytes inside (D43).
+  // Heap byte strings keep 4 bytes inside (OG-D43).
   CHECK(Shape::internal_plan.rehydrates_windows);
   CHECK(!Shape::internal_plan.inlines_node_search);
   if constexpr (string_has_rust_size) {

@@ -12,7 +12,7 @@
 // - **Strategies**, picked once as std picks them: when the sets' ranges
 //   don't overlap, an answer without walking; when one set has at least 16
 //   times the elements of the other, a lookup in the large one for each
-//   element of the small one, 32 at a time as a batch (doc 12); otherwise a
+//   element of the small one, 32 at a time as a batch (OG-doc 12); otherwise a
 //   walk of both side by side.
 #pragma once
 
@@ -256,8 +256,9 @@ class MergeSides {
 
 /// Looks up a cursor's elements in a large set a batch at a time, for the
 /// operations that search one set for the other's elements: a batch's
-/// lookups overlap their waits for memory (doc 12). The cursor's next 32
-/// elements wait in `ahead`, found or not, handed out one at a time.
+/// lookups overlap their waits for memory (OG-doc 12). The cursor's next 32
+/// elements wait in `ahead`, found or not, handed out one at a time: a walk
+/// is never copied to read ahead, as Rust clones its iterator (D16).
 template <class K, class S>
 class LookupsAhead {
   using TreeType = Tree<K, Unit, S>;

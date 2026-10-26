@@ -1,6 +1,6 @@
 // A minimal test harness: `TEST(name) { ... }` registers a test, `CHECK`
 // and `CHECK_EQ` fail it with the expression and the values, and `main` runs
-// every test in registration order. Zero dependencies (D2).
+// every test in registration order. Zero dependencies (D1, OG-D2).
 #pragma once
 
 #include <cstdint>

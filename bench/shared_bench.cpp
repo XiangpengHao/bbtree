@@ -53,7 +53,8 @@ int main(int argc, char** argv) {
       std::printf("shared insert   threads %2zu  %8.1f Mops/s\n", threads, 1000.0 / ns);
     }
     {
-      // `GET_ROUNDS` repeats the lookups, as `BATCH_ROUNDS` the batched ones.
+      // `GET_ROUNDS` repeats the lookups, as `BATCH_ROUNDS` the batched ones:
+      // the difference of two runs counts one phase's instructions (D31).
       const char* rounds_variable = std::getenv("GET_ROUNDS");
       const std::size_t rounds = rounds_variable ? std::strtoull(rounds_variable, nullptr, 10) : 1;
       Stopwatch watch;

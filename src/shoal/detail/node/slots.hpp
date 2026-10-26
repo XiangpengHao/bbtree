@@ -1,17 +1,17 @@
 // Slot arrays inside a node page (`tree/node/slots.rs`). Apart from whole
 // pages, this is the only code that moves keys, values and edges within and
-// between nodes (D9, D12, D14, D29). Keys and values move as bytes: they are
-// trivially relocatable (PORTING.md, P2).
+// between nodes (OG-D9, OG-D12, OG-D14, OG-D29). Keys and values move as
+// bytes: they are trivially relocatable (D7).
 //
 // - `Slots<T>`: a fixed-capacity array of slots, side by side or a stride
 //   apart.
 // - `NodeKeys<K>`: a node's keys lent in place, and the two binary searches
-//   over a key list (D19).
+//   over a key list (OG-D19).
 // - `KindShape`: one node kind's plan and layout constants.
 // - `KeyColumns`: the arrays a node keeps beside its keys, inline keys and
 //   hash tags, which every move moves alike.
 // - `KeySlots`: a node's keys with their columns.
-// - `SeparatorSlots`: an internal node's separators, keys or windows (D49).
+// - `SeparatorSlots`: an internal node's separators, keys or windows (OG-D49).
 #pragma once
 
 #include <cstddef>
@@ -31,7 +31,7 @@ namespace shoal::detail {
 /// Where `capacity` slots of `T` sit in a page: slot `i` at `stride * i` bytes
 /// past `anchor`. The slots of an array of their own sit side by side; the
 /// keys and values of a leaf of entries are fields of its entries, an entry's
-/// size apart (D29).
+/// size apart (OG-D29).
 ///
 /// A `Slots` neither owns nor borrows its slots and tracks no length: which
 /// slots are initialized is the caller's business. Objects move as bytes; a
@@ -138,7 +138,7 @@ class Slots {
 
   /// Shifts the whole strides of slots `index..len` up by one slot, with the
   /// other fields between them: the entries of a node whose first fields are
-  /// these slots (D29). Slot `index`'s stride holds stale bytes afterwards.
+  /// these slots (OG-D29). Slot `index`'s stride holds stale bytes afterwards.
   void shift_strides_up(std::size_t index, std::size_t len) const noexcept {
     SHOAL_ASSERT(index <= len && len < capacity_);
     if (index == len) return;
@@ -183,7 +183,7 @@ struct SearchResult {
 };
 
 /// A node's keys `0..len`, in order, lent in place: side by side, or each the
-/// key of an entry in a leaf of entries (D29).
+/// key of an entry in a leaf of entries (OG-D29).
 template <class K>
 class NodeKeys {
  public:
@@ -209,7 +209,7 @@ class NodeKeys {
 };
 
 /// The two binary searches over a key list, a node's own keys or the head
-/// keys an internal node's separators lead to (D19). A list has `len()`,
+/// keys an internal node's separators lead to (OG-D19). A list has `len()`,
 /// `operator[]` and `slice`.
 struct KeySearcher {
   /// Key `i` if it equals `query`, otherwise the edge where it belongs, by a
@@ -301,8 +301,8 @@ struct KeyCells {
 };
 
 /// The arrays a node of kind `Kind` keeps beside its keys, one slot per key:
-/// its inline keys (D18) and, in a leaf whose plan keeps them, hash tags
-/// (D36). Each operation mirrors the `Slots` operation of its name.
+/// its inline keys (OG-D18) and, in a leaf whose plan keeps them, hash tags
+/// (OG-D36). Each operation mirrors the `Slots` operation of its name.
 template <class Kind>
 class KeyColumns {
  public:
@@ -435,9 +435,9 @@ class KeySlots {
     columns().insert(index, len, cells);
   }
 
-  /// `insert` in a node of entries whose first fields are the keys (D29): it
-  /// shifts entries `index..len` up whole, in one copy, then writes the key.
-  /// The caller writes what pairs with it.
+  /// `insert` in a node of entries whose first fields are the keys (OG-D29):
+  /// it shifts entries `index..len` up whole, in one copy, then writes the
+  /// key. The caller writes what pairs with it.
   void insert_shifting_entries(std::size_t index, std::size_t len,
                                WindowedKey<K>&& key) const noexcept {
     const KeyCells cells = cells_of(key);
@@ -453,9 +453,9 @@ class KeySlots {
     return WindowedKey<K>(std::move(key), key_window);
   }
 
-  /// `remove` in a node of entries whose first fields are the keys (D29): it
-  /// takes key `index` out, then shifts entries `index + 1..len` down whole.
-  /// The caller has taken out what pairs with key `index` first.
+  /// `remove` in a node of entries whose first fields are the keys (OG-D29):
+  /// it takes key `index` out, then shifts entries `index + 1..len` down
+  /// whole. The caller has taken out what pairs with key `index` first.
   WindowedKey<K> remove_shifting_entries(std::size_t index, std::size_t len) const noexcept {
     const Window key_window = window(index);
     K key = keys().take(index);
@@ -486,9 +486,9 @@ class KeySlots {
   }
 };
 
-/// An internal node's separators (D17): its keys without inline keys, their
-/// windows with them (D49). Every operation mirrors the `KeySlots` operation
-/// of its name, on separators.
+/// An internal node's separators (OG-D17): its keys without inline keys, their
+/// windows with them (OG-D49). Every operation mirrors the `KeySlots`
+/// operation of its name, on separators.
 template <class K, class Kind>
 class SeparatorSlots {
  public:

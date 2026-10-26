@@ -1,13 +1,13 @@
-// Walks over a tree in key order (`tree/walk.rs`, D23): the core of every
+// Walks over a tree in key order (`tree/walk.rs`, OG-D23): the core of every
 // iterator. A walk is a node stack to a position between two entries of a
-// leaf, and moving it never calls `operator<` (D11).
+// leaf, and moving it never calls `operator<` (OG-D11).
 //
 // Within a leaf, the next entry is beside the position: the walk keeps the
-// leaf, its index and the run's limit in its own fields, a cached run (D33),
-// and touches the node stack only to cross a leaf boundary. After a leaf's
-// last entry comes the nearest ancestor separator to its right, whose value
-// is the next leaf's head (D17): the walk climbs to it and descends to that
-// leaf. Walking backward mirrors this.
+// leaf, its index and the run's limit in its own fields, a cached run
+// (OG-D33), and touches the node stack only to cross a leaf boundary. After a
+// leaf's last entry comes the nearest ancestor separator to its right, whose
+// value is the next leaf's head (OG-D17): the walk climbs to it and descends
+// to that leaf. Walking backward mirrors this.
 //
 // A walk stops at a position, a leaf and an edge of it, or at the tree's end.
 // Every entry has one position just before it and one just after: key `i`
@@ -106,8 +106,8 @@ class Walk {
 
   /// Starts over the entries of `tree` within `lower` and `upper`; hands out
   /// none if the bounds cross. The walk's own node stack goes to where it
-  /// starts, in place: a node stack is never copied (D23). The other end is
-  /// searched only if it has a bound (D32).
+  /// starts, in place: a node stack is never copied (OG-D23). The other end is
+  /// searched only if it has a bound (OG-D32).
   template <class L, class U>
   void start_range(const Tree<K, V, S>& tree, const ::shoal::Bound<L>& lower,
                    const ::shoal::Bound<U>& upper) noexcept {
@@ -165,7 +165,7 @@ class Walk {
   }
 
   /// Hands every entry left to `visit(entry)`, a counted loop per leaf
-  /// (D32): no per-entry bookkeeping beyond the index.
+  /// (OG-D32): no per-entry bookkeeping beyond the index.
   template <class Visit>
   void for_each(Visit visit) noexcept {
     Entry entry;
@@ -239,7 +239,7 @@ class Walk {
   /// that may change the walk keeps the compiler from holding the walk's
   /// index and limit in registers, and the loop then carries each entry's
   /// index through a store and a load. Inlined, a 64-entry range scan of a
-  /// 1M `uint64_t` map took 736 cycles instead of 1092 (PORTING.md).
+  /// 1M `uint64_t` map took 736 cycles instead of 1092 (D14).
   SHOAL_ALWAYS_INLINE bool cross(Entry& entry) noexcept {
     if (done_) return false;
     if (has_stop_ && stop_.leaf == leaf_.node_ptr() && stop_.edge == index_) {

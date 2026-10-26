@@ -1,6 +1,7 @@
-// An owning, single-threaded hash map. The probe index moves independently
-// of paged entries: inserts/reserve preserve references, erase invalidates
-// only the removed entry, and clear/assignment invalidate everything.
+// An owning, single-threaded hash map, on a paged table (D25). The probe index
+// moves independently of paged entries: inserts/reserve preserve references,
+// erase invalidates only the removed entry, and clear/assignment invalidate
+// everything.
 #pragma once
 
 #include <functional>

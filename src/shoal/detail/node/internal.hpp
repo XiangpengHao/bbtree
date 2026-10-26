@@ -1,9 +1,9 @@
 // Internal nodes: the nodes that route (`tree/node/internal.rs`). An internal
-// node's page holds its children, one more than its separators (D12, D32),
-// and no values (D17). With inline keys it holds only its separators' inline
-// keys and its edges, in a 512 B page by default; each separator's key is the
-// head key of the leftmost leaf right of it, read only on a tie (D49).
-// Without inline keys, the node keeps its separator keys.
+// node's page holds its children, one more than its separators (OG-D12,
+// OG-D32), and no values (OG-D17). With inline keys it holds only its
+// separators' inline keys and its edges, in a 512 B page by default; each
+// separator's key is the head key of the leftmost leaf right of it, read only
+// on a tie (OG-D49). Without inline keys, the node keeps its separator keys.
 #pragma once
 
 #include <cstddef>
@@ -23,7 +23,7 @@ class Internal;
 
 /// A node, of the kind its pointer's tag tells: what an edge or the root
 /// leads to. A traversal decides the kind once, where it reads the pointer
-/// (D28).
+/// (OG-D28).
 template <class K, class V, class S>
 class Node {
  public:
@@ -130,7 +130,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
   }
 
   /// The leftmost leaf right of separator `index`, whose head is that
-  /// separator's (D17, D49): down edge `index + 1`, then first edges.
+  /// separator's (OG-D17, OG-D49): down edge `index + 1`, then first edges.
   LeafNode head_leaf(std::size_t index) const noexcept {
     Ptr node = child(index + 1).node_ptr();
     while (!node.is_leaf()) node = Internal::at(node).edge(0);
@@ -139,8 +139,8 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
 
   // Separators.
 
-  /// Separator `index`'s key: in this node (D17), or with inline keys the
-  /// head key of its leaf, which this walks down to (D49).
+  /// Separator `index`'s key: in this node (OG-D17), or with inline keys the
+  /// head key of its leaf, which this walks down to (OG-D49).
   const K& separator_key(std::size_t index) const noexcept {
     SHOAL_CHECK(index < len());
     if constexpr (has_inline_keys) {
@@ -179,7 +179,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
   }
 
   /// Separator `index`'s window at the node's prefix length. A node keeping
-  /// fewer bytes than a leaf reads it from the key again (D43).
+  /// fewer bytes than a leaf reads it from the key again (OG-D43).
   Window window(std::size_t index) const noexcept {
     SHOAL_CHECK(index < len());
     if constexpr (has_inline_keys) {
@@ -220,7 +220,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
   }
 
   /// Replaces separator `index`'s key and its inline key, returning the old
-  /// key: in this node, or with inline keys in its leaf's head (D49).
+  /// key: in this node, or with inline keys in its leaf's head (OG-D49).
   K replace_key(std::size_t index, Windowed&& key) const noexcept {
     if constexpr (!has_inline_keys) {
       return replace_separator_from_below(index, Sep(std::move(key))).into_windowed_key().into_key();
@@ -236,7 +236,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
 
   /// `key` searched for among the separators: the separator equal to it, or
   /// the edge to the child it belongs under. With inline keys, over those
-  /// first, reading a separator's key only on a tie (D49).
+  /// first, reading a separator's key only on a tie (OG-D49).
   template <class Q>
   SHOAL_ALWAYS_INLINE SearchResult search(const SearchKey<K, Q>& key) const noexcept {
     if constexpr (Kind::plan.inlines_node_search) {
@@ -257,7 +257,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
       const Window target = key.inline_target(prefix_len());
       const IndexRange candidates = this->inline_keys().equal_range(target.inline_key());
       // Most searches tie with no separator: they stop here, without a call
-      // to the tie search, which reads keys in leaf heads (D49).
+      // to the tie search, which reads keys in leaf heads (OG-D49).
       if (candidates.empty()) return SearchResult::edge(candidates.start);
       return search_candidates(candidates, key, target);
     } else if constexpr (has_inline_keys) {
@@ -421,7 +421,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
   KeySlots<K, Kind> key_slots() const noexcept { return node_.template key_slots<Kind>(); }
 
   /// The keys of separators `start..start + len`, with inline keys: each a
-  /// head key, which getting walks down to (D49).
+  /// head key, which getting walks down to (OG-D49).
   class HeadKeys {
    public:
     HeadKeys(Internal node, std::size_t start, std::size_t len) noexcept
@@ -443,7 +443,7 @@ class Internal : public ChildBase<Internal<K, V, S>, K, KindShape<K, V, S, false
 
   /// `separator`, from a split of the child at edge `index`, with its window
   /// moved back to this node's prefix length. A node without separators is a
-  /// new root, at the shared prefix's length as its only child (D50).
+  /// new root, at the shared prefix's length as its only child (OG-D50).
   Sep separator_from_child(std::size_t index, Sep&& separator) const noexcept {
     if (const std::optional<Window> fill = fence_window(index)) {
       return std::move(separator).moved_back_to(*fill);

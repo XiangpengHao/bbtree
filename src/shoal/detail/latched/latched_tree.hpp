@@ -1,4 +1,4 @@
-// A tree that threads share (design/09-concurrency.md, D54,
+// A tree that threads share (OG-design/09-concurrency.md, OG-D54,
 // `tree/latched/*.rs`): the unsync tree, with a latch word in each node,
 // behind an atomic pointer to the root page. It is the unsync tree in every
 // way but how threads share it: same nodes, shared prefix, prefix fits,
@@ -6,7 +6,7 @@
 //
 // - **Descent** is optimistic through the internal nodes, each read in place
 //   and checked by its version; the leaf is latched, shared or exclusive, or
-//   read at a version (D57).
+//   read at a version (OG-D57).
 // - **Operations** run the caller's closure on an entry while its leaf is
 //   latched, and let go before returning.
 // - **Changes to more than a leaf** (a split, a rebalancing removal, a
@@ -190,7 +190,7 @@ class LatchedTree {
   }
 
   /// A copy of the value of `key`'s entry: unlatched where the leaf settles
-  /// it, as a sequence lock reads (D57).
+  /// it, as a sequence lock reads (OG-D57).
   template <class Q>
   SHOAL_ALWAYS_INLINE std::optional<V> get_copied(const Q& key) const noexcept {
     static_assert(std::is_trivially_copyable_v<V>, "get_copied copies values read unlatched");
@@ -242,7 +242,7 @@ class LatchedTree {
   /// Inserts `key` and `value`, or, if an equal key is there, keeps it and
   /// does what `policy` does; returns what `policy` returns. If the
   /// allocator has no page to give, the tree is unchanged, and the entry
-  /// comes back.
+  /// comes back. Inlined into its caller, as Rust's is (D17).
   template <class Policy, class A>
   SHOAL_ALWAYS_INLINE InsertOutcome<typename Policy::Output, K, V> insert(K&& key, V&& value, Policy policy,
                                                                            A& alloc) const noexcept {
@@ -370,7 +370,7 @@ class LatchedTree {
   Ptr root_ptr() const noexcept { return Ptr::from_tagged(root_.load(std::memory_order_acquire)); }
   Root root_page() const noexcept { return Root::of_ptr(root_ptr()); }
 
-  /// Whether `leaf` is the root, which has no minimum (D22).
+  /// Whether `leaf` is the root, which has no minimum (OG-D22).
   bool is_root(LeafNode leaf) const noexcept {
     return root_.load(std::memory_order_acquire) == leaf.node_ptr().tagged();
   }
@@ -454,7 +454,7 @@ class LatchedTree {
 
   /// One try of `descend`, into `descent`; false to start over. Filling the
   /// caller's descent rather than returning an optional one spares a move
-  /// and a destructor of the latch it holds on every descent.
+  /// and a destructor of the latch it holds on every descent (D18).
   template <class Mode, class P, class Q>
   SHOAL_ALWAYS_INLINE bool try_descend(const SearchKey<K, Q>& key, P& path,
                                         Descent<Mode>& descent) const noexcept {
@@ -462,7 +462,7 @@ class LatchedTree {
     const Root root_page = this->root_page();
     // No root yet: the key is in no node. Every caller reads `outside`
     // as absent here (a scan checks for a root before it descends), so
-    // lookups load the root pointer once, in this descent, not twice.
+    // lookups load the root pointer once, in this descent, not twice (D21).
     if (root_page.is_null()) {
       descent.outside = Ordering::Less;
       return true;
@@ -675,7 +675,7 @@ class LatchedTree {
   /// Inserts into `held`, the leaf where `key` belongs, if it holds `key` or
   /// has room, and returns what `policy` returned, as the policy's own
   /// `LeafOutcome` (no second optional around it: that layer cost
-  /// instructions on every insert, where Rust's `Result` is one enum).
+  /// instructions on every insert, where Rust's `Result` is one enum, D18).
   /// Keeping the entry instead: with `refused` set if the policy refused,
   /// or else a refusal of no layout, the leaf full and `edge` where `key`
   /// goes.

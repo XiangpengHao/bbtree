@@ -6,7 +6,7 @@
 // zero, so neither reaches an entry the other took. Rust's iterator frees
 // each node once both ends are past it; this one gives every page back when
 // it is destroyed, after destroying the entries left between the ends in
-// ascending order, as destroying the map does (PORTING.md).
+// ascending order, as destroying the map does (D15).
 #pragma once
 
 #include <cstddef>
