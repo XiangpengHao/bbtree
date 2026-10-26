@@ -6,20 +6,10 @@
 //! holds a leaf until the tree grows and an internal node after, keeps one
 //! word through the change:
 //!
-//! - **Internal nodes, optimistically.** A reader reads the version, reads
-//!   the node, and checks that the version is unchanged
-//!   ([`NodeLatch::read_version`], [`NodeLatch::is_unchanged`]). A writer
-//!   takes the node exclusively from the version it read
-//!   ([`NodeLatch::try_lock_at`]), never waiting, and bumps the version as
-//!   it lets go. The writer changes the node in place. The reader reads it
-//!   through raw pointers, in bounds whatever it reads (`optimistic.rs`); a
-//!   writer changing it meanwhile fails the check. This is optimistic lock
-//!   coupling.
-//! - **Leaves, pessimistically.** Shared for reads, exclusive for changes,
-//!   spinning with backoff while the other mode holds it
-//!   ([`NodeLatch::lock_shared`], [`NodeLatch::lock_exclusive`]). Letting
-//!   go of it exclusively bumps the version too, so a lookup can also read
-//!   a leaf optimistically (D57).
+//! Both internal nodes and leaves are shared-latched for ordinary reads and
+//! exclusively latched for changes. A traversal takes short snapshots and uses
+//! versions to validate their relationships after releasing each latch. Version
+//! validation alone cannot protect ordinary memory from a concurrent writer.
 //!
 //! The word, from the low bit: the exclusive bit, a count of shared holders,
 //! and the version. A version is the word without its count, read while the
@@ -323,5 +313,24 @@ mod tests {
         assert_eq!(held_at, after);
         latch.unlock_exclusive(held_at);
         assert_ne!(latch.read_version(), Version(after.0));
+    }
+}
+
+/// A shared page hold, released on return or unwind. Keep a snapshot's hold
+/// shorter than the traversal: version checks validate the next page separately.
+pub(in crate::tree) struct SharedLatch<'a>(&'a NodeLatch);
+
+impl<'a> SharedLatch<'a> {
+    #[inline(always)]
+    pub(in crate::tree) fn lock(latch: &'a NodeLatch) -> Self {
+        latch.lock_shared();
+        Self(latch)
+    }
+}
+
+impl Drop for SharedLatch<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        self.0.unlock_shared();
     }
 }

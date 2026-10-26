@@ -184,10 +184,14 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// The page is a latched tree's root page, allocated.
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
+        // SAFETY: the allocated page belongs to a latched tree (caller).
+        // The prefix is ordinary memory; version validation alone is not enough.
+        let _held = super::latch::SharedLatch::lock(unsafe { self.node.latch() });
         Interleaving::switch_point();
         // SAFETY: the root area was written with the page, which is
         // allocated (caller). Its length is a byte, read as an atomic. A
-        // racing write makes the copy one that the version check throws away.
+        // shared hold prevents overlapping writes; later version checks
+        // validate this snapshot against the traversal.
         unsafe {
             let len = AtomicU8::from_ptr(self.area().byte_add(SharedPrefix::LEN_OFFSET).cast());
             (len.load(Ordering::Relaxed) != 0).then(|| self.area().read())

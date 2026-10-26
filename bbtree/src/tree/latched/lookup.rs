@@ -1,23 +1,7 @@
-//! Looking a key up in a latched tree (`design/09-concurrency.md`, Lookups,
-//! D57). The descent reads the internal nodes optimistically, as every
-//! operation's does, and the leaf too, at the version it was at
-//! ([`Optimistic`]).
-//!
-//! - **A key the leaf's inline keys rule out** is absent once the leaf's
-//!   version, unchanged after the read, confirms it: a miss writes no
-//!   latch.
-//! - **A copy** of a `Copy` value ([`LatchedTree::get_copied`]) is read
-//!   unlatched, then the version checked, as a sequence lock reads. This
-//!   works where the leaf settles the key. A key ordered by its own bytes
-//!   is read and compared as a copy, and a byte string that ends within its
-//!   inline key is the candidate of the same length (D36). Other keys
-//!   compare latched.
-//! - **Otherwise** the leaf is latched shared and, if it is still at that
-//!   version, searched. The caller's closure runs on the entry while the
-//!   latch is held.
-//!
-//! A leaf that changed meanwhile sends the lookup the latched way, which
-//! waits for a writer rather than race it again.
+//! Point lookups use shared-latched snapshots of each node and validate
+//! versions between snapshots. Copyable payloads can leave the leaf after
+//! the snapshot; arbitrary keys and callback references stay protected by a
+//! shared hold. A changed version retries with a single held-leaf search.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering as KeyOrdering;
@@ -31,11 +15,11 @@ use super::LatchedTree;
 use super::descent::{HeldLeaf, Optimistic, Shared};
 use crate::inline_key::InlineKeyStrategy;
 
-/// A lookup that reading unlatched couldn't settle: the leaf changed, or the
+/// A lookup that reading from short snapshots couldn't settle: the leaf changed, or the
 /// key's comparison needs it latched. It goes the latched way.
 pub(super) struct Unsettled;
 
-/// What a lookup read of its leaf unlatched, which holds only if the leaf's
+/// What a lookup read of its leaf from short snapshots, which holds only if the leaf's
 /// version is unchanged after ([`Self::settle`]).
 pub(super) enum RacingRead<K, V> {
     /// The leaf's inline keys rule the key out.
@@ -125,12 +109,12 @@ impl<K, V> RacingRead<K, V> {
     }
 }
 
-/// Where a lookup that read its leaf unlatched found its entry
+/// Where a lookup that read its leaf from short snapshots found its entry
 /// ([`LatchedTree::find_optimistic`]).
 enum LeafFind<K, V, S: InlineKeyStrategy<K>> {
     /// The tree holds no entry with the key.
     Absent,
-    /// A copy of the entry's value, settled unlatched.
+    /// A copy of the entry's value, settled from short snapshots.
     Copied(ManuallyDrop<V>),
     /// The entry, in its leaf, which the lookup holds latched shared.
     Held(HeldLeaf<K, V, S, Shared>, EntryPlace),
@@ -149,7 +133,7 @@ enum EntryPlace {
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Runs `f` on the entry whose key equals `key`, while its leaf is
     /// latched shared, and returns what `f` returned; `None` without one,
-    /// which the leaf's inline keys may tell unlatched.
+    /// which the leaf's inline keys may tell from short snapshots.
     #[inline]
     pub(crate) fn read<Q, R>(&self, key: &Q, f: impl FnOnce(&K, &V) -> R) -> Option<R>
     where
@@ -171,7 +155,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// A copy of the value of `key`'s entry; `None` without one. Unlatched
+    /// A copy of the value of `key`'s entry; `None` without one. From short snapshots
     /// where the leaf settles it (module documentation).
     #[inline]
     pub(crate) fn get_copied<Q>(&self, key: &Q) -> Option<V>
@@ -194,7 +178,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         }
     }
 
-    /// Whether the tree holds an entry whose key equals `key`. Unlatched
+    /// Whether the tree holds an entry whose key equals `key`. From short snapshots
     /// where the leaf settles it, as for [`Self::get_copied`].
     #[inline]
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
@@ -214,7 +198,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     }
 
     /// Where `key`'s entry is, by an optimistic descent and a read of its
-    /// leaf in place. Settled unlatched where the leaf's inline keys rule
+    /// leaf in place. Settled from short snapshots where the leaf's inline keys rule
     /// the key out, or, if `COPIES`, where the leaf settles a candidate,
     /// whose value it copies ([`RacingRead`]). Otherwise found in the leaf,
     /// latched shared if still at the version the descent read.

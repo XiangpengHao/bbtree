@@ -1,31 +1,16 @@
-//! Reads of a latched tree's nodes while other threads write them: internal
-//! nodes always, by optimistic lock coupling, and leaves for lookups and
-//! hints (D57; `latch.rs`, `design/09-concurrency.md`).
+//! Version-validated snapshots of a concurrently modified tree's nodes.
 //!
-//! A racing reader takes no latch. It reads the node's version, reads the
-//! node in place, and checks the version after. A writer holding the node
-//! changes it in place, with the ordinary node code. The reader may
-//! meanwhile read half of one change and half of another, which the check
-//! then throws away. So a read here:
+//! Every snapshot holds the page's shared latch while reading ordinary memory.
+//! Raw pointers and `MaybeUninit` do not make an overlapping writer safe, even
+//! when a later version check would discard the read. A snapshot releases its
+//! latch before visiting another page; the existing version checks validate
+//! structural relationships across those separate snapshots.
 //!
-//! - goes through raw pointers and forms no reference into the node
-//!   ([`NodeInlineKeys`] over its slots, edges read from their slots);
-//! - reads the node's length once and clamps it to the capacity, so the
-//!   search stays in bounds whatever it read (D14);
-//! - follows no edge before the node's version vouches for it. The edge then
-//!   reaches a page of the kind its tag says. Every page but the root's
-//!   keeps its kind while threads share the tree. A node moved or freed
-//!   keeps its page's latch word, whose version only grows
-//!   (`tree/latched/pages.rs`);
-//! - runs no user code on what it read. Where inline keys tie, it compares a
-//!   separator's key, a leaf's head (D49), with that leaf latched shared,
-//!   once the node's version vouches for the edge it walked down. A head key
-//!   changes only while its leaf is latched exclusively, and the key a
-//!   removal takes out may be dropped, and its memory freed, right after.
-//!   Keys ordered by their own bytes alone (std integers and byte arrays) it
-//!   compares as an unlatched copy instead, and checks the node's version
-//!   after: a head changes only while the node holding its separator is
-//!   held.
+//! Writers acquire all additional pages without waiting (`latched/held.rs`),
+//! so these short shared holds do not introduce a lock-order cycle. Pages stay
+//! allocated while threads share the tree, including pages removed or reused.
+//! The root is special: its version must also validate its page kind before a
+//! child pointer read from it is followed.
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
@@ -39,7 +24,7 @@ use super::hash_tags::HashTags;
 use super::inline_key_search::NodeInlineKeys;
 use super::inline_keys::{KeyInliner, SearchKey, Window};
 use super::internal::Internal;
-use super::latch::{NodeLatch, Version};
+use super::latch::{SharedLatch, Version};
 use super::leaf::{CandidateLine, Leaf};
 use super::page::{NodeKind, NodePtr};
 use crate::inline_key::InlineKeyStrategy;
@@ -84,7 +69,7 @@ pub(in crate::tree) struct Routed {
 
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// Whether `key` may sort after every key of this leaf, read in place
-    /// without its latch while writers may change it. `false` if the leaf, as
+    /// under its shared latch. `false` if the leaf, as
     /// read, has no key, or a last key whose inline key alone sorts it after
     /// `key`. A hint for an append, which latches the leaf to be sure
     /// (`tree/latched/append.rs`): an insert that won't append then writes
@@ -95,6 +80,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree.
         let (len, prefix_len, inline_keys) =
@@ -106,7 +94,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             .is_none_or(|target| !inline_keys.is_above(last, target.inline_key()))
     }
 
-    /// [`Self::candidate_line`], read in place while writers may change the
+    /// [`Self::candidate_line`], read in a shared-latched snapshot while other operations may change the
     /// leaf, and the prefix length it read the leaf at. Both hold only if the
     /// leaf's version is unchanged after. A batch's lane reads it before it
     /// latches the leaf, to fetch the candidate's entry first
@@ -123,6 +111,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree.
         let (len, prefix_len, inline_keys) =
@@ -135,7 +126,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     }
 
     /// The line of the entry an insertion of `key` would shift first, as the
-    /// leaf's inline keys say, read in place while writers may change them.
+    /// leaf's inline keys say, read in a shared-latched snapshot while other operations may change them.
     /// A batch's lane fetches it before its insert searches the leaf latched
     /// (`tree/latched/batch.rs`). `None` if the key would go last, shifting
     /// nothing, or the inline keys can't place it.
@@ -148,6 +139,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree.
         let (len, prefix_len, inline_keys) =
@@ -177,6 +171,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// In debug builds, if `index` is not below the capacity.
     #[inline(always)]
     pub(in crate::tree) fn load_racing_entry(self, index: usize) -> RacingEntry<K, V> {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         debug_assert!(index < Self::capacity());
         let page = self.node_ptr();
         // SAFETY: `index` is below the capacity, so key slot `index` and
@@ -191,7 +188,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// A copy of value `index`, read in place while writers may change it:
+    /// A copy of value `index`, read in a shared-latched snapshot while other operations may change it:
     /// the value of key `index` only if the leaf's version is unchanged
     /// after.
     ///
@@ -200,6 +197,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// In debug builds, if `index` is not below the capacity.
     #[inline(always)]
     pub(in crate::tree) fn load_racing_value(self, index: usize) -> MaybeUninit<V> {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         debug_assert!(index < Self::capacity());
         // SAFETY: `index` is below the capacity, so value slot `index` is in
         // the page, which is a leaf's, allocated while threads share the
@@ -232,6 +232,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         debug_assert!(index < Self::capacity());
         if !key.ends_within_window::<Self>(prefix_len) {
             return None;
@@ -255,6 +258,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// read, has no head.
     #[inline(always)]
     pub(in crate::tree) fn load_racing_head_entry(self) -> Option<RacingEntry<K, V>> {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         let page = self.node_ptr();
         // SAFETY: the page is a leaf's, allocated while threads share the tree,
         // in a map with inline keys (D49); its head key slot and head slot are
@@ -267,13 +273,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         }
     }
 
-    /// A copy of the head's key, read in place while writers may change it,
+    /// A copy of the head's key, read in a shared-latched snapshot while other operations may change it,
     /// for keys ordered by their own bytes alone
     /// ([`KeyInliner::orders_by_own_bytes`]). Whatever bytes the copy holds
     /// make a key that compares by them, and a version check after tells
     /// whether the comparison held. `None` if the leaf, as read, has no head.
     #[inline(always)]
     fn load_racing_head_key(self) -> Option<ManuallyDrop<K>> {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         debug_assert!(KeyInliner::<K>::orders_by_own_bytes::<S>());
         let page = self.node_ptr();
         // SAFETY: the page is a leaf's, allocated while threads share the tree,
@@ -289,7 +298,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
 
 impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// Routes `key` through this node, read at `version`, as
-    /// [`Internal::search`] does, but in place while writers may change it.
+    /// [`Internal::search`] does, but in a shared-latched snapshot while other operations may change it.
     /// The result holds only if the version is unchanged after. `None` if a
     /// tie found the node changed, or what it read is no node any writer
     /// left; the caller starts over.
@@ -322,6 +331,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: the page is an internal node's, allocated while threads
         // share the tree.
         let (len, prefix_len, inline_keys) =
@@ -415,7 +427,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
             None => key.key().cmp(stored.borrow()),
         };
         if KeyInliner::<K>::orders_by_own_bytes::<S>() {
-            // Without the latch: the head changes only while this node is
+            // The copied head changes only while this node is
             // held (`tree/latched/held.rs`), which its version tells.
             let head = leaf.load_racing_head_key()?;
             let ordering = cmp(&head);
@@ -430,27 +442,33 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         ordering
     }
 
-    /// The node's length, read in place while writers may change it, and
+    /// The node's length, read in a shared-latched snapshot while other operations may change it, and
     /// clamped to the capacity. It is the node's only if the node's version
     /// is unchanged after.
     #[inline(always)]
     pub(in crate::tree) fn racing_len(self) -> usize {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: the page is an internal node's, allocated while threads
         // share the tree, its header initialized.
         let (len, _) = unsafe { self.node_ptr().load_racing_header() };
         len.min(Self::capacity())
     }
 
-    /// The node's prefix length, read in place while writers may change it.
+    /// The node's prefix length, read in a shared-latched snapshot while other operations may change it.
     /// It is the node's only if the node's version is unchanged after.
     #[inline(always)]
     pub(in crate::tree) fn racing_prefix_len(self) -> usize {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         // SAFETY: as for `racing_len`.
         let (_, prefix_len) = unsafe { self.node_ptr().load_racing_header() };
         prefix_len
     }
 
-    /// The child at edge `index`, read in place while writers may change
+    /// The child at edge `index`, read in a shared-latched snapshot while other operations may change
     /// it: what a writer stored there, or `None` for an edge none has.
     ///
     /// # Panics
@@ -458,6 +476,9 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// In debug builds, if `index > capacity`.
     #[inline(always)]
     pub(in crate::tree) fn racing_child(self, index: usize) -> Option<Node<K, V, S>> {
+        // SAFETY: snapshot handles name allocated pages of a latched tree.
+        // Hold this page only; version checks connect separate snapshots.
+        let _held = SharedLatch::lock(unsafe { self.node_ptr().latch() });
         debug_assert!(index <= Self::capacity());
         // SAFETY: `index <= capacity`, so the edge slot is in the page, which
         // is allocated while threads share the tree. The slot is aligned for a
@@ -490,14 +511,13 @@ impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
-    /// The length and prefix length of the `Kind` node on this page, and its
-    /// inline keys, read in place while writers may change them. Each field
+    /// The length, prefix length and inline keys of the held `Kind` node. Each field
     /// is read once, and the length is clamped to the capacity, so a search
     /// over the inline keys stays in bounds whatever it read (D14).
     ///
     /// # Safety
     ///
-    /// The page is a `Kind` node's, allocated while threads share the tree.
+    /// The allocated page is held shared until the returned view is no longer used.
     #[inline(always)]
     unsafe fn load_racing_inline_keys<'a, Kind: NodeKind>(
         self,
@@ -519,10 +539,9 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 }
 
-/// A copy of a leaf's entry, its key and value, read in place while writers
-/// may change them. It may be torn, or of slots no entry fills; it is an
-/// entry the leaf held only if the leaf's version is unchanged after the
-/// read.
+/// A shared-latched copy of a leaf slot. It may no longer be the candidate
+/// selected by an earlier snapshot, or may be uninitialized after a removal.
+/// Only version validation permits interpreting the bytes as that entry.
 pub(in crate::tree) struct RacingEntry<K, V> {
     key: MaybeUninit<K>,
     value: MaybeUninit<V>,
@@ -552,21 +571,5 @@ impl<K, V> RacingEntry<K, V> {
                 ManuallyDrop::new(self.value.assume_init()),
             )
         }
-    }
-}
-
-/// A node latched shared until dropped, unwinding included.
-struct SharedLatch<'a>(&'a NodeLatch);
-
-impl<'a> SharedLatch<'a> {
-    fn lock(latch: &'a NodeLatch) -> Self {
-        latch.lock_shared();
-        Self(latch)
-    }
-}
-
-impl Drop for SharedLatch<'_> {
-    fn drop(&mut self) {
-        self.0.unlock_shared();
     }
 }

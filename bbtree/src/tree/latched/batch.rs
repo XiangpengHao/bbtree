@@ -15,14 +15,14 @@
 //!   header, read its version, check the node's again.
 //! - **The leaf**: its inline keys, read at the version the lane read,
 //!   either rule the key out or name its one candidate. A key ruled out is
-//!   absent once that version, unchanged, confirms it, without a latch. A
+//!   absent once that version, unchanged, confirms it, with a short shared hold. A
 //!   candidate's entry the lane fetches before it latches the leaf. For a
 //!   heap key it fetches the key's bytes too, their address read with the
 //!   leaf latched a moment. Then, with the leaf latched shared and still at
 //!   that version, the lane compares the candidate and runs the closure.
 //!   Ties go to the leaf's search, latched.
 //! - **Copies** ([`LatchedTree::get_many_copied`]): a lane that copies a
-//!   `Copy` value copies the candidate's unlatched instead, then checks the
+//!   `Copy` value copies the candidate's in a shared-latched snapshot instead, then checks the
 //!   leaf's version. That works where the leaf settles the key, as for a
 //!   single [`LatchedTree::get_copied`] (`lookup.rs`); such a hit writes
 //!   nothing either.
@@ -57,7 +57,7 @@ struct Restart;
 trait EntryVisit<K, V, S: InlineKeyStrategy<K>> {
     type Output;
 
-    /// Whether a lane copies its candidate's entry unlatched and checks the
+    /// Whether a lane copies its candidate's entry in a shared-latched snapshot and checks the
     /// leaf's version after, for keys ordered by their own bytes, rather
     /// than latch the leaf (`lookup.rs`).
     const COPIES: bool;
@@ -65,7 +65,7 @@ trait EntryVisit<K, V, S: InlineKeyStrategy<K>> {
     /// What the batch returns for the entry `key` and `value`.
     fn visit(&mut self, key: &K, value: &V) -> Self::Output;
 
-    /// What the batch returns for `value`, copied out of the leaf unlatched:
+    /// What the batch returns for `value`, copied out of the leaf in a shared-latched snapshot:
     /// only where [`Self::COPIES`].
     fn copied(&mut self, value: ManuallyDrop<V>) -> Self::Output;
 
@@ -662,7 +662,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Ok(result)
     }
 
-    /// What `visit` makes of the value `read`, read unlatched from `leaf` (from
+    /// What `visit` makes of the value `read`, read in a shared-latched snapshot from `leaf` (from
     /// its head if `at_separator`). That takes the leaf still at `version`,
     /// which it was read at, and the entry read being `key`'s (`lookup.rs`);
     /// `None` for a candidate that isn't. [`Restart`] if the leaf changed, or

@@ -151,15 +151,11 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
 
     /// A copy of the value of `key`'s entry; `None` without one.
     ///
-    /// Mostly without a latch: it copies the value, then checks that no
-    /// thread changed its leaf meanwhile, and looks again, latched, if one
-    /// did. So a lookup writes nothing to the map, and threads that look up
-    /// the same keys share their cache lines. This works for a key the leaf
-    /// tells apart without following a pointer. That is a std integer or
-    /// byte array under [`Auto`], or a std byte string that ends within the
-    /// bytes a leaf keeps of each key, about 8 past what its keys share. Any
-    /// other key's entry it copies with its leaf latched, as [`Self::read`]
-    /// does.
+    /// Reads short shared-latched snapshots and validates the leaf's version
+    /// between them. A changed leaf is searched again with one shared hold.
+    /// Keys requiring pointer dereferences are compared while the leaf is held,
+    /// as in [`Self::read`]. Readers of different leaves can run concurrently
+    /// with a writer; a writer of the same leaf waits for its readers.
     ///
     /// ```
     /// use bbtree::BBTreeMap;

@@ -77,9 +77,9 @@ pub(super) enum Shared {}
 /// Latched for changing.
 pub(super) enum Exclusive {}
 
-/// Not latched: the leaf is read in place at the version it was at once no
-/// thread held it exclusively, which the reader checks after the read
-/// (`lookup.rs`). A miss settled this way writes nothing.
+/// Captures a version without retaining a latch. Each later node snapshot
+/// takes its own short shared hold, and the reader checks the version after
+/// the snapshots (`lookup.rs`).
 pub(super) enum Optimistic {}
 
 impl LatchMode for Shared {
@@ -457,7 +457,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                         // The separator the key matched above may have been
                         // removed since, and its successor be the head now:
                         // the parent's version check may not catch that. An
-                        // unlatched caller checks the head it reads itself.
+                        // snapshot caller checks the head it reads itself.
                         if M::LATCHES && at_separator && !Self::is_head(leaf, key) {
                             continue 'restart;
                         }
