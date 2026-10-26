@@ -281,6 +281,9 @@ class HashMap {
     std::array<Shard *, batch_width> shards;
     std::array<detail::Version, batch_width> versions;
     std::array<typename Table::RacingLookup, batch_width> lookups;
+    // The lanes whose tags don't show their key absent, and what their
+    // entries held, by their place among them.
+    std::array<std::uint8_t, batch_width> matched;
     std::array<detail::RacingCopy<Entry>, batch_width> found;
     std::array<bool, batch_width> hits;
     const typename Table::NoEntry none;
@@ -296,20 +299,30 @@ class HashMap {
     // the keys' waits for memory overlap.
     std::atomic_thread_fence(std::memory_order_acquire);
     for (size_type lane = 0; lane < width; ++lane) lookups[lane].load_tags(shards[lane]->table, hashes[lane]);
-    for (size_type lane = 0; lane < width; ++lane) lookups[lane].load_hash(hashes[lane], none);
-    for (size_type lane = 0; lane < width; ++lane)
-      hits[lane] = lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane], equal_, found[lane]);
+    // Every lane is written and the count moves by whether it matched: a
+    // key its tags show absent stops here, without a branch.
+    size_type matched_count = 0;
+    for (size_type lane = 0; lane < width; ++lane) {
+      matched[matched_count] = static_cast<std::uint8_t>(lane);
+      matched_count += lookups[lane].match(hashes[lane]);
+    }
+    for (size_type index = 0; index < matched_count; ++index) lookups[matched[index]].load_hash(none);
+    for (size_type index = 0; index < matched_count; ++index) {
+      const auto lane = matched[index];
+      hits[index] = lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane], equal_, found[index]);
+    }
+    for (size_type lane = 0; lane < width; ++lane) values[lane].reset();
+    for (size_type index = 0; index < matched_count; ++index) {
+      // A miss copied `NoEntry`, or another key's entry: its value is
+      // dropped, without a branch on whether the key was there.
+      auto &value = values[matched[index]];
+      value.emplace(found[index].assume_read().value);
+      if (!hits[index]) value.reset();
+    }
     std::atomic_thread_fence(std::memory_order_acquire);
     for (size_type lane = 0; lane < width; ++lane) {
-      if (SHOAL_LIKELY(!versions[lane].held() &&
-                        shards[lane]->latch.load_version_relaxed() == versions[lane])) {
-        // A miss copied `NoEntry`: its value is dropped, without a branch
-        // on whether the key was there.
-        values[lane].emplace(found[lane].assume_read().value);
-        if (!hits[lane]) values[lane].reset();
-      } else {
+      if (SHOAL_UNLIKELY(versions[lane].held() || shards[lane]->latch.load_version_relaxed() != versions[lane]))
         values[lane] = get_copied(keys[lane]);
-      }
     }
   }
 

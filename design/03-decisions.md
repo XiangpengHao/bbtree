@@ -370,12 +370,15 @@ tag.
 `get_many_copied` reads 64 keys a call, each step for every key before the
 next, so that their waits for memory overlap without prefetching: every
 shard's version by a relaxed load, then one fence; the eight tags at each
-key's home; the first match before an empty one, and that slot's cached
-hash; the entry copied and keys compared; one fence, then every version
-checked. A key whose shard changed is read again on its own. No step
-branches on whether a key is there: a key with no candidate reads a zeroed
-`NoEntry` in its slot's place, a hit is `candidate & hash equal & keys
-equal`, and a miss's value is written and dropped.
+key's home; which keys go on, those with a match before an empty one or
+with neither; for those, the first match's cached hash; the entry copied
+and keys compared; one fence, then every version checked. A key whose
+shard changed is read again on its own. No step branches on whether a key
+is there: the keys that go on are listed by writing every key at the
+list's end and moving the end by whether it goes on; a key with eight full
+tags and no match reads a zeroed `NoEntry` in its slot's place; a hit is
+`candidate & hash equal & keys equal`, and a miss's value is written and
+dropped.
 
 - **Why one fence:** an acquire load per key held each key up behind the
   previous key's wait for memory (8.5 to 10.3 M/s on one thread).
@@ -384,6 +387,16 @@ equal`, and a miss's value is written and dropped.
   away the following keys' loads: 78 cycles a key against Boost's 40.
   Branch-free, 46. Merging steps instead saved instructions and cost time
   (27.4 to 19.8 M/s), for the same reason.
+- **Why only the keys that may be there go on:** a key its tags show
+  absent cost what a hit did, read `NoEntry`, copied it and compared keys,
+  where Boost's miss stops at its group's metadata: 133 instructions and
+  74 cycles a lookup against Boost's 56 and 48, at 10% hits (10M keys, one
+  thread). Listed, 112 and 55 at 10% hits; 127 and 76 at 50%, from 131 and
+  97. That cycles fell 21 at 50% hits, instructions only 4, isn't
+  explained yet. At 90% hits, where nearly every key goes on, the list
+  costs 14 instructions a lookup (129 to 143) and still saves 7 cycles
+  (87 to 80); in cache (100K keys) it costs 11% at 90% hits (161 to 143
+  M/s), nothing at 50%, and gains 14% at 10%.
 - **Why the slot's address comes before the select:** written as
   `candidate ? slot : NoEntry`, clang compiled the select to a branch,
   the slot's address being work in one of its arms (`__builtin_unpredictable`

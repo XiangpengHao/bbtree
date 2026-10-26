@@ -108,15 +108,18 @@ contents before the pointer that publishes it.
 `get_many_copied` reads 64 keys a call in steps, each step for every key
 before the next, so that the keys' waits for memory overlap, without
 prefetching: every shard's version by a relaxed load, then one fence; the
-eight tags at each key's home; the first match before an empty one, and
-that slot's cached hash; the entry copied and keys compared; one fence,
-then every version checked, a version read while a writer held the shard
-turning the key away. A key whose shard changed is read again on its own.
+eight tags at each key's home; which keys go on, those whose tags hold a
+match before an empty one, or neither; for those, the first match's
+cached hash; the entry copied and keys compared; one fence, then every
+version checked, a version read while a writer held the shard turning the
+key away. A key whose shard changed is read again on its own.
 
-No step branches on whether a key is there. A key with no candidate reads
-its hash from, and copies, a zeroed entry (`NoEntry`) in its place; a hit
-is `candidate & hash equal & keys equal`; a miss's value is written and
-dropped. The compiler must agree: the slot's address is computed before
+No step branches on whether a key is there. The keys that go on are
+listed by writing every key at the list's end and moving the end by
+whether it goes on, so a key its tags show absent stops after one line,
+as a Boost miss does. A listed key with no candidate reads its hash from,
+and copies, a zeroed entry (`NoEntry`) in its place; a hit is `candidate &
+hash equal & keys equal`; a miss's value is written and dropped. The compiler must agree: the slot's address is computed before
 the select between it and `NoEntry`, which clang otherwise makes a branch.
 Only a key whose first match was another's, or whose eight tags held
 neither its own nor an empty one, takes a branch, rarely.
@@ -137,6 +140,7 @@ different occasions; each ran next to the one before it.
 | inline slots (D25, D29) | 37.5 | 373.0 | 260.4 |
 | inline, eight tags a word, no branch on the outcome (D27, D28) | 44.6 | 469.7 | 306.1 |
 | the slot's address before the select (D28) | 45.5 | 474.4 | |
+| only the keys that may be there go on (D28) | 54.5 | 501.9 | |
 | Boost `concurrent_flat_map` (bulk `cvisit`) | 40.2 | 427.1 | |
 
 Each step answered what the one before it measured:
@@ -158,6 +162,16 @@ Each step answered what the one before it measured:
 - **Inline slots (D25).** The descriptor, directory and page hops exist
   for stable references, which the shared map doesn't give: entries in
   the slots removed them.
+- **Only the keys that may be there (D28).** At 10% hits Boost led by
+  1.5× (870 against 585 M/s, 14 threads): a Boost miss stops at its
+  group's metadata, where a shoal miss ran every step a hit did. Counted
+  on one thread, 133 instructions and 74 cycles a lookup against Boost's
+  56 and 48. Listing the keys that go on: 112 and 55 at 10% hits, 811
+  against Boost's 830 M/s at 14 threads; 127 and 76 at 50%, from 131 and
+  97, 502 against 399. Why cycles fell five times as much as
+  instructions at 50% hits is open. With nearly every key going on (90%
+  hits) the list costs 14 instructions a lookup and saves 7 cycles; in
+  cache it costs 11% there.
 - **No branch on the outcome (D28).** With every key present the same code
   ran at Boost's speed (23 cycles a key cached, 176 against 174 M/s); with
   half absent, 78 cycles against Boost's 40. The outcome branches
