@@ -144,6 +144,18 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
         alloc: &impl PageAllocator,
         length: &mut usize,
     ) -> (K, V) {
+        // A leaf that needs no fixing keeps the path to its successor. Its
+        // next key shifts into this index; past its end, the next slot leads
+        // to the separator on its right, or detaches past the tree's last.
+        if let Node::Leaf(leaf) = self.node()
+            && (leaf.keeps_its_minimum() || self.is_at_root())
+        {
+            let index = self.index();
+            let entry = leaf.remove(index);
+            *length -= 1;
+            self.go_to_entry_at_slot(index + 1);
+            return entry;
+        }
         let (entry, mut changed) = self.take_out(alloc, length);
         // The way down to the next entry: as the node stack leads above the
         // nodes the fixing changed, and as the fixing tracked it from there.
