@@ -38,54 +38,66 @@ Millions of lookups per second:
 
 | tree maps (ordered) | M ops/s |
 |---|--:|
-| shoal `TreeMap`, bulk (`get_many_copied`, 64 keys a call) | **152.4** |
-| shoal `TreeMap` (`get_copied`) | **83.9** |
-| folly `ConcurrentSkipList` | 8.5 |
-| oneTBB `tbb::concurrent_map` (skip list) | 7.6 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
-| `std::map` + `std::shared_mutex` | 1.4 |
+| shoal `TreeMap`, bulk (`get_many_copied`, 64 keys a call) | **147.3** |
+| shoal `TreeMap` (`get_copied`) | 78.8 |
+| oneTBB `tbb::concurrent_map` (skip list) | 8.2 |
+| folly `ConcurrentSkipList` | 7.3 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 1.9 |
+| `std::map` + `std::shared_mutex` | 1.3 |
 
 | hash maps (unordered) | M ops/s |
 |---|--:|
-| shoal `HashMap`, bulk (`get_many_copied`, 64 keys a call) | **471.0** |
-| shoal `HashMap` (`get_copied`) | **310.2** |
-| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 402.6 |
-| oneTBB `tbb::concurrent_hash_map` | 143.4 |
-| folly `ConcurrentHashMap` | 121.7 |
-| oneTBB `tbb::concurrent_unordered_map` | 46.3 |
-| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 8.1 |
-| `std::unordered_map` + `std::shared_mutex` | 4.5 |
+| shoal `HashMap`, bulk (`get_many_copied`, 64 keys a call) | **551.2** |
+| shoal `HashMap` (`get_copied`) | 300.3 |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 396.5 |
+| oneTBB `tbb::concurrent_hash_map` | 130.2 |
+| folly `ConcurrentHashMap` | 125.0 |
+| oneTBB `tbb::concurrent_unordered_map` | 57.8 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 7.2 |
+| `std::unordered_map` + `std::shared_mutex` | 4.0 |
 
-shoal leads both heats: its tree map by 10–18×, its hash map by 17% over
-Boost's in bulk (5–17% over four runs of the same binary) and 2× over the
-rest one key at a time. Readers of both shoal maps write nothing shared: they check a version after reading
+shoal leads both heats: its tree map by 18× (147 against oneTBB's 8.2),
+its hash map in bulk by 39% over Boost's (551 against 397), and one key
+at a time 2.3× over every map but Boost's bulk read. Readers of both shoal
+maps write nothing shared: they check a version after reading
 ([design/05-hash-maps.md](design/05-hash-maps.md)). The UUID hash declares `is_avalanching`, which
 both shoal and Boost read as leave to use it unmixed.
 
 On one thread nothing contends, and a locked map's lock costs it little:
-shoal's hash map in bulk runs 5% ahead of Boost's (45.6 against 43.5
-M/s), one key at a time ahead of every other (25.1), and its tree map
-leads Abseil's B-tree 5.3× (14.2 against 2.7):
+shoal's hash map in bulk runs 26% ahead of Boost's (55.5 against 43.9
+M/s), one key at a time ahead of every other (26.8), and its tree map
+leads Abseil's B-tree 5.3× (13.8 against 2.6):
 
 ![shoal against C++ maps: lookups on one thread on a MacBook Pro M4 Pro](assets/readme-race-1-thread.svg)
 
-With every key in cache (100K keys), shoal's hash map in bulk leads
-Boost's too: 120 against 110 M/s, 164 against 158 with 90% found
+With every key in cache (100K keys, one thread), what a lookup does
+decides: shoal's hash map in bulk leads Boost's at 50% hits (122 against
+105 M/s) and trails at 90% (143 against 156) and 10% (177 against 276)
 ([design/06-race.md](design/06-race.md)).
 
 With 90% of the lookups finding their key, every hit reads its slot:
-shoal's hash map in bulk leads Boost's by 38% (443 against 321 M/s), and
-its tree map holds its lead (171 against folly's 8.6):
+shoal's hash map in bulk leads Boost's by 62% (510 against 315 M/s), and
+its tree map holds its lead (162 against folly's 8.2):
 
 ![shoal against C++ concurrent maps: lookups at 14 threads, 90% present, on a MacBook Pro M4 Pro](assets/readme-race-90-hit.svg)
+
+With 90% of the lookups missing, Boost's hash map leads by 15% (927
+against 808 M/s). Both stop a miss at its metadata, shoal at its eight
+tags, but a shoal miss ends only at an empty tag, which one in eleven
+doesn't find among its eight
+([design/06-race.md](design/06-race.md)). The tree map leads its heat 24×
+(196 against 8.1):
+
+![shoal against C++ concurrent maps: lookups at 14 threads, 10% present, on a MacBook Pro M4 Pro](assets/readme-race-10-hit.svg)
 
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first
 65,536 lookups right before it races. The bench is
 [bench/race/race_bench.cpp](bench/race/race_bench.cpp); the runs' output is
 in [bench/race/m4-pro-14-threads.csv](bench/race/m4-pro-14-threads.csv),
-[m4-pro-1-thread.csv](bench/race/m4-pro-1-thread.csv) and
-[m4-pro-14-threads-90-hit.csv](bench/race/m4-pro-14-threads-90-hit.csv),
+[m4-pro-1-thread.csv](bench/race/m4-pro-1-thread.csv),
+[m4-pro-14-threads-90-hit.csv](bench/race/m4-pro-14-threads-90-hit.csv) and
+[m4-pro-14-threads-10-hit.csv](bench/race/m4-pro-14-threads-10-hit.csv),
 one run each. To build it (it needs oneTBB, folly, Abseil and Boost, e.g.
 from Homebrew):
 
@@ -106,6 +118,10 @@ all), and the percentage of lookups that find their key:
 
 ```bash
 ./build-race/race_bench 10000000 14 2 "" 90 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-90-hit.svg
+```
+
+```bash
+./build-race/race_bench 10000000 14 2 "" 10 | python3 bench/race/race_svg.py "MacBook Pro M4 Pro" > assets/readme-race-10-hit.svg
 ```
 
 ## The tree map against the Rust bbtree
