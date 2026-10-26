@@ -27,6 +27,7 @@ mod overflow;
 mod range;
 mod record;
 mod store;
+pub mod wal;
 
 pub use range::RangeCopies;
 pub use store::{BBTreeStore, DefaultConfig, InsertError};

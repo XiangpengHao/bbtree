@@ -59,5 +59,3 @@ We should be gracefully shutting down, and write everything to disk. During reco
 Inner and leaf nodes are still pinned to memory, so we can still do the normal operations; only heap pages are written to disk.
 
 We will have a buffer management. which swaps the cold pages to disk, and bring hot pages to memory.
-
-
