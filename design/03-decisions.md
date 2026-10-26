@@ -443,3 +443,18 @@ two heats, tree maps and hash maps. Each map gets its best use, Boost's
 bulk `cvisit` included. The competitors are dependencies, so the race
 builds only with `-DSHOAL_RACE_BENCH=ON`. Many-key reads are called
 "bulk", as Boost's API calls them.
+
+**D33. A root page's size is a multiple of its alignment.** (2026-10-26)
+The root page is room for the larger node kind, then the shared prefix
+(OG-D50). That sum is not a multiple of the page alignment: a `uint64_t`
+map's root is 1089 bytes, aligned to 1024. Rust's `Layout` allows a size
+that is not a multiple of its alignment. C++17's aligned `operator new`
+does not: the call is undefined unless the size is a multiple of the
+alignment. `FreshPage`'s root layout rounds the size up
+(`NodeLayoutMath::next_multiple_of`); the prefix stays at
+`root_area_offset`, and the spare bytes are padding. Deallocation uses
+that same layout.
+
+- **Why not pad `SharedPrefix`:** its 65 bytes are the length and the 64
+  prefix bytes, and a latched descent reads the length at a fixed offset.
+  Padding the page, not the value, leaves that layout alone.
