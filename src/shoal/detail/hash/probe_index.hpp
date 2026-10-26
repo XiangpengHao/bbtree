@@ -62,6 +62,11 @@ class HashProbeIndex {
   static std::uint64_t descriptor_identifier(std::uint64_t descriptor) noexcept {
     return descriptor & identifier_mask();
   }
+  /// Whether a descriptor holds the deleted encoding, which a pending claim
+  /// shares.
+  static bool descriptor_deleted(std::uint64_t descriptor) noexcept {
+    return (descriptor & identifier_mask()) == identifier_mask();
+  }
   std::uint64_t identifier(std::size_t slot) const noexcept {
     return descriptors_[slot] & identifier_mask();
   }
@@ -88,22 +93,30 @@ class HashProbeIndex {
   }
   /// The tags step of `probe` for many keys, every key's before any
   /// descriptor is read (D28), so that their waits for memory overlap: each
-  /// row's slot moves to the first that is empty or whose tag is its hash's.
-  /// `hash_of(row)` is a row's hash, `slot_of(row)` a reference to its slot.
-  /// `confirm` is the descriptors step, a row at a time in the caller's next
-  /// loop over them.
-  template <class Row, class HashOf, class SlotOf>
-  void probe_tags(const Row *rows, std::size_t count, const HashOf &hash_of, const SlotOf &slot_of) const noexcept {
+  /// row's slot moves to the first that is empty or whose tag is its hash's,
+  /// and `empty_of(row)` says which, while that tag is in cache. `hash_of(row)`
+  /// is a row's hash, `slot_of(row)` a reference to its slot. `confirm` is
+  /// the descriptors step, a row at a time in the caller's next loop over
+  /// them, by which time a batch's tags have left the nearest cache.
+  template <class Row, class HashOf, class SlotOf, class EmptyOf>
+  void probe_tags(const Row *rows, std::size_t count, const HashOf &hash_of, const SlotOf &slot_of,
+                  const EmptyOf &empty_of) const noexcept {
     for (std::size_t i = 0; i < count; ++i) {
       auto &slot = slot_of(rows[i]);
-      slot = empty_or_wanted(wanted_tag(hash_of(rows[i])), static_cast<std::size_t>(slot));
+      const auto found = empty_or_wanted(wanted_tag(hash_of(rows[i])), static_cast<std::size_t>(slot));
+      slot = found;
+      empty_of(rows[i]) = tags()[found] == empty_tag;
     }
   }
-  /// `probe`'s answer from a slot that is empty or whose tag is `hash`'s:
-  /// that slot, unless it holds another fingerprint, one tag match in a
-  /// hundred or so; then on from it.
-  std::size_t confirm(std::uint64_t hash, std::size_t slot) const noexcept {
-    return tag(slot) == empty_tag || fingerprint(slot) == hash >> 48 ? slot : probe(hash, slot);
+  /// `probe`'s answer from where `probe_tags` stopped: that slot if `empty`,
+  /// with no load, or if it holds `hash`'s fingerprint, with its descriptor's
+  /// alone; on from it past another, one tag match in a hundred or so,
+  /// updating `empty`.
+  std::size_t confirm(std::uint64_t hash, std::size_t slot, bool &empty) const noexcept {
+    if (empty || fingerprint(slot) == hash >> 48) return slot;
+    slot = probe(hash, next(slot));
+    empty = tag(slot) == empty_tag;
+    return slot;
   }
   /// `probe` from `hash`'s home, for one key at a time: the home tag first,
   /// alone, by a branch (D27). Predicted, the branch lets the home

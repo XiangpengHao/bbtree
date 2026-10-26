@@ -51,7 +51,9 @@ Descriptors stay the truth; every write of one writes its tag
 
 A batch probes in steps (D28): every key's tags, then, in the loop that
 reads candidates, each key's descriptor where its tag matched, so that the
-keys' waits for tags overlap, then their waits for descriptors.
+keys' waits for tags overlap, then their waits for descriptors. The tags
+step notes which keys stopped at an empty tag, so that the second loads
+nothing for them, nor the tag again.
 
 `bench/hash_bench.cpp` times it, at 0.69 load, one pass, one run each (M4
 Pro, ns a key): the walk a tag at a time it replaced (`eb7fcdc`), word
@@ -341,6 +343,38 @@ took 361–390 ms at one thread, against the pointer table's 294–313; in
 steps, 265–306. At eight threads, each thread's index stays small and the
 three took 45–59 ms alike. In the same pass on the cells above, steps cost
 at most a few percent (`medium_groups` 66.6–68.6 against 64.3–67.9 ms).
+
+`medium_groups` at one thread, every row a hit in an index that stays in
+L2, was the cell left behind: 68.2–70.4 ms against the pointer table's
+57.7–64.7. A profile with line tables (`-gline-tables-only`, 60 runs)
+put the whole gap in the probe: 2,765 samples against 2,321, with
+`confirm`'s tag load alone at 9% of the run. A step over 2048 rows
+touches as many tag lines, 128 KB, the M4's whole L1, so each later loop
+went to L2 again: a hit loaded its tag in the tags step, its tag and
+descriptor in the descriptors step, and its descriptor once more for its
+handle, four loads where the pointer table makes one. Noting empty stops
+in the tags step and taking handles in the descriptors step leaves two,
+the tag word and the descriptor: 62.7–65.3 ms, in the same pass as
+`main`'s 68.2–70.4, while `large_groups` (21.5–22.8 against 20.6–22.3)
+and 5M groups (122–137 against 125–156) hold. Reading descriptors alone
+in the second step, empty slots' included, took `medium_groups` to
+61.0–63.4 but cost new groups out of cache, where an empty slot's
+descriptor is in memory and its tag in L2: 5M groups took 134–158 ms.
+
+What is left is not the tag load. Walking the descriptors alone, in one
+step, wherever the descriptors fit 4 MiB (`medium_groups`' index, not the
+others' once grown), took `medium_groups` 58.4–65.1 ms against
+60.7–65.1 for steps, the pointer table 55.9–60.7, in one pass; and as an
+index grew through that size, `large_groups` lost (21.5–23.5 against
+20.0–21.1 ms) and so did the 2M-group hits (319–399 against 293–317).
+
+On a quiet machine, with tight runs, the steps as they are already hold
+`medium_groups` level: 61.9–62.8 ms at one thread against the pointer
+table's 60.6–62.6. A profile of that pass (80 runs each) finds 4% more
+samples under the aggregate's sink, all in the batch's own passes over its
+rows, the key compare equal (495 samples against 491). Folding the first
+round's tags step into the loop that takes each row's hash, one pass
+fewer, took 61.4–63.6 ms: no gain, and is not done.
 
 With the home tag tested first in every probe instead, in a pass of its
 own on a busier machine, `large_groups` at one thread took 23.8–24.8 ms

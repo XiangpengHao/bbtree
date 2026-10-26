@@ -56,6 +56,7 @@ class HashLookupBatch {
       std::array<std::size_t, 128> local_slots;
       auto* slots = positions ? positions : local_slots.data();
       std::array<std::uint8_t, 128> pending, candidates;
+      std::array<bool, 128> empty;
       std::array<const Entry*, 128> payloads;
       const auto width = count < hashes.size() ? count : hashes.size();
       if (index.capacity() == 0) {
@@ -72,12 +73,13 @@ class HashLookupBatch {
           // the payloads (D28): an absent key reads no descriptor.
           index.probe_tags(
               pending.data(), remaining, [&](std::uint8_t row) { return hashes[row]; },
-              [&](std::uint8_t row) -> std::size_t & { return slots[row]; });
+              [&](std::uint8_t row) -> std::size_t & { return slots[row]; },
+              [&](std::uint8_t row) -> bool & { return empty[row]; });
           std::size_t candidate_count = 0;
           for (std::size_t lane = 0; lane < remaining; ++lane) {
             const auto row = pending[lane];
-            const auto slot = slots[row] = index.confirm(hashes[row], slots[row]);
-            if (index.tag(slot) == Index::empty_tag)
+            const auto slot = slots[row] = index.confirm(hashes[row], slots[row], empty[row]);
+            if (empty[row])
               values[row] = nullptr;
             else {
               candidates[candidate_count] = row;
