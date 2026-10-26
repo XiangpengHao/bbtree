@@ -394,11 +394,17 @@ dropped.
 
 The owned map's batch and `HashIndex` probe in steps too
 (`HashProbeIndex::probe_tags`, then `confirm`): every key's tags, then each
-key's descriptor in the loop that reads candidates. `HashIndex` claims in
-that loop, so a key whose empty slot a key before it claimed this round
-probes on from there, rather than reach `compare` with another
-fingerprint. In one step, a hit out of cache read its descriptor only once
-its tags came, and the batch overlapped too few keys to hide that.
+key's descriptor in the loop that reads candidates. In one step, a hit out
+of cache read its descriptor only once its tags came, and the batch
+overlapped too few keys to hide that. The tags step notes whether each key
+stopped at an empty tag, while that tag is in cache: a batch's tags fill
+the nearest cache by the next loop, so the descriptors step then loads one
+thing a key, the descriptor of a match, or nothing for an empty slot.
+`HashIndex` claims in that loop: there an empty slot's tag is read again,
+since a key before it may have claimed it this round, and past such a
+claim of another fingerprint the key probes on rather than reach
+`compare`. A candidate takes its handle then, while its descriptor is in
+cache, but for a claim of the round, read after the commit.
 
 - **Why one fence:** an acquire load per key held each key up behind the
   previous key's wait for memory (8.5 to 10.3 M/s on one thread).

@@ -44,6 +44,7 @@ class HashIndex {
    private:
     friend class HashIndex;
     std::uint16_t fingerprints_[2048];
+    bool empty_[2048];
     position_type slots_[2048];
     row_type pending_[2048], candidates_[2048], rejected_[2048], new_rows_[2048];
     Handle new_handles_[2048];
@@ -125,8 +126,10 @@ class HashIndex {
         for (std::size_t i = 0; i < pending; ++i) {
           const auto row = state.pending_[i];
           auto &slot = working_positions[row - base];
-          slot = index_.confirm(std::uint64_t{state.fingerprints_[row - base]} << 48, static_cast<std::size_t>(slot));
-          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
+          auto &empty = state.empty_[row - base];
+          slot = index_.confirm(std::uint64_t{state.fingerprints_[row - base]} << 48, static_cast<std::size_t>(slot),
+                                empty);
+          if (empty) {
             results[row] = Handle{};
             if (positions) positions[row] = missing_position();
           } else {
@@ -169,19 +172,38 @@ class HashIndex {
         std::size_t candidates = 0;
         for (std::size_t i = 0; i < pending; ++i) {
           const auto row = state.pending_[i];
-          auto &slot = working_positions[row - base];
           const auto fingerprint = state.fingerprints_[row - base];
-          // Also past a claim of this round, by a row before this one, on the
-          // empty slot this one found: of its fingerprint it is a candidate,
-          // past another it probes on rather than reach `compare`.
-          slot = index_.confirm(std::uint64_t{fingerprint} << 48, static_cast<std::size_t>(slot));
-          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
-            index_.claim_empty(slot, std::uint64_t{fingerprint} << 48);
-            claims.add(row);
-          } else
-            state.candidates_[candidates++] = row;
+          const auto hash = std::uint64_t{fingerprint} << 48;
+          auto at = static_cast<std::size_t>(working_positions[row - base]);
+          bool empty = state.empty_[row - base];
+          // The descriptors step loads one thing a row: at an empty slot its
+          // tag again, which a claim of this round by a row before this one
+          // may have filled, and at a match the descriptor alone. Past
+          // another fingerprint, such a claim's included, it probes on rather
+          // than reach `compare`.
+          for (;;) {
+            if (empty && index_.tag(at) == ProbeIndex::empty_tag) {
+              index_.claim_empty(at, hash);
+              claims.add(row);
+              break;
+            }
+            const auto descriptor = index_.descriptor(at);
+            if (descriptor >> 48 == fingerprint) {
+              // Its handle now, while the descriptor is in cache; a claim of
+              // this round has none until its commit.
+              results[row] = ProbeIndex::descriptor_deleted(descriptor)
+                                 ? Handle{}
+                                 : decode(ProbeIndex::descriptor_identifier(descriptor));
+              state.candidates_[candidates++] = row;
+              break;
+            }
+            at = index_.probe(hash, index_.next(at));
+            empty = index_.tag(at) == ProbeIndex::empty_tag;
+          }
+          working_positions[row - base] = at;
         }
-        if (claims.count()) {
+        const bool claimed = claims.count() != 0;
+        if (claimed) {
           create(state.new_rows_, claims.count(), state.new_handles_);
           validate_handles(state.new_handles_, claims.count());
           for (std::size_t i = 0; i < claims.count(); ++i) {
@@ -191,10 +213,9 @@ class HashIndex {
           }
           claims.published();
         }
-        for (std::size_t i = 0; i < candidates; ++i) {
+        for (std::size_t i = 0; claimed && i < candidates; ++i) {
           const auto row = state.candidates_[i];
-          const auto slot = working_positions[row - base];
-          results[row] = decode(index_.identifier(slot));
+          if (results[row] == Handle{}) results[row] = decode(index_.identifier(working_positions[row - base]));
         }
         pending = reject_candidates(state, working_positions, base, candidates, compare, results);
       }
@@ -316,7 +337,8 @@ class HashIndex {
     index_.probe_tags(
         state.pending_, pending,
         [&](row_type row) { return std::uint64_t{state.fingerprints_[row - base]} << 48; },
-        [&](row_type row) -> position_type & { return positions[row - base]; });
+        [&](row_type row) -> position_type & { return positions[row - base]; },
+        [&](row_type row) -> bool & { return state.empty_[row - base]; });
   }
   template <class HashAt>
   void initialize(ProbeState &state, position_type *positions, std::size_t base, std::size_t width,

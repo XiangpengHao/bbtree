@@ -578,8 +578,8 @@ TEST(streamed_reserve_allocation_failure_preserves_positions) {
   for (unsigned row = 0; row < 2; ++row) CHECK_EQ(index.handle_at(positions[row]), results[row]);
 }
 
-TEST(probe_scratch_keeps_only_fingerprints_and_one_position_array) {
-  CHECK_EQ(sizeof(Index::ProbeState), 69632u);
+TEST(probe_scratch_keeps_fingerprints_stops_and_one_position_array) {
+  CHECK_EQ(sizeof(Index::ProbeState), 71680u);
 }
 
 TEST_MAIN()
