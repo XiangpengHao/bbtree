@@ -102,8 +102,17 @@ struct Bits {
 };
 
 /// Byte order: every target the headers build for is little-endian but
-/// big-endian GCC targets, which swap nothing.
+/// big-endian GCC targets, which swap the other way.
 struct ByteOrder {
+  static inline std::uint64_t little_endian64(std::uint64_t word) noexcept {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return __builtin_bswap64(word);
+#else
+    return word;
+#endif
+  }
+
+
   static inline std::uint64_t big_endian64(std::uint64_t word) noexcept {
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     return word;

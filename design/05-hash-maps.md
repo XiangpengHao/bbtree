@@ -273,6 +273,38 @@ owned elsewhere: it takes cached hashes unchanged, stores row handles
 directly, and does key matching and row creation in bulk, through
 callbacks. It shares the owned map's descriptor storage.
 
+It probes as the owned map does (D27): tags first, eight at a time as
+one word, reading a descriptor only where a tag matches, so a key that
+is absent reads none. A new entry writes its tag once: its claim writes
+the occupied tag and its commit keeps it. The block comes zeroed, and
+zero is an empty descriptor and an empty tag, so growth writes only the
+entries it places, and `reset` zeroes the block whole.
+
+Measured in DuckDB (`1641475ef1d`), with the `GroupedAggregateHashTable`
+pointer table swapped for this index and row storage, comparison,
+aggregates and merge unchanged. Both builds are configured alike (`cmake -G
+Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=1`), on an M4 Pro, one
+process a cell, giving the runner's five timed runs in ms. The descriptor
+walk is this index before tags first (`eb7fcdc`), timed in a later pass
+against its own stock runs, which matched the first.
+
+| `groupby-parallel/` benchmark | threads | pointer table | `HashIndex` | descriptor walk |
+|---|---:|---:|---:|---:|
+| `large_groups`: 1M rows, 1M groups | 1 | 26.8–29.2 | 18.0–21.8 | 29.8–32.7 |
+| `large_groups` | 8 | 6.0–7.4 | 5.4–6.3 | 6.9–7.8 |
+| `many_groups_large_values_small`: 5M rows, 5M groups | 1 | 175–179 | 96–105 | 205–293 |
+| `medium_groups`: 10M rows, 100k groups | 1 | 58.5–68.6 | 63.8–65.3 | 56.6–64.4 |
+| `medium_groups` | 8 | 20.6–21.8 | 20.4–23.8 | 22.2–23.7 |
+| `tiny_groups`: perfect hash, no index | 1 | 29.3–34.8 | 29.8–30.6 | 29.4–30.2 |
+
+Where every row is a new group, the tags win, in an index too large to
+stay in cache: a miss reads no descriptor. Where rows are lookups in an
+index that stays in cache (`medium_groups`, one thread), the pointer table
+settles at 56–61 ms after its first run and the descriptor walk matches
+it, while the tags lose about a tenth: a hit loads its tag word before
+its descriptor, where the descriptor walk loads one word that holds the
+fingerprint. `tiny_groups` never reaches the index and is the control.
+
 ## Verification
 
 `hash_map_test` checks mixed operations against `std::unordered_map`,

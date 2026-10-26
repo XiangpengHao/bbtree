@@ -141,12 +141,13 @@ class HashTable {
   Iterator<true> begin() const noexcept { return {&entries_, entries_.next(0)}; }
   Iterator<true> end() const noexcept { return {&entries_, 0}; }
 
-  // No user hashing/equality: prove descriptor ownership, fingerprint and
+  // No user hashing/equality: prove descriptor ownership, fingerprint, tag and
   // reachability from each cached hash, with exactly one descriptor per entry.
   void check_invariants() const noexcept {
     SHOAL_CHECK(index_.size() == entries_.size());
     std::size_t count = 0;
     for (std::size_t slot = 0; slot < index_.capacity(); ++slot) {
+      SHOAL_CHECK(index_.tag_agrees(slot));
       if (!index_.occupied(slot)) continue;
       const auto identifier = index_.identifier(slot);
       SHOAL_CHECK(entries_.live(identifier));

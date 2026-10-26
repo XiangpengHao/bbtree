@@ -360,11 +360,14 @@ with the shard held shared.
 Both tables keep a byte a slot, in front of what they probe: empty (and,
 in the paged table, deleted), or occupied with the hash's top seven bits.
 A lookup reads a descriptor or slot only where the tag matches, so a miss
-reads none. The inline table reads its tags eight at a time as one word
-(the first seven cloned past the last, so that a group never wraps), and
-a zero-byte test finds the first match and the first empty one. In the
-paged table descriptors stay the truth and every write of one writes its
-tag.
+reads none; `HashIndex` probes the paged table's index the same way. Both
+read their tags eight at a time as one word (`TagGroup`), where a
+zero-byte test finds the first match and the first empty one. The inline
+table clones its first seven tags past the last, so that a group never
+wraps; the paged table reads the last seven before its end a byte at a
+time instead. In the paged table descriptors stay the truth and every
+write of one writes its tag, but for a claim's commit: its claim already
+wrote the entry's tag, and the fingerprint does not change.
 
 **D28. Bulk reads go in steps, and branch on no outcome.** (2026-10-26)
 `get_many_copied` reads 64 keys a call, each step for every key before the

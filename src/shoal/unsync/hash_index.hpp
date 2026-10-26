@@ -117,13 +117,17 @@ class HashIndex {
           const auto row = state.pending_[i];
           auto &slot = working_positions[row - base];
           const auto fingerprint = state.fingerprints_[row - base];
-          while (capacity() && index_.descriptor(slot) && index_.fingerprint(slot) != fingerprint)
-            slot = index_.next(slot);
-          if (!capacity() || !index_.descriptor(slot)) {
+          if (!capacity()) {
+            results[row] = Handle{};
+            if (positions) positions[row] = missing_position();
+            continue;
+          }
+          slot = index_.probe(std::uint64_t{fingerprint} << 48, static_cast<std::size_t>(slot));
+          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
             results[row] = Handle{};
             if (positions) positions[row] = missing_position();
           } else {
-            results[row] = decode(index_.identifier(slot));
+            results[row] = decode(index_.identifier(static_cast<std::size_t>(slot)));
             state.candidates_[candidates++] = row;
           }
         }
@@ -163,9 +167,8 @@ class HashIndex {
           const auto row = state.pending_[i];
           auto &slot = working_positions[row - base];
           const auto fingerprint = state.fingerprints_[row - base];
-          while (index_.descriptor(slot) && index_.fingerprint(slot) != fingerprint)
-            slot = index_.next(slot);
-          if (!index_.descriptor(slot)) {
+          slot = index_.probe(std::uint64_t{fingerprint} << 48, static_cast<std::size_t>(slot));
+          if (index_.tag(static_cast<std::size_t>(slot)) == ProbeIndex::empty_tag) {
             index_.claim_empty(slot, std::uint64_t{fingerprint} << 48);
             claims.add(row);
           } else
@@ -196,8 +199,10 @@ class HashIndex {
   void check_invariants(StoredHash stored_hash) const {
     std::size_t occupied = 0;
     for (std::size_t slot = 0; slot < capacity(); ++slot) {
+      if (index_.descriptor(slot) && !index_.occupied(slot))
+        throw std::logic_error("HashIndex unpublished claim");
+      if (!index_.tag_agrees(slot)) throw std::logic_error("HashIndex tag mismatch");
       if (!index_.descriptor(slot)) continue;
-      if (!index_.occupied(slot)) throw std::logic_error("HashIndex unpublished claim");
       ++occupied;
       const auto hash = stored_hash(decode(index_.identifier(slot)));
       if (index_.fingerprint(slot) != hash >> 48)

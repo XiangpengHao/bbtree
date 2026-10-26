@@ -73,10 +73,7 @@ class HashLookupBatch {
           std::size_t candidate_count = 0;
           for (std::size_t lane = 0; lane < remaining; ++lane) {
             const auto row = pending[lane];
-            auto slot = index.probe(hashes[row], slots[row]);
-            while (index.tag(slot) != Index::empty_tag &&
-                   !Index::descriptor_matches(index.descriptor(slot), hashes[row]))
-              slot = index.probe(hashes[row], index.next(slot));
+            const auto slot = index.probe(hashes[row], slots[row]);
             slots[row] = slot;
             if (index.tag(slot) == Index::empty_tag)
               values[row] = nullptr;
