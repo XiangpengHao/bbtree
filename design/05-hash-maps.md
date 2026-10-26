@@ -361,6 +361,13 @@ in the second step, empty slots' included, took `medium_groups` to
 61.0–63.4 but cost new groups out of cache, where an empty slot's
 descriptor is in memory and its tag in L2: 5M groups took 134–158 ms.
 
+What is left is not the tag load. Walking the descriptors alone, in one
+step, wherever the descriptors fit 4 MiB (`medium_groups`' index, not the
+others' once grown), took `medium_groups` 58.4–65.1 ms against
+60.7–65.1 for steps, the pointer table 55.9–60.7, in one pass; and as an
+index grew through that size, `large_groups` lost (21.5–23.5 against
+20.0–21.1 ms) and so did the 2M-group hits (319–399 against 293–317).
+
 With the home tag tested first in every probe instead, in a pass of its
 own on a busier machine, `large_groups` at one thread took 23.8–24.8 ms
 against 19.6–21.6 for groups only and 29.8–32.4 for the pointer table,
