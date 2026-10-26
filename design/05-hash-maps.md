@@ -368,6 +368,14 @@ others' once grown), took `medium_groups` 58.4–65.1 ms against
 index grew through that size, `large_groups` lost (21.5–23.5 against
 20.0–21.1 ms) and so did the 2M-group hits (319–399 against 293–317).
 
+On a quiet machine, with tight runs, the steps as they are already hold
+`medium_groups` level: 61.9–62.8 ms at one thread against the pointer
+table's 60.6–62.6. A profile of that pass (80 runs each) finds 4% more
+samples under the aggregate's sink, all in the batch's own passes over its
+rows, the key compare equal (495 samples against 491). Folding the first
+round's tags step into the loop that takes each row's hash, one pass
+fewer, took 61.4–63.6 ms: no gain, and is not done.
+
 With the home tag tested first in every probe instead, in a pass of its
 own on a busier machine, `large_groups` at one thread took 23.8–24.8 ms
 against 19.6–21.6 for groups only and 29.8–32.4 for the pointer table,
