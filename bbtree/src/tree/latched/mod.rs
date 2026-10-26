@@ -46,6 +46,7 @@
 mod append;
 mod batch;
 mod descent;
+mod first_copied;
 mod held;
 mod insert;
 mod lookup;

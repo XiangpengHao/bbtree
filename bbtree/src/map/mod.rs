@@ -250,6 +250,26 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
             .scan_rev(start, end, None, |key, value, _| f(key, value))
     }
 
+    /// A copy of the first entry whose key lies in `range`, in key order: a
+    /// seek. Read without latching its leaf where the leaf's version holds,
+    /// for keys and values that are copies of their bytes, as
+    /// [`Self::get_copied`] copies one value; the same entry a [`Self::scan`]
+    /// of `range` would visit first. `None` if no key lies in `range`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::scan`].
+    #[inline]
+    pub fn first_copied<Q>(&self, range: impl RangeBounds<Q>) -> Option<(K, V)>
+    where
+        K: Borrow<Q> + Copy + 'static,
+        V: Copy + 'static,
+        Q: Ord + ?Sized,
+    {
+        let (start, end) = Self::checked_bounds(&range);
+        self.tree.first_copied(start, end)
+    }
+
     /// An iterator over clones of the entries whose keys lie in `range`: in
     /// key order, and in reverse from its back ([`DoubleEndedIterator`]).
     ///

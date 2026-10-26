@@ -178,6 +178,50 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         })
     }
 
+    /// Where a bound lies among this leaf's keys, as its inline keys say,
+    /// read in place while writers may change them ([`Placed`]). `None` if
+    /// the inline keys can't place the bound. Holds only if the leaf's
+    /// version is unchanged after.
+    ///
+    /// The bound shares the leaf's prefix if it routed here through nodes
+    /// whose versions held.
+    #[inline(always)]
+    pub(in crate::tree) fn racing_place<Q>(self, key: &SearchKey<'_, K, S, Q>) -> Option<Placed>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        // SAFETY: the page is a leaf's, allocated while threads share the
+        // tree.
+        let (len, prefix_len, inline_keys) =
+            unsafe { self.node_ptr().load_racing_inline_keys::<Self>() };
+        let target = key.inline_target(prefix_len)?;
+        let ties = inline_keys.equal_range(target.inline_key());
+        Some(Placed {
+            // The range is cut at `len` already; cut again against a torn
+            // read.
+            ties: ties.start.min(len)..ties.end.min(len),
+            len,
+            target,
+        })
+    }
+
+    /// How `key` orders against `stored`, a key of this leaf whose inline
+    /// key ties with `key`'s at `placed`, compared from past the bytes they
+    /// are known to share, as a latched search compares its candidates.
+    #[inline(always)]
+    pub(in crate::tree) fn cmp_tied<Q>(
+        key: &SearchKey<'_, K, S, Q>,
+        placed: &Placed,
+        stored: &K,
+    ) -> Ordering
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        key.cmp_tied::<Self>(placed.target, stored)
+    }
+
     /// A copy of key `index` and its value, read in place while writers may
     /// change them: an entry of the leaf only if its version is unchanged
     /// after ([`RacingEntry`]).
@@ -535,6 +579,19 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 }
 
+/// Where a bound lies among a leaf's keys, as the leaf's inline keys said
+/// when read in place ([`Leaf::racing_place`]): the keys whose inline keys
+/// equal the bound's, and the leaf's length as read. The keys before the
+/// range sort before the bound, those after it after; those in it compare
+/// in full ([`Leaf::cmp_tied`]).
+pub(in crate::tree) struct Placed {
+    pub(in crate::tree) ties: Range<usize>,
+    pub(in crate::tree) len: usize,
+    /// The bound's window at the leaf's prefix length, which the comparison
+    /// of a tie starts past.
+    target: Window,
+}
+
 /// A copy of a leaf's entry, its key and value, read in place while writers
 /// may change them. It may be torn, or of slots no entry fills; it is an
 /// entry the leaf held only if the leaf's version is unchanged after the
@@ -568,6 +625,19 @@ impl<K, V> RacingEntry<K, V> {
                 ManuallyDrop::new(self.value.assume_init()),
             )
         }
+    }
+
+    /// The key and value read, in place: a scan over many copies reads them
+    /// where they are instead of moving each out.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::assume_read`].
+    #[inline(always)]
+    pub(in crate::tree) unsafe fn assume_read_ref(&self) -> (&K, &V) {
+        // SAFETY: the slots held the entry's key and value throughout the
+        // read (caller).
+        unsafe { (self.key.assume_init_ref(), self.value.assume_init_ref()) }
     }
 }
 
