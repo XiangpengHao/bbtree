@@ -196,6 +196,7 @@ suite.
 | Exact guard bytes inside the node | deferred (model) | |
 | Re-splitting summary loads at cache lines | rejected (codegen) | |
 | Last-leaf append cache | accepted | D45 |
+| Value updates keep the last-leaf cache | accepted | D45 |
 | Another short-range boundary shortcut | deferred (model) | |
 | 2 KiB upper levels only | deferred (model) | |
 | Sign-biased portable summaries | rejected (codegen) | |
@@ -448,6 +449,16 @@ instructions for JSON; the final version checks a borrowed key and
 returns a token that moves the key only on success. Baseline x86-64:
 ordered `u64` 43.5 → 5.5, JSON 143.7 → 47.9; random +0.9% / +0.2%.
 Accepted (D45); D30's per-node check stays rejected.
+
+**Value updates keep the last-leaf append cache (D45).** A `get_mut`
+cleared the remembered leaf, so ascending inserts alternating with value
+updates descended the tree every time. Keeping the leaf: 10M `u64`
+inserts each followed by `*map.get_mut(&(key / 2)) += 1` took about 103 →
+54 ns per insert+update pair, while ascending inserts alone stayed at
+about 18 ns; comparisons per insert, counted through `Ord`, went 23.55 →
+2.41, the same as ascending inserts alone. A test asserts that equality,
+so a regression in the cache shows as a test failure, not just a timing
+change. Accepted (D45).
 
 ### Scans
 

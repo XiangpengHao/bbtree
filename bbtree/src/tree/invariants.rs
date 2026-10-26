@@ -55,6 +55,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///   reads as the separator's;
     /// - `length` is the number of entries, each counted once: leaf entries
     ///   and separators, whose values are the heads;
+    /// - if a leaf is remembered for the next append (D45), it is the tree's
+    ///   physically last leaf;
     /// - if the strategy gives the keys inline keys, every node holds its
     ///   keys' windows at its prefix length, in order (D18). The prefix is
     ///   what its fences share, or along the tree's borders, what every key
@@ -66,6 +68,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Calls `Ord` and the strategy's inline-key encoding: a tree whose keys
     /// break their contracts fails it.
     pub(crate) fn check_invariants(&self, length: usize) {
+        self.check_rightmost_leaf();
         let Some(root_page) = self.root_page() else {
             assert_eq!(length, 0, "a map without a tree has entries");
             return;

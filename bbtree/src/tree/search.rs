@@ -192,13 +192,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
-    /// [`Self::find`].
+    /// [`Self::find`]. Changing a value moves and frees no node, so this
+    /// keeps the tree's remembered rightmost leaf for the next append (D45).
     pub(crate) fn find_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let root_page = self.root_page_mut()?;
+        let root_page = self.root_page_for_value_updates()?;
         let key = SearchKey::new(key);
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
