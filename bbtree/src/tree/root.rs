@@ -45,9 +45,8 @@ use crate::inline_key::InlineKeyStrategy;
 /// If present, `rightmost_leaf` points to the tree's physically last leaf.
 /// Every exclusive use of the tree that can move or free a node clears it
 /// first ([`Self::root_mut`]); the owner's fitting append and its value
-/// updates ([`Self::root_page_for_value_updates`]) keep it. It holds no
-/// reference to a key, no cached length, and no assumption about how `Ord`
-/// behaves.
+/// updates (`Tree::find_mut`, `search.rs`) keep it. It holds no reference to
+/// a key, no cached length, and no assumption about how `Ord` behaves.
 pub(crate) struct Tree<K, V, S> {
     root_page: Option<RootPage<K, V, S>>,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
@@ -95,16 +94,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     #[inline(always)]
     pub(crate) fn root_page_mut(&mut self) -> Option<RootPage<K, V, S>> {
         self.forget_rightmost_leaf();
-        self.root_page
-    }
-
-    /// The tree's root page, to change the values of its entries from: unlike
-    /// [`Self::root_page_mut`], it keeps the permission to append to the
-    /// remembered leaf (D45), which changing a value moves and frees no node
-    /// for. Only the owner has the tree here, so no key, count or node
-    /// changes meanwhile, and the leaf is still the physically last one.
-    #[inline(always)]
-    pub(crate) fn root_page_for_value_updates(&mut self) -> Option<RootPage<K, V, S>> {
         self.root_page
     }
 

@@ -192,14 +192,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     }
 
     /// The value of the entry whose key equals `key`, exclusive; see
-    /// [`Self::find`]. Changing a value moves and frees no node, so this
-    /// keeps the tree's remembered rightmost leaf for the next append (D45).
+    /// [`Self::find`]. Reads the root page shared, as the shared map's owner
+    /// does: a value update moves and frees no node, so the tree keeps its
+    /// remembered rightmost leaf for the next append (D45). The caller's
+    /// exclusive borrow is what makes handing out `&mut V` sound.
     pub(crate) fn find_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        let root_page = self.root_page_for_value_updates()?;
+        let root_page = self.root_page()?;
         let key = SearchKey::new(key);
         if root_page.shared_prefix().place_outside(&key).is_some() {
             return None;
