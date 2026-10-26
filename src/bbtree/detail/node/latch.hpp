@@ -35,6 +35,9 @@ class Version {
   constexpr std::uint64_t word() const noexcept { return word_; }
   constexpr bool operator==(Version other) const noexcept { return word_ == other.word_; }
   constexpr bool operator!=(Version other) const noexcept { return word_ != other.word_; }
+  /// Whether a thread held the node exclusively when this was read: then it
+  /// vouches for nothing (`NodeLatch::load_version_relaxed`).
+  constexpr bool held() const noexcept;
 
   /// The version a node moves to when let go after being held exclusively
   /// since this one.
@@ -112,15 +115,14 @@ class NodeLatch {
     return true;
   }
 
-  /// The node's version if no thread holds it exclusively now, by a relaxed
-  /// load: for a reader of many nodes, which fences once after reading all
-  /// their versions and before reading the nodes, so that one node's wait
-  /// for memory does not hold up the next one's.
-  inline bool try_read_version_relaxed(Version& version) const noexcept {
-    const std::uint64_t word = word_.load(std::memory_order_relaxed);
-    if ((word & exclusive_bit) != 0) return false;
-    version = Version(word & ~shared_mask);
-    return true;
+  /// The node's word without its shared count, by a relaxed load: a version
+  /// unless a thread held the node exclusively (`Version::held`). For a
+  /// reader of many nodes, which fences once after reading all their words
+  /// and before reading the nodes, so that one node's wait for memory does
+  /// not hold up the next one's, and keeps what it read of a node only if
+  /// the node was not held and is still at that word after another fence.
+  inline Version load_version_relaxed() const noexcept {
+    return Version(word_.load(std::memory_order_relaxed) & ~shared_mask);
   }
 
   /// Takes the node exclusively if no thread holds it in either mode; the
@@ -200,5 +202,6 @@ class NodeLatch {
 static_assert(sizeof(NodeLatch) == 8 && std::atomic<std::uint64_t>::is_always_lock_free);
 
 constexpr Version Version::next() const noexcept { return Version(word_ + NodeLatch::version_unit); }
+constexpr bool Version::held() const noexcept { return (word_ & NodeLatch::exclusive_bit) != 0; }
 
 }  // namespace bbtree::detail

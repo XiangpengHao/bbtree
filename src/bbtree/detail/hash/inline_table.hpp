@@ -4,8 +4,11 @@
 // with the high bit set. One block holds it all: a header line with the
 // capacity, the tags, then the slots, aligned to cache lines.
 //
-// A lookup walks the tags, which stay in cache, and reads the one slot whose
-// tag matches: a miss reads no slot, a hit its own. The owned map's paged
+// A lookup reads the tags eight at a time, as one word: the first that
+// matches and the first that is empty come out of a few bit operations, no
+// branch a tag. It reads the one slot whose tag matches: a miss reads no
+// slot, a hit its own. The first seven tags are cloned past the last, so that
+// a group of eight never wraps. The owned map's paged
 // table (`table.hpp`) reaches its entries through descriptors and pages
 // instead, so that they never move; the shared map hands out no reference
 // that outlives a callback, so its entries may move, and live where the
@@ -24,6 +27,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <optional>
@@ -91,7 +95,7 @@ class InlineHashTable {
     if (capacity_ == 0 || size_ + 1 > threshold(capacity_)) grow();
     const auto slot = vacant(hash);
     ::new (static_cast<void *>(slots() + slot)) Entry{hash, std::move(key), std::move(value)};
-    tags()[slot] = tag_of(hash);
+    set_tag(tags(), capacity_, slot, tag_of(hash));
     ++size_;
     return std::nullopt;
   }
@@ -119,7 +123,7 @@ class InlineHashTable {
     for (std::size_t slot = 0; slot < capacity_; ++slot) {
       if (tags()[slot] == empty_tag) continue;
       slots()[slot].~Entry();
-      tags()[slot] = empty_tag;
+      set_tag(tags(), capacity_, slot, empty_tag);
     }
     size_ = 0;
   }
@@ -159,49 +163,63 @@ class InlineHashTable {
                             equal, found);
   }
 
+  /// Zero bytes in an entry's shape, which a bulk read's keys that have no
+  /// candidate slot read in its place: so no step branches on whether a key
+  /// has one.
+  class NoEntry {
+   public:
+    const Entry *entry() const noexcept { return std::launder(reinterpret_cast<const Entry *>(bytes_)); }
+
+   private:
+    alignas(Entry) unsigned char bytes_[sizeof(Entry)]{};
+  };
+
   /// One key's optimistic lookup in steps, which a bulk read takes for all
   /// its keys before the next step, so that the keys' waits for memory
-  /// overlap. A step branches only on what an earlier step loaded: a branch
-  /// on a load still in flight, mispredicted, would throw away the loads of
-  /// the keys after it. The tag at the key's home slot; the tags from there
-  /// to the first that is empty or its own, and that slot's hash; the entry
-  /// copied and the keys compared. A key whose slot holds another hash
-  /// finishes as `racing_find` does. The bulk read keeps each key's hash.
+  /// overlap. No step branches on whether the key is there: half the keys
+  /// of a lookup mix are absent, and each mispredicted branch would also
+  /// throw away the loads of the keys after it. The eight tags from the
+  /// key's home slot; the first of them that matches before an empty one,
+  /// and that slot's cached hash, or `NoEntry`'s; the entry copied and the
+  /// keys compared. A key whose first match was another key's, or whose
+  /// eight tags held neither its own nor an empty one, finishes as
+  /// `racing_find` does.
   class RacingLookup {
    public:
-    BBTREE_ALWAYS_INLINE void load_tag(const InlineHashTable &table, std::uint64_t hash) noexcept {
+    BBTREE_ALWAYS_INLINE void load_tags(const InlineHashTable &table, std::uint64_t hash) noexcept {
       view_ = table.racing_view();
-      slot_ = static_cast<std::size_t>(hash) & (view_.capacity - 1);
-      tag_ = view_.capacity == 0 ? empty_tag : racing_tag(view_, slot_);
+      home_ = static_cast<std::size_t>(hash) & (view_.capacity - 1);
+      group_ = view_.capacity == 0 ? 0 : racing_group(view_, home_);
     }
-    BBTREE_ALWAYS_INLINE void load_hash(std::uint64_t hash) noexcept {
-      const auto wanted = tag_of(hash);
-      if (tag_ == empty_tag) return;
-      if (tag_ != wanted) {
-        slot_ = racing_probe(view_, hash, slot_);
-        tag_ = racing_tag(view_, slot_);
-        if (tag_ != wanted) return;
-      }
-      slot_hash_ = racing_hash(slot_in(view_, slot_));
+    BBTREE_ALWAYS_INLINE void load_hash(std::uint64_t hash, const NoEntry &none) noexcept {
+      const TagGroup group(group_, tag_of(hash));
+      candidate_ = group.first_match() < group.first_empty();
+      overflow_ = group.first_empty() == group_width && group.first_match() == group_width;
+      slot_ = (home_ + group.first_match()) & (view_.capacity - 1);
+      entry_ = candidate_ ? slot_in(view_, slot_) : none.entry();
+      entry_hash_ = racing_hash(entry_);
     }
     template <class Q, class Equal>
     BBTREE_ALWAYS_INLINE bool finish(const InlineHashTable &table, std::uint64_t hash, const Q &key,
                                      const Equal &equal, RacingCopy<Entry> &found) const {
-      // No matching tag before an empty one: the key is absent.
-      if (tag_ != tag_of(hash)) return false;
-      if (slot_hash_ == hash) {
-        found.read_from(slot_in(view_, slot_));
-        if (equal(found.assume_read().key, key)) return true;
+      found.read_from(entry_);
+      const bool hit = candidate_ & (entry_hash_ == hash) & equal(found.assume_read().key, key);
+      if (BBTREE_UNLIKELY(overflow_ | (candidate_ & !hit))) {
+        const auto from = overflow_ ? home_ + group_width : slot_ + 1;
+        return table.racing_find_from(view_, from & (view_.capacity - 1), hash, key, equal, found);
       }
-      return table.racing_find_from(view_, (slot_ + 1) & (view_.capacity - 1), hash, key, equal,
-                                    found);
+      return hit;
     }
 
    private:
     RacingView view_;
+    std::size_t home_;
     std::size_t slot_;
-    std::uint64_t slot_hash_;
-    std::uint8_t tag_;
+    std::uint64_t group_;
+    const Entry *entry_;
+    std::uint64_t entry_hash_;
+    bool candidate_;
+    bool overflow_;
   };
 
  private:
@@ -210,6 +228,7 @@ class InlineHashTable {
   /// The header line before the tags; its first word is the capacity.
   static constexpr std::size_t header_bytes = 64;
   static constexpr std::size_t block_align = alignof(Entry) > 64 ? alignof(Entry) : 64;
+  static constexpr std::size_t group_width = 8;
 
   A allocator_;
   unsigned char *block_ = nullptr;
@@ -221,7 +240,13 @@ class InlineHashTable {
   }
   static std::size_t threshold(std::size_t capacity) noexcept { return capacity - capacity / 4; }
   static std::size_t slots_offset(std::size_t capacity) noexcept {
-    return (header_bytes + capacity + block_align - 1) / block_align * block_align;
+    return (header_bytes + capacity + group_width - 1 + block_align - 1) / block_align * block_align;
+  }
+  /// Writes a tag, and its clone past the last tag if it is among the first
+  /// seven.
+  static void set_tag(std::uint8_t *tags, std::size_t capacity, std::size_t slot, std::uint8_t tag) noexcept {
+    tags[slot] = tag;
+    if (slot < group_width - 1) tags[capacity + slot] = tag;
   }
   static Layout layout(std::size_t capacity) noexcept {
     return {slots_offset(capacity) + capacity * sizeof(Entry), block_align};
@@ -255,10 +280,10 @@ class InlineHashTable {
       if (distance_home < distance_hole) continue;
       ::new (static_cast<void *>(slots() + hole)) Entry(std::move(slots()[slot]));
       slots()[slot].~Entry();
-      tags()[hole] = tags()[slot];
+      set_tag(tags(), capacity_, hole, tags()[slot]);
       hole = slot;
     }
-    tags()[hole] = empty_tag;
+    set_tag(tags(), capacity_, hole, empty_tag);
   }
 
   void grow() {
@@ -269,14 +294,14 @@ class InlineHashTable {
     ::new (static_cast<void *>(block)) std::uint64_t(capacity);
     std::uint8_t *tags = tags_of(block);
     Entry *slots = slots_of(block, capacity);
-    for (std::size_t slot = 0; slot < capacity; ++slot)
+    for (std::size_t slot = 0; slot < capacity + group_width - 1; ++slot)
       ::new (static_cast<void *>(tags + slot)) std::uint8_t(empty_tag);
     for (std::size_t slot = 0; slot < capacity_; ++slot) {
       if (this->tags()[slot] == empty_tag) continue;
       Entry &entry = this->slots()[slot];
       const auto target = vacant_in(tags, capacity, entry.hash);
       ::new (static_cast<void *>(slots + target)) Entry(std::move(entry));
-      tags[target] = this->tags()[slot];
+      set_tag(tags, capacity, target, this->tags()[slot]);
       entry.~Entry();
     }
     // A racing reader reaches the block through `block_`: the header, tags
@@ -292,43 +317,60 @@ class InlineHashTable {
     if (!block) return {nullptr, 0};
     return {block, static_cast<std::size_t>(RacingLoad::relaxed(reinterpret_cast<const std::uint64_t *>(block)))};
   }
-  BBTREE_RACING_READ static std::uint8_t racing_tag(const RacingView &view, std::size_t slot) noexcept {
-    return RacingLoad::relaxed(view.block + header_bytes + slot);
-  }
   static const Entry *slot_in(const RacingView &view, std::size_t slot) noexcept {
     return reinterpret_cast<const Entry *>(view.block + slots_offset(view.capacity)) + slot;
+  }
+  /// Eight tags as a word, the first at the low byte, and where in them the
+  /// first tag equal to a wanted one and the first empty one are: a zero
+  /// byte test (`(x - 0x01..) & ~x & 0x80..`), whose lowest flag is always
+  /// a true zero byte.
+  class TagGroup {
+   public:
+    TagGroup(std::uint64_t tags, std::uint8_t wanted) noexcept
+        : matches_(zero_bytes(tags ^ (wanted * low_bits))), empties_(zero_bytes(tags)) {}
+    /// Index of the first match, `group_width` if none.
+    std::size_t first_match() const noexcept { return Bits::trailing_zeros(matches_) / 8; }
+    std::size_t first_empty() const noexcept { return Bits::trailing_zeros(empties_) / 8; }
+    /// The matches before the first empty tag, as flags (bit 7 of a byte).
+    std::uint64_t matches_before_empty() const noexcept {
+      return empties_ == 0 ? matches_ : matches_ & ((empties_ & (~empties_ + 1)) - 1);
+    }
+
+   private:
+    static constexpr std::uint64_t low_bits = 0x0101010101010101ull;
+    static constexpr std::uint64_t high_bits = 0x8080808080808080ull;
+    static std::uint64_t zero_bytes(std::uint64_t x) noexcept { return (x - low_bits) & ~x & high_bits; }
+
+    std::uint64_t matches_;
+    std::uint64_t empties_;
+  };
+
+  BBTREE_RACING_READ static std::uint64_t racing_group(const RacingView &view, std::size_t slot) noexcept {
+    std::uint64_t group;
+    std::memcpy(&group, view.block + header_bytes + slot, sizeof(group));
+    return group;
   }
   BBTREE_RACING_READ static std::uint64_t racing_hash(const Entry *entry) noexcept {
     return RacingLoad::relaxed(&entry->hash);
   }
-  /// From `slot` on, the first slot that is empty or whose tag is `hash`'s;
-  /// it gives up after a lap, which only a block a writer is changing could
-  /// need.
-  BBTREE_RACING_READ static std::size_t racing_probe(const RacingView &view, std::uint64_t hash,
-                                                     std::size_t slot) noexcept {
-    const auto wanted = tag_of(hash);
-    for (std::size_t probes = 0; probes < view.capacity; ++probes) {
-      const auto tag = RacingLoad::relaxed(view.block + header_bytes + slot);
-      if (tag == empty_tag || tag == wanted) return slot;
-      slot = (slot + 1) & (view.capacity - 1);
-    }
-    return slot;
-  }
-
+  /// From `slot` on, eight tags at a time, each slot whose tag matches
+  /// before an empty one; it gives up after a lap, which only a block a
+  /// writer is changing could need.
   template <class Q, class Equal>
   BBTREE_ALWAYS_INLINE bool racing_find_from(const RacingView &view, std::size_t slot, std::uint64_t hash,
                                              const Q &key, const Equal &equal, RacingCopy<Entry> &found) const {
     static_assert(std::is_trivially_copyable_v<Entry>, "racing reads copy entries as bytes");
     const auto wanted = tag_of(hash);
-    for (std::size_t probes = 0; probes < view.capacity; ++probes) {
-      slot = racing_probe(view, hash, slot);
-      if (racing_tag(view, slot) != wanted) return false;
-      const Entry *entry = slot_in(view, slot);
-      if (racing_hash(entry) == hash) {
+    for (std::size_t probes = 0; probes < view.capacity; probes += group_width) {
+      const TagGroup group(racing_group(view, slot), wanted);
+      for (auto matches = group.matches_before_empty(); matches != 0; matches &= matches - 1) {
+        const Entry *entry = slot_in(view, (slot + Bits::trailing_zeros(matches) / 8) & (view.capacity - 1));
+        if (racing_hash(entry) != hash) continue;
         found.read_from(entry);
-        if (found.assume_read().hash == hash && equal(found.assume_read().key, key)) return true;
+        if (equal(found.assume_read().key, key)) return true;
       }
-      slot = (slot + 1) & (view.capacity - 1);
+      if (group.first_empty() < group_width) return false;
+      slot = (slot + group_width) & (view.capacity - 1);
     }
     return false;
   }

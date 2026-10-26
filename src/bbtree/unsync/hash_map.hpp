@@ -167,7 +167,7 @@ class BBHashMap {
 
   template <class Q>
   std::uint64_t hash_key(const Q &key) const {
-    return detail::HashBits::mix(hash_(key));
+    return detail::HashBits::of<Hasher>(hash_(key));
   }
 };
 

@@ -177,7 +177,7 @@ class HashTable {
       std::array<const V *, Batch::maximum_width()> found;
       std::array<std::size_t, Batch::maximum_width()> positions;
       const auto width = count < hashes.size() ? count : hashes.size();
-      for (std::size_t row = 0; row < width; ++row) hashes[row] = HashBits::mix(hash(keys[row]));
+      for (std::size_t row = 0; row < width; ++row) hashes[row] = HashBits::of<Hasher>(hash(keys[row]));
       Batch::find_hashed(index_, entries_, keys, hashes.data(), width, found.data(), equal,
                          positions.data());
       std::size_t missing = 0;

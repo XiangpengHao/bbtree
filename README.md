@@ -35,28 +35,29 @@ Millions of lookups per second:
 
 | tree maps (ordered) | M ops/s |
 |---|--:|
-| bbtree, bulk (`get_many_copied`, 64 keys a call) | **154.7** |
-| bbtree (`get_copied`) | **81.5** |
-| oneTBB `tbb::concurrent_map` (skip list) | 8.4 |
-| folly `ConcurrentSkipList` | 8.2 |
-| Abseil `absl::btree_map` + `std::shared_mutex` | 2.1 |
-| `std::map` + `std::shared_mutex` | 1.4 |
+| bbtree, bulk (`get_many_copied`, 64 keys a call) | **158.9** |
+| bbtree (`get_copied`) | **84.5** |
+| oneTBB `tbb::concurrent_map` (skip list) | 8.7 |
+| folly `ConcurrentSkipList` | 8.4 |
+| Abseil `absl::btree_map` + `std::shared_mutex` | 2.2 |
+| `std::map` + `std::shared_mutex` | 1.5 |
 
 | hash maps (unordered) | M ops/s |
 |---|--:|
-| bbtree `BBHashMap`, bulk (`get_many_copied`, 64 keys a call) | **392.5** |
-| bbtree `BBHashMap` (`get_copied`) | **265.5** |
-| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 412.0 |
-| oneTBB `tbb::concurrent_hash_map` | 139.3 |
-| folly `ConcurrentHashMap` | 128.0 |
-| oneTBB `tbb::concurrent_unordered_map` | 58.1 |
-| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 6.5 |
-| `std::unordered_map` + `std::shared_mutex` | 4.0 |
+| bbtree `BBHashMap`, bulk (`get_many_copied`, 64 keys a call) | **469.7** |
+| bbtree `BBHashMap` (`get_copied`) | **306.1** |
+| Boost `boost::concurrent_flat_map`, bulk (`cvisit` over 64 keys) | 427.1 |
+| oneTBB `tbb::concurrent_hash_map` | 144.1 |
+| folly `ConcurrentHashMap` | 135.1 |
+| oneTBB `tbb::concurrent_unordered_map` | 65.0 |
+| Abseil `absl::flat_hash_map` + `std::shared_mutex` | 6.4 |
+| `std::unordered_map` + `std::shared_mutex` | 3.8 |
 
-bbtree's tree maps lead their heat by 10–18×. Its hash map runs within 5%
-of Boost's in bulk, and leads one key at a time by about 2×. Readers of
-both bbtree maps write nothing shared: they check a version after
-reading (PORTING.md, Hash maps).
+bbtree leads both heats: its tree maps by 10–18×, its hash map by 10% over
+Boost's in bulk and 2× over the rest one key at a time. Readers of both
+bbtree maps write nothing shared: they check a version after reading
+(PORTING.md, Hash maps). The UUID hash declares `is_avalanching`, which
+both bbtree and Boost read as leave to use it unmixed.
 
 The shared maps are built by every thread; a locked map by one thread, and
 it takes its lock for every lookup. Every map must answer the same first

@@ -28,7 +28,7 @@ class HashLookupBatch {
                         const Equal& equal) {
     find_many_impl(
         index, entries, keys, count, values,
-        [&](const Q& key, std::size_t) { return HashBits::mix(hash(key)); }, equal, nullptr);
+        [&](const Q& key, std::size_t) { return HashBits::of<Hasher>(hash(key)); }, equal, nullptr);
   }
 
   template <class Q, class Equal>

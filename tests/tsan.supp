@@ -16,9 +16,8 @@ race:place_outside_racing
 # block, its tags and slots, read while a writer that holds the shard changes
 # them, and checked against the shard's version after.
 race:bbtree::detail::InlineHashTable*::racing_view
-race:bbtree::detail::InlineHashTable*::racing_tag
+race:bbtree::detail::InlineHashTable*::racing_group
 race:bbtree::detail::InlineHashTable*::racing_hash
-race:bbtree::detail::InlineHashTable*::racing_probe
 race:bbtree::detail::InlineHashTable*::racing_find_from
 race:bbtree::detail::InlineHashTable*::RacingLookup
 # A latch word is only ever accessed atomically, by `NodeLatch`, which reads

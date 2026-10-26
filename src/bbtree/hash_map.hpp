@@ -277,48 +277,45 @@ class BBHashMap {
   /// Up to `batch_width` keys read optimistically, then checked.
   template <class Q>
   void get_batch_copied(const Q *keys, size_type width, std::optional<V> *values) const {
+    std::array<std::uint64_t, batch_width> hashes;
     std::array<Shard *, batch_width> shards;
     std::array<detail::Version, batch_width> versions;
-    std::array<bool, batch_width> optimistic, hits;
     std::array<typename Table::RacingLookup, batch_width> lookups;
     std::array<detail::RacingCopy<Entry>, batch_width> found;
-    std::array<std::uint64_t, batch_width> hashes;
+    std::array<bool, batch_width> hits;
+    const typename Table::NoEntry none;
     for (size_type lane = 0; lane < width; ++lane) {
       hashes[lane] = hash_key(keys[lane]);
       shards[lane] = &shard_for(hashes[lane]);
-      // A key whose shard a writer holds now is read again on its own, below.
-      optimistic[lane] = shards[lane]->latch.try_read_version_relaxed(versions[lane]);
+      // A shard a writer holds now is read all the same, as safely, and
+      // turned away below.
+      versions[lane] = shards[lane]->latch.load_version_relaxed();
     }
     // Fences, rather than acquire loads, order the versions before the
-    // entries and the entries before the checks: once a batch, so that the
-    // keys' waits for memory overlap.
+    // entries and the entries before the checks: once a bulk read, so that
+    // the keys' waits for memory overlap.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    for (size_type lane = 0; lane < width; ++lane) lookups[lane].load_tags(shards[lane]->table, hashes[lane]);
+    for (size_type lane = 0; lane < width; ++lane) lookups[lane].load_hash(hashes[lane], none);
+    for (size_type lane = 0; lane < width; ++lane)
+      hits[lane] = lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane], equal_, found[lane]);
     std::atomic_thread_fence(std::memory_order_acquire);
     for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].load_tag(shards[lane]->table, hashes[lane]);
-    }
-    for (size_type lane = 0; lane < width; ++lane) {
-      if (optimistic[lane]) lookups[lane].load_hash(hashes[lane]);
-    }
-    for (size_type lane = 0; lane < width; ++lane) {
-      hits[lane] = optimistic[lane] && lookups[lane].finish(shards[lane]->table, hashes[lane], keys[lane],
-                                                            equal_, found[lane]);
-    }
-    std::atomic_thread_fence(std::memory_order_acquire);
-    for (size_type lane = 0; lane < width; ++lane) {
-      values[lane].reset();
-      detail::Version now;
-      if (optimistic[lane] && shards[lane]->latch.try_read_version_relaxed(now) &&
-          now == versions[lane]) {
-        if (hits[lane]) values[lane].emplace(found[lane].assume_read().value);
-      } else if (auto result = get_copied(keys[lane])) {
-        values[lane].emplace(*result);
+      if (BBTREE_LIKELY(!versions[lane].held() &&
+                        shards[lane]->latch.load_version_relaxed() == versions[lane])) {
+        // A miss copied `NoEntry`: its value is dropped, without a branch
+        // on whether the key was there.
+        values[lane].emplace(found[lane].assume_read().value);
+        if (!hits[lane]) values[lane].reset();
+      } else {
+        values[lane] = get_copied(keys[lane]);
       }
     }
   }
 
   template <class Q>
   std::uint64_t hash_key(const Q &key) const {
-    return detail::HashBits::mix(hash_(key));
+    return detail::HashBits::of<Hasher>(hash_(key));
   }
   Shard &shard_for(std::uint64_t hash) const noexcept {
     // Middle bits leave the fingerprint and the low 32 placement bits intact.

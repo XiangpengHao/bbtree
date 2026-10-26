@@ -277,9 +277,11 @@ A shard of the shared map is an inline-slot table
 (`detail/hash/inline_table.hpp`): open addressing with linear probing, the
 entries (cached hash, `K`, `V`) in the slots it probes, a tag a slot in
 front of them (empty, or the hash's top seven bits), all in one block: a
-header line with the capacity, the tags, the slots aligned to cache lines.
-A lookup walks the tags and reads the one slot whose tag matches: a miss
-reads no slot, a hit its own. It grows at 75% occupancy, moving the entries
+header line with the capacity, the tags (the first seven cloned past the
+last, so that eight never wrap), the slots aligned to cache lines. A
+lookup reads eight tags as a word and finds the first matching and the
+first empty one with a zero-byte test, and reads the one slot whose tag
+matches: a miss reads no slot, a hit its own. It grows at 75% occupancy, moving the entries
 by their cached hashes, no user code run. A removal shifts the entries
 after the hole back into it (Knuth's Algorithm R), so there are no
 tombstones and no rebuild but growth. Memory is `(1 + E) / alpha` bytes per
@@ -315,14 +317,27 @@ orders a new block's contents before the pointer that publishes it.
 `get_many_copied` reads 64 keys a call in steps, each step for every key
 before the next, so that the keys' waits for memory overlap (no
 prefetching): every shard's version by a relaxed load, then one fence; the
-tag at each key's home slot; the tags on to the first empty or matching
-one, and that slot's hash; the entry copied and keys compared; one fence,
-then every version checked. A key whose shard changed is read again on its
+eight tags at each key's home slot; the first that matches before an empty
+one, and that slot's cached hash; the entry copied and keys compared; one
+fence, then every version checked, a version read while a writer held the
+shard turning the key away. A key whose shard changed is read again on its
 own. The versions are loaded relaxed and fenced once because an acquire
-load per key held each key up behind the previous key's memory wait. A step
-branches only on what an earlier step loaded: in the paged table, merging
-steps put a branch on a load still in flight, and its mispredictions threw
-away the next keys' loads (27.4 to 19.8 M/s).
+load per key held each key up behind the previous key's memory wait.
+
+No step branches on whether a key is there. A key with no candidate slot
+reads its hash from and copies a zeroed entry (`NoEntry`) in its place, a
+hit is `candidate & hash equal & keys equal`, and a miss's value is
+written and dropped: only a key whose first match was another's, or whose
+eight tags held neither its own nor an empty one, takes a branch, rarely.
+With half the keys absent, the branches on the outcome mispredicted half
+the time, and a misprediction also throws away the following keys' loads:
+with every key present the same code ran at Boost's speed (23 cycles a key
+cached, 176 against 174 M/s), with half absent at 78 cycles against
+Boost's 40. Branch-free, it is 46.
+
+A policy that declares `is_avalanching`, as Boost reads it, is used
+unmixed (`HashBits::of`): the UUID hash of the race declares it, and both
+maps skip their mix for it.
 
 Measured with `bench/race/race_bench.cpp` (10M random UUID keys, half the
 lookups missing, M4 Pro), millions of lookups per second:
@@ -335,12 +350,13 @@ lookups missing, M4 Pro), millions of lookups per second:
 | paged, in steps across the bulk read | 28.5 | 247.9 | 120.0 |
 | paged, tags before descriptors | 27.4 | 270.8 | 134.3 |
 | inline slots | 37.5 | 373.0 | 260.4 |
-| Boost `concurrent_flat_map` (bulk `cvisit`) | 42.2 | 381.2 | |
+| inline, eight tags a word, no branch on the outcome | 44.6 | 469.7 | 306.1 |
+| Boost `concurrent_flat_map` (bulk `cvisit`) | 40.2 | 427.1 | |
 
 Rows ran on different occasions; each of ours ran next to the one before
-it, and the last two side by side. With every key in cache the inline
-table still does half of Boost's work rate (54 against 106 M/s on one
-thread): what is left is the shard, its version checked twice, and the
+it. With every key in cache (100K keys), one thread, the bulk read costs
+127 instructions and 46 cycles a key against Boost's 85 and 40 (90 against
+107 M/s): what is left is the shard, its version checked twice, and the
 bulk read's passes.
 
 ### Verification
