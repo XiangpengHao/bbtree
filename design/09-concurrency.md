@@ -813,3 +813,21 @@ outside the shared prefix started at the first entry after a shrink had
 put a key before the bound (Scans, above). No test scanned from outside
 the prefix while it shrank. `scans_from_outside_the_shared_prefix_race_a_shrink`
 does, and Shuttle finds the bug in its first schedules.
+
+### The racing reads, compiled
+
+By Rust's rules a racing read is undefined behavior, so only the compiled
+code shows that a compiler kept each read of a node before the version
+check that vouches for it, rather than loading it again after, as it may
+for a read it takes to be race-free. `bbtree/racing-reads` builds four
+operations to assembly, `get_copied` for `u64` and `String` keys,
+`get_many_copied` and `insert`, for x86-64, x86-64-v4 and AArch64.
+`check.py` follows every path from each check that passes: a read of the
+node after it, other than of its latch word or under its latch, has to meet
+another check of the node on every path that returns. CI's `racing reads`
+job runs it with the last stable releases, the latest and the pinned
+nightly. With the latest and the nightly it also plants three reloads, a
+leaf's entry read again after the leaf's check and an edge read again after
+its node's second check, in the descent and in the lanes, and fails unless
+the checker flags each where it is reached. Removals, scans and batched
+inserts aren't built.

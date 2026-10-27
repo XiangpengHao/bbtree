@@ -31,7 +31,8 @@
 //! - tells ThreadSanitizer to ignore it ([`RacingReads`]). By Rust's rules,
 //!   a plain read that races with a write is undefined behavior, checked or
 //!   not, and Rust has no way yet to read bytes that a writer changes,
-//!   padding included: RFC 3301's `AtomicPerByte` would be one.
+//!   padding included: RFC 3301's `AtomicPerByte` would be one. CI checks
+//!   the compiled reads instead (`bbtree/racing-reads`).
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;

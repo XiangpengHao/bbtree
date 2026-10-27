@@ -236,6 +236,41 @@ jobs:
           CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS: -C link-arg=-zstack-size=8388608
         run: cargo test -p bbtree --target wasm32-wasip1 --lib --all-features
 
+  # The racing reads as each compiler builds them (bbtree/racing-reads). By
+  # Rust's rules a read that races with a write is undefined behavior, so
+  # only the compiled code shows that the compiler kept every read of a
+  # node before the version check that vouches for it. The last stable
+  # releases, the latest, and the nightly the other jobs use; with the latest
+  # and the nightly, the job also plants reloads and fails unless each is
+  # flagged, so that a checker blind to a new compiler's code fails rather
+  # than passes. A new release can fail it with no change here: that is what
+  # it is for.
+  racing-reads:
+    name: racing reads (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep the nightly aligned with flake.nix.
+        toolchain: [1.96.1, 1.97.1, 1.98.1, 1.99.0, stable, nightly-2026-10-07]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bbtree/racing-reads
+
+      - name: Check
+        env:
+          PLANTED: ${{ (matrix.toolchain == 'stable' || startsWith(matrix.toolchain, 'nightly')) && '--planted' || '' }}
+        run: python3 bbtree/racing-reads/check.py $PLANTED
+
   # The release checks: the fuzzing takes half an hour on the shared runner,
   # so it runs for releases (and weekly, in fuzz.yml) rather than for every
   # change.
@@ -276,7 +311,7 @@ jobs:
   merge-gate:
     name: merge gate
     if: always()
-    needs: [plan, check, bench, fuzz, test-aarch64, test-macos, test-wasm, release-fuzz, release-package]
+    needs: [plan, check, bench, fuzz, test-aarch64, test-macos, test-wasm, racing-reads, release-fuzz, release-package]
     runs-on: ubuntu-latest
     steps:
       - name: Check that every job passed
