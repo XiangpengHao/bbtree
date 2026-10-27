@@ -36,6 +36,7 @@
 
 use core::borrow::Borrow;
 use core::cmp::Ordering;
+use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Range;
 use core::ptr::NonNull;
@@ -175,6 +176,39 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
                 .cast::<u8>()
                 .as_ptr()
                 .cast_const()
+        })
+    }
+
+    /// Where a bound lies among this leaf's keys, as its inline keys say,
+    /// read in place while writers may change them ([`Placed`]). `None` if
+    /// the inline keys can't place the bound. Holds only if the leaf's
+    /// version is unchanged after.
+    ///
+    /// The bound shares the leaf's prefix if it routed here through nodes
+    /// whose versions held.
+    #[inline(always)]
+    pub(in crate::tree) fn racing_place<Q>(
+        self,
+        key: &SearchKey<'_, K, S, Q>,
+    ) -> Option<Placed<K, V, S>>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let _reads = RacingReads::begin();
+        // SAFETY: the page is a leaf's, allocated while threads share the
+        // tree.
+        let (len, prefix_len, inline_keys) =
+            unsafe { self.node_ptr().load_racing_inline_keys::<Self>() };
+        let target = key.inline_target(prefix_len)?;
+        let ties = inline_keys.equal_range(target.inline_key());
+        Some(Placed {
+            // The range is cut at `len` already; cut again against a torn
+            // read.
+            ties: ties.start.min(len)..ties.end.min(len),
+            len,
+            target,
+            leaf: PhantomData,
         })
     }
 
@@ -532,6 +566,34 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
                 .expect("a latched tree's keys have inline keys");
             (len, prefix_len, NodeInlineKeys::new(slots, capacity, len))
         }
+    }
+}
+
+/// Where a bound lies among a leaf's keys, as the leaf's inline keys said
+/// when read in place ([`Leaf::racing_place`]): the keys whose inline keys
+/// equal the bound's, and the leaf's length as read. The keys before the
+/// range sort before the bound, those after it after; those in it compare
+/// in full ([`Self::cmp_tied`]).
+pub(in crate::tree) struct Placed<K, V, S> {
+    pub(in crate::tree) ties: Range<usize>,
+    pub(in crate::tree) len: usize,
+    /// The bound's window at the leaf's prefix length, which the comparison
+    /// of a tie starts past.
+    target: Window,
+    leaf: PhantomData<Leaf<K, V, S>>,
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Placed<K, V, S> {
+    /// How `key`, the bound placed, orders against `stored`, a key of the
+    /// leaf among the ties, compared from past the bytes they are known to
+    /// share, as a latched search compares its candidates.
+    #[inline(always)]
+    pub(in crate::tree) fn cmp_tied<Q>(&self, key: &SearchKey<'_, K, S, Q>, stored: &K) -> Ordering
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        key.cmp_tied::<Leaf<K, V, S>>(self.target, stored)
     }
 }
 
