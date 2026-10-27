@@ -18,6 +18,7 @@ use super::latch::NodeLatch;
 use super::layout::{Header, InternalLayout, KeyArea, LeafLayout, NodeLayout};
 use super::leaf::Leaf;
 use super::node_plan::NodePlan;
+use super::optimistic::RacingReads;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
 use crate::allocator::{AllocError, Allocator, PageKind};
@@ -517,6 +518,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// The tree is latched, and the page allocated, its header initialized.
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_header(self) -> (usize, usize) {
+        let _reads = RacingReads::begin();
         debug_assert!(Self::is_latched());
         Interleaving::switch_point();
         // SAFETY: both fields are aligned `u16`s of the allocated,
@@ -541,6 +543,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     /// The tree is latched, and the page allocated, its header initialized.
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_has_head(self) -> bool {
+        let _reads = RacingReads::begin();
         debug_assert!(Self::is_latched());
         Interleaving::switch_point();
         // SAFETY: the field is a `bool` of the allocated, initialized header
