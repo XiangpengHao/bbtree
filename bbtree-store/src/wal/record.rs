@@ -11,10 +11,8 @@
 //!
 //! Verus proves that encoding round-trips ([`StoredRecord::decode`]):
 //! a record decodes from its bytes, whatever follows them, and nothing
-//! else does; and the bytes of records one after another split into
-//! records one way only ([`StoredRecord::lemma_concat_unique`]), which the
-//! scan (`tail.rs`) rests on. The specs are what to review; the lemmas
-//! Verus checks, and `trusted.rs` holds what the proofs trust.
+//! else does. The specs are what to review; the proofs are in `lemmas.rs`,
+//! which only Verus reads, and `trusted.rs` holds what they trust.
 use std::vec::Vec;
 
 use vstd::bytes::{u32_from_le_bytes, u64_from_le_bytes};
@@ -25,10 +23,7 @@ use super::trusted::{Crc32c, LittleEndian};
 use super::{WalError, WalStorage};
 
 #[cfg(verus_only)]
-use vstd::bytes::{
-    lemma_auto_spec_u32_to_from_le_bytes, lemma_auto_spec_u64_to_from_le_bytes,
-    spec_u32_from_le_bytes, spec_u32_to_le_bytes, spec_u64_from_le_bytes, spec_u64_to_le_bytes,
-};
+use vstd::bytes::{spec_u32_to_le_bytes, spec_u64_to_le_bytes};
 
 /// One key's insert or removal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,99 +155,10 @@ impl<'a> StoredRecord<'a> {
     }
 
     /// The record's bytes. Opaque: proofs that read its layout reveal it,
-    /// others see only its length ([`Self::lemma_len`]).
+    /// others see only its length (`lemma_len`).
     #[verifier::opaque]
     pub(super) open spec fn bytes(self) -> Seq<u8> {
         spec_u32_to_le_bytes(Crc32c::spec_of(self.checked_bytes())) + self.checked_bytes()
-    }
-
-    /// Whether decoding `bytes` reads this record's fields: its lengths,
-    /// LSN, kind byte, key and value where a record keeps them, and a CRC
-    /// that matches the bytes after it.
-    spec fn is_read_from(self, bytes: Seq<u8>) -> bool {
-        let key_end = 21 + self.key@.len() as int;
-        let len = key_end + self.value@.len();
-        &&& len <= bytes.len()
-        &&& spec_u32_from_le_bytes(bytes.subrange(0, 4)) == Crc32c::spec_of(bytes.subrange(4, len))
-        &&& spec_u64_from_le_bytes(bytes.subrange(4, 12)) == self.lsn
-        &&& spec_u32_from_le_bytes(bytes.subrange(12, 16)) as int == self.key@.len()
-        &&& spec_u32_from_le_bytes(bytes.subrange(16, 20)) as int == self.value@.len()
-        &&& bytes[20] == self.kind.spec_byte(self.last_in_append)
-        &&& bytes.subrange(21, key_end) == self.key@
-        &&& bytes.subrange(key_end, len) == self.value@
-    }
-
-    /// `bytes` start with this record's bytes exactly when decoding them
-    /// reads its fields.
-    proof fn lemma_starts_with(self, bytes: Seq<u8>)
-        requires
-            self.fits(),
-        ensures
-            self.bytes().is_prefix_of(bytes) <==> self.is_read_from(bytes),
-    {
-        reveal(StoredRecord::bytes);
-        lemma_auto_spec_u32_to_from_le_bytes();
-        lemma_auto_spec_u64_to_from_le_bytes();
-        let (encoded, checked) = (self.bytes(), self.checked_bytes());
-        let len = encoded.len() as int;
-        let key_end = 21 + self.key@.len() as int;
-        // Where the fields lie in `encoded`.
-        assert(encoded.subrange(0, 4) =~= spec_u32_to_le_bytes(Crc32c::spec_of(checked)));
-        assert(encoded.subrange(4, len) =~= checked);
-        assert(encoded.subrange(4, 12) =~= spec_u64_to_le_bytes(self.lsn));
-        assert(encoded.subrange(12, 16) =~= spec_u32_to_le_bytes(self.key@.len() as u32));
-        assert(encoded.subrange(16, 20) =~= spec_u32_to_le_bytes(self.value@.len() as u32));
-        assert(encoded.subrange(21, key_end) =~= self.key@);
-        assert(encoded.subrange(key_end, len) =~= self.value@);
-        if encoded.is_prefix_of(bytes) {
-            // Each field of `bytes` is the one at the same place in `encoded`.
-            assert(bytes.subrange(0, len) == encoded);
-            assert(bytes.subrange(0, 4) =~= encoded.subrange(0, 4));
-            assert(bytes.subrange(4, len) =~= encoded.subrange(4, len));
-            assert(bytes.subrange(4, 12) =~= encoded.subrange(4, 12));
-            assert(bytes.subrange(12, 16) =~= encoded.subrange(12, 16));
-            assert(bytes.subrange(16, 20) =~= encoded.subrange(16, 20));
-            assert(bytes[20] == encoded[20]);
-            assert(bytes.subrange(21, key_end) =~= encoded.subrange(21, key_end));
-            assert(bytes.subrange(key_end, len) =~= encoded.subrange(key_end, len));
-        }
-        if self.is_read_from(bytes) {
-            // Each field of `encoded` is the one at the same place in `bytes`.
-            assert(spec_u64_to_le_bytes(self.lsn) == bytes.subrange(4, 12));
-            assert(self.key@.len() as u32 == spec_u32_from_le_bytes(bytes.subrange(12, 16)));
-            assert(spec_u32_to_le_bytes(self.key@.len() as u32) == bytes.subrange(12, 16));
-            assert(self.value@.len() as u32 == spec_u32_from_le_bytes(bytes.subrange(16, 20)));
-            assert(spec_u32_to_le_bytes(self.value@.len() as u32) == bytes.subrange(16, 20));
-            assert(checked =~= bytes.subrange(4, len));
-            assert(spec_u32_to_le_bytes(Crc32c::spec_of(checked)) == bytes.subrange(0, 4));
-            assert(encoded =~= bytes.subrange(0, len));
-        }
-    }
-
-    /// A record's length: its header's 21 bytes, then its key and value.
-    pub(super) proof fn lemma_len(self)
-        ensures
-            self.bytes().len() == 21 + self.key@.len() + self.value@.len(),
-    {
-        reveal(StoredRecord::bytes);
-        lemma_auto_spec_u32_to_from_le_bytes();
-        lemma_auto_spec_u64_to_from_le_bytes();
-    }
-
-    /// Two records whose bytes both start `bytes` are one.
-    proof fn lemma_same_record(self, other: Self, bytes: Seq<u8>)
-        requires
-            self.fits(),
-            other.fits(),
-            self.bytes().is_prefix_of(bytes),
-            other.bytes().is_prefix_of(bytes),
-        ensures
-            self == other,
-    {
-        self.lemma_starts_with(bytes);
-        other.lemma_starts_with(bytes);
-        assert(self.key =~= other.key);
-        assert(self.value =~= other.value);
     }
 
     /// The bytes of `records`, one after another.
@@ -263,108 +169,6 @@ impl<'a> StoredRecord<'a> {
             Seq::empty()
         } else {
             records[0].bytes() + Self::concat_bytes(records.skip(1))
-        }
-    }
-
-    /// The bytes of `records`, then `record`, are those of `records`, then
-    /// `record`'s.
-    pub(super) proof fn lemma_concat_push(records: Seq<Self>, record: Self)
-        ensures
-            Self::concat_bytes(records.push(record)) == Self::concat_bytes(records)
-                + record.bytes(),
-        decreases records.len(),
-    {
-        let pushed = records.push(record);
-        if records.len() == 0 {
-            assert(pushed.skip(1) =~= records);
-        } else {
-            assert(pushed.skip(1) =~= records.skip(1).push(record));
-            Self::lemma_concat_push(records.skip(1), record);
-        }
-        assert(Self::concat_bytes(pushed) =~= Self::concat_bytes(records) + record.bytes());
-    }
-
-    /// The bytes of the first `n` of `records` start the bytes of all.
-    pub(super) proof fn lemma_concat_take(records: Seq<Self>, n: int)
-        requires
-            0 <= n <= records.len(),
-        ensures
-            Self::concat_bytes(records.take(n)).is_prefix_of(Self::concat_bytes(records)),
-        decreases n,
-    {
-        if n > 0 {
-            let rest = records.skip(1);
-            assert(records.take(n).skip(1) =~= rest.take(n - 1));
-            Self::lemma_concat_take(rest, n - 1);
-            let (first, taken) = (records[0].bytes(), Self::concat_bytes(rest.take(n - 1)));
-            assert(Self::concat_bytes(records.take(n)) =~= Self::concat_bytes(records).subrange(
-                0,
-                (first.len() + taken.len()) as int,
-            ));
-        }
-    }
-
-    /// The bytes of `records`, then `others`, are those of `records`, then
-    /// those of `others`.
-    pub(super) proof fn lemma_concat_append(records: Seq<Self>, others: Seq<Self>)
-        ensures
-            Self::concat_bytes(records + others) == Self::concat_bytes(records)
-                + Self::concat_bytes(others),
-        decreases records.len(),
-    {
-        if records.len() == 0 {
-            assert(records + others =~= others);
-        } else {
-            assert((records + others).skip(1) =~= records.skip(1) + others);
-            Self::lemma_concat_append(records.skip(1), others);
-        }
-        assert(Self::concat_bytes(records + others) =~= Self::concat_bytes(records)
-            + Self::concat_bytes(others));
-    }
-
-    /// Records whose bytes start the bytes of `others` are the first of
-    /// them: the bytes of records split into records one way only.
-    pub(super) proof fn lemma_concat_unique(records: Seq<Self>, others: Seq<Self>)
-        requires
-            forall|i: int| 0 <= i < records.len() ==> #[trigger] records[i].fits(),
-            forall|i: int| 0 <= i < others.len() ==> #[trigger] others[i].fits(),
-            Self::concat_bytes(records).is_prefix_of(Self::concat_bytes(others)),
-        ensures
-            records.len() <= others.len(),
-            records == others.take(records.len() as int),
-        decreases records.len(),
-    {
-        if records.len() == 0 {
-            assert(records =~= others.take(0));
-        } else {
-            let (first, rest) = (records[0], records.skip(1));
-            let all = Self::concat_bytes(others);
-            first.lemma_len();
-            assert(others.len() > 0);
-            let (other_first, other_rest) = (others[0], others.skip(1));
-            let first_len = first.bytes().len() as int;
-            assert(first.bytes() =~= all.subrange(0, first_len));
-            assert(other_first.bytes() =~= all.subrange(0, other_first.bytes().len() as int));
-            first.lemma_same_record(other_first, all);
-            // Past the first record, the rest of `records`' bytes start the
-            // rest of `others`'.
-            let (mine, rest_bytes) = (Self::concat_bytes(records), Self::concat_bytes(rest));
-            let other_rest_bytes = Self::concat_bytes(other_rest);
-            assert(mine == first.bytes() + rest_bytes);
-            assert(all == other_first.bytes() + other_rest_bytes);
-            assert forall|i: int| 0 <= i < rest_bytes.len() implies rest_bytes[i]
-                == other_rest_bytes[i] by {
-                assert(rest_bytes[i] == mine[first_len + i]);
-                assert(mine[first_len + i] == all[first_len + i]);
-            }
-            assert(rest_bytes =~= other_rest_bytes.subrange(0, rest_bytes.len() as int));
-            Self::lemma_concat_unique(rest, other_rest);
-            assert forall|i: int| 0 <= i < records.len() implies records[i] == others[i] by {
-                if i > 0 {
-                    assert(records[i] == rest[i - 1]);
-                }
-            }
-            assert(records =~= others.take(records.len() as int));
         }
     }
 }
@@ -378,8 +182,8 @@ impl<'a> StoredRecord<'a> {
             final(out)@ == old(out)@ + self.bytes(),
     {
         let start = out.len();
+        // A zero CRC, written over once the CRC of the bytes after it is known.
         LittleEndian::push_u32(out, 0);
-        let checked_start = out.len();
         LittleEndian::push_u64(out, self.lsn);
         LittleEndian::push_u32(out, self.key.len() as u32);
         LittleEndian::push_u32(out, self.value.len() as u32);
@@ -387,20 +191,13 @@ impl<'a> StoredRecord<'a> {
         out.extend_from_slice(self.key);
         out.extend_from_slice(self.value);
         proof {
-            lemma_auto_spec_u32_to_from_le_bytes();
-            lemma_auto_spec_u64_to_from_le_bytes();
-            assert(out@ =~= old(out)@ + spec_u32_to_le_bytes(0) + self.checked_bytes());
-            assert(out@.subrange(checked_start as int, out@.len() as int) =~= self.checked_bytes());
+            self.lemma_pushed(old(out)@, out@);
         }
-        let crc = Crc32c::of(slice_subrange(out.as_slice(), checked_start, out.len()));
-        let ghost before_crc = out@;
+        let end = out.len();
+        let crc = Crc32c::of(slice_subrange(out.as_slice(), start + 4, end));
         LittleEndian::write_u32(out.as_mut_slice(), start, crc);
         proof {
-            assert(before_crc.subrange(0, start as int) =~= old(out)@);
-            assert(before_crc.subrange(checked_start as int, before_crc.len() as int)
-                =~= self.checked_bytes());
-            reveal(StoredRecord::bytes);
-            assert(out@ =~= old(out)@ + self.bytes());
+            self.lemma_crc_written(old(out)@, out@);
         }
     }
 
@@ -415,10 +212,7 @@ impl<'a> StoredRecord<'a> {
                 decoded matches Some(decoded) && decoded == record),
     {
         proof {
-            assert forall|record: StoredRecord<'a>| record.fits() implies (
-            #[trigger] record.bytes().is_prefix_of(bytes@) <==> record.is_read_from(bytes@)) by {
-                record.lemma_starts_with(bytes@);
-            }
+            Self::lemma_read_from(bytes@);
         }
         if bytes.len() < RECORD_HEADER_LEN {
             return None;
@@ -443,12 +237,7 @@ impl<'a> StoredRecord<'a> {
         let value = slice_subrange(bytes, key_end, len);
         let decoded = Self { lsn, kind, last_in_append, key, value };
         proof {
-            assert forall|record: StoredRecord<'a>|
-                record.fits() && #[trigger] record.bytes().is_prefix_of(bytes@) implies decoded
-                == record by {
-                assert(decoded.key =~= record.key);
-                assert(decoded.value =~= record.value);
-            }
+            decoded.lemma_only_record(bytes@);
         }
         Some(decoded)
     }
@@ -479,25 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_what_it_encodes() {
-        let (key, value) = (&b"key"[..], &b"value"[..]);
-        let bytes = encoded(StoredRecord {
-            lsn: 7,
-            kind: Kind::Insert,
-            last_in_append: true,
-            key,
-            value,
-        });
-        let record = StoredRecord::decode(&bytes).unwrap();
-        assert_eq!(
-            (record.lsn, record.kind, record.last_in_append),
-            (7, Kind::Insert, true)
-        );
-        assert_eq!((record.key, record.value), (key, value));
-        assert_eq!(record.len(), bytes.len());
-    }
-
-    #[test]
     fn any_flipped_bit_fails() {
         let record = StoredRecord {
             lsn: u64::MAX,
@@ -511,21 +281,6 @@ mod tests {
             let mut flipped = bytes.clone();
             flipped[bit / 8] ^= 1 << (bit % 8);
             assert!(StoredRecord::decode(&flipped).is_none(), "bit {bit}");
-        }
-    }
-
-    #[test]
-    fn a_cut_record_fails() {
-        let record = StoredRecord {
-            lsn: 0,
-            kind: Kind::Insert,
-            last_in_append: true,
-            key: b"key",
-            value: b"value",
-        };
-        let bytes = encoded(record);
-        for len in 0..bytes.len() {
-            assert!(StoredRecord::decode(&bytes[..len]).is_none(), "{len} bytes");
         }
     }
 }

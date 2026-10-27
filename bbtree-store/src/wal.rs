@@ -12,6 +12,7 @@ use core::fmt;
 use std::error::Error;
 use std::io;
 
+mod lemmas;
 mod record;
 mod storage;
 mod tail;

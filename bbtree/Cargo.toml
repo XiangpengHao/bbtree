@@ -28,7 +28,9 @@ inspect = []
 [lints.rust]
 # Verus sets `verus_only` while it verifies: the proofs' modules, which only
 # it reads, are behind it.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(shuttle)", "cfg(verus_only)"] }
+# TSan builds set `tsan`: racing reads tell TSan to ignore them
+# (`src/tree/node/optimistic.rs`, `.github/workflows/sanitizer.yml`).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(shuttle)", "cfg(tsan)", "cfg(verus_only)"] }
 
 [package.metadata.verus]
 verify = true
