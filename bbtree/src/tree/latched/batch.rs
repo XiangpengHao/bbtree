@@ -442,7 +442,6 @@ where
                     Prefetcher::fetch(line).await;
                 }
                 let mut at_separator = false;
-                let mut at_root = true;
                 loop {
                     let Some(routed) = node.route_racing(&self.key, version) else {
                         continue 'restart;
@@ -453,12 +452,11 @@ where
                     let Some(child) = node.racing_child(usize::from(edge)) else {
                         continue 'restart;
                     };
-                    // An edge of the root page is followed only once the
-                    // root's version vouches for it (`descent.rs`).
-                    if at_root && !node.latch().is_unchanged(version) {
+                    // Followed only once the node's version vouches for the
+                    // edge (`descent.rs`).
+                    if !node.latch().is_unchanged(version) {
                         continue 'restart;
                     }
-                    at_root = false;
                     match child {
                         Node::Leaf(leaf) => {
                             Prefetcher::fetch(leaf.search_line()).await;
@@ -528,7 +526,6 @@ where
                     Prefetcher::fetch(line).await;
                 }
                 let mut at_separator = false;
-                let mut at_root = true;
                 let leaf = loop {
                     let Some(routed) = node.route_racing(&self.key, version) else {
                         continue 'restart;
@@ -539,12 +536,11 @@ where
                     let Some(child) = node.racing_child(usize::from(edge)) else {
                         continue 'restart;
                     };
-                    // An edge of the root page is followed only once the
-                    // root's version vouches for it (`descent.rs`).
-                    if at_root && !node.latch().is_unchanged(version) {
+                    // Followed only once the node's version vouches for the
+                    // edge (`descent.rs`).
+                    if !node.latch().is_unchanged(version) {
                         continue 'restart;
                     }
-                    at_root = false;
                     match child {
                         Node::Leaf(leaf) => {
                             Prefetcher::fetch(leaf.search_line()).await;

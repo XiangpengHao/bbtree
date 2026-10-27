@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::leaf::Leaf;
+use super::optimistic::RacingReads;
 use super::page::{FreshPage, NodePtr, PageAllocator, PageByType, PageType};
 use super::{Child, Node};
 use crate::allocator::PageKind;
@@ -184,6 +185,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// The page is a latched tree's root page, allocated.
     #[inline(always)]
     pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
+        let _reads = RacingReads::begin();
         Interleaving::switch_point();
         // SAFETY: the root area was written with the page, which is
         // allocated (caller). Its length is a byte, read as an atomic. A

@@ -239,19 +239,27 @@ not crash it or run user code on garbage:
   runs the shared inline-key search on the page's slots: any inline keys
   give an answer in bounds (D14). The shared prefix is copied out of the
   root page, as raw bytes.
-- **Edges** of the root page are followed only once the root's version
-  vouches for them: it is the one page that changes kind, so an edge read
-  from it may be a leaf's bytes. An edge read from any other node, even a
-  stale one or one past the length, is null or a pointer to a node page of
-  the kind its tag says, live or free: internal pages come zeroed and keep
-  their kind while threads share the tree (type-stable nodes, below). So
-  the descent reads the child's version before checking the parent's,
-  once, which then vouches for both.
+- **Edges** are followed only once the version of the node they were read
+  from vouches for them, and the node's version is checked again after the
+  child's is read, so the child was still the node's child then: two
+  checks a level, as in Leis et al.'s B-tree. The first orders the child's
+  page before the reader touches it. An edge read while a split wrote it
+  may lead to a page allocated a moment before, zeroed by plain writes that
+  nothing orders before the reader's access to its latch word: TSan
+  reports it, and on hardware with a weak memory model a latch taken there
+  could be lost to the zeroing. A check that holds means that the writer
+  let the node go before the reader read its version, which acquired the
+  zeroing. The check also rules out an edge of the root page that is a
+  leaf's bytes: the root page is the one page that changes kind. An edge
+  read from any other node, even a stale one or one past the length, is
+  null or a pointer to a node page of the kind its tag says, live or free:
+  internal pages come zeroed and keep their kind while threads share the
+  tree (type-stable nodes, below).
 - **Ties** compare the separator's key, the head of the leftmost leaf right
   of it (D49), with that leaf latched shared: the walk reads the node's
-  edge, checks the node's version, walks down first edges, which only a
-  thread holding the node changes, latches the leaf, and checks the node's
-  version again before comparing. The latch keeps the head in place: a
+  edge and walks down first edges, which only a thread holding the node
+  changes, checking the node's version before each step down and before it
+  latches the leaf, and again before comparing. The latch keeps the head in place: a
   removal takes out a head with its leaf latched exclusively, and its key's
   memory may be freed at once. Keys ordered by their own bytes alone, the
   std integers and byte arrays `Auto` recognizes, skip the latch: the walk
@@ -805,3 +813,21 @@ outside the shared prefix started at the first entry after a shrink had
 put a key before the bound (Scans, above). No test scanned from outside
 the prefix while it shrank. `scans_from_outside_the_shared_prefix_race_a_shrink`
 does, and Shuttle finds the bug in its first schedules.
+
+### The racing reads, compiled
+
+By Rust's rules a racing read is undefined behavior, so only the compiled
+code shows that a compiler kept each read of a node before the version
+check that vouches for it, rather than loading it again after, as it may
+for a read it takes to be race-free. `bbtree/racing-reads` builds four
+operations to assembly, `get_copied` for `u64` and `String` keys,
+`get_many_copied` and `insert`, for x86-64, x86-64-v4 and AArch64.
+`check.py` follows every path from each check that passes: a read of the
+node after it, other than of its latch word or under its latch, has to meet
+another check of the node on every path that returns. CI's `racing reads`
+job runs it with the last stable releases, the latest and the pinned
+nightly. With the latest and the nightly it also plants three reloads, a
+leaf's entry read again after the leaf's check and an edge read again after
+its node's second check, in the descent and in the lanes, and fails unless
+the checker flags each where it is reached. Removals, scans and batched
+inserts aren't built.

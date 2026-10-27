@@ -8,16 +8,22 @@
 //!   version vouches for what it read of the shared prefix, or while the
 //!   root leaf is latched, which holds the prefix still.
 //! - **Each internal node** is read at a version. The descent routes the
-//!   key through it, reads the edge and the child's version, then checks
-//!   the node's version. So the child was still the node's child when the
+//!   key through it and reads the edge, then checks the node's version
+//!   twice: before it touches the child, and after it reads the child's
+//!   version. The first check orders the child's page before the descent.
+//!   An edge written while the descent read the node may lead to a page
+//!   that a split allocated a moment before, zeroed by plain writes, and
+//!   nothing orders those before an access to its latch word. A check that
+//!   holds means that the edge's writer let the node go before the descent
+//!   read its version, whose read acquired all the writer did. The second
+//!   check means that the child was still the node's child when the
 //!   child's version was read.
-//! - **The root's version** is checked before the descent follows an edge
-//!   read from it, too. The root page turns from a leaf into an internal
-//!   node and back in place (`node/root_page.rs`), so an edge read from it
-//!   may be a leaf's bytes. For the same reason, the descent checks the
-//!   root pointer's tag again once it has the root's version. Every other
-//!   page keeps its kind: an edge read from one, even stale, is null or a
-//!   node of the kind its tag says (`pages.rs`).
+//! - **The root page** turns from a leaf into an internal node and back in
+//!   place (`node/root_page.rs`), so an edge read from it may be a leaf's
+//!   bytes, which the first check also rules out. For the same reason, the
+//!   descent checks the root pointer's tag again once it has the root's
+//!   version. Every other page keeps its kind: an edge read from one, even
+//!   stale, is null or a node of the kind its tag says (`pages.rs`).
 //! - **The leaf** is latched, shared or exclusive, or read at a version
 //!   ([`Optimistic`]). Then its parent's version is checked again, so the
 //!   leaf is still where the key belongs. A failed check starts over from
@@ -431,7 +437,6 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 },
             };
             let mut at_separator = false;
-            let mut at_root = true;
             loop {
                 let Some(routed) = node.route_racing(key, version) else {
                     continue 'restart;
@@ -439,13 +444,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 let Some(child) = node.racing_child(routed.edge) else {
                     continue 'restart;
                 };
-                // An edge read from the root page is followed only once the
-                // root's version vouches for it: the page may hold a leaf
-                // now. Any other edge is null or a node's (`pages.rs`).
-                if at_root && !node.latch().is_unchanged(version) {
+                // Followed only once the node's version vouches for the edge:
+                // the child's page may be fresh, or the root page hold a leaf
+                // now (module documentation).
+                if !node.latch().is_unchanged(version) {
                     continue 'restart;
                 }
-                at_root = false;
                 at_separator |= routed.at_separator;
                 path.record(node, version, routed);
                 match child {

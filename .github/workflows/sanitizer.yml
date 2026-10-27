@@ -4,7 +4,8 @@ name: sanitizer
 # The tests under AddressSanitizer, with its LeakSanitizer: out-of-bounds
 # accesses, use after free, double frees and leaks, in the code as compiled
 # for real hardware, at the tests' full sizes. Miri sees only the code paths
-# it can interpret, at small sizes.
+# it can interpret, at small sizes. And the map's threaded tests under
+# ThreadSanitizer: data races, and accesses that the latches leave unordered.
 on:
   push:
     branches: [main]
@@ -48,3 +49,28 @@ jobs:
           RUSTFLAGS: -Zsanitizer=address
           ASAN_OPTIONS: detect_leaks=1
         run: cargo test -p bbtree -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features
+
+  thread-sanitizer:
+    name: thread sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--cfg tsan` has the optimistic reads of a latched tree tell TSan to
+      # ignore them: they race with writers on purpose, and a version check
+      # after throws away what they read (`src/tree/node/optimistic.rs`).
+      # TSan checks every other access. It exits with an error after any
+      # report.
+      - name: Test
+        env:
+          RUSTFLAGS: -Zsanitizer=thread --cfg tsan
+        run: cargo test -p bbtree -Zbuild-std --target x86_64-unknown-linux-gnu --lib --all-features map::tests

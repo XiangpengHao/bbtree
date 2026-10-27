@@ -905,6 +905,140 @@ fn scans_match_std() {
     }
 }
 
+/// Copied firsts match std's first entry of a range, for every kind of
+/// bound, bounds on keys the map holds included (ties, heads, separators),
+/// and work on a map whose root is a leaf, an empty map, and byte-array
+/// keys.
+#[test]
+fn copied_firsts_match_std() {
+    let rng = TestRng::new(113);
+    let map = BBTreeMap::<u64, u64>::new();
+    let mut std_map = BTreeMap::new();
+    let numbers = random_numbers(&rng, 20_000, 1 << 20);
+    for &number in &numbers {
+        map.insert(number, number * 3).unwrap();
+        std_map.insert(number, number * 3);
+    }
+    let first_in =
+        |range: (Bound<u64>, Bound<u64>)| std_map.range(range).next().map(|(&k, &v)| (k, v));
+    for _ in 0..3_000 {
+        // Half the bounds are keys the map holds.
+        let pick = || {
+            if rng.below(2) == 0 {
+                numbers[rng.below(numbers.len())]
+            } else {
+                rng.below_u64(1 << 20)
+            }
+        };
+        let (a, b) = (pick(), pick());
+        let (low, high) = (a.min(b), a.max(b));
+        let bound = |key: u64, kind: usize| match kind {
+            0 => Bound::Included(key),
+            1 if low != high => Bound::Excluded(key),
+            1 => Bound::Included(key),
+            _ => Bound::Unbounded,
+        };
+        let range = (bound(low, rng.below(3)), bound(high, rng.below(3)));
+        assert_eq!(map.first_copied(range), first_in(range), "{range:?}");
+    }
+    assert_eq!(
+        map.first_copied(..),
+        first_in((Bound::Unbounded, Bound::Unbounded))
+    );
+    assert_eq!(map.first_copied((1_u64 << 20)..), None);
+
+    let small = BBTreeMap::<u64, u64>::new();
+    assert_eq!(small.first_copied(..), None);
+    for key in [5, 1, 3] {
+        small.insert(key, key).unwrap();
+    }
+    assert_eq!(small.first_copied(..), Some((1, 1)));
+    assert_eq!(small.first_copied(2..), Some((3, 3)));
+    assert_eq!(small.first_copied(3..), Some((3, 3)));
+    assert_eq!(
+        small.first_copied((Bound::Excluded(3), Bound::Unbounded)),
+        Some((5, 5))
+    );
+    assert_eq!(small.first_copied(6..), None);
+    assert_eq!(small.first_copied(..=0), None);
+    assert_eq!(small.first_copied(2..3), None);
+
+    let arrays = BBTreeMap::<[u8; 16], u32>::new();
+    let mut std_arrays = BTreeMap::new();
+    for (index, number) in random_numbers(&rng, 5_000, 1 << 30).into_iter().enumerate() {
+        let key = (u128::from(number) << 64 | u128::from(number % 7)).to_be_bytes();
+        arrays.insert(key, index as u32).unwrap();
+        std_arrays.insert(key, index as u32);
+    }
+    for _ in 0..500 {
+        let start = (u128::from(rng.below_u64(1 << 30)) << 64).to_be_bytes();
+        assert_eq!(
+            arrays.first_copied(start..),
+            std_arrays.range(start..).next().map(|(&k, &v)| (k, v))
+        );
+    }
+    for (&key, &value) in std_arrays.iter().take(300) {
+        assert_eq!(arrays.first_copied(key..), Some((key, value)));
+        let after = (Bound::Excluded(key), Bound::Unbounded);
+        assert_eq!(
+            arrays.first_copied(after),
+            std_arrays.range(after).next().map(|(&k, &v)| (k, v))
+        );
+    }
+}
+
+/// Copied firsts, while other threads insert and remove: the entry found
+/// is at or after the bound, never past the first key that is present
+/// throughout, and its value is its key's.
+#[test]
+#[cfg_attr(target_family = "wasm", ignore = "needs threads")]
+fn copied_firsts_hold_while_others_change_the_map() {
+    let (writers, seekers, steady) = (3, 3, 30_000_u64);
+    let map = BBTreeMap::<u64, u64>::new();
+    // Even keys stay for the whole test; odd ones come and go.
+    for number in 0..steady {
+        map.insert(number * 2, number).unwrap();
+    }
+    let barrier = Barrier::new(writers + seekers);
+    thread::scope(|scope| {
+        for writer in 0..writers {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(900 + writer as u64);
+                barrier.wait();
+                for _ in 0..100_000 {
+                    let key = rng.below_u64(steady) * 2 + 1;
+                    if rng.below(2) == 0 {
+                        map.insert(key, key).unwrap();
+                    } else {
+                        map.remove(&key);
+                    }
+                }
+            });
+        }
+        for seeker in 0..seekers {
+            let (map, barrier) = (&map, &barrier);
+            scope.spawn(move || {
+                let rng = TestRng::new(1000 + seeker as u64);
+                barrier.wait();
+                for _ in 0..200_000 {
+                    let start = rng.below_u64(steady * 2);
+                    let first_even = start.div_ceil(2) * 2;
+                    let found = map.first_copied(start..);
+                    match found {
+                        Some((key, value)) => {
+                            assert!(key >= start && key <= first_even, "{found:?} from {start}");
+                            let expected = if key % 2 == 0 { key / 2 } else { key };
+                            assert_eq!(value, expected, "the value of {key}");
+                        }
+                        None => assert!(first_even >= steady * 2, "nothing from {start}"),
+                    }
+                }
+            });
+        }
+    });
+}
+
 /// Scans, in both orders, while other threads insert and remove: every key
 /// present for the whole scan is visited exactly once, in the scan's order.
 #[test]
