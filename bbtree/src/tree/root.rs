@@ -43,9 +43,10 @@ use crate::inline_key::InlineKeyStrategy;
 /// route, never to stay in bounds.
 ///
 /// If present, `rightmost_leaf` points to the tree's physically last leaf.
-/// Every exclusive use of the tree except the owner's fitting append clears
-/// it first ([`Self::root_mut`]). It holds no reference to a key, no cached
-/// length, and no assumption about how `Ord` behaves.
+/// Every exclusive use of the tree that can move or free a node clears it
+/// first ([`Self::root_mut`]); the owner's fitting append and its value
+/// updates (`Tree::find_mut`, `search.rs`) keep it. It holds no reference to
+/// a key, no cached length, and no assumption about how `Ord` behaves.
 pub(crate) struct Tree<K, V, S> {
     root_page: Option<RootPage<K, V, S>>,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
@@ -182,9 +183,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
+    /// The leaf the tree remembers for the next append, if any (D45): for
+    /// the check that it is the tree's physically last leaf
+    /// (`tree/invariants.rs`).
+    #[cfg(any(test, fuzzing))]
+    pub(in crate::tree) fn remembered_rightmost_leaf(&self) -> Option<NodePtr<K, V, S>> {
+        self.rightmost_leaf
+    }
+
     #[cfg(test)]
     pub(crate) fn remembers_rightmost_leaf(&self) -> bool {
-        self.rightmost_leaf.is_some()
+        self.remembered_rightmost_leaf().is_some()
     }
 
     /// A new tree, on a root page from `alloc`: an empty root leaf, without
