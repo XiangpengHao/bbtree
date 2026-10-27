@@ -11,20 +11,19 @@
 //!   whose inline keys sort below the bound's are before it, those above are
 //!   past it, and the few that tie are compared in full, on copies.
 //! - **One leaf.** The descent's leaf holds the first entry unless the bound
-//!   sorts past every key in it, when the next leaf's head does. That, a run
-//!   of ties longer than the copies taken, a range that starts before every
-//!   key, or a leaf that changed meanwhile, sends the read the latched way
-//!   (`scan.rs`).
+//!   sorts past every key in it, when the next leaf's head does. That, more
+//!   ties than [`READ`] reads settle, a range unbounded below or starting
+//!   before every key, or a leaf that changed meanwhile, sends the read the
+//!   latched way (`scan.rs`).
 //!
 //! No latch is taken on this path, so seekers write nothing to the leaves
 //! they read (`design/09-concurrency.md`, principle 3).
 
 use core::borrow::Borrow;
 use core::cmp::Ordering as KeyOrdering;
-use core::ops::{Bound, ControlFlow};
+use core::ops::{Bound, ControlFlow, RangeBounds};
 
 use super::super::node::inline_keys::SearchKey;
-use super::super::node::leaf::Leaf;
 use super::LatchedTree;
 use super::descent::Optimistic;
 use crate::inline_key::InlineKeyStrategy;
@@ -117,7 +116,7 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // A tie compares from past the bytes it shares with the bound;
             // the key after the ties is past the bound.
             if index < ties.end {
-                let before = match Leaf::<K, V, _>::cmp_tied(&key, &placed, &stored) {
+                let before = match placed.cmp_tied(&key, &stored) {
                     KeyOrdering::Greater => true,
                     KeyOrdering::Equal => matches!(start, Bound::Excluded(_)),
                     KeyOrdering::Less => false,
@@ -138,7 +137,9 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        (!Self::past_end(&key, end)).then_some((key, value))
+        (Bound::Unbounded, end)
+            .contains::<Q>(key.borrow())
+            .then_some((key, value))
     }
 
     /// The first entry the latched way (`scan.rs`).
@@ -152,18 +153,5 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         self.scan(start, end, None, |key, value, _| {
             ControlFlow::Break((*key, *value))
         })
-    }
-
-    /// Whether `key` is past the bound a scan stops at.
-    fn past_end<Q>(key: &K, to: Bound<&Q>) -> bool
-    where
-        K: Borrow<Q>,
-        Q: Ord + ?Sized,
-    {
-        match to {
-            Bound::Included(to) => key.borrow() > to,
-            Bound::Excluded(to) => key.borrow() >= to,
-            Bound::Unbounded => false,
-        }
     }
 }
