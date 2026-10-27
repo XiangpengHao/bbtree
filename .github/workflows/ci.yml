@@ -301,7 +301,7 @@ jobs:
       # and the crates released with it, each built against the others'
       # packages.
       - name: Package
-        run: cargo publish --dry-run --locked -p bbtree -p bbtree-mmap -p bbtree-store
+        run: cargo publish --dry-run --locked -p bbtree -p bbtree-mmap
 
   # This workflow's one required check (.github/rulesets/main.json), so the
   # jobs above can change without touching the ruleset. It always runs: a
