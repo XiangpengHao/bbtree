@@ -319,20 +319,29 @@ fn a_dropped_rightmost_append_forgets_the_leaf_and_changes_nothing() {
     inserts.map.check_invariants();
 }
 
+/// Every exclusive access that can move or free the remembered leaf forgets
+/// it: the value walks, the entry handle (which may remove), removals, a cut
+/// that frees the leaf, and clearing. A value update through `get_mut` moves
+/// nothing and keeps it ([`value_updates_keep_the_rightmost_leaf`], D45).
 #[test]
 fn mutable_access_forgets_the_rightmost_leaf() {
     for operation in 0..7 {
         let mut inserts = AscendingInserts::new();
         inserts.insert_until_rightmost_leaf_remembered();
         match operation {
-            0 => *inserts.map.get_mut(&0).unwrap() += 1,
-            1 => *inserts.map.iter_mut().next_back().unwrap().1 += 1,
-            2 => *inserts.map.range_mut(0..).next().unwrap().1 += 1,
-            3 => {
+            0 => *inserts.map.iter_mut().next_back().unwrap().1 += 1,
+            1 => *inserts.map.range_mut(0..).next().unwrap().1 += 1,
+            2 => {
                 inserts.map.entry(0).and_modify(|value| *value += 1);
             }
-            4 => {
+            3 => {
                 assert_eq!(inserts.map.last_entry().unwrap().remove(), inserts.next - 1);
+            }
+            4 => {
+                assert_eq!(
+                    inserts.map.pop_last(),
+                    Some((inserts.next - 1, inserts.next - 1))
+                );
             }
             // The remembered leaf goes with the part cut off, and is freed.
             5 => drop(inserts.map.split_off(&(inserts.next / 2))),
@@ -343,6 +352,93 @@ fn mutable_access_forgets_the_rightmost_leaf() {
         inserts.insert_next();
         inserts.map.check_invariants();
     }
+}
+
+/// A value update changes no key, count or node, so `get_mut` keeps the
+/// remembered rightmost leaf (D45): on a hit in a leaf, on a hit at a
+/// separator, on a miss that shares what every key shares, and on a query
+/// outside it. Ascending inserts still append meanwhile, and the tree stays
+/// valid.
+#[test]
+fn value_updates_keep_the_rightmost_leaf() {
+    let mut inserts = AscendingInserts::new();
+    inserts.insert_until_rightmost_leaf_remembered();
+    // The tree's shared prefix starts with the first byte of every key, 0.
+    assert!(inserts.next < 256, "every key is below the second byte");
+    let separator = *inserts.map.separator_keys()[0];
+
+    // A hit in a leaf.
+    *inserts.map.get_mut(&0).expect("key 0 is there") += 1;
+    assert_eq!(inserts.map.get(&0), Some(&1));
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.insert_next();
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.map.check_invariants();
+
+    // A hit at a separator, whose value is its right child's head.
+    *inserts
+        .map
+        .get_mut(&separator)
+        .expect("a separator key is there") += 1;
+    assert_eq!(inserts.map.get(&separator), Some(&(separator + 1)));
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.insert_next();
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.map.check_invariants();
+
+    // A miss inside the shared prefix: absent, and still below the byte.
+    assert_eq!(inserts.map.get_mut(&(inserts.next + 1)), None);
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.insert_next();
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.map.check_invariants();
+
+    // A miss outside the shared prefix: `u64::MAX` starts with another byte.
+    assert_eq!(inserts.map.get_mut(&u64::MAX), None);
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.insert_next();
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.map.check_invariants();
+
+    assert_eq!(inserts.map.get(&0), Some(&1));
+    assert_eq!(inserts.map.get(&separator), Some(&(separator + 1)));
+
+    // The first split after those updates still remembers its new leaf.
+    while !inserts.is_rightmost_leaf_full() {
+        inserts.insert_next();
+    }
+    inserts.insert_next();
+    assert!(inserts.remembers_rightmost_leaf());
+    inserts.map.check_invariants();
+}
+
+/// A value update changes no node, so the ascending inserts around it compare
+/// exactly as often as they do without it, counting `Ord`: the update costs
+/// no descent (D45).
+#[test]
+fn value_updates_add_no_descent_to_ascending_inserts() {
+    fn comparisons_with_updates(update: bool) -> usize {
+        let budget = Cell::new(usize::MAX);
+        let mut map = BBTreeMap::new();
+        let mut comparisons = 0;
+        for number in 0..4096 {
+            let before = budget.get();
+            map.insert(BudgetedKey::new(number, &budget), number);
+            comparisons += before - budget.get();
+            if update {
+                let updated = BudgetedKey::new(number / 2, &budget);
+                assert!(map.get_mut(&updated).is_some());
+            }
+        }
+        map.check_invariants();
+        comparisons
+    }
+
+    assert_eq!(
+        comparisons_with_updates(true),
+        comparisons_with_updates(false),
+        "an update between ascending inserts adds no comparison"
+    );
 }
 
 #[test]

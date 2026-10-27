@@ -955,6 +955,13 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
     or any `&mut` access that can change the tree's structure. The next
     qualifying split sets it again. `Entry` handles never set it; clones,
     `split_off` outputs and new maps start without it.
+  - **Kept by a value update.** `get_mut` changes a value in place, which
+    moves, frees and reorders no node, so the next greater key still
+    appends. The value walks (`iter_mut`, `range_mut`) and `Entry`
+    handles keep forgetting it, as before: they hold node handles past
+    the lookup, and an entry may remove. So do removals, cuts and
+    `clear`. The shared map's owner already kept it this way
+    (`tree/latched/owner.rs`).
 - **Safety:** the check hands back a private token, and only consuming it
   moves the key and value in.
 - **Why not D30's check:** it ran in every node of every insert
@@ -968,6 +975,24 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   shortcut.
 - **Measured,** 10M ordered inserts: `u64` 31.1 → 5.3 ns (std 39.5), JSON
   121.7 → 45.3 (std 198.9), paths 185.9 → 63.1 (std 256.0).
+- **Measured,** a value update between ascending inserts used to clear it
+  and force a full descent on every insert (2026-10-26, Ryzen AI 9 HX 370,
+  release, LTO, one run each): 10M `u64` inserts, each followed by
+  `*map.get_mut(&(key / 2)) += 1`. The pair took about 103 ns per
+  insert+update before, 54 after; ascending inserts alone took about 18
+  both times. Counted through a key type whose `Ord` increments a counter,
+  comparisons per insert over 1M inserts: 23.55 before, 2.41 after — the
+  same 2.41 as ascending inserts alone, so the updates add no descent. A
+  hit in a leaf, a hit at a separator, a miss inside the shared prefix and
+  a query outside it all keep the leaf
+  (`value_updates_keep_the_rightmost_leaf`).
+- **No other workload pays:** instruction counts (callgrind, 200k `u64`
+  operations, release) of the change: hits through `get_mut` on a 200k map
+  −1.0 per lookup, random inserts unchanged, random inserts each followed
+  by a `get_mut` −2.0 per pair, ascending inserts each followed by a
+  `get_mut` −454 per pair. A later insert either appends (cheaper) or pays
+  one failed append check, which clears the leaf, so at most one such
+  check per split. No other operation reads the leaf.
 
 **D46. No software prefetch.** (2026-10-10)
 

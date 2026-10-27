@@ -15,6 +15,7 @@ use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
 use super::node::page::NodePtr;
 use super::node::{Child, Node};
+use super::node_stack::LastEdge;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 
@@ -37,6 +38,24 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         }
     }
 
+    /// Panics unless the leaf remembered for the next append (D45) is the
+    /// tree's physically last leaf.
+    fn check_rightmost_leaf(&self) {
+        let Some(remembered) = self.remembered_rightmost_leaf() else {
+            return;
+        };
+        let last = self
+            .root_page()
+            .expect("a remembered leaf without a tree")
+            .node()
+            .border_leaf::<LastEdge>();
+        assert_eq!(
+            remembered.tagged(),
+            last.node_ptr().tagged(),
+            "the remembered leaf is not the tree's last leaf"
+        );
+    }
+
     /// Panics unless this is a well-formed B+-tree of `length` entries
     /// (D17):
     ///
@@ -55,6 +74,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     ///   reads as the separator's;
     /// - `length` is the number of entries, each counted once: leaf entries
     ///   and separators, whose values are the heads;
+    /// - if a leaf is remembered for the next append (D45), it is the tree's
+    ///   physically last leaf;
     /// - if the strategy gives the keys inline keys, every node holds its
     ///   keys' windows at its prefix length, in order (D18). The prefix is
     ///   what its fences share, or along the tree's borders, what every key
@@ -66,6 +87,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Calls `Ord` and the strategy's inline-key encoding: a tree whose keys
     /// break their contracts fails it.
     pub(crate) fn check_invariants(&self, length: usize) {
+        self.check_rightmost_leaf();
         let Some(root_page) = self.root_page() else {
             assert_eq!(length, 0, "a map without a tree has entries");
             return;
