@@ -1,0 +1,19 @@
+# The latched map's racing reads as the compilers build them, checked: once
+# a node's version check passes, the code reads nothing more of the node
+# unless another check of it follows (check.py, CI's `racing reads` job).
+# A workspace of its own, as the bench and the fuzz targets are.
+[package]
+name = "bbtree-racing-reads"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+bbtree = { path = ".." }
+
+[workspace]
+members = ["."]
+
+# One codegen unit, so that rustc writes the crate's assembly to one file.
+[profile.release]
+codegen-units = 1

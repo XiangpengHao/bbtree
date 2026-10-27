@@ -5,9 +5,10 @@
 //! Verus proves that a scan reads exactly what appends write: bytes past a
 //! tail scan to records exactly when they hold them ([`WalTail::holds`]),
 //! and an append's bytes hold its records; the scan and the append give
-//! the same addresses for them, and the same tail after them. The specs
-//! are what to review; the lemmas, at the end and in `record.rs`, Verus
-//! checks.
+//! the same addresses for them, and the same tail after them; and a scan
+//! picks up where it stopped (`WalTail::lemma_scan_in_two`, in
+//! `lemmas.rs`). The specs are what to review; the proofs are in
+//! `lemmas.rs`, which only Verus reads.
 use std::vec::Vec;
 
 use vstd::prelude::*;
@@ -183,11 +184,7 @@ impl WalTail {
             {
                 if i == bytes.len() || bytes[i] != FILE_HEADER[i] {
                     proof {
-                        assert forall|records: Seq<StoredRecord<'a>>| #[trigger]
-                            self.holds(bytes@, records) implies false by {
-                            let held = FILE_HEADER@ + StoredRecord::concat_bytes(records);
-                            assert(bytes@[i as int] == held[i as int]);
-                        }
+                        self.lemma_no_header(bytes@, i as int);
                     }
                     return Err(0);
                 }
@@ -202,8 +199,7 @@ impl WalTail {
         let mut next_lsn = self.next_lsn;
         let mut file_appends = self.file_appends;
         proof {
-            assert(bytes@.subrange(0, pos as int) =~= self.header_bytes()
-                + StoredRecord::concat_bytes(records@));
+            self.lemma_header_alone(bytes@.subrange(0, pos as int), records@);
         }
         while pos < bytes.len()
             invariant
@@ -226,47 +222,21 @@ impl WalTail {
                 addresses@ == self.addresses(records@),
             decreases bytes.len() - pos,
         {
+            proof {
+                self.lemma_next_held(bytes@, records@, pos as int);
+            }
             let rest = slice_subrange(bytes, pos, bytes.len());
             let record = match StoredRecord::decode(rest) {
                 Some(record) => record,
-                None => {
-                    proof {
-                        assert forall|held: Seq<StoredRecord<'a>>| #[trigger]
-                            self.holds(bytes@, held) implies false by {
-                            self.lemma_held_records_go_on(bytes@, records@, held, pos as int);
-                        }
-                    }
-                    return Err(pos);
-                },
+                None => return Err(pos),
             };
             if record.lsn != next_lsn {
-                proof {
-                    assert forall|held: Seq<StoredRecord<'a>>| #[trigger]
-                        self.holds(bytes@, held) implies false by {
-                        self.lemma_held_records_go_on(bytes@, records@, held, pos as int);
-                    }
-                }
                 return Err(pos);
             }
             proof {
-                record.lemma_len();
+                self.lemma_scanned_one_more(bytes@, records@, record, pos as int);
             }
             let len = record.len();
-            let ghost scanned = records@.push(record);
-            proof {
-                assert(record.bytes() =~= bytes@.subrange(pos as int, pos + len));
-                StoredRecord::lemma_concat_push(records@, record);
-                assert(bytes@.subrange(0, pos + len) =~= bytes@.subrange(0, pos as int)
-                    + record.bytes());
-                assert(scanned.drop_last() =~= records@);
-                assert(scanned.take(records@.len() as int) =~= records@);
-                assert forall|j: int| 0 <= j < records@.len() implies #[trigger] self.address_at(
-                    scanned,
-                    j,
-                ) == self.address_at(records@, j) by {
-                    assert(scanned.take(j) =~= records@.take(j));
-                }
-            }
             addresses.push(
                 RecordAddress {
                     file: self.file,
@@ -281,18 +251,11 @@ impl WalTail {
                 last_append_end = pos;
             }
             records.push(record);
-            proof {
-                assert(addresses@ =~= self.addresses(records@));
-            }
+        }
+        proof {
+            self.lemma_scanned_all(bytes@, records@);
         }
         if last_append_end != pos {
-            proof {
-                assert(bytes@.subrange(0, pos as int) =~= bytes@);
-                assert forall|held: Seq<StoredRecord<'a>>| #[trigger]
-                    self.holds(bytes@, held) implies false by {
-                    self.lemma_held_records_are(bytes@, records@, held);
-                }
-            }
             return Err(last_append_end);
         }
         let tail = WalTail {
@@ -301,193 +264,7 @@ impl WalTail {
             file_appends,
             next_lsn,
         };
-        let scanned = ScannedBytes { records, addresses, tail };
-        proof {
-            assert(bytes@.subrange(0, pos as int) =~= bytes@);
-            assert forall|held: Seq<StoredRecord<'a>>| #[trigger]
-                self.holds(bytes@, held) implies scanned.records@ == held by {
-                self.lemma_held_records_are(bytes@, records@, held);
-            }
-        }
-        Ok(scanned)
-    }
-
-    /// Records the scan read, at the start of bytes that hold records, are
-    /// the first of those, and more follow while bytes do.
-    proof fn lemma_held_records_go_on<'a>(
-        self,
-        bytes: Seq<u8>,
-        scanned: Seq<StoredRecord<'a>>,
-        held: Seq<StoredRecord<'a>>,
-        pos: int,
-    )
-        requires
-            self.holds(bytes, held),
-            forall|i: int| 0 <= i < scanned.len() ==> #[trigger] scanned[i].fits(),
-            0 <= pos < bytes.len(),
-            bytes.subrange(0, pos) == self.header_bytes() + StoredRecord::concat_bytes(scanned),
-        ensures
-            scanned.len() < held.len(),
-            scanned == held.take(scanned.len() as int),
-            held[scanned.len() as int].bytes().is_prefix_of(
-                bytes.subrange(pos, bytes.len() as int),
-            ),
-    {
-        let (header, header_len) = (self.header_bytes(), self.header_bytes().len() as int);
-        let (read, all) = (StoredRecord::concat_bytes(scanned), StoredRecord::concat_bytes(held));
-        // Past the header, the bytes scanned start the records' bytes.
-        assert(bytes.subrange(0, pos).len() == pos);
-        assert(read.len() + header_len == pos);
-        assert forall|i: int| 0 <= i < read.len() implies read[i] == all[i] by {
-            assert(read[i] == (header + read)[header_len + i]);
-            assert(bytes[header_len + i] == (header + all)[header_len + i]);
-        }
-        assert(read =~= all.subrange(0, read.len() as int));
-        StoredRecord::lemma_concat_unique(scanned, held);
-        let k = scanned.len() as int;
-        if k == held.len() {
-            assert(held.take(k) =~= held);
-        }
-        // The next record's bytes are those from `pos` on.
-
-        StoredRecord::lemma_concat_take(held, k + 1);
-        assert(held.take(k + 1) =~= held.take(k).push(held[k]));
-        StoredRecord::lemma_concat_push(held.take(k), held[k]);
-        let next = held[k].bytes();
-        let through_next = StoredRecord::concat_bytes(held.take(k + 1));
-        assert forall|i: int| 0 <= i < next.len() implies next[i] == bytes[pos + i] by {
-            assert(next[i] == through_next[read.len() + i]);
-            assert(bytes[pos + i] == (header + all)[header_len + read.len() + i]);
-        }
-        assert(next =~= bytes.subrange(pos, bytes.len() as int).subrange(0, next.len() as int));
-    }
-
-    /// Records the scan read, where they fill bytes that hold records, are
-    /// those.
-    proof fn lemma_held_records_are<'a>(
-        self,
-        bytes: Seq<u8>,
-        scanned: Seq<StoredRecord<'a>>,
-        held: Seq<StoredRecord<'a>>,
-    )
-        requires
-            self.holds(bytes, held),
-            forall|i: int| 0 <= i < scanned.len() ==> #[trigger] scanned[i].fits(),
-            bytes == self.header_bytes() + StoredRecord::concat_bytes(scanned),
-        ensures
-            scanned == held,
-    {
-        let (header, header_len) = (self.header_bytes(), self.header_bytes().len() as int);
-        let (read, all) = (StoredRecord::concat_bytes(scanned), StoredRecord::concat_bytes(held));
-        assert((header + read).len() == (header + all).len());
-        assert forall|i: int| 0 <= i < read.len() implies read[i] == all[i] by {
-            assert(read[i] == (header + read)[header_len + i]);
-            assert(all[i] == (header + all)[header_len + i]);
-        }
-        assert(read =~= all);
-        assert(read =~= all.subrange(0, read.len() as int));
-        assert(all =~= read.subrange(0, all.len() as int));
-        StoredRecord::lemma_concat_unique(scanned, held);
-        StoredRecord::lemma_concat_unique(held, scanned);
-        assert(scanned =~= held);
-    }
-
-    /// Bytes that hold records past this tail, then bytes that hold more
-    /// past the tail after them, hold all of them: a scan of both at once
-    /// reads what a scan of each, one after the other, does, at the same
-    /// addresses, to the same tail.
-    pub(super) proof fn lemma_scan_in_two<'a>(
-        self,
-        bytes: Seq<u8>,
-        records: Seq<StoredRecord<'a>>,
-        more_bytes: Seq<u8>,
-        more: Seq<StoredRecord<'a>>,
-    )
-        requires
-            self.holds(bytes, records),
-            self.after(records).holds(more_bytes, more),
-            self.file_len + bytes.len() + more_bytes.len() <= u64::MAX,
-            self.next_lsn + records.len() + more.len() <= u64::MAX,
-            self.file_appends + records.len() + more.len() <= u64::MAX,
-        ensures
-            self.holds(bytes + more_bytes, records + more),
-            self.addresses(records + more) == self.addresses(records) + self.after(
-                records,
-            ).addresses(more),
-            self.after(records + more) == self.after(records).after(more),
-    {
-        let (between, all) = (self.after(records), records + more);
-        StoredRecord::lemma_concat_append(records, more);
-        Self::lemma_append_ends_append(records, more);
-        Self::lemma_append_ends_at_most(records);
-        Self::lemma_append_ends_at_most(more);
-        // Past the first records' bytes, the file has started: no header.
-        if self.file_len == 0 {
-            assert(self.header_bytes().len() == FILE_HEADER_LEN);
-        }
-        assert(between.file_len > 0);
-        assert(between.header_bytes() =~= Seq::<u8>::empty());
-        assert(bytes + more_bytes =~= self.header_bytes() + StoredRecord::concat_bytes(all));
-        assert forall|i: int| 0 <= i < all.len() implies #[trigger] all[i].fits() && all[i].lsn
-            == self.next_lsn + i by {
-            if i >= records.len() {
-                assert(all[i] == more[i - records.len()]);
-            }
-        }
-        assert forall|i: int| 0 <= i < all.len() implies #[trigger] self.address_at(all, i) == (
-        self.addresses(records) + between.addresses(more))[i] by {
-            if i < records.len() {
-                assert(all.take(i) =~= records.take(i));
-            } else {
-                let j = i - records.len();
-                assert(all.take(i) =~= records + more.take(j));
-                StoredRecord::lemma_concat_append(records, more.take(j));
-            }
-        }
-        assert(self.addresses(all) =~= self.addresses(records) + between.addresses(more));
-    }
-
-    /// How many of two runs of records end an append, together.
-    proof fn lemma_append_ends_append<'a>(
-        records: Seq<StoredRecord<'a>>,
-        more: Seq<StoredRecord<'a>>,
-    )
-        ensures
-            Self::append_ends(records + more) == Self::append_ends(records) + Self::append_ends(
-                more,
-            ),
-        decreases more.len(),
-    {
-        if more.len() == 0 {
-            assert(records + more =~= records);
-        } else {
-            assert((records + more).drop_last() =~= records + more.drop_last());
-            Self::lemma_append_ends_append(records, more.drop_last());
-        }
-    }
-
-    /// At most all of `records` end an append.
-    proof fn lemma_append_ends_at_most<'a>(records: Seq<StoredRecord<'a>>)
-        ensures
-            Self::append_ends(records) <= records.len(),
-        decreases records.len(),
-    {
-        if records.len() > 0 {
-            Self::lemma_append_ends_at_most(records.drop_last());
-        }
-    }
-
-    /// Records none of which ends an append end none.
-    proof fn lemma_no_append_ends<'a>(records: Seq<StoredRecord<'a>>)
-        requires
-            forall|i: int| 0 <= i < records.len() ==> !(#[trigger] records[i]).last_in_append,
-        ensures
-            Self::append_ends(records) == 0,
-        decreases records.len(),
-    {
-        if records.len() > 0 {
-            Self::lemma_no_append_ends(records.drop_last());
-        }
+        Ok(ScannedBytes { records, addresses, tail })
     }
 }
 
@@ -556,8 +333,7 @@ impl EncodedAppend {
             bytes.extend_from_slice(FILE_HEADER.as_slice());
         }
         proof {
-            assert(bytes@ =~= position.header_bytes());
-            assert(records.take(0) =~= Seq::<StoredRecord<'a>>::empty());
+            position.lemma_header_alone(bytes@, records.take(0));
         }
         let mut addresses: Vec<RecordAddress> = Vec::new();
         let mut i = 0;
@@ -590,11 +366,7 @@ impl EncodedAppend {
                 value,
             };
             proof {
-                assert(record == records[i as int]);
-                StoredRecord::lemma_concat_take(records, i as int);
-                StoredRecord::lemma_concat_take(records, i + 1);
-                assert(records.take(i + 1) =~= records.take(i as int).push(records[i as int]));
-                StoredRecord::lemma_concat_push(records.take(i as int), records[i as int]);
+                position.lemma_encoded_one_more(records, i as int, record);
             }
             record.encode(&mut bytes);
             addresses.push(
@@ -607,10 +379,7 @@ impl EncodedAppend {
             i += 1;
         }
         proof {
-            assert(records.take(i as int) =~= records);
-            assert(addresses@ =~= position.addresses(records));
-            assert(records.drop_last().len() + 1 == records.len());
-            WalTail::lemma_no_append_ends(records.drop_last());
+            position.lemma_encoded_all(records, addresses@);
         }
         let tail = WalTail {
             file: position.file,
