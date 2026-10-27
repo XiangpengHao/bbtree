@@ -195,6 +195,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        let _reads = RacingReads::begin();
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree.
         let (len, prefix_len, inline_keys) =
