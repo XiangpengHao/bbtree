@@ -56,10 +56,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
     /// The entries go into the rightmost leaf while it has room. The leaf is
     /// found once per leaf and once per call: callers append runs, not
     /// single entries.
-    ///
-    /// An `InlineKey` that panics computing an entry's inline key drops the
-    /// entry; one that panics fitting the prefix of a node the entry closes
-    /// leaves the entry placed. Either way the tree stays well formed.
     pub(crate) fn extend(&mut self, entries: impl IntoIterator<Item = (K, V)>) {
         let mut entries = entries.into_iter();
         let Some(mut next) = entries.next() else {

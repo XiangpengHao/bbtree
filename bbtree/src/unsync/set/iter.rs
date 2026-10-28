@@ -433,8 +433,8 @@ impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// be removed.
     ///
     /// If the closure returns `true`, the element is removed from the set
-    /// and yielded. If the closure returns `false`, or panics, the element
-    /// remains in the set and will not be yielded.
+    /// and yielded. If the closure returns `false`, the element remains in
+    /// the set and will not be yielded.
     ///
     /// If the returned `ExtractIf` is not exhausted, e.g. because it is
     /// dropped without iterating or the iteration short-circuits, then the

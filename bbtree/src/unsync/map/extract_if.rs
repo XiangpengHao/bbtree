@@ -6,8 +6,8 @@
 //! its end, comparing each entry it visits with the end, as std's does. An
 //! entry the predicate passes over stays where it is; one it picks comes out
 //! as a removal takes it, and the walk goes on from where the entry after it
-//! went (`tree/remove.rs`). The map is whole between steps, so a panicking
-//! predicate or `Ord` leaves it whole.
+//! went (`tree/remove.rs`). The map is whole between steps, where the
+//! predicate and `Ord` run (D48).
 //!
 //! The walk itself, [`ExtractionWalk`], takes the predicate at each step,
 //! as std's `ExtractIfInner` does, so that the set's `ExtractIf`, whose
@@ -145,8 +145,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
     /// determine if an element should be removed.
     ///
     /// If the closure returns `true`, the element is removed from the map
-    /// and yielded. If the closure returns `false`, or panics, the element
-    /// remains in the map and will not be yielded.
+    /// and yielded. If the closure returns `false`, the element remains in
+    /// the map and will not be yielded.
     ///
     /// The iterator also lets you mutate the value of each element in the
     /// closure, regardless of whether you choose to keep or remove it.

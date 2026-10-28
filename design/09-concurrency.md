@@ -678,9 +678,9 @@ memory delivers.
 
 ## Panics
 
-Whatever is simplest. The latch guard unlatches on unwind; there is no
-poisoning; a value that a panicking `update` closure left half-changed
-stays as it is.
+User code, closures included, must not panic (D48). If it does, the latch
+guards unlatch on unwind, with no poisoning, and a value that a panicking
+`update` closure left half-changed stays as it is.
 
 ## Open
 

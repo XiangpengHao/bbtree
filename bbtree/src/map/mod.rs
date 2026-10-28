@@ -44,6 +44,12 @@ use crate::tree::latched::{LatchedTree, ReadOrInsert, UpdateOrInsert};
 /// strings have them under [`Auto`]; other keys implement the trait and use
 /// [`WithInlineKey`](crate::WithInlineKey).
 ///
+/// As with std's map, it is a logic error for a key to change its order
+/// relative to other keys while it is in the map, and so is a panic in user
+/// code it calls, its closures included
+/// ([crate docs](crate#user-code-must-not-panic)); the behavior that results
+/// is unspecified but memory-safe.
+///
 /// It iterates by [`Self::scan`] and [`Self::scan_rev`], which run a
 /// closure on each entry of a range, in key order or in reverse.
 /// [`Self::range_cloned`] is an iterator over clones of the entries, which

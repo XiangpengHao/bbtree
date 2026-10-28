@@ -18,12 +18,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// does (D1), and gives every page back to `alloc`, the map's
     /// allocator. A separator's value is its head (D17), dropped right
     /// after the separator's key.
-    ///
-    /// If a key's or value's `Drop` panics, the rest is still taken apart, in
-    /// the same order, before the panic goes on, as in std's collections.
-    /// Either way, every key and value is dropped once and every page
-    /// released once. A second panic while doing so aborts, as any panic
-    /// during unwinding does.
     pub(crate) fn destroy(self, alloc: &impl Allocator) {
         // Without a count of the entries, the walk ends where the tree does:
         // only its front moves. The tree's leftmost leaf has no head.

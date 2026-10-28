@@ -23,9 +23,6 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S
     /// `other`. `self` keeps its key, and drops its old value, then the key
     /// of `other`, as std's map does.
     ///
-    /// If `K`'s `Ord` panics, `self` keeps its entries and those of `other`
-    /// merged so far, and the rest of `other` is dropped, as with std's map.
-    ///
     /// The merged nodes come from `self`'s allocator; `other` keeps its own.
     /// If `self` is empty, the two maps swap, allocators too, as std's do.
     ///

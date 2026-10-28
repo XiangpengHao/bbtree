@@ -142,8 +142,7 @@ pub trait InlineKey: Ord {
 
 The test-only checker verifies both on every tree (`tree/invariants.rs`).
 Correctness needs less: any `prefix_len` up to `LCP(low, high)` gives right
-answers, only shorter windows. That is what an operation keeps in the middle,
-and what a panic in its last step leaves.
+answers, only shorter windows. That is what an operation keeps in the middle.
 
 ## Upkeep
 
@@ -180,11 +179,10 @@ An operation does its upkeep in two steps:
 | insert of a key that shares less, join | the borders' missing ones: the shared bytes shrink | every border node moves back to the new length, filled from the shared bytes' window there | — |
 
 - **Why the first border of a removed separator shrinks first.** Its
-  fences widen, so its prefixes must shrink before `s'` replaces `s`, and
-  reading keys then still leaves the map unchanged on a panic. A node there
-  has fences `low` and `s`, so its new prefix is `min(own, LCP(s, s'))`, with
-  no fence read: `low ≤ s ≤ s'`. It can't be skipped: a search for a key in
-  `(s, s')` goes down that border.
+  fences widen, so its prefixes must shrink before `s'` replaces `s`. A
+  node there has fences `low` and `s`, so its new prefix is
+  `min(own, LCP(s, s'))`, with no fence read: `low ≤ s ≤ s'`. It can't be
+  skipped: a search for a key in `(s, s')` goes down that border.
 - **What a removal fits:** at each node it fixed, the child the node stack
   leads to and the sibling that gave it an entry; for a separator, every node
   below it on the node stack, which goes down the second border. It keeps the
@@ -195,12 +193,11 @@ An operation does its upkeep in two steps:
   first, its `high` the key right of it at the nearest where it isn't the last
   (`NodeStackMut::fences`). Only fitting reads them. A plain search reads no
   fence.
-- **A node on a border keeps the shared prefix through a panic.** A search
-  for a key past the first or last that has the shared bytes goes down a
-  border and reads windows there, so no fit may give a border node a longer
-  prefix, even for a moment that a panicking `InlineKey` could make last:
-  the builder fits a full rightmost node only once the next leaf hangs after
-  it, off the border.
+- **A node on a border keeps the shared prefix.** A search for a key past
+  the first or last that has the shared bytes goes down a border and reads
+  windows there, so no fit gives a border node a longer prefix: the builder
+  fits a full rightmost node only once the next leaf hangs after it, off the
+  border.
 - **An internal node grows at most to its children's prefixes,** which reads
   their headers: a prefix that fits its fences never passes them, but a panic
   during an earlier fit may have left one of theirs short.

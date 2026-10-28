@@ -49,8 +49,9 @@ pub use iter_mut::{IterMut, RangeMut, ValuesMut};
 /// replacement for [`std::collections::BTreeMap`].
 ///
 /// As with std's map, it is a logic error for a key to change its order
-/// relative to other keys while it is in the map; the behavior that results
-/// is unspecified but memory-safe.
+/// relative to other keys while it is in the map, and so is a panic in user
+/// code it calls ([crate docs](crate#user-code-must-not-panic)); the
+/// behavior that results is unspecified but memory-safe.
 ///
 /// Its nodes store an inline key beside each key, when the strategy `S`
 /// gives the key type one: the first bytes of the key's encoding, in a
@@ -195,8 +196,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// Clears the map, removing all elements.
     ///
     /// Drops every key and value in ascending key order, each key before its
-    /// value, as dropping the map does. If one of their `Drop`s panics, the
-    /// rest are still dropped, and the map is left empty.
+    /// value, as dropping the map does.
     ///
     /// # Examples
     ///
@@ -382,15 +382,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// If the map did have this key present, the value is updated, and the
     /// old value is returned. The key is not updated, though: the map keeps
     /// its key and drops the given one, before it replaces the value.
-    ///
-    /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
-    /// before the first change. So does every call to its `InlineKey` with
-    /// [`WithInlineKey`], except those an insert makes last, once the entry
-    /// is in and counted: if it split nodes, it fits their inline keys to
-    /// their new fences. If one of those calls panics, the map has the new
-    /// entry. Either way, it stays valid.
-    ///
-    /// [`WithInlineKey`]: crate::WithInlineKey
     pub fn insert(&mut self, key: K, value: V) -> Option<V>
     where
         K: Ord,
@@ -404,16 +395,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// The key may be any borrowed form of the map's key type, but the
     /// ordering on the borrowed form *must* match the ordering on the key
     /// type.
-    ///
-    /// If `K`'s `Ord` panics, the map is unchanged: every call to it happens
-    /// before the first change. So does every call to its `InlineKey` with
-    /// [`WithInlineKey`], except those a removal makes last, once the entry
-    /// is out and counted: if it merged nodes, moved entries between them or
-    /// removed a separator, it fits their inline keys to their new fences.
-    /// If one of those calls panics, the entry is gone. Either way, the map
-    /// stays valid.
-    ///
-    /// [`WithInlineKey`]: crate::WithInlineKey
     ///
     /// # Examples
     ///
@@ -439,9 +420,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// The key may be any borrowed form of the map's key type, but the
     /// ordering on the borrowed form *must* match the ordering on the key
     /// type.
-    ///
-    /// Panics in `K`'s `Ord` or `InlineKey` leave the map as for
-    /// [`BBTreeMap::remove`].
     ///
     /// # Examples
     ///
@@ -470,11 +448,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
     /// Splits the collection into two at the given key. Returns everything
     /// after the given key, including the key. The returned map's nodes
-    /// come from a clone of this map's allocator.
-    ///
-    /// Every `Ord` call happens first, before any entry moves. `InlineKey`
-    /// is called last, once both maps are counted: if it panics, both stay
-    /// valid. Both maps keep a tree, even an empty one, as std's do.
+    /// come from a clone of this map's allocator. Both maps keep a tree,
+    /// even an empty one, as std's do.
     ///
     /// # Examples
     ///

@@ -67,7 +67,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// separator between the two halves of its child that split.
     ///
     /// Calls `InlineKey`: an insert does this last, once its entry is in and
-    /// counted, so that a panic leaves a map that has it.
+    /// counted (D48).
     pub(in crate::tree) fn refit_split_halves(
         &mut self,
         separator_indexes: &[usize; MAX_DEPTH + 1],
