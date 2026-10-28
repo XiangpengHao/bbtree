@@ -43,12 +43,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Removes the entry whose key equals `key` and returns it, with the key
     /// as stored, counting it out of `length`; or `None` if there is none.
     ///
-    /// Every `Ord` call happens in the search, before anything changes, so a
-    /// panicking `Ord` leaves the tree unchanged. `InlineKey` runs before
-    /// anything changes too, and last, once the entry is out and counted: a
-    /// panic in that last call leaves a valid tree without the entry. Every
-    /// page a merge frees, and the one freed when an emptied root lowers the
-    /// tree, goes back to `alloc`, the map's allocator.
+    /// User code runs between changes, and inside one only behind an
+    /// abort-on-unwind guard (D48): `Ord` and `InlineKey` in the search, and
+    /// `InlineKey` again once the entry is out and counted. Every page a merge frees, and the one freed when an
+    /// emptied root lowers the tree, goes back to `alloc`, the map's
+    /// allocator.
     pub(crate) fn remove_entry<Q>(
         &mut self,
         key: &Q,

@@ -43,19 +43,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// the time of the split. So do the page the root node moves to when the
     /// tree grows a level, and the tree's root page if it has none.
     ///
-    /// Panics in user code:
-    ///
-    /// - `Ord` runs only while checking an append or searching. `InlineKey`
-    ///   runs only while checking an append, checking what the key shares
-    ///   with every key (D50), searching, or computing the key's inline key.
-    ///   All of these run before anything changes but the shared prefix and
-    ///   the border prefixes that follow it, so a panic there leaves the
-    ///   tree with the same entries.
-    /// - After a split, the split nodes' prefixes fit their new fences
-    ///   (`prefix.rs`), which calls `InlineKey` again once the entry is in
-    ///   and counted. A panic then leaves a valid tree that has the entry.
-    /// - `alloc` is called on the way back up, possibly after the leaf has
-    ///   changed; it doesn't unwind (D8).
+    /// User code runs between changes, and inside one only behind an
+    /// abort-on-unwind guard (D48): `Ord` and `InlineKey` before the leaf
+    /// changes, and `InlineKey` again once the entry is in and counted,
+    /// fitting split nodes' prefixes (`prefix.rs`). `alloc`, called
+    /// mid-split, doesn't unwind (D8).
     #[inline(always)]
     pub(crate) fn insert(
         &mut self,
@@ -82,8 +74,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             .search_for_insert(&SearchKey::new(key.key()))
         {
             Ok(found) => {
-                // Keep std's drop-before-replacement behavior on this path
-                // too: a panicking key destructor leaves the value intact.
+                // As std's does, drop the new key before replacing the value.
                 drop(key);
                 return Some(mem::replace(found.value_mut(), value));
             }
@@ -117,8 +108,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     {
         let mut stack = NodeStackMut::new(self);
         if stack.search(&SearchKey::new(key.key())) {
-            // As in std, the new key is dropped before the value changes: if
-            // its `Drop` panics, the map is unchanged.
+            // As in std, the new key is dropped before the value changes.
             drop(key);
             Some(mem::replace(stack.value_mut(), value))
         } else {
@@ -181,7 +171,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         let prefix_len = leaf.prefix_len();
         if leaf.len() < Leaf::<K, V, S>::capacity() {
             // Compute the inline key before the first change, as a split
-            // does, so a panic leaves the tree unchanged.
+            // does (D48).
             leaf.insert_fit(index, key.window_at(prefix_len), value);
             *length += 1;
         } else {

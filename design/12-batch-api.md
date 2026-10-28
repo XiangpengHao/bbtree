@@ -46,9 +46,8 @@ keys and prefix lengths included, as individual inserts. Nothing async
 reaches the caller: no future, no executor, nothing to poll.
 
 Comparison order need not match individual calls: the read-only descent
-compares later keys before earlier entries apply. User-code panics are not
-reconciled with a serial loop (D48); entries pulled into a batch but not
-yet applied may be dropped. Ownership and memory safety hold.
+compares later keys before earlier entries apply. User code must not
+panic (D48); if it does, memory safety still holds.
 
 Operations whose work is a batch use it without being asked:
 

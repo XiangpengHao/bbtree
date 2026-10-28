@@ -20,10 +20,6 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// A copy of the tree on pages from `alloc`, the copy's allocator. Every
     /// key and value is cloned in key order: each separator's value right
     /// after its key (D17), which with inline keys is its head's key (D49).
-    ///
-    /// If a `clone` panics, what was copied so far is dropped, and its pages
-    /// given back, before the panic goes on: nothing leaks, and the tree is
-    /// unchanged.
     pub(crate) fn clone_in(&self, alloc: &impl Allocator) -> Self {
         let Some(root_page) = self.root_page() else {
             return Self::EMPTY;

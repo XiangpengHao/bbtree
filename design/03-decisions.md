@@ -500,7 +500,7 @@ Design in 04-inline-key.md.
   ascending key order, comparing no keys: each node fills before the next
   starts beside it, and `finish` tops up the right border to the minimum
   (D22) from the full left siblings. The tree is well formed throughout but
-  for that border, so a panic part-way takes it apart as any other.
+  for that border.
 - **`collect` and `from`** sort, keep the last of equal keys (as std), and
   build. 10M u64→u64, one run: 2.02 vs std's 2.86 ns per entry, 16.3 vs
   18.2 bytes per entry.
@@ -1049,21 +1049,27 @@ Design and measurements in 07-node-plan.md.
   speculation drops `inbounds` and keeps one null test). Debug tests 86 → 75 s, from
   narrowing type recognition before comparing type identities.
 
-**D48. A panic in user code is not reconciled.** (2026-10-12)
+**D48. User code must not panic; a panic in it is not reconciled.** (2026-10-12)
 
-- **What:** when user-provided code panics (`Ord`, `InlineKey`, `Clone`,
-  `Drop`), the map does whatever is simplest. Calls into user code are not
-  ordered around changes, and a panic need not leave a valid map behind.
-- **Why:** after a panic in user code there is no state the map can
-  gracefully reconcile, and designing around it constrains every
-  structural operation.
+- **What:** user code (`Ord`, `InlineKey`, `Clone`, `Drop`, and the
+  closures the maps' methods take) must not panic, a logic error like a
+  key whose order changes (crate docs, `lib.rs`). If it does, the map does
+  whatever is simplest. Calls into user code are not ordered around
+  changes, and a panic need not leave a valid map behind.
+- **Why:** a panic is an ordinary unwind out of a call the map made, so
+  reconciling one is possible (std's `sort` keeps every element through a
+  panicking `Ord`), but every call into user code would then have to sit
+  before or after a change, or behind a guard that finishes or undoes it.
+  That constrains every structural operation, for code already wrong.
 - **Still sound:** no undefined behavior, whatever user code does (D14).
   User code runs between structural changes, not inside one, so unwinding
   never leaves what unchecked code trusts (lengths, node minimums) half
   done (D26, D37). A change that must call it inside one goes behind an
   abort-on-unwind guard, as a key's hash tag (D36), and the window an
   internal node reads again from its key (D43), do. The allocator, called
-  inside splits, must not unwind at all (D8).
+  inside splits, must not unwind at all (D8). In the shared map, the latch
+  guards unlatch on unwind, so other threads find the nodes as whole as
+  between changes.
 - **Tests:** a lying `Ord` or `InlineKey` must stay memory-safe. A
   panicking one need not leave a valid map; the tests that still check one
   (`unsync/map/tests/drops.rs`, `unsync/map/tests/inline_key.rs`,

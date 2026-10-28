@@ -337,8 +337,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
             rightmost_leaf,
         } = self;
         let index = leaf.len();
-        // Compute the key's window before the leaf changes. A panic or an
-        // unused token leaves the leaf forgotten, without changing the tree.
+        // Compute the key's window before the leaf changes (D48).
         leaf.insert_fit(index, key.window_at(leaf.prefix_len()), value);
         // Fitting appends preserve this leaf and all ancestors. There are
         // no callbacks after insertion; the caller counts the entry next.

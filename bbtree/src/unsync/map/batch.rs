@@ -39,7 +39,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// Repeated keys replace earlier values in the batch and keep the
     /// existing key, exactly as separate calls to `insert` do.
     /// The descent may compare later keys before earlier entries apply.
-    /// If user code panics, entries not yet inserted are dropped.
     ///
     /// ```
     /// use bbtree::unsync::BBTreeMap;

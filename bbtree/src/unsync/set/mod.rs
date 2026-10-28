@@ -53,8 +53,9 @@ struct SetValZST;
 ///
 /// It is a logic error for an item to be modified in such a way that the
 /// item's ordering relative to any other item, as determined by the [`Ord`]
-/// trait, changes while it is in the set. The behavior that results is
-/// unspecified but memory-safe.
+/// trait, changes while it is in the set, and so is a panic in user code it
+/// calls ([crate docs](crate#user-code-must-not-panic)). The behavior that
+/// results is unspecified but memory-safe.
 ///
 /// [`std::collections::BTreeSet`]: https://doc.rust-lang.org/std/collections/struct.BTreeSet.html
 ///
@@ -393,9 +394,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     ///   the entry is not updated: the set keeps its element and drops the
     ///   given one.
     ///
-    /// Panics in `T`'s `Ord` or `InlineKey` leave the set as for
-    /// [`BBTreeMap::insert`].
-    ///
     /// # Examples
     ///
     /// ```
@@ -417,11 +415,7 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Adds a value to the set, replacing the existing element, if any, that
     /// is equal to the value. Returns the replaced element.
     ///
-    /// It searches the set once. If `T`'s `Ord`, or its `InlineKey` with
-    /// [`WithInlineKey`], panics before an element is replaced, the set is
-    /// unchanged; an insert panics as [`BBTreeMap::insert`] does.
-    ///
-    /// [`WithInlineKey`]: crate::WithInlineKey
+    /// It searches the set once.
     ///
     /// # Examples
     ///
@@ -449,9 +443,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// but the ordering on the borrowed form *must* match the
     /// ordering on the element type.
     ///
-    /// Panics in `T`'s `Ord` or `InlineKey` leave the set as for
-    /// [`BBTreeMap::remove`].
-    ///
     /// # Examples
     ///
     /// ```
@@ -477,9 +468,6 @@ impl<T, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// The value may be any borrowed form of the set's element type,
     /// but the ordering on the borrowed form *must* match the
     /// ordering on the element type.
-    ///
-    /// Panics in `T`'s `Ord` or `InlineKey` leave the set as for
-    /// [`BBTreeMap::remove`].
     ///
     /// # Examples
     ///

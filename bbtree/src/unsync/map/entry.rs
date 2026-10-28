@@ -537,11 +537,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// manipulation.
     ///
     /// Every `Ord` call the entry makes happens here; the entry's methods
-    /// compare no keys. If `K`'s `Ord`, or its `InlineKey` with
-    /// [`WithInlineKey`], panics here, the map is unchanged. A vacant
-    /// entry's insert calls `InlineKey` too, as [`BBTreeMap::insert`] does.
-    ///
-    /// [`WithInlineKey`]: crate::WithInlineKey
+    /// compare no keys.
     ///
     /// # Examples
     ///
@@ -586,12 +582,6 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
     /// Puts `key` in place of an equal key and returns that one, keeping its
     /// value and dropping `value`; or, if there is none, inserts `key` with
     /// `value` and returns `None`: std's set's `replace`, on one search.
-    ///
-    /// If `K`'s `Ord`, or its `InlineKey` with [`WithInlineKey`], panics
-    /// before the key is replaced, the map is unchanged; an insert panics as
-    /// [`BBTreeMap::insert`] does.
-    ///
-    /// [`WithInlineKey`]: crate::WithInlineKey
     pub(crate) fn replace_key(&mut self, key: K, value: V) -> Option<K>
     where
         K: Ord,

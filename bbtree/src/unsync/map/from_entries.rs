@@ -123,9 +123,8 @@ impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BBTreeMap<K, V> {
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> Extend<(K, V)>
     for BBTreeMap<K, V, S, A>
 {
-    /// Inserts each entry in turn, as `insert` does.
-    /// Large trees may pull sixteen entries ahead; a panic can drop entries
-    /// already pulled from the iterator but not yet inserted.
+    /// Inserts each entry in turn, as `insert` does. Large trees may pull
+    /// sixteen entries ahead of the insert.
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
         let mut entries = iter.into_iter();
         // Automatic batching must not put large inline values in several

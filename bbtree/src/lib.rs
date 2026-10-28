@@ -1,4 +1,15 @@
 //! bbtree: the blessed B-tree.
+//!
+//! # User code must not panic
+//!
+//! The code a map runs for its user must not panic: the keys' `Ord` and
+//! [`InlineKey`], the keys' and values' `Clone` and `Drop`, and the closures
+//! a map's methods take, such as `retain`'s and [`BBTreeMap::update`]'s. A
+//! panic there is a logic error, like a key whose order changes while it is
+//! in the map. The map stays memory-safe, dropping it included, but what it
+//! holds afterwards is unspecified: it may lose or leak entries, give wrong
+//! answers, panic again, or abort the process. An [`Allocator`] must not
+//! unwind at all: its safety contract says so.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]

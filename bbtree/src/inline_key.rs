@@ -99,7 +99,8 @@ impl InlineWidth {
 ///
 /// A wrong implementation, like a wrong `Ord`, gives wrong answers but never
 /// undefined behavior: whatever it returns, the map reads only its own
-/// entries.
+/// entries. Like `Ord`'s, its methods must not panic
+/// ([crate docs](crate#user-code-must-not-panic)).
 ///
 /// # Examples
 ///
@@ -168,9 +169,7 @@ pub trait InlineKey: Ord {
     /// keys instead of several. Called only if [`Self::HAS_HASH_TAG`].
     ///
     /// A tag that differs between equal keys, like a wrong `Ord`, gives
-    /// wrong answers but never undefined behavior. The map also calls it
-    /// while it moves keys between nodes, where a panic would leave the move
-    /// half done: a panic there aborts the process.
+    /// wrong answers but never undefined behavior.
     fn hash_tag(&self) -> u8 {
         0
     }
@@ -183,10 +182,7 @@ pub trait InlineKey: Ord {
     /// differ, not from its start. Called only if [`Self::HAS_CMP_FROM`].
     ///
     /// One that orders keys otherwise than `Ord`, like a wrong `Ord`,
-    /// gives wrong answers but never undefined behavior. With it, the map
-    /// also calls [`Self::inline_key_at`] while it moves keys between
-    /// nodes, to read a window's other 4 bytes, where a panic would leave
-    /// the move half done: a panic there aborts the process.
+    /// gives wrong answers but never undefined behavior.
     fn cmp_from(&self, other: &Self, equal_len: usize) -> Ordering {
         let _ = equal_len;
         self.cmp(other)
