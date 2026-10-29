@@ -61,6 +61,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The library without its default `std` feature: still `no_std` (D3).
+      - name: Clippy without std
+        run: cargo clippy -p bbtree --no-default-features --features file,inspect -- -D warnings
+
       - name: Test
         run: cargo test --workspace --all-features
 

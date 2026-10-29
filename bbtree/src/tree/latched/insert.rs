@@ -31,7 +31,7 @@
 
 use core::alloc::Layout;
 
-use super::super::interleaving::Interleaving;
+use super::super::interleaving::Backoff;
 use super::super::node::Node;
 use super::super::node::annexed_leaf::AnnexedLeaf;
 use super::super::node::inline_keys::SearchKey;
@@ -312,6 +312,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         // Declared outside the loop, so it drops last, after the nodes each
         // split held: see `NodePages`.
         let pages = self.pages(alloc);
+        let mut backoff = Backoff::new();
         loop {
             let mut path = TreePath::new();
             let Ok((held, at_separator)) =
@@ -332,7 +333,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 Err(entry) => (key, value, policy) = entry,
             }
             // Another thread holds a node the split needs.
-            Interleaving::wait(1);
+            backoff.wait();
         }
     }
 

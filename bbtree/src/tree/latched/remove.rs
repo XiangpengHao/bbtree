@@ -33,7 +33,7 @@
 
 use core::borrow::Borrow;
 
-use super::super::interleaving::Interleaving;
+use super::super::interleaving::Backoff;
 use super::super::node::Child;
 use super::super::node::Node;
 use super::super::node::annexed_leaf::AnnexedLeaf;
@@ -114,12 +114,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         // Declared outside the loop, so it drops last, after the nodes each
         // try held: see `NodePages`.
         let pages = self.pages(alloc);
+        let mut backoff = Backoff::new();
         loop {
             if let Ok(removed) = self.try_remove_rebalancing(key, condition, on_remove, &pages) {
                 return removed;
             }
             // Another thread holds a node the removal needs.
-            Interleaving::wait(1);
+            backoff.wait();
         }
     }
 

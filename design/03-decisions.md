@@ -14,7 +14,9 @@ it could be merged into std someday; flag anything that would prevent that.
 **D2. Zero dependencies.** `serde` and `rand` support, when added, are
 optional features.
 
-**D3. `no_std`.**
+**D3. `no_std`.** The `std` feature, on by default, adds only what an OS
+offers: a thread waiting for a latch yields to the scheduler once a short
+spin hasn't freed it (09-concurrency.md, Latching).
 
 **D4. Two maps on one tree: `BBTreeMap`, which threads share, and
 `unsync`'s, single-threaded like std's.** (2026-10-17)

@@ -26,7 +26,7 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use super::super::interleaving::Interleaving;
+use super::super::interleaving::{Backoff, Interleaving};
 use super::super::node::latch::Version;
 use super::super::node::page::{LatchedNodeHeader, PageAllocator};
 use super::super::node_stack::MAX_DEPTH;
@@ -59,6 +59,7 @@ impl FreeList {
     }
 
     fn with_locked<R>(&self, f: impl FnOnce() -> R) -> R {
+        let mut backoff = Backoff::new();
         loop {
             Interleaving::switch_point();
             if self
@@ -68,7 +69,7 @@ impl FreeList {
             {
                 break;
             }
-            Interleaving::wait(1);
+            backoff.wait();
         }
         let result = f();
         Interleaving::switch_point();

@@ -200,8 +200,10 @@ an internal node and back.
   `upgrade`).
 - **Leaves: latched to change them, and to run a closure.** Shared for
   `read`'s closure and scans, exclusive for `update` and `insert`,
-  spinning with exponential backoff. No scheduler hint: the crate is
-  `no_std` (D3). Releasing exclusively bumps the version too. Writers can
+  waiting with exponential backoff (`Backoff`): a short spin, then, with
+  the `std` feature (D3), a yield to the OS scheduler each round, as
+  crossbeam's `Backoff` does, since the holder may be preempted or running
+  a user's closure. Releasing exclusively bumps the version too. Writers can
   starve under a steady stream of readers. A lookup reads its leaf
   optimistically first, as it reads internal nodes, and latches it only
   where that doesn't settle it (Lookups, below).
@@ -331,10 +333,11 @@ node it passes with the version it read, the edge it took and the length
 without waiting (`held.rs`), internal nodes on the path by compare-and-swap
 at the versions it read, so that each is still the parent of the next, and
 nodes beside the path at the versions they are at, reached through nodes
-it holds. Any node held by another thread, or changed, lets go of all and
-starts over. Then it runs the unsync tree's operation along a node stack from the
-topmost node it holds, as if that were the root, on the tree as it is
-(`LatchedTree::change_held`), and lets go once all is done: a reader that
+it holds. Any node held by another thread, or changed, lets go of all and,
+after a round of `Backoff`, starts over. Then it runs the unsync tree's
+operation along a node stack from the topmost node it holds, as if that
+were the root, on the tree as it is (`LatchedTree::change_held`), and lets
+go once all is done: a reader that
 read a node meanwhile fails its check. Pages it allocates it takes before
 it changes anything, and they come latched and stay so until then
 (`pages.rs`); a change of the root's kind retags the tree's root pointer
