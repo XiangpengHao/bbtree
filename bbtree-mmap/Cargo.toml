@@ -1,6 +1,6 @@
 [package]
 name = "bbtree-mmap"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "bbtree on disk: a compact, read-only map written to a file and looked up where it lies, mapped into memory, at a map's speed."
 license = "MIT OR Apache-2.0"
@@ -8,7 +8,7 @@ repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
 # Released with bbtree, at its version.
-bbtree = { path = "../bbtree", version = "0.1.6", features = ["file"] }
+bbtree = { path = "../bbtree", version = "0.1.7", features = ["file"] }
 memmap2 = "0.9.11"
 
 [dev-dependencies]
