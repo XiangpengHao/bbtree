@@ -10,8 +10,14 @@
 //!
 //! - goes through raw pointers and forms no reference into the node
 //!   ([`NodeInlineKeys`] over its slots, edges read from their slots);
-//! - reads the node's length once and clamps it to the capacity, so the
-//!   search stays in bounds whatever it read (D14);
+//! - reads the node's length once, volatile, and clamps it to the capacity,
+//!   so the search stays in bounds whatever it read (D14);
+//! - acts on nothing it read before the node's version vouches for it:
+//!   whatever it read, its next atomic operation, and a batch lane's next
+//!   yield (doc 12), is the check. The version is then a racing read's only
+//!   synchronization, so a replay that keeps the order of a program's
+//!   atomics replays every read, torn ones included. For the same reason,
+//!   fields read once are read volatile, not as atomics;
 //! - follows no edge before the node's version vouches for it, touching
 //!   neither the child's latch word nor its bytes: the check orders the
 //!   child's page, which a split may have just allocated, before the reader
@@ -25,9 +31,9 @@
 //!   changes only while its leaf is latched exclusively, and the key a
 //!   removal takes out may be dropped, and its memory freed, right after.
 //!   Keys ordered by their own bytes alone (std integers and byte arrays) it
-//!   compares as an unlatched copy instead, and checks the node's version
-//!   after: a head changes only while the node holding its separator is
-//!   held;
+//!   compares as an unlatched copy instead, once the node's version vouches
+//!   for the copy: a head changes only while the node holding its separator
+//!   is held;
 //! - tells ThreadSanitizer to ignore it ([`RacingReads`]). By Rust's rules,
 //!   a plain read that races with a write is undefined behavior, checked or
 //!   not, and Rust has no way yet to read bytes that a writer changes,
@@ -40,7 +46,6 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
 
 use super::Node;
 use super::hash_tags::HashTags;
@@ -288,11 +293,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
             .filter(|&tag| HashTags::is_exact_length(tag))?;
         // SAFETY: the page is a leaf's, allocated while threads share the
         // tree, and its hash tags were initialized with it (invariant 5).
-        // Tag `index`, below the capacity, is a byte in the page, read as an
-        // atomic.
+        // Tag `index`, below the capacity, is a byte in the page, read once,
+        // volatile.
         let tag = unsafe {
             let tags = self.node_ptr().key_columns::<Self>().hash_tags()?;
-            AtomicU8::from_ptr(tags.slot(index).as_ptr()).load(AtomicOrdering::Relaxed)
+            tags.slot(index).as_ptr().read_volatile()
         };
         Some(tag == query_tag)
     }
@@ -341,7 +346,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     /// [`Internal::search`] does, but in place while writers may change it.
     /// The result holds only if the version is unchanged after. `None` if a
     /// tie found the node changed, or what it read is no node any writer
-    /// left; the caller starts over.
+    /// left; the caller starts over. Only a tie returns `None`, and only
+    /// once it has checked the version: a restart on `None` follows a check.
     ///
     /// `key` shares the node's prefix if it routed here through nodes whose
     /// versions held.
@@ -461,11 +467,11 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         if KeyInliner::<K>::orders_by_own_bytes::<S>() {
             // Without the latch: the head changes only while this node is
             // held (`tree/latched/held.rs`), which its version tells.
-            let head = leaf.load_racing_head_key()?;
-            let ordering = cmp(&head);
-            return latch_of(self.node_ptr())
-                .is_unchanged(version)
-                .then_some(ordering);
+            let head = leaf.load_racing_head_key();
+            if !latch_of(self.node_ptr()).is_unchanged(version) {
+                return None;
+            }
+            return head.map(|head| cmp(&head));
         }
         let latched = SharedLatch::lock(latch_of(leaf.node_ptr()));
         let ordering = (latch_of(self.node_ptr()).is_unchanged(version) && leaf.has_head())
@@ -504,14 +510,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
         // SAFETY: the tree is latched (`route_racing`'s caller), and its
         // pages stay node pages of their kind (`tree/latched`).
         let latch = unsafe { self.node_ptr().latch() };
-        let mut node = self.racing_child(edge)?;
+        let mut child = self.racing_child(edge);
         loop {
             if !latch.is_unchanged(version) {
                 return None;
             }
-            node = match node {
+            child = match child? {
                 Node::Leaf(leaf) => return Some(leaf),
-                Node::Internal(internal) => internal.racing_child(0)?,
+                Node::Internal(internal) => internal.racing_child(0),
             };
         }
     }

@@ -56,7 +56,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let Some(leaf) = self.rightmost_leaf() else {
             return Err((key, value, policy));
         };
-        if !leaf.may_go_last_racing(&SearchKey::new(&key)) {
+        // Whether the key may go last, read unlatched at the leaf's version,
+        // which is checked before the read chooses to latch the leaf
+        // (`node/optimistic.rs`).
+        let version = leaf.latch().read_version();
+        let may_go_last = leaf.may_go_last_racing(&SearchKey::new(&key));
+        if !leaf.latch().is_unchanged(version) || !may_go_last {
             return Err((key, value, policy));
         }
         let held = HeldLeaf::<K, V, S, Exclusive>::lock(leaf);

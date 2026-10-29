@@ -259,9 +259,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 Err(Unsettled) => LeafFind::Changed,
             };
         }
-        // A leaf that changed since the descent may have merged into its
-        // sibling and been freed, its bytes a stale copy of entries that
-        // live on there.
+        // The reads chose the latched way: checked first all the same
+        // (`node/optimistic.rs`). A leaf that changed since the descent may
+        // have merged into its sibling and been freed, its bytes a stale
+        // copy of entries that live on there.
+        if !at.is_unchanged() {
+            return LeafFind::Changed;
+        }
         let Some(held) = Self::latch_unchanged(leaf, at.version()) else {
             return LeafFind::Changed;
         };

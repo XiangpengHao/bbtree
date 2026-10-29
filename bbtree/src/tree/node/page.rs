@@ -10,7 +10,6 @@ use core::mem::offset_of;
 #[cfg(feature = "file")]
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
@@ -510,8 +509,8 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
 
     /// The `len` and `prefix_len` header fields of a latched tree's internal
     /// node, while a writer may be changing them, for an optimistic read
-    /// (`optimistic.rs`). Each is read once, as a relaxed atomic, so that the
-    /// compiler loads it once, and what the read checks is what it uses.
+    /// (`optimistic.rs`). Each is read once, volatile, so that the compiler
+    /// loads it once, and what the read checks is what it uses.
     ///
     /// # Safety
     ///
@@ -525,18 +524,16 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // initialized header (caller), read through the raw pointer.
         unsafe {
             let header = self.page().cast::<InlineKeyNodeHeader>().as_ptr();
-            let len = AtomicU16::from_ptr(&raw mut (*header).header.len);
-            let prefix_len = AtomicU16::from_ptr(&raw mut (*header).prefix_len);
             (
-                usize::from(len.load(Ordering::Relaxed)),
-                usize::from(prefix_len.load(Ordering::Relaxed)),
+                usize::from((&raw const (*header).header.len).read_volatile()),
+                usize::from((&raw const (*header).prefix_len).read_volatile()),
             )
         }
     }
 
     /// The `has_head` header field of a latched tree's leaf, while a writer
     /// may be changing it, for an optimistic read (`optimistic.rs`): read
-    /// once, as a relaxed atomic.
+    /// once, volatile.
     ///
     /// # Safety
     ///
@@ -549,7 +546,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // SAFETY: the field is a `bool` of the allocated, initialized header
         // (caller), which writers only ever set to a `bool`, read through
         // the raw pointer.
-        unsafe { AtomicBool::from_ptr(&raw mut (*self.header()).has_head).load(Ordering::Relaxed) }
+        unsafe { (&raw const (*self.header()).has_head).read_volatile() }
     }
 
     /// The width of the inline keys nodes of `Kind` hold, or `None` if they

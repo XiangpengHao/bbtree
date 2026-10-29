@@ -63,12 +63,13 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // the bound includes it, and before the range otherwise; a head
             // past the bound is the first entry, every other key of the leaf
             // being past the head.
-            let Some(head) = leaf.load_racing_head_entry() else {
-                return self.first_latched(start, end);
-            };
+            let head = leaf.load_racing_head_entry();
             if !held.is_unchanged() {
                 return self.first_latched(start, end);
             }
+            let Some(head) = head else {
+                return self.first_latched(start, end);
+            };
             // SAFETY: the leaf stayed at the version the descent read, with
             // no thread holding it exclusively, from before the read to
             // after it, and it had a head as read. A `Copy` key and value
@@ -84,7 +85,13 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 KeyOrdering::Greater => return self.first_latched(start, end),
             }
         }
-        let Some(placed) = leaf.racing_place(&key) else {
+        let placed = leaf.racing_place(&key);
+        // Checked before anything the place read chooses, even the latched
+        // way (`node/optimistic.rs`).
+        if !held.is_unchanged() {
+            return self.first_latched(start, end);
+        }
+        let Some(placed) = placed else {
             return self.first_latched(start, end);
         };
         let (ties, len) = (placed.ties.clone(), placed.len);

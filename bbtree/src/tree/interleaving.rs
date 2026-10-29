@@ -1,16 +1,16 @@
 //! Where a latched tree's threads may interleave: before each access to an
-//! atomic that threads share, and in each round of waiting for another
-//! thread ([`Interleaving`]).
+//! atomic that threads share, before a racing read of a node's header or
+//! of the shared prefix, and in each round of waiting for another thread
+//! ([`Interleaving`]).
 //!
 //! In a normal build, a switch point is nothing and a wait is spin hints.
 //! Under Shuttle (`--cfg shuttle`, tests only, `map/shuttle_tests.rs`), each
 //! is a point where Shuttle's scheduler may switch to another thread; it
 //! runs one thread at a time. Shuttle's own atomics would mark these points
-//! themselves. But the latch words live in node pages, and the racing reads
-//! load page fields in place (`AtomicU16::from_ptr`), so the tree keeps
-//! core's atomics and marks the points itself. With one thread running at a
-//! time, every access is sequentially consistent: Shuttle finds bad
-//! interleavings, not reorderings a weak memory model allows.
+//! themselves. But the latch words live in node pages, as core's atomics,
+//! so the tree keeps those and marks the points itself. With one thread
+//! running at a time, every access is sequentially consistent: Shuttle
+//! finds bad interleavings, not reorderings a weak memory model allows.
 //!
 //! Outside a Shuttle test, a `--cfg shuttle` build behaves as any other, so
 //! the whole suite runs under it.
