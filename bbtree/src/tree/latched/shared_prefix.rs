@@ -9,7 +9,7 @@
 //! that side. So an operation that holds a border node holds what every key
 //! shares still, as a shrinking must take that node.
 
-use super::super::interleaving::Interleaving;
+use super::super::interleaving::Backoff;
 use super::super::node::Node;
 use super::super::node::latch::Latched;
 use super::super::node_stack::{FirstEdge, LastEdge, NodeEnd};
@@ -29,6 +29,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     #[cold]
     #[inline(never)]
     pub(super) fn shrink_shared_prefix_for(&self, key: K, alloc: &impl Allocator) -> K {
+        let mut backoff = Backoff::new();
         loop {
             let mut held_nodes = HeldNodes::new();
             if self.take_borders(&mut held_nodes) {
@@ -37,7 +38,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     .into_key();
             }
             drop(held_nodes);
-            Interleaving::wait(1);
+            backoff.wait();
         }
     }
 

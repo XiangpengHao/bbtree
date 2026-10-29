@@ -16,7 +16,7 @@
 //!   writer changing it meanwhile fails the check. This is optimistic lock
 //!   coupling.
 //! - **Leaves, pessimistically.** Shared for reads, exclusive for changes,
-//!   spinning with backoff while the other mode holds it
+//!   waiting, with [`Backoff`], while the other mode holds it
 //!   ([`NodeLatch::lock_shared`], [`NodeLatch::lock_exclusive`]). Letting
 //!   go of it exclusively bumps the version too, so a lookup can also read
 //!   a leaf optimistically (D57).
@@ -29,7 +29,7 @@
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
-use super::super::interleaving::Interleaving;
+use super::super::interleaving::{Backoff, Interleaving};
 use super::internal::Internal;
 use super::leaf::Leaf;
 use crate::inline_key::InlineKeyStrategy;
@@ -101,7 +101,7 @@ impl NodeLatch {
     const VERSION_UNIT: u64 = 1 << 21;
 
     /// The node's version, to read it optimistically, once no thread holds
-    /// it exclusively; spins until then.
+    /// it exclusively; waits until then.
     #[inline(always)]
     pub(in crate::tree) fn read_version(&self) -> Version {
         Interleaving::switch_point();
@@ -117,7 +117,7 @@ impl NodeLatch {
     fn read_version_contended(&self) -> Version {
         let mut backoff = Backoff::new();
         loop {
-            backoff.spin();
+            backoff.wait();
             Interleaving::switch_point();
             let word = self.0.load(Ordering::Acquire);
             if word & Self::EXCLUSIVE == 0 {
@@ -188,7 +188,7 @@ impl NodeLatch {
     }
 
     /// Takes the node exclusively, once no thread holds it in either mode;
-    /// spins until then. Returns the version to let go at.
+    /// waits until then. Returns the version to let go at.
     #[inline]
     pub(in crate::tree) fn lock_exclusive(&self) -> Version {
         Interleaving::switch_point();
@@ -205,7 +205,7 @@ impl NodeLatch {
     fn lock_exclusive_contended(&self) -> Version {
         let mut backoff = Backoff::new();
         loop {
-            backoff.spin();
+            backoff.wait();
             Interleaving::switch_point();
             let word = self.0.load(Ordering::Relaxed);
             if word & (Self::EXCLUSIVE | Self::SHARED_MASK) == 0 && self.try_lock_at(Version(word))
@@ -215,7 +215,7 @@ impl NodeLatch {
         }
     }
 
-    /// Takes the node shared, once no thread holds it exclusively; spins
+    /// Takes the node shared, once no thread holds it exclusively; waits
     /// until then. Let go with [`Self::unlock_shared`].
     #[inline]
     pub(in crate::tree) fn lock_shared(&self) {
@@ -255,7 +255,7 @@ impl NodeLatch {
                     return;
                 }
             }
-            backoff.spin();
+            backoff.wait();
         }
     }
 
@@ -264,26 +264,6 @@ impl NodeLatch {
     pub(in crate::tree) fn unlock_shared(&self) {
         Interleaving::switch_point();
         self.0.fetch_sub(Self::SHARED_UNIT, Ordering::Release);
-    }
-}
-
-/// Spinning while another thread holds a latch: twice as long each round,
-/// up to a cap. The crate has no `std`, so there is no scheduler to yield
-/// to, except Shuttle's in tests (`tree/interleaving.rs`).
-struct Backoff {
-    round: u32,
-}
-
-impl Backoff {
-    const MAX_ROUND: u32 = 10;
-
-    fn new() -> Self {
-        Self { round: 0 }
-    }
-
-    fn spin(&mut self) {
-        Interleaving::wait(1 << self.round);
-        self.round = (self.round + 1).min(Self::MAX_ROUND);
     }
 }
 
