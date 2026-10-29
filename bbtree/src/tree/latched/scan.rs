@@ -717,11 +717,13 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         loop {
             let len = node.racing_len();
             let edge_taken = edge.take().unwrap_or_else(|| O::entered_edge(len));
-            let child = node.racing_child(edge_taken)?;
-            // Followed only once the node's version vouches for it.
+            let child = node.racing_child(edge_taken);
+            // Followed only once the node's version vouches for it, checked
+            // first even if the edge read null (`node/optimistic.rs`).
             if !node.latch().is_unchanged(version) {
                 return None;
             }
+            let child = child?;
             path.record(
                 node,
                 version,

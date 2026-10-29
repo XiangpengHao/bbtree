@@ -518,7 +518,7 @@ class Function:
         is folded into a flag with other conditions, which the branch tests
         (`folded_fails`). What it can't make out as either goes to
         `unrecognized`, as does, on AArch64, an acquire barrier that no check
-        follows."""
+        follows, nor a check's load whose value it discards."""
         self.checks, self.unrecognized, folded = [], [], []
         for i, ins in enumerate(self.instructions):
             if ins.op != "and" or not any(mask in ins.text for mask in CHECK_MASKS):
@@ -556,7 +556,9 @@ class Function:
         if self.arm:
             loads = {check[0] for check in self.checks}
             for i, ins in enumerate(self.instructions):
-                if ins.text.split() == ["dmb", "ishld"] and not any(i < j <= i + 3 for j in loads):
+                follows = range(i + 1, min(i + 4, len(self.instructions)))
+                if ins.text.split() == ["dmb", "ishld"] and not any(
+                        j in loads or self.discards_latch_word(j) for j in follows):
                     self.unrecognized.append(i)
         self.check_through = {}
         for check in self.checks:
@@ -571,8 +573,7 @@ class Function:
         otherwise, or further back than two blocks."""
         loads, seen = [], set()
 
-        def back(j, depth):
-            start = self.block_start[j]
+        def back(j, start, depth):
             while j >= start:
                 ins = self.instructions[j]
                 if reg in ins.defines:
@@ -587,10 +588,23 @@ class Function:
             for p in self.predecessors[start]:
                 if p not in seen:
                     seen.add(p)
-                    if not back(p, depth + 1):
+                    if not back(p, self.block_start[p], depth + 1):
                         return False
             return True
-        return loads if back(i - 1, 0) else []
+        # Back from i within its block, then along every path into the block:
+        # a compare that starts a block may join loads from several.
+        return loads if back(i - 1, self.block_start[i], 0) else []
+
+    def discards_latch_word(self, j):
+        """Whether instruction j loads a latch word into the zero register: a
+        check whose compare the compiler dropped, as every path goes on alike
+        whatever the version. It vouches for nothing."""
+        ins = self.instructions[j]
+        if ins.op != "ldr" or ins.operands[0].strip() != "xzr" or not ins.accesses:
+            return False
+        _, base, offset = ins.accesses[0]
+        at = (self.values_in[j] or {}).get(base, (None, 0))[1]
+        return at is not None and offset is not None and at + offset in LATCH_OFFSETS
 
     def folded_fails(self, i, k):
         """For a check whose compare is folded into a flag (cset, setcc) that

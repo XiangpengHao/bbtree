@@ -8,9 +8,10 @@
 //!   version vouches for what it read of the shared prefix, or while the
 //!   root leaf is latched, which holds the prefix still.
 //! - **Each internal node** is read at a version. The descent routes the
-//!   key through it and reads the edge, then checks the node's version
-//!   twice: before it touches the child, and after it reads the child's
-//!   version. The first check orders the child's page before the descent.
+//!   key through it and reads the edge, then, whatever it read, checks the
+//!   node's version twice: before it touches the child, and after it reads
+//!   the child's version. The first check orders the child's page before
+//!   the descent.
 //!   An edge written while the descent read the node may lead to a page
 //!   that a split allocated a moment before, zeroed by plain writes, and
 //!   nothing orders those before an access to its latch word. A check that
@@ -441,15 +442,17 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 let Some(routed) = node.route_racing(key, version) else {
                     continue 'restart;
                 };
-                let Some(child) = node.racing_child(routed.edge) else {
-                    continue 'restart;
-                };
+                let child = node.racing_child(routed.edge);
                 // Followed only once the node's version vouches for the edge:
                 // the child's page may be fresh, or the root page hold a leaf
-                // now (module documentation).
+                // now (module documentation). Checked even if the edge read
+                // null (`node/optimistic.rs`).
                 if !node.latch().is_unchanged(version) {
                     continue 'restart;
                 }
+                let Some(child) = child else {
+                    continue 'restart;
+                };
                 at_separator |= routed.at_separator;
                 path.record(node, version, routed);
                 match child {

@@ -16,7 +16,6 @@ use core::mem::size_of;
 #[cfg(any(test, feature = "inspect"))]
 use core::ops::Range;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::super::interleaving::Interleaving;
 use super::internal::Internal;
@@ -188,11 +187,11 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         let _reads = RacingReads::begin();
         Interleaving::switch_point();
         // SAFETY: the root area was written with the page, which is
-        // allocated (caller). Its length is a byte, read as an atomic. A
+        // allocated (caller). Its length is a byte, read once, volatile. A
         // racing write makes the copy one that the version check throws away.
         unsafe {
-            let len = AtomicU8::from_ptr(self.area().byte_add(SharedPrefix::LEN_OFFSET).cast());
-            (len.load(Ordering::Relaxed) != 0).then(|| self.area().read())
+            let len = self.area().byte_add(SharedPrefix::LEN_OFFSET).cast::<u8>();
+            (len.read_volatile() != 0).then(|| self.area().read())
         }
     }
 

@@ -234,8 +234,15 @@ No copies on either side. A racing read forms no reference into the node,
 so the aliasing model is not involved; what it reads before its check must
 not crash it or run user code on garbage:
 
-- **Routing** reads `len` and `prefix_len` once each (relaxed atomic loads,
-  so the compiler loads them once), clamps the length to the capacity, and
+- **Nothing before the check.** Whatever a racing read found, its next
+  atomic operation, and a batch lane's next yield, is its node's version
+  check: a restart, the latched way, and the latch a hint chose all wait
+  for it. The version is then a racing read's only synchronization, so a
+  replay that keeps the order of a program's atomics replays every read,
+  torn ones included. Fields read once are read volatile, not as atomics,
+  so they add none.
+- **Routing** reads `len` and `prefix_len` once each (volatile loads, so
+  the compiler loads them once), clamps the length to the capacity, and
   runs the shared inline-key search on the page's slots: any inline keys
   give an answer in bounds (D14). The shared prefix is copied out of the
   root page, as raw bytes.
@@ -750,10 +757,11 @@ Shuttle (`map/shuttle_tests.rs`, `.github/workflows/shuttle.yml`) runs a test's
 threads one at a time and switches between them where the tree touches an
 atomic that threads share or waits for another thread
 (`tree/interleaving.rs`): a latch word, the root and last-leaf pointers, a
-free list, the header fields a racing read loads. Built with
+free list; and where a racing read loads a node's header fields or the
+shared prefix. Built with
 `--cfg shuttle`, like loom's `cfg(loom)`; other builds compile the points
 to nothing. Shuttle's own atomics would do the same, but the latch words
-live in node pages and racing reads load page fields in place. One thread
+live in node pages, which core's atomics access in place. One thread
 runs at a time, so Shuttle finds bad interleavings, not reorderings of a
 weak memory model, nor torn reads of a node a writer is changing.
 
