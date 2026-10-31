@@ -511,8 +511,10 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                 // still lacks it on the same side, and descends again if not.
                 Err(outside) if outside == O::PAST.reverse() => {
                     let start = self.descend_to_first_leaf::<O>(path);
-                    let root_page = self.root_page().expect("a tree with a first leaf");
-                    if root_page.shared_prefix().place_outside(&key) == Some(outside) {
+                    // SAFETY: the thread holds `start`'s leaf, on the
+                    // scan's starting border, latched shared.
+                    let shared_prefix = unsafe { self.held_shared_prefix() };
+                    if shared_prefix.place_outside(&key) == Some(outside) {
                         return Some(start);
                     }
                 }

@@ -687,13 +687,13 @@ fn iterators_are_covariant_in_elements() {
     assert_eq!(iter.count() + range.count(), 2);
 }
 
-/// The map's three words, its values taking no space.
+/// The map's cache line, its values taking no space.
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-fn three_words_like_the_map() {
-    assert_eq!(size_of::<BBTreeSet<u64>>(), 24);
+fn one_cache_line_like_the_map() {
+    assert_eq!(size_of::<BBTreeSet<u64>>(), 64);
     assert_eq!(size_of::<BBTreeSet<u64>>(), size_of::<BBTreeMap<u64, ()>>());
-    assert_eq!(size_of::<BBTreeSet<String, WithInlineKey>>(), 24);
+    assert_eq!(size_of::<BBTreeSet<String, WithInlineKey>>(), 64);
 }
 
 #[test]

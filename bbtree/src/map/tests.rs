@@ -2,6 +2,7 @@
 //! answers while threads share it.
 
 use core::ops::{Bound, ControlFlow};
+use core::panic::{RefUnwindSafe, UnwindSafe};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::format;
@@ -12,7 +13,7 @@ use std::vec::Vec;
 
 use super::{BBTreeMap, RangeCloned};
 use crate::allocator::{Global, InsertError};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::node_config::Configured;
 use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
@@ -103,6 +104,15 @@ fn assert_batches_match_reads<K: Ord + Clone + core::fmt::Debug>(
 /// `count` random numbers below `universe`, some repeated.
 fn random_numbers(rng: &TestRng, count: usize, universe: u64) -> Vec<u64> {
     (0..count).map(|_| rng.below_u64(universe)).collect()
+}
+
+/// A shared map crosses `catch_unwind` as std's map does: unwind safe, by
+/// value and by reference, with keys and values that are.
+#[test]
+fn unwind_safe_as_std_map() {
+    fn assert_unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
+    assert_unwind_safe::<BBTreeMap<u64, u64>>();
+    assert_unwind_safe::<BBTreeMap<String, u64, WithInlineKey>>();
 }
 
 #[test]

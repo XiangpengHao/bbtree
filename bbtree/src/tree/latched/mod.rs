@@ -61,8 +61,11 @@ pub(crate) use self::scan::{LeafStamp, ScanResume};
 
 use core::alloc::Layout;
 use core::borrow::Borrow;
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
+use core::mem;
 use core::ops::{Deref, DerefMut};
+use core::panic::RefUnwindSafe;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -74,9 +77,11 @@ use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::latch::Latched;
 use super::node::leaf::Leaf;
+use super::node::optimistic::RacingReads;
 use super::node::page::{FreshPage, NodePtr, PageType};
 use super::node::root_page::RootPage;
 use super::root::Tree;
+use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
@@ -89,6 +94,12 @@ use crate::inline_key::InlineKeyStrategy;
 pub(crate) struct LatchedTree<K, V, S> {
     /// Read by every operation, written when the root changes kind.
     root: AtomicPtr<u8>,
+    /// What every key shares (D50), on the root pointer's line: read by
+    /// every descent. Written only by a thread that holds the root and every
+    /// node along both borders (`shared_prefix.rs`), or the root leaf, which
+    /// lies on both. Read by a thread holding a node on a border, or racing,
+    /// the copy checked by the root's version.
+    shared_prefix: UnsafeCell<SharedPrefix>,
     /// The tree's last leaf, tagged, where an append goes (`append.rs`):
     /// null until the first insert makes the tree. Written when the last
     /// leaf splits.
@@ -129,8 +140,16 @@ unsafe impl<K: Send, V: Send, S> Send for LatchedTree<K, V, S> {}
 // which other threads then read, change through `&mut V`, or drop: they
 // must be `Send` and `Sync`. Every change to a node through `&self` holds
 // its latch, and every read either holds it or is checked by its version
-// (`node/latch.rs`, `node/optimistic.rs`).
+// (`node/latch.rs`, `node/optimistic.rs`); so for the shared prefix, by the
+// root's and the borders' (the field's documentation).
 unsafe impl<K: Send + Sync, V: Send + Sync, S> Sync for LatchedTree<K, V, S> {}
+
+// The shared prefix's cell, as every `UnsafeCell`, takes `RefUnwindSafe`
+// away. No unwind leaves the prefix half changed: an operation stores it
+// whole once it is done, and one that unwinds before stores nothing
+// (`change_held`). So the tree is as unwind safe as its keys and values, as
+// std's map is.
+impl<K: RefUnwindSafe, V: RefUnwindSafe, S> RefUnwindSafe for LatchedTree<K, V, S> {}
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// No tree.
@@ -146,6 +165,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         );
         Self {
             root: AtomicPtr::new(ptr::null_mut()),
+            shared_prefix: UnsafeCell::new(SharedPrefix::none()),
             rightmost_leaf: CachePadded(AtomicPtr::new(ptr::null_mut())),
             free: CachePadded(FreeLists::new()),
             _entries: PhantomData,
@@ -176,6 +196,40 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         Some(RootPage::of_node(Node::at(unsafe {
             NodePtr::from_tagged(tagged)
         })))
+    }
+
+    /// What every key of the tree shares (D50), to a thread that holds a
+    /// node on one of the tree's borders, the root included.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds such a node, latched or taken, for as long as it
+    /// borrows the value: a thread that changes it holds every one
+    /// (`shared_prefix.rs`).
+    #[inline(always)]
+    unsafe fn held_shared_prefix(&self) -> &SharedPrefix {
+        // SAFETY: no thread writes it meanwhile (caller).
+        unsafe { &*self.shared_prefix.get() }
+    }
+
+    /// What every key of the tree shares, read while a thread holding the
+    /// root may be changing it. Returns a copy, which the root's version
+    /// vouches for once checked. `None` if its length, read first, is 0:
+    /// most trees read only that byte.
+    #[inline(always)]
+    fn load_racing_shared_prefix(&self) -> Option<SharedPrefix> {
+        let _reads = RacingReads::begin();
+        Interleaving::switch_point();
+        let shared_prefix = self.shared_prefix.get();
+        // SAFETY: the value lives as long as the tree. Its length is a byte,
+        // read once, volatile. A racing write makes the copy one that the
+        // version check throws away.
+        unsafe {
+            let len = shared_prefix
+                .byte_add(SharedPrefix::LEN_OFFSET)
+                .cast::<u8>();
+            (len.read_volatile() != 0).then(|| shared_prefix.read())
+        }
     }
 
     /// Whether `leaf` is the root, which has no minimum (D22).
@@ -231,11 +285,23 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// a separator of (module documentation). If the operation changed the
     /// root's kind, by raising a root leaf or lowering the tree to one, this
     /// retags the tree's root pointer for the new kind while the caller
-    /// still holds the root.
+    /// still holds the root. If it changed what every key shares, which only
+    /// an operation that holds the root and the borders does, this stores
+    /// that, still holding them.
     fn change_held<R>(&self, operation: impl FnOnce(&mut Tree<K, V, Latched<S>>) -> R) -> R {
         let root_page = self.root_page().expect("a tree to change");
-        let mut tree = Tree::of_root_page(root_page);
+        // Racing, if the caller holds no border node: the operation then
+        // reads none of it, as every node it changes has both fences.
+        let shared_prefix = (self.load_racing_shared_prefix()).unwrap_or(SharedPrefix::none());
+        let mut tree = Tree::of_root_page(root_page, shared_prefix);
         let result = operation(&mut tree);
+        if *tree.shared_prefix() != shared_prefix {
+            Interleaving::switch_point();
+            // SAFETY: the operation changed it, so the caller holds the root
+            // and every border node, or the root leaf: no other thread writes
+            // it, and one that reads it racing fails the root's version check.
+            unsafe { self.shared_prefix.get().write(*tree.shared_prefix()) };
+        }
         let changed = tree
             .root_page()
             .expect("bbtree's operations keep the root page");
@@ -285,7 +351,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
 
         match self.root_page() {
             Some(root_page) => {
-                Tree::of_root_page(root_page).check_invariants(length);
+                Tree::of_root_page(root_page, *self.shared_prefix.get_mut())
+                    .check_invariants(length);
                 let last_leaf = root_page.node().border_leaf::<LastEdge>();
                 assert_eq!(
                     *self.rightmost_leaf.get_mut(),
@@ -310,7 +377,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let Some(root_page) = self.root_page() else {
             return Vec::new();
         };
-        let tree = Tree::of_root_page(root_page);
+        let tree = Tree::of_root_page(root_page, *self.shared_prefix.get_mut());
         let view = TreeView::new(&tree, 0);
         let mut levels = Vec::new();
         let mut level = vec![view.root().expect("a tree has a root")];
@@ -337,7 +404,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let Some(root_page) = self.root_page() else {
             return Vec::new();
         };
-        let tree = Tree::of_root_page(root_page);
+        let tree = Tree::of_root_page(root_page, *self.shared_prefix.get_mut());
         let view = TreeView::new(&tree, 0);
         let mut level = vec![view.root().expect("a tree has a root")];
         while !level[0].is_leaf() {
@@ -358,8 +425,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// How many leading bytes every key of the tree shares (D50).
     #[cfg(test)]
     pub(crate) fn shared_prefix_len(&mut self) -> usize {
-        self.root_page()
-            .map_or(0, |root_page| root_page.shared_prefix().len())
+        self.shared_prefix.get_mut().len()
     }
 
     /// Takes the tree apart, the pages on its free lists too, giving the
@@ -369,7 +435,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         if let Some(root_page) = self.root_page() {
             *self.root.get_mut() = ptr::null_mut();
             *self.rightmost_leaf.get_mut() = ptr::null_mut();
-            Tree::of_root_page(root_page).destroy(alloc);
+            let shared_prefix = mem::replace(self.shared_prefix.get_mut(), SharedPrefix::none());
+            Tree::of_root_page(root_page, shared_prefix).destroy(alloc);
         }
         self.free.deallocate_all(
             alloc,

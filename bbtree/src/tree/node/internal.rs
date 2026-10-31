@@ -44,7 +44,10 @@ impl<K, V, S> Copy for Internal<K, V, S> {}
 
 // SAFETY: internal nodes have the internal layout.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Internal<K, V, S> {
-    const KIND: PageKind = PageKind::Internal;
+    #[inline(always)]
+    fn kind() -> PageKind {
+        PageKind::Internal
+    }
 
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::internal_layout().page

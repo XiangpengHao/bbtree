@@ -84,6 +84,7 @@ use super::node::{EntrySlots, Node};
 use super::node_stack::{
     CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, NodeStack, ValMut,
 };
+use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
@@ -747,6 +748,41 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> RangeWalk<Immut<'a>, K, V, S> {
     }
 }
 
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// A walk over the tree's entries within the bounds
+    /// ([`RangeWalk::new`]); over none without a tree.
+    pub(crate) fn range_walk<B: WalkBorrow<K, V>, Q>(
+        &self,
+        start: Bound<&Q>,
+        end: Bound<&Q>,
+    ) -> RangeWalk<B, K, V, S>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self.root_page() {
+            Some(root_page) => RangeWalk::new(root_page, self.shared_prefix(), start, end),
+            None => RangeWalk::EMPTY,
+        }
+    }
+
+    /// [`Self::range_walk`], values exclusive: it ends the owner's
+    /// permission to append to the remembered leaf
+    /// ([`Self::root_page_mut`]).
+    pub(crate) fn range_walk_mut<B: WalkBorrow<K, V>, Q>(
+        &mut self,
+        start: Bound<&Q>,
+        end: Bound<&Q>,
+    ) -> RangeWalk<B, K, V, S>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.forget_rightmost_leaf();
+        self.range_walk(start, end)
+    }
+}
+
 impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
     /// A walk over no entries.
     pub(crate) const EMPTY: Self = Self {
@@ -754,14 +790,20 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         run: None,
     };
 
-    /// A walk over the entries of the tree in `root_page` within the bounds,
-    /// with std's panics for bounds out of order (D1).
+    /// A walk over the entries of the tree in `root_page`, whose keys share
+    /// `shared`, within the bounds, with std's panics for bounds out of
+    /// order (D1).
     ///
     /// # Panics
     ///
     /// If `start > end`, if `start == end` and both are excluded, or if `Ord`
     /// is so inconsistent that the start is found after the end.
-    pub(crate) fn new<Q>(root_page: RootPage<K, V, S>, start: Bound<&Q>, end: Bound<&Q>) -> Self
+    pub(in crate::tree) fn new<Q>(
+        root_page: RootPage<K, V, S>,
+        shared: &SharedPrefix,
+        start: Bound<&Q>,
+        end: Bound<&Q>,
+    ) -> Self
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
@@ -779,7 +821,7 @@ impl<B: WalkBorrow<K, V>, K, V, S: InlineKeyStrategy<K>> RangeWalk<B, K, V, S> {
         // The ends start where they stay: positioning them writes their
         // node stacks, which a copy right after would wait on
         // (`node_stack.rs`).
-        let (top, shared) = (WalkTop::of_root_page(root_page), root_page.shared_prefix());
+        let top = WalkTop::of_root_page(root_page);
         let mut walk = Self {
             ends: Some(Ends::unstarted(top)),
             run: None,

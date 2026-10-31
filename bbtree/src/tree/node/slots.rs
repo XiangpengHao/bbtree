@@ -96,7 +96,11 @@ impl<T> Slots<T> {
     }
 
     /// Slot 0 of slots side by side: where a vector load over them starts.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    /// Vectors are SSE2's on x86-64, which a target for kernels lacks.
+    #[cfg(any(
+        all(target_arch = "x86_64", target_feature = "sse2"),
+        target_arch = "aarch64"
+    ))]
     #[inline(always)]
     pub(super) fn as_ptr(self) -> *const T {
         debug_assert!(self.is_contiguous());

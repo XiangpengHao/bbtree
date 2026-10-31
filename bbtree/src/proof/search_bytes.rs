@@ -157,8 +157,9 @@ impl<'q> SearchBytes<'q> {
     /// `InlineKey::cmp_prefix` (D50).
     ///
     /// The bytes are almost always equal, and may be many (file-path keys
-    /// can share 64). So whole 32-byte chunks first test equality without
-    /// ordering them, and the rest compares a zero-padded window at a time.
+    /// can share all 39 a map keeps). So whole 32-byte chunks first test
+    /// equality without ordering them, and the rest compares a zero-padded
+    /// window at a time.
     /// Windows are read from the whole keys, where most are a single load.
     /// Always inlined, with no call: a call anywhere in the search loop
     /// makes every search keep its state in stack slots (D41).

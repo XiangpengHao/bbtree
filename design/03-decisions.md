@@ -47,9 +47,9 @@ Verus is optional but welcome.
 **D8. Own allocator trait, the map's last type parameter.** (2026-10-14)
 Every allocation is a page, counted, of a kind and a size known in advance;
 no runtime surprises. A map asks its allocator for each kind of page by a
-method of its own: internal nodes', leaves' and the root page; and a store
-asks for its heap pages by a fourth (D60); every page of one kind with one
-layout (D21, D59).
+method of its own: internal nodes' and leaves', the root page among the
+larger kind's (D52); and a store asks for its heap pages by a third (D60);
+every page of one kind with one layout (D21, D59).
 
 - **Trait:** `Allocator` (`allocator.rs`), public: the part of std's unstable
   `core::alloc::Allocator` a map needs, `allocate_zeroed(&self, Layout)` and
@@ -58,14 +58,14 @@ layout (D21, D59).
   `Global`, the global allocator, is the default; `&A` is an allocator too,
   to share one between maps.
 - **A method pair per kind** (2026-10-20): `allocate_internal`,
-  `allocate_leaf`, `allocate_root` and `allocate_heap`, each with its
-  `deallocate_*`, by default `allocate_zeroed`'s and `deallocate`'s. An
-  allocator that overrides them budgets, pools or places the kinds apart:
-  a pool of one page size per kind, index memory counted apart from a
-  store's records. Inside, the tree names a page's kind
-  (`PageType::KIND`, `PageKind`) wherever it allocates or frees one, so a
-  latched tree's page pool tells its node pages apart without their
-  layouts.
+  `allocate_leaf` and `allocate_heap`, each with its `deallocate_*`, by
+  default `allocate_zeroed`'s and `deallocate`'s. The root page is a page
+  of the larger node kind, from its pair (D52). An allocator that overrides
+  them budgets, pools or places the kinds apart: a pool of one page size
+  per kind, index memory counted apart from a store's records. Inside, the
+  tree names a page's kind (`PageType::kind`, `PageKind`) wherever it
+  allocates or frees one, so a latched tree's page pool tells its node
+  pages apart without their layouts.
 - **Zeroed pages:** every page comes zeroed, the allocator's job, which
   some do for free (fresh memory from the OS), but a store's heap pages,
   which may hold anything. The latched tree needs it, for latch words and
@@ -92,9 +92,11 @@ layout (D21, D59).
   holds a clone; `clone` and `split_off` give the new map one.
   `append` moves entries, not pages, so maps with different allocators of
   one type append soundly; the set operators build on the left set's.
-- **Failure:** `allocate_zeroed` returns `AllocError`. The unsync map calls
-  `handle_alloc_error`, as std's collections do, wherever the page is
-  asked for, the middle of a split included. The shared `BBTreeMap` hands
+- **Failure:** `allocate_zeroed` returns `AllocError`. The unsync map's
+  `try_insert` hands it to the caller as `InsertError`, with the entry, its
+  entries unchanged; its other operations call `handle_alloc_error`, as
+  std's collections do. Its inserts take a split's pages before the split
+  changes anything (`tree/reserved_pages.rs`). The shared `BBTreeMap` hands
   it to the caller: `insert`, `update_or_insert`, `get_or_insert` and each
   entry of the batches return `InsertError`, with the entry, and leave the map
   unchanged. A split counts the pages it takes from the nodes it holds (a
@@ -971,7 +973,7 @@ The experiments behind D32–D45 are in [06-cost-model.md](06-cost-model.md).
   test per insert while unset. For random keys it can only be set at a
   new maximum: about 17 times over 10M inserts. No counters, no tuned
   thresholds.
-- **Cost:** a word in the map (std's is 24 bytes; bbtree's 40, with
+- **Cost:** a word in the map (std's is 24 bytes; bbtree's 64, with
   D50's shared prefix). JSON random insert +2.3% in one run; other random
   inserts within ±0.5%. Descending and middle-ordered runs get no
   shortcut.
@@ -1122,8 +1124,9 @@ Design, census and measurements in 11-separator-key.md.
 Design in 05-fence-key.md, "The shared prefix".
 
 - **What:** the root has no parent to give it fences, so the tree keeps
-  them with it, in the root page (D51, D52): the leading bytes of the
-  encoding every key shares (D18), up to 64, and how many
+  them with it, in the map beside its pointer to the root page (D51, D52):
+  the leading bytes of the encoding every key shares (D18), up to 39, and
+  how many
   (`SharedPrefix`, `tree/shared_prefix.rs`). The root, and every node with no
   separator above it on a side, along the tree's borders, take its length
   as their prefix, where they had 0 (D26). Every key with inline
@@ -1160,7 +1163,9 @@ Design in 05-fence-key.md, "The shared prefix".
   establishes the same for the root and the borders, where fences are
   missing, and the internal search, without the per-node check, is small
   enough for LLVM to inline into `get`.
-- **Cost:** 65 bytes of the root page, none of the map (D52). Each insert
+- **Cost:** 40 bytes of the map, which is 64, a cache line (D52). Keys
+  that share more than 39 bytes tie in the root's and the borders' windows
+  past them. Each insert
   checks its key against the bytes, inline: a length test when nothing is
   shared; starting and shrinking are out of line. The insert's append shortcut (D45) checks
   after it clears its hint, so no user code runs with the hint set.
@@ -1228,9 +1233,9 @@ Design in 05-fence-key.md, "The shared prefix".
   which gets its tag where a page becomes a node of a kind and masks it
   off to reach the page. Following an edge decides the child's kind
   before the child is read (D28). The root node
-  lives in the root page: room for a node of either kind, and after it the
-  root area, the tree's shared prefix (D50); nothing records how tall the
-  tree is (D24). A tree keeps
+  lives in the root page: room for a node of either kind, as large as the
+  larger kind's page. The tree's shared prefix (D50) lies beside the
+  pointer to it, in the map; nothing records how tall the tree is (D24). A tree keeps
   its root page for life. Raising it moves the root node to a fresh page of
   its kind and makes the root internal above it; lowering it moves the
   root's only child up and frees the child's page; either returns the
@@ -1242,8 +1247,10 @@ Design in 05-fence-key.md, "The shared prefix".
   would have to keep right too; with the kind on the pointer, a latch knows what it latches
   before it touches the node, as bf-tree's parent flag
   (`children_is_leaf`) tells it, per edge here. The shared prefix is the
-  root's fences, so it lives with the root node, not behind a pointer of
-  its own. A root that never moves needs no root pointer to swap and read
+  root's fences, so it lives beside the pointer to the root, in the map,
+  not behind a pointer of its own; the root page is then a node's page, so
+  that an allocator of one page size, a kernel's frame pool, serves every
+  page. A root that never moves needs no root pointer to swap and read
   again, which bf-tree's new roots need (01-bftree.md). One record of the
   kind cannot disagree with another, and one pointer type leaves no
   untagged copy of an address to mix up with a tagged one: untagging is
@@ -1252,8 +1259,11 @@ Design in 05-fence-key.md, "The shared prefix".
   the root's pointer. Every access through a pointer masks off its tag
   first. A join moves
   the shorter tree's root to a plain page first; a cut's new part and a
-  copy move their top into a root page. The root page is the larger
-  kind's page and 65 B. The map is 24 bytes, std's size, down from 40.
+  copy move their top into a root page. The root page is a page of the
+  larger kind, from that kind's allocator methods, which must be at least
+  as aligned as the other's: a node config of internal pages larger than
+  leaves', with leaves larger still, panics. The map is 64 bytes, a cache line: std's 24, and the shared
+  prefix's 40.
 - **Measured** against D51, 10M, one run each (ns per op; instructions in
   brackets):
 

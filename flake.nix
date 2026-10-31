@@ -33,10 +33,12 @@
             "miri"
           ];
           # The visualizer (`bbtree/vis/`) builds bbtree for the browser; CI
-          # tests the library on wasm32-wasip1 under wasmtime.
+          # tests the library on wasm32-wasip1 under wasmtime, and builds the
+          # maps for a target for kernels (`bbtree/kernel-target/`).
           targets = [
             "wasm32-unknown-unknown"
             "wasm32-wasip1"
+            "x86_64-unknown-none"
           ];
         };
         # Verus proves bbtree/src/proof/ (design/08-fuzzing-verification.md).

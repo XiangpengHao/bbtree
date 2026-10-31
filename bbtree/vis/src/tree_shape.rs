@@ -38,7 +38,7 @@ pub(crate) struct TreeShape {
     levels: Vec<Level>,
     leaf_page_size: usize,
     internal_page_size: usize,
-    /// The root's page: a node's room and the root area (D52).
+    /// The root's page: room for a node of either kind (D52).
     root_page_size: usize,
 }
 

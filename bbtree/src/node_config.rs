@@ -57,6 +57,12 @@ use crate::inline_key::sealed::{InlineKeySource, Sealed};
 ///
 /// Every page of one kind in a map has one layout: an allocator that pools
 /// pages by kind ([`Allocator`](crate::Allocator)) pools pages of one size.
+/// The root's page is a page of the larger node kind, a leaf's if they are
+/// as large: with leaves and internal nodes of one page size, every page a
+/// map takes is of that size. The larger kind must be at least as aligned
+/// as the other. Only internal pages larger than leaves', with leaves larger
+/// still, break that, and a map with such a config panics at its first
+/// insert.
 pub trait NodeConfig {
     /// The page size of leaves: at least 1024. Larger leaves are fewer,
     /// but an insert or a remove shifts more of a leaf's bytes.

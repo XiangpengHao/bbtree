@@ -53,7 +53,10 @@ impl U8EqualitySearch {
         candidates: Range<usize>,
         target: u8,
     ) -> Option<SlotMatches> {
-        #[cfg(target_arch = "x86_64")]
+        // SSE2, which every x86-64 target has but those for kernels, built
+        // with no vector registers (`x86_64-unknown-none`): those search
+        // the slots one by one (`None`).
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
         {
             use core::arch::x86_64::{
                 _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
@@ -63,7 +66,7 @@ impl U8EqualitySearch {
                 return None;
             }
             let mut bits = 0_u64;
-            // SAFETY: SSE2 is part of every x86-64 target. Each load starts
+            // SAFETY: the target has SSE2 (the `cfg`). Each load starts
             // at most `slots.len() - LANES`, so all sixteen initialized slots
             // fit.
             // The last partial chunk overlaps the preceding one; equal
@@ -98,7 +101,7 @@ impl U8EqualitySearch {
                 SlotMatches::Many
             })
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "sse2")))]
         {
             let _ = (slots, candidates, target);
             None
@@ -486,6 +489,7 @@ macro_rules! vector_count {
                 }
                 #[cfg(all(
                     target_arch = "x86_64",
+                    target_feature = "sse2",
                     not(target_feature = "avx512bw"),
                     not(target_feature = "popcnt")
                 ))]
@@ -579,7 +583,7 @@ macro_rules! vector_count {
                     all(
                         target_arch = "x86_64",
                         not(target_feature = "avx512bw"),
-                        target_feature = "popcnt"
+                        any(target_feature = "popcnt", not(target_feature = "sse2"))
                     )
                 ))]
                 {
@@ -802,6 +806,7 @@ mod tests {
 
     #[cfg(all(
         target_arch = "x86_64",
+        target_feature = "sse2",
         not(target_feature = "avx512bw"),
         not(target_feature = "popcnt")
     ))]
@@ -832,6 +837,7 @@ mod tests {
 
     #[cfg(all(
         target_arch = "x86_64",
+        target_feature = "sse2",
         not(target_feature = "avx512bw"),
         not(target_feature = "popcnt")
     ))]

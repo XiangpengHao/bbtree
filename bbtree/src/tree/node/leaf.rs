@@ -50,7 +50,10 @@ impl<K, V, S> Copy for Leaf<K, V, S> {}
 
 // SAFETY: leaves have the leaf layout.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for Leaf<K, V, S> {
-    const KIND: PageKind = PageKind::Leaf;
+    #[inline(always)]
+    fn kind() -> PageKind {
+        PageKind::Leaf
+    }
 
     fn page_layout() -> Layout {
         NodePtr::<K, V, S>::leaf_layout().page

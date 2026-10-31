@@ -31,6 +31,7 @@
 
 use core::alloc::Layout;
 
+use super::super::insert::SplitPages;
 use super::super::interleaving::Backoff;
 use super::super::node::Node;
 use super::super::node::annexed_leaf::AnnexedLeaf;
@@ -375,18 +376,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         if !held_nodes.take_path(path, top) {
             return Err((key, value, policy));
         }
-        // The pages the split allocates (`tree/insert.rs`), which the nodes
-        // it holds tell: one for the leaf's right half, and one for each
-        // internal node below the one with room, which splits too. A root
-        // that splits also moves out of the root page, to a page of its kind,
-        // as the tree grows.
-        let splits = path.depth() - room.map_or(0, |level| level + 1);
-        let (leaves, internals) = match (room, path.depth()) {
-            (None, 0) => (2, 0),
-            (None, _) => (1, splits + 1),
-            (Some(_), _) => (1, splits),
-        };
-        if let Err(layout) = pages.reserve(leaves, internals) {
+        // The pages the split allocates, which the nodes it holds tell.
+        if let Err(layout) = pages.reserve(SplitPages::of_full_leaf(path.depth(), room)) {
             return Ok(Err(InsertError::new(key, value, layout)));
         }
         let leaf = held.leaf();

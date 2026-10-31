@@ -2,16 +2,16 @@
 //! parameter, `A`, as in std's collections (D8). The default is [`Global`],
 //! the global allocator.
 //!
-//! A map asks it for pages of three kinds, each by a method of its own:
-//! internal nodes', leaves', and the root page, which holds the root node of
-//! either kind (`tree/node/page.rs`); a fourth kind, heap pages, is for the
-//! code that keeps a map's keys and values beside it (`bbtree-store`). Every
-//! page of one kind in a map has one layout,
-//! which the map's types and node config fix. By default every kind comes
-//! from [`Allocator::allocate_zeroed`], the part of std's unstable
-//! `core::alloc::Allocator` a map needs, with its names and contract, so
-//! that it works on stable; an allocator that tells the kinds apart, to
-//! budget, pool or place them apart, overrides the kinds' methods.
+//! A map asks it for pages of two kinds, each by a method of its own:
+//! internal nodes' and leaves'. The root page, which holds the root node of
+//! either kind, is a page of the larger kind (`tree/node/root_page.rs`). A
+//! third kind, heap pages, is for the code that keeps a map's keys and
+//! values beside it (`bbtree-store`). Every page of one kind in a map has
+//! one layout, which the map's types and node config fix. By default every
+//! kind comes from [`Allocator::allocate_zeroed`], the part of std's
+//! unstable `core::alloc::Allocator` a map needs, with its names and
+//! contract, so that it works on stable; an allocator that tells the kinds
+//! apart, to budget, pool or place them apart, overrides the kinds' methods.
 
 use core::alloc::Layout;
 use core::error::Error;
@@ -22,11 +22,11 @@ use core::ptr::NonNull;
 /// keeping a map's keys and values beside it keeps them in (heap pages).
 ///
 /// A map asks only for pages of non-zero size, each kind by its own method:
-/// [`Self::allocate_internal`], [`Self::allocate_leaf`] and
-/// [`Self::allocate_root`]; heap pages come from [`Self::allocate_heap`].
-/// It asks for every
-/// page of one kind with one layout, the same each time: so an allocator
-/// may keep each kind in a pool of pages of one size. By default each kind
+/// [`Self::allocate_internal`] and [`Self::allocate_leaf`], the root page
+/// among those of the larger kind; heap pages come from
+/// [`Self::allocate_heap`]. It asks for every page of one kind with one
+/// layout, the same each time: so an allocator may keep each kind in a pool
+/// of pages of one size. By default each kind
 /// comes from [`Self::allocate_zeroed`] and goes back to
 /// [`Self::deallocate`].
 ///
@@ -34,13 +34,15 @@ use core::ptr::NonNull;
 /// asked for it with, to the allocator it came from or a clone of it. A
 /// shared [`BBTreeMap`](crate::BBTreeMap) gives its internal nodes' and
 /// leaves' pages back when it is dropped, as threads may still read them
-/// until then; its root page too.
+/// until then.
 ///
 /// A failed allocation is an [`AllocError`]. The map for one thread,
 /// [`unsync::BBTreeMap`](crate::unsync::BBTreeMap), then calls
 /// [`handle_alloc_error`](alloc::alloc::handle_alloc_error), as std's
-/// collections do. [`BBTreeMap`](crate::BBTreeMap) hands it to the caller,
-/// with the map unchanged.
+/// collections do, but for its
+/// [`try_insert`](crate::unsync::BBTreeMap::try_insert), which hands it to
+/// the caller with the map's entries unchanged, as
+/// [`BBTreeMap`](crate::BBTreeMap) does.
 ///
 /// # Safety
 ///
@@ -103,23 +105,6 @@ pub unsafe trait Allocator {
         unsafe { self.deallocate(page, layout) }
     }
 
-    /// A tree's root page, zeroed, one a tree, which holds its root node of
-    /// either kind; by default [`Self::allocate_zeroed`]'s.
-    fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        self.allocate_zeroed(layout)
-    }
-
-    /// Takes back a root page; by default with [`Self::deallocate`].
-    ///
-    /// # Safety
-    ///
-    /// `page` was handed out by `allocate_root`, of this allocator or of a
-    /// clone of it, for `layout`, and not given back since.
-    unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
-        // SAFETY: as in `deallocate_internal`.
-        unsafe { self.deallocate(page, layout) }
-    }
-
     /// A heap page, which holds keys and values that a map's leaves point
     /// to (`bbtree-store`, `HEAP_PAGE_SIZE`), of any contents; by default
     /// [`Self::allocate_zeroed`]'s.
@@ -146,7 +131,6 @@ pub unsafe trait Allocator {
 pub(crate) enum PageKind {
     Internal,
     Leaf,
-    Root,
 }
 
 impl PageKind {
@@ -159,7 +143,6 @@ impl PageKind {
         match self {
             Self::Internal => alloc.allocate_internal(layout),
             Self::Leaf => alloc.allocate_leaf(layout),
-            Self::Root => alloc.allocate_root(layout),
         }
     }
 
@@ -180,7 +163,6 @@ impl PageKind {
             match self {
                 Self::Internal => alloc.deallocate_internal(page, layout),
                 Self::Leaf => alloc.deallocate_leaf(page, layout),
-                Self::Root => alloc.deallocate_root(page, layout),
             }
         }
     }
@@ -241,15 +223,6 @@ unsafe impl<A: Allocator + ?Sized> Allocator for &A {
     unsafe fn deallocate_leaf(&self, page: NonNull<u8>, layout: Layout) {
         // SAFETY: as in `deallocate`.
         unsafe { (**self).deallocate_leaf(page, layout) }
-    }
-
-    fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        (**self).allocate_root(layout)
-    }
-
-    unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
-        // SAFETY: as in `deallocate`.
-        unsafe { (**self).deallocate_root(page, layout) }
     }
 
     fn allocate_heap(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {

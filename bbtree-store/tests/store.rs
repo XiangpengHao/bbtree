@@ -12,12 +12,11 @@ use std::thread;
 use bbtree_store::bbtree::{AllocError, Allocator, Global};
 use bbtree_store::{BBTreeStore, InsertError};
 
-/// Pages out, by kind: internal nodes, leaves, root pages, heap pages.
+/// Pages out, by kind: internal nodes, leaves, heap pages.
 #[derive(Default)]
 struct Counting {
     internal: AtomicUsize,
     leaf: AtomicUsize,
-    root: AtomicUsize,
     heap: AtomicUsize,
     /// At most this many pages of every kind out at once; 0 for any.
     limit: AtomicUsize,
@@ -25,7 +24,7 @@ struct Counting {
 
 impl Counting {
     fn out(&self) -> usize {
-        [&self.internal, &self.leaf, &self.root, &self.heap]
+        [&self.internal, &self.leaf, &self.heap]
             .iter()
             .map(|count| count.load(Ordering::Relaxed))
             .sum()
@@ -81,15 +80,6 @@ unsafe impl Allocator for Counting {
     unsafe fn deallocate_leaf(&self, page: NonNull<u8>, layout: Layout) {
         // SAFETY: forwarded.
         unsafe { self.give(&self.leaf, page, layout) }
-    }
-
-    fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-        self.take(&self.root, layout)
-    }
-
-    unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
-        // SAFETY: forwarded.
-        unsafe { self.give(&self.root, page, layout) }
     }
 
     fn allocate_heap(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {

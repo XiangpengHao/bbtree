@@ -522,11 +522,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> Range<'a, K, V, S> {
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root_page) = tree.root_page() else {
-            return Self::default();
-        };
         Self {
-            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
+            walk: tree.range_walk(range.start_bound(), range.end_bound()),
         }
     }
 }

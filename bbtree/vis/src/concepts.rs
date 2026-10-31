@@ -55,7 +55,7 @@ impl Concept {
                 "Every key of a node lies between the two separators that bound it in its ancestors, its fences, so it starts with the bytes they share. The node records how many, and its inline keys start after them: deeper nodes summarize the bytes that still differ."
             }
             Concept::SharedPrefix => {
-                "The bytes every key of the map shares, up to 64, which the map keeps in its root's page, after the root node. Nodes along the tree's borders, where a fence is missing, take them as their prefix, as the root does. A lookup checks the key against them once, before the root: a key without them sorts before or after every key, and reads no node."
+                "The bytes every key of the map shares, up to 39, which the map keeps beside its pointer to the root, so that the root's page is a node's page. Nodes along the tree's borders, where a fence is missing, take them as their prefix, as the root does. A lookup checks the key against them once, before the root: a key without them sorts before or after every key, and reads no node."
             }
             Concept::Separator => {
                 "A key in an internal node that divides two children. bbtree moves a key up rather than copying it, so every key is stored exactly once: a separator's value stays below, as the head of the leaf to its right."
@@ -70,7 +70,7 @@ impl Concept {
                 "An internal node's child pointers. Child i holds the keys between key i − 1 and key i. A pointer to a leaf has its lowest bit set, so a lookup knows a child's kind before reading it."
             }
             Concept::Page => {
-                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is larger: room for a node of either kind, then the root area, which keeps the tree's shared prefix. Whatever no array covers is padding."
+                "A node's memory: one allocation, aligned to its size, holding its slot arrays where its layout puts them. The root's page is room for a node of either kind, the larger kind's page. Whatever no array covers is padding."
             }
             Concept::Wasm32 => {
                 "This page runs bbtree compiled for wasm32, where a pointer takes 4 bytes: internal nodes hold more keys than on a 64-bit machine, and string leaves have no room for hash tags. Leaves of fixed-size keys and values are the same. Without vector compares, it counts the smaller inline keys by a binary search over them instead, to the same count; the cache lines drawn are those of the x86-64 count."

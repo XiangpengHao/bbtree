@@ -7,12 +7,15 @@
 //! belongs. An insertion that fits its leaf needs no ancestors.
 //!
 //! If the leaf is full, a second search records a node stack for the split.
-//! Going back up it, each node takes its split child's separator and right
-//! half, and splits in turn if it is full. A root that splits raises the
-//! tree: the root node moves down a level, under a new root in the root
-//! page. A separator's value stays in the right half, as its head (D17), and
-//! with inline keys so does its key (D49). Its inline key goes up, moved
-//! back to its new node's prefix length (D18).
+//! The split's pages come from the map's allocator first, before the tree
+//! changes ([`SplitPages`], `reserved_pages.rs`): an allocator that refuses
+//! one leaves the tree holding what it held. Going back up the node stack,
+//! each node takes its split child's separator and right half, and splits
+//! in turn if it is full. A root that splits raises the tree: the root node
+//! moves down a level, under a new root in the root page. A separator's
+//! value stays in the right half, as its head (D17), and with inline keys
+//! so does its key (D49). Its inline key goes up, moved back to its new
+//! node's prefix length (D18).
 //!
 //! Once the entry is in and counted, the halves of every split fit their
 //! prefixes to their new fences (`prefix.rs`). The node stack then goes back
@@ -21,41 +24,65 @@
 
 #![forbid(unsafe_code)]
 
+use core::iter;
 use core::mem;
 
 use super::node::inline_keys::SearchKey;
+use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, PageAllocator};
 use super::node::{Insertion, Node};
 use super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::prefix::PrefixedKey;
+use super::reserved_pages::ReservedPages;
 use super::root::Tree;
+use crate::allocator::{Allocator, InsertError, PageKind};
 use crate::inline_key::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// [`Self::try_insert`], calling
+    /// [`handle_alloc_error`](alloc::alloc::handle_alloc_error) if `alloc`
+    /// refuses a page, as std's collections do.
+    #[inline(always)]
+    pub(crate) fn insert(
+        &mut self,
+        key: K,
+        value: V,
+        alloc: &impl Allocator,
+        length: &mut usize,
+    ) -> Option<V>
+    where
+        K: Ord,
+    {
+        (self.try_insert(key, value, alloc, length))
+            .unwrap_or_else(|error| error.handle_alloc_error())
+    }
+
     /// Inserts `key`/`value` and returns `None`, counting the entry in
     /// `length`; or, if an equal key is there, keeps that key, drops `key`,
     /// replaces its value and returns the old one, as std's
     /// `BTreeMap::insert` does. For a separator key, the value replaced is
     /// its head (D17).
     ///
-    /// Every page a split needs comes from `alloc`, the map's allocator, at
-    /// the time of the split. So do the page the root node moves to when the
-    /// tree grows a level, and the tree's root page if it has none.
+    /// Every page a split needs comes from `alloc`, the map's allocator,
+    /// before the tree changes. So do the page the root node moves to when
+    /// the tree grows a level, and the tree's root page if it has none. If
+    /// `alloc` refuses one, the error holds the entry, and the tree the
+    /// entries it held; what every key shares may be shorter, `key`'s too.
     ///
     /// User code runs between changes, and inside one only behind an
     /// abort-on-unwind guard (D48): `Ord` and `InlineKey` before the leaf
     /// changes, and `InlineKey` again once the entry is in and counted,
-    /// fitting split nodes' prefixes (`prefix.rs`). `alloc`, called
-    /// mid-split, doesn't unwind (D8).
+    /// fitting split nodes' prefixes (`prefix.rs`). `alloc` doesn't unwind
+    /// (D8).
     #[inline(always)]
-    pub(crate) fn insert(
+    pub(crate) fn try_insert(
         &mut self,
         key: K,
         value: V,
-        alloc: &impl PageAllocator,
+        alloc: &impl Allocator,
         length: &mut usize,
-    ) -> Option<V>
+    ) -> Result<Option<V>, InsertError<K, V>>
     where
         K: Ord,
     {
@@ -63,10 +90,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             Ok(append) => {
                 append.insert(value);
                 *length += 1;
-                return None;
+                return Ok(None);
             }
             Err(key) => key,
         };
+        if !self.has_root() {
+            match Self::try_new(alloc) {
+                Ok(tree) => *self = tree,
+                Err(layout) => return Err(InsertError::new(key, value, layout)),
+            }
+        }
         // Shrink first: the search skips every node's prefix unchecked.
         let key = self.shrink_shared_prefix_for(key, alloc);
         match self
@@ -76,14 +109,14 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             Ok(found) => {
                 // As std's does, drop the new key before replacing the value.
                 drop(key);
-                return Some(mem::replace(found.value_mut(), value));
+                return Ok(Some(mem::replace(found.value_mut(), value)));
             }
             Err((leaf, edge)) => {
                 if leaf.len() < Leaf::<K, V, S>::capacity() {
                     // Compute the inline key before the first change.
                     leaf.insert_fit(edge, key.window_at(leaf.prefix_len()), value);
                     *length += 1;
-                    return None;
+                    return Ok(None);
                 }
             }
         }
@@ -94,15 +127,16 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// to keep that node stack, and the machine stack it takes, out of
     /// fitting inserts. It searches again rather than trusting the first
     /// result: an inconsistent `Ord` may now find an existing key or a
-    /// different leaf with room, which this handles too.
+    /// different leaf with room, which this handles too. Then it takes the
+    /// pages the split needs from `alloc`, or gives the entry back.
     #[inline(never)]
     pub(in crate::tree) fn insert_with_stack(
         &mut self,
         key: PrefixedKey<K>,
         value: V,
-        alloc: &impl PageAllocator,
+        alloc: &impl Allocator,
         length: &mut usize,
-    ) -> Option<V>
+    ) -> Result<Option<V>, InsertError<K, V>>
     where
         K: Ord,
     {
@@ -110,16 +144,67 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         if stack.search(&SearchKey::new(key.key())) {
             // As in std, the new key is dropped before the value changes.
             drop(key);
-            Some(mem::replace(stack.value_mut(), value))
-        } else {
-            stack.insert_prefixed(key, value, alloc, length);
-            stack.finish_insertion();
-            None
+            return Ok(Some(mem::replace(stack.value_mut(), value)));
         }
+        let pages = match ReservedPages::reserve::<K, V, S>(alloc, stack.split_pages()) {
+            Ok(pages) => pages,
+            Err(layout) => return Err(InsertError::new(key.into_key(), value, layout)),
+        };
+        stack.insert_prefixed(key, value, &pages, length);
+        stack.finish_insertion();
+        Ok(None)
+    }
+}
+
+/// The pages a split that inserts into a full leaf takes: a leaf's, for its
+/// right half; an internal node's for each internal node above it that is
+/// full too, and splits; and if the root splits, one of the root's kind for
+/// the root's node, which moves out of the root page as the tree grows.
+#[derive(Clone, Copy)]
+pub(in crate::tree) struct SplitPages {
+    leaves: usize,
+    internals: usize,
+}
+
+impl SplitPages {
+    /// No split: the leaf has room.
+    const NONE: Self = Self {
+        leaves: 0,
+        internals: 0,
+    };
+
+    /// The pages for a full leaf `depth` levels below the root, whose lowest
+    /// ancestor with room, if any, is at level `room`, the root's 0.
+    pub(in crate::tree) fn of_full_leaf(depth: usize, room: Option<usize>) -> Self {
+        let splits = depth - room.map_or(0, |level| level + 1);
+        let (leaves, internals) = match (room, depth) {
+            (None, 0) => (2, 0),
+            (None, _) => (1, splits + 1),
+            (Some(_), _) => (1, splits),
+        };
+        Self { leaves, internals }
+    }
+
+    /// Each page's kind, the leaves' first.
+    pub(in crate::tree) fn kinds(self) -> impl Iterator<Item = PageKind> {
+        iter::repeat_n(PageKind::Leaf, self.leaves)
+            .chain(iter::repeat_n(PageKind::Internal, self.internals))
     }
 }
 
 impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
+    /// The pages an insert at the leaf edge the node stack ends at takes.
+    fn split_pages(&self) -> SplitPages {
+        if self.leaf().len() < Leaf::<K, V, S>::capacity() {
+            return SplitPages::NONE;
+        }
+        let depth = self.depth();
+        let room = (0..depth)
+            .rev()
+            .find(|&level| self.internal_at(level).len() < Internal::<K, V, S>::capacity());
+        SplitPages::of_full_leaf(depth, room)
+    }
+
     /// Makes a new tree in `tree`, which has none, from `alloc`, and returns
     /// a node stack at the only edge of its root, an empty leaf. A vacant
     /// entry of a map without a tree inserts there ([`Self::insert`]).
