@@ -2,10 +2,11 @@
 //! an array, and [`Extend`].
 //!
 //! `extend` inserts in input order, batching descents on large trees.
-//! `collect` and `from` sort entries by key, stably, and keep only the last
-//! key and value of each run of equal keys, dropping the others in order;
-//! then they build the tree from sorted entries, into full nodes, comparing
-//! no more keys (`tree/build.rs`).
+//! `collect` and `from` sort entries by key, stably, and build the map with
+//! `from_sorted_in`, which takes entries sorted already, of any strategy and
+//! allocator. It keeps only the last key and value of each run of equal
+//! keys, dropping the others in order, and builds the tree into full nodes,
+//! comparing each key with the next alone (`tree/build.rs`).
 //!
 //! Like `new` and `Default`, `collect` and `from` make maps of the default
 //! strategy only, as std's make maps of the global allocator only: with a
@@ -14,22 +15,50 @@
 #![forbid(unsafe_code)]
 
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::iter::Peekable;
+use core::mem;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::InlineKeyStrategy;
+use crate::inline_key::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::root::Tree;
 
-impl<K: Ord, V> BBTreeMap<K, V> {
-    /// A map of `entries`, sorted by key, of which only the last of each run
-    /// of equal keys is kept; the others are dropped in order.
-    fn from_sorted_keeping_last(entries: impl Iterator<Item = (K, V)>) -> Self {
+impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {
+    /// A map of `entries`, sorted by key, with inline-key strategy
+    /// `strategy`, whose nodes come from `alloc`: built into full nodes, as
+    /// `collect` builds its sorted entries, each key compared only with the
+    /// next. Of each run of equal keys, only the last is kept, as `collect`
+    /// keeps it; the others are dropped in order. If `alloc` refuses a page,
+    /// calls [`handle_alloc_error`](alloc::alloc::handle_alloc_error), as
+    /// `insert` does.
+    ///
+    /// # Panics
+    ///
+    /// If a key is less than the one before it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::unsync::BBTreeMap;
+    /// use bbtree::{Auto, Global};
+    ///
+    /// let map = BBTreeMap::from_sorted_in([(1, "a"), (2, "b"), (2, "c")], Auto, Global);
+    /// assert_eq!(map.len(), 2);
+    /// assert_eq!(map.get(&2), Some(&"c"));
+    /// ```
+    pub fn from_sorted_in(
+        entries: impl IntoIterator<Item = (K, V)>,
+        strategy: S,
+        alloc: A,
+    ) -> Self {
+        // Only the strategy's type matters, as in `with_strategy_in`.
+        mem::forget(strategy);
         let entries = LastOfEqualKeys {
-            entries: entries.peekable(),
+            entries: entries.into_iter().peekable(),
         };
-        Self::from_ascending_entries(entries, Global)
+        Self::from_ascending_entries(entries, alloc)
     }
 }
 
@@ -73,19 +102,22 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
 
 /// The entries of a sequence sorted by key, but for those followed by one
 /// with an equal key: the last of each run of equal keys, which std's
-/// `collect` keeps. The others drop whole, key before value.
+/// `collect` keeps. The others drop whole, key before value. A key less
+/// than the one before it panics: the sequence isn't sorted.
 struct LastOfEqualKeys<I: Iterator> {
     entries: Peekable<I>,
 }
 
-impl<K: PartialEq, V, I: Iterator<Item = (K, V)>> Iterator for LastOfEqualKeys<I> {
+impl<K: Ord, V, I: Iterator<Item = (K, V)>> Iterator for LastOfEqualKeys<I> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<(K, V)> {
         loop {
             let entry = self.entries.next()?;
-            if self.entries.peek().is_none_or(|next| next.0 != entry.0) {
-                return Some(entry);
+            match self.entries.peek().map(|next| next.0.cmp(&entry.0)) {
+                Some(Ordering::Less) => panic!("entries not sorted by key"),
+                Some(Ordering::Equal) => {}
+                Some(Ordering::Greater) | None => return Some(entry),
             }
         }
     }
@@ -97,7 +129,7 @@ impl<K: Ord, V> FromIterator<(K, V)> for BBTreeMap<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut entries: Vec<(K, V)> = iter.into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_keeping_last(entries.into_iter())
+        Self::from_sorted_in(entries, Auto, Global)
     }
 }
 
@@ -116,7 +148,7 @@ impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BBTreeMap<K, V> {
     /// ```
     fn from(mut entries: [(K, V); N]) -> Self {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        Self::from_sorted_keeping_last(entries.into_iter())
+        Self::from_sorted_in(entries, Auto, Global)
     }
 }
 

@@ -1,6 +1,7 @@
-//! The root page: the root node, of either kind, in room for the larger,
-//! and after it the root area, which the tree keeps in place of a parent.
-//! The root area holds what every key shares (D50, `tree/shared_prefix.rs`).
+//! The root page: the root node, of either kind, in room for the larger: a
+//! node's page, the larger kind's. What the tree keeps in place of the
+//! root's parent, the bytes every key shares (D50), lies beside its pointer
+//! to the page (`tree/root.rs`).
 //!
 //! A tree keeps its root page for life, however tall it grows; the root
 //! node's kind changes in place, as InnoDB's root page does (D52). Raising
@@ -12,20 +13,14 @@
 //! kind, and changes with it.
 
 use core::alloc::Layout;
-use core::mem::size_of;
-#[cfg(any(test, feature = "inspect"))]
-use core::ops::Range;
 use core::ptr::NonNull;
 
-use super::super::interleaving::Interleaving;
 use super::internal::Internal;
 use super::leaf::Leaf;
-use super::optimistic::RacingReads;
 use super::page::{FreshPage, NodePtr, PageAllocator, PageByType, PageType};
 use super::{Child, Node};
 use crate::allocator::PageKind;
 use crate::inline_key::InlineKeyStrategy;
-use crate::tree::shared_prefix::SharedPrefix;
 
 /// A tree's root page, by a pointer to it tagged with the root node's kind,
 /// as an edge to the node would be.
@@ -47,53 +42,70 @@ impl<K, V, S> Clone for RootPage<K, V, S> {
 
 impl<K, V, S> Copy for RootPage<K, V, S> {}
 
-// SAFETY: a root page is used with this layout only. The root node is at its
+// SAFETY: a root page is used with this layout only: the larger kind's
+// page, at least as aligned as the other kind's. The root node is at its
 // start, with its kind's layout, which fits in the page and whose alignment
-// divides the page's. The root area follows the larger kind's page.
+// divides the page's.
 unsafe impl<K, V, S: InlineKeyStrategy<K>> PageType for RootPage<K, V, S> {
-    const KIND: PageKind = PageKind::Root;
+    #[inline(always)]
+    fn kind() -> PageKind {
+        Self::larger_kind().0
+    }
 
+    #[inline(always)]
     fn page_layout() -> Layout {
-        let (leaf, internal) = (
-            Leaf::<K, V, S>::page_layout(),
-            Internal::<K, V, S>::page_layout(),
-        );
-        let size = Self::area_offset() + size_of::<SharedPrefix>();
-        Layout::from_size_align(size, leaf.align().max(internal.align()))
-            .expect("a root page's layout is valid")
+        Self::larger_kind().1
     }
 }
 
 impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
-    /// A new tree's root page, in `page`: an empty leaf, whose keys share
-    /// nothing yet.
+    /// The larger node kind, a leaf if they are as large, and its page's
+    /// layout: what a root page is, room for a node of either kind.
+    ///
+    /// # Panics
+    ///
+    /// If the larger kind's pages are less aligned than the other's, which
+    /// only a node config of internal pages larger than leaves', whose leaves
+    /// are larger still, makes (`node_config.rs`). Folded after
+    /// monomorphization, as the layouts are.
+    #[inline(always)]
+    fn larger_kind() -> (PageKind, Layout) {
+        let (leaf, internal) = (
+            Leaf::<K, V, S>::page_layout(),
+            Internal::<K, V, S>::page_layout(),
+        );
+        let (larger, smaller) = if leaf.size() >= internal.size() {
+            ((PageKind::Leaf, leaf), internal)
+        } else {
+            ((PageKind::Internal, internal), leaf)
+        };
+        assert!(
+            larger.1.align() >= smaller.align(),
+            "the larger node kind's pages are the more aligned"
+        );
+        larger
+    }
+
+    /// A new tree's root page, in `page`: an empty leaf.
     pub(in crate::tree) fn new(page: FreshPage<Self>) -> Self {
-        // SAFETY: the page is a fresh root page, aligned to and larger than
+        // SAFETY: the page is a fresh root page, aligned to and as large as
         // a leaf's, which nothing else uses.
         let node = unsafe { NodePtr::initialize::<Leaf<K, V, S>>(page.into_raw()) };
-        let root_page = Self { node };
-        // SAFETY: the root area lies past the node, in the page, and needs no
-        // alignment.
-        unsafe { root_page.area().write(SharedPrefix::none()) };
-        root_page
+        Self { node }
     }
 
     /// Makes `page` the root page for `top`, moving `top` there, and returns
     /// it with `top`'s emptied page. `top` is the top node of a tree made on
-    /// plain pages, whose keys share `shared_prefix`: a copy
-    /// (`tree/clone.rs`), or the part a cut makes (`tree/cut.rs`).
+    /// plain pages: a copy (`tree/clone.rs`), or the part a cut makes
+    /// (`tree/cut.rs`).
     pub(in crate::tree) fn from_node(
         page: FreshPage<Self>,
         top: Node<K, V, S>,
-        shared_prefix: SharedPrefix,
     ) -> (Self, PageByType<K, V, S>) {
         // SAFETY: the page is a fresh root page, which nothing else uses, and
         // nothing points to a tree's top node but its owner, who gives it up.
         let (node, emptied) = unsafe { Self::move_in(page.into_raw(), top) };
-        let root_page = Self { node };
-        // SAFETY: the root area lies past the node, in the page.
-        unsafe { root_page.area().write(shared_prefix) };
-        (root_page, emptied)
+        (Self { node }, emptied)
     }
 
     /// Moves `node`, on a plain page of its kind, whole into the root page at
@@ -129,78 +141,10 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         }
     }
 
-    /// Where the root area starts: past room for a node of either kind.
-    #[inline(always)]
-    pub(in crate::tree) fn area_offset() -> usize {
-        let (leaf, internal) = (
-            Leaf::<K, V, S>::page_layout(),
-            Internal::<K, V, S>::page_layout(),
-        );
-        leaf.size().max(internal.size())
-    }
-
-    /// Where the root area lies in the page (`tree/inspect.rs`).
-    #[cfg(any(test, feature = "inspect"))]
-    pub(in crate::tree) fn area_bytes() -> Range<usize> {
-        let start = Self::area_offset();
-        start..start + size_of::<SharedPrefix>()
-    }
-
-    /// The root area: what every key of the tree shares.
-    #[inline(always)]
-    fn area(self) -> *mut SharedPrefix {
-        // SAFETY: the root area lies within the page (`page_layout`).
-        unsafe {
-            self.node
-                .page()
-                .byte_add(Self::area_offset())
-                .cast::<SharedPrefix>()
-                .as_ptr()
-        }
-    }
-
     /// The root node, of the kind the tag tells.
     #[inline(always)]
     pub(in crate::tree) fn node(self) -> Node<K, V, S> {
         Node::at(self.node)
-    }
-
-    /// What every key of the tree shares (D50).
-    #[inline(always)]
-    pub(in crate::tree) fn shared_prefix<'a>(self) -> &'a SharedPrefix {
-        // SAFETY: the root area was written with the page; nothing writes it
-        // while the caller borrows it (the handles' contract).
-        unsafe { &*self.area() }
-    }
-
-    /// [`Self::shared_prefix`] of a latched tree, read while a thread holding
-    /// the root may be changing it. Returns a copy, read through the raw
-    /// pointer, which the root's version vouches for once checked
-    /// (`tree/latched`). `None` if its length, read first, is 0: most trees
-    /// read only that byte.
-    ///
-    /// # Safety
-    ///
-    /// The page is a latched tree's root page, allocated.
-    #[inline(always)]
-    pub(in crate::tree) unsafe fn load_racing_shared_prefix(self) -> Option<SharedPrefix> {
-        let _reads = RacingReads::begin();
-        Interleaving::switch_point();
-        // SAFETY: the root area was written with the page, which is
-        // allocated (caller). Its length is a byte, read once, volatile. A
-        // racing write makes the copy one that the version check throws away.
-        unsafe {
-            let len = self.area().byte_add(SharedPrefix::LEN_OFFSET).cast::<u8>();
-            (len.read_volatile() != 0).then(|| self.area().read())
-        }
-    }
-
-    /// What every key of the tree shares, to change. The caller keeps every
-    /// node along the tree's borders at its length (`tree/prefix.rs`).
-    pub(in crate::tree) fn shared_prefix_mut<'a>(self) -> &'a mut SharedPrefix {
-        // SAFETY: the root area was written with the page; the access is
-        // exclusive while the caller borrows it (the handles' contract).
-        unsafe { &mut *self.area() }
     }
 
     /// Moves the root node to a fresh page of its kind, from `alloc`, and
@@ -226,10 +170,10 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
 
     /// Makes the tree a level taller. Moves the root node to a fresh page of
     /// its kind, from `alloc`, and makes the root an internal node with that
-    /// node as its only child. The new root, on both borders, is at the
-    /// tree's shared prefix length (D50), as the old one was. Returns the
-    /// page's new handle.
-    pub(in crate::tree) fn raise(self, alloc: &impl PageAllocator) -> Self {
+    /// node as its only child. The new root, on both borders, is at
+    /// `shared_len`, the tree's shared prefix length (D50), as the old one
+    /// was. Returns the page's new handle.
+    pub(in crate::tree) fn raise(self, alloc: &impl PageAllocator, shared_len: usize) -> Self {
         let child = self.move_node_out(alloc);
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents
@@ -237,7 +181,7 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
         let node = unsafe { NodePtr::initialize::<Internal<K, V, S>>(self.node.page()) };
         let root = Internal::at(node);
         root.put_only_child(child);
-        root.set_empty_prefix_len(self.shared_prefix().len());
+        root.set_empty_prefix_len(shared_len);
         Self { node }
     }
 

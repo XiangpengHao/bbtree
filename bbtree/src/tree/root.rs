@@ -6,10 +6,10 @@
 //! the tree keeps its fences beside it, as the bytes every key shares (D50,
 //! `shared_prefix.rs`). A search checks a query against them once, before
 //! the root. A node along the tree's left or right border, with no
-//! separator above it on that side, takes the root's fence there. The
-//! fences live in the root page, after the root node (`node/root_page.rs`).
-//! The tree also remembers the last leaf an append went to, to append there
-//! again without a search (D45).
+//! separator above it on that side, takes the root's fence there. The tree
+//! keeps the fences beside its root page, so that a root page is a node's
+//! page. The tree also remembers the last leaf an append went to, to append
+//! there again without a search (D45).
 //!
 //! The root node is a leaf, in a tree of one node, or an internal node. The
 //! tree grows and shrinks a level only at its root, in the root page, which
@@ -18,6 +18,7 @@
 //! std's has no root then (D1), so making a map allocates nothing. Every
 //! operation on a whole tree starts at [`Tree`].
 
+use core::alloc::Layout;
 use core::cmp::Ordering;
 use core::mem;
 
@@ -28,10 +29,12 @@ use super::node::page::{FreshPage, NodePtr, PageAllocator, PageByType};
 use super::node::root_page::RootPage;
 use super::prefix::PrefixedKey;
 use super::shared_prefix::SharedPrefix;
+use crate::allocator::Allocator;
 use crate::inline_key::InlineKeyStrategy;
 
 /// A tree: its root page, if it has one, which the tree owns with every
-/// node under it, and the last leaf an append went to.
+/// node under it; what every key shares; and the last leaf an append went
+/// to.
 ///
 /// It has no `Drop`: dropping a `Tree` leaks the tree, which is safe.
 /// `Tree::destroy` takes it apart (`teardown.rs`).
@@ -50,6 +53,7 @@ use crate::inline_key::InlineKeyStrategy;
 pub(crate) struct Tree<K, V, S> {
     root_page: Option<RootPage<K, V, S>>,
     rightmost_leaf: Option<NodePtr<K, V, S>>,
+    shared_prefix: SharedPrefix,
 }
 
 // SAFETY: a `Tree` owns its pages, keys and values, and nothing else reaches
@@ -69,16 +73,22 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     pub(crate) const EMPTY: Self = Self {
         root_page: None,
         rightmost_leaf: None,
+        shared_prefix: SharedPrefix::none(),
     };
 
-    /// The tree on `root_page`, with every node under it. For a latched
-    /// tree (`tree/latched`): to take it apart once no other thread reaches
-    /// it, or to run one of the tree's operations on the nodes a latched
-    /// operation holds, as if it owned them.
-    pub(in crate::tree) fn of_root_page(root_page: RootPage<K, V, S>) -> Self {
+    /// The tree on `root_page`, with every node under it, whose keys share
+    /// `shared_prefix`. For a latched tree (`tree/latched`): to take it
+    /// apart once no other thread reaches it, or to run one of the tree's
+    /// operations on the nodes a latched operation holds, as if it owned
+    /// them; and for a file map's tree (`tree/file.rs`).
+    pub(in crate::tree) fn of_root_page(
+        root_page: RootPage<K, V, S>,
+        shared_prefix: SharedPrefix,
+    ) -> Self {
         Self {
             root_page: Some(root_page),
             rightmost_leaf: None,
+            shared_prefix,
         }
     }
 
@@ -155,24 +165,17 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         depth
     }
 
-    /// What every key of the tree shares (D50).
-    ///
-    /// # Panics
-    ///
-    /// Without a tree.
+    /// What every key of the tree shares (D50): nothing without a tree.
+    #[inline(always)]
     pub(in crate::tree) fn shared_prefix(&self) -> &SharedPrefix {
-        self.existing_root_page().shared_prefix()
+        &self.shared_prefix
     }
 
     /// What every key of the tree shares, to change: keeping every node
     /// along the tree's borders at its length is the caller's business
     /// (`tree/prefix.rs`).
-    ///
-    /// # Panics
-    ///
-    /// Without a tree.
     pub(in crate::tree) fn shared_prefix_mut(&mut self) -> &mut SharedPrefix {
-        self.existing_root_page().shared_prefix_mut()
+        &mut self.shared_prefix
     }
 
     /// Ends the owner's permission to append directly before another
@@ -202,7 +205,20 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         Self {
             root_page: Some(RootPage::new(FreshPage::allocate(alloc))),
             rightmost_leaf: None,
+            shared_prefix: SharedPrefix::none(),
         }
+    }
+
+    /// [`Self::new`], or the layout `alloc` refused the root page for: a
+    /// fallible insert's first (`insert.rs`).
+    #[cold]
+    #[inline(never)]
+    pub(in crate::tree) fn try_new(alloc: &impl Allocator) -> Result<Self, Layout> {
+        Ok(Self {
+            root_page: Some(RootPage::new(FreshPage::try_allocate(alloc)?)),
+            rightmost_leaf: None,
+            shared_prefix: SharedPrefix::none(),
+        })
     }
 
     /// The tree's root page, as [`Self::root_page`] reads it; without a
@@ -228,11 +244,12 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         shared_prefix: SharedPrefix,
         alloc: &impl PageAllocator,
     ) -> Self {
-        let (page, emptied) = RootPage::from_node(FreshPage::allocate(alloc), top, shared_prefix);
+        let (page, emptied) = RootPage::from_node(FreshPage::allocate(alloc), top);
         emptied.deallocate(alloc);
         Self {
             root_page: Some(page),
             rightmost_leaf: None,
+            shared_prefix,
         }
     }
 
@@ -245,7 +262,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Without a tree.
     pub(in crate::tree) fn raise(&mut self, alloc: &impl PageAllocator) {
         self.forget_rightmost_leaf();
-        let root_page = self.existing_root_page().raise(alloc);
+        let root_page = (self.existing_root_page()).raise(alloc, self.shared_prefix.len());
         self.root_page = Some(root_page);
     }
 

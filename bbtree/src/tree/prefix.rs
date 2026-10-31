@@ -330,7 +330,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             {
                 self.start_shared_prefix(root, &key);
             } else {
-                let len = root_page.shared_prefix().len_shared_with::<K, S>(&key);
+                let len = self.shared_prefix().len_shared_with::<K, S>(&key);
                 self.shrink_shared_prefix_to(len);
             }
         }

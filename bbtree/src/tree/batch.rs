@@ -375,9 +375,9 @@ impl Prefetcher {
     /// Prefetches `line` without yielding.
     #[inline(always)]
     pub(in crate::tree) fn hint(line: *const u8) {
-        #[cfg(all(target_arch = "x86_64", not(miri)))]
-        // SAFETY: x86-64 has SSE, and the intrinsic doesn't dereference
-        // its address.
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse", not(miri)))]
+        // SAFETY: the target has SSE (the `cfg`), and the intrinsic doesn't
+        // dereference its address.
         unsafe {
             core::arch::x86_64::_mm_prefetch(line.cast(), core::arch::x86_64::_MM_HINT_T0);
         }
@@ -392,7 +392,16 @@ impl Prefetcher {
                 options(nostack, preserves_flags, readonly),
             );
         }
-        #[cfg(any(not(any(target_arch = "x86_64", target_arch = "aarch64")), miri))]
+        // Elsewhere, and on a target for kernels, built with no vector
+        // registers (`x86_64-unknown-none`), which has no `_mm_prefetch`,
+        // lanes go without.
+        #[cfg(any(
+            not(any(
+                all(target_arch = "x86_64", target_feature = "sse"),
+                target_arch = "aarch64"
+            )),
+            miri
+        ))]
         let _ = line;
     }
 }
@@ -432,7 +441,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     {
         let root_page = self.root_page()?;
         let key = SearchKey::<K, S, Q>::new(key);
-        if root_page.shared_prefix().place_outside(&key).is_some() {
+        if self.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
         root_page
@@ -461,7 +470,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let Node::Internal(root) = root_page.node() else {
             return keys.map(|key| self.find_in_batch(key));
         };
-        let lanes = keys.map(|key| Lane::new(key, root, root_page.shared_prefix(), ()));
+        let lanes = keys.map(|key| Lane::new(key, root, self.shared_prefix(), ()));
         let mut values = [None; N];
         let mut outputs = values.iter_mut();
         Executor::run(lanes.map(|lane| lane.find(outputs.next().expect("one value per key"))));
@@ -530,7 +539,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let Node::Internal(root) = root_page.node() else {
             return entries.map(|(key, value)| self.insert(key, value, alloc, length));
         };
-        let shared = root_page.shared_prefix();
+        let shared = self.shared_prefix();
         let mut destinations = core::array::from_fn::<_, N, _>(|_| Destination::FromRoot);
         let mut outputs = destinations.iter_mut();
         Executor::run(entries.each_ref().map(|(key, _)| {
@@ -578,7 +587,8 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
                     None
                 }
                 Err((leaf, _)) => {
-                    let previous = self.insert_with_stack(key, value, alloc, length);
+                    let previous = (self.insert_with_stack(key, value, alloc, length))
+                        .unwrap_or_else(|error| error.handle_alloc_error());
                     for destination in destinations.as_mut_slice() {
                         destination.invalidate_after_split(leaf);
                     }
@@ -614,7 +624,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let mut watches = watches.into_iter();
         Executor::run(keys.map(|key| {
             let watch = watches.next().expect("one watch per key");
-            let lane = Lane::new(key, root, root_page.shared_prefix(), watch);
+            let lane = Lane::new(key, root, self.shared_prefix(), watch);
             let output = outputs.next().expect("one value per key");
             async move {
                 lane.find(output).await;

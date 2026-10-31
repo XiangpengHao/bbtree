@@ -42,8 +42,9 @@ with every pointer replaced by an offset. A reader maps the file and runs
 the map's code on the pages where they lie.
 
 ```text
-offset 0      header: magic, version, layout fingerprint, entries, root
-              root page            (root node and root area, D50, D52)
+offset 0      header: magic, version, layout fingerprint, entries, root,
+                      what every key shares (D50)
+              root page            (the root node, D52)
               internal nodes       level 1, left to right
               internal nodes       level 2 ...
               leaves               in key order, each followed by its heap pages

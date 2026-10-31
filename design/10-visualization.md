@@ -152,7 +152,7 @@ also compiles in tests, so `cargo test` runs its checks without the feature.
 - **`PageMap`** comes from the page's `LeafLayout` or `InternalLayout`: each
   slot array (header, inline keys, hash tags, keys, head, values, edges)
   by offset, stride, slot size, capacity, and how many slots the node uses.
-  The root's page adds its root area, after room for a node of either kind
+  The root's page is room for a node of either kind, the larger kind's page
   (D52). Arrays, rather than contiguous regions, because inline-key leaves
   interleave keys with values (D29). Whatever no array covers is padding.
 - **Not offered:** raw page bytes, since unused slots are uninitialized and

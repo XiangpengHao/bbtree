@@ -29,7 +29,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     {
         let root_page = self.root_page()?;
         let key = SearchKey::new(key);
-        if root_page.shared_prefix().place_outside(&key).is_some() {
+        if self.shared_prefix.get_mut().place_outside(&key).is_some() {
             return None;
         }
         root_page.node().find(&key, ()).map(Found::value_mut)
@@ -42,7 +42,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         K: Ord,
     {
         match self.root_page() {
-            Some(root_page) => RangeWalk::new::<K>(root_page, Bound::Unbounded, Bound::Unbounded),
+            Some(root_page) => RangeWalk::new::<K>(
+                root_page,
+                self.shared_prefix.get_mut(),
+                Bound::Unbounded,
+                Bound::Unbounded,
+            ),
             None => RangeWalk::EMPTY,
         }
     }

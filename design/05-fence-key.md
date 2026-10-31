@@ -210,8 +210,9 @@ nothing from fences, yet their keys often share many bytes (dense integers,
 UUIDv7-like arrays, paths behind a common head). Every window there ties,
 and searches compare whole keys.
 
-- **Kept** by the root, as its fences, in the root page after the root
-  node (D52): the leading bytes of the encoding every key shares, up to 64,
+- **Kept** for the root, as its fences, in the map beside the pointer to
+  the root page (D52): the leading bytes of the encoding every key shares,
+  up to 39,
   by their bytes for byte strings and by their encoding otherwise
   (`SharedPrefix`). A node with no separator
   above it on a side takes the root's fence there, so the root and the

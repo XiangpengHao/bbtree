@@ -327,10 +327,10 @@ fn readers_refuse_what_is_not_a_file_map_of_their_layout() {
         Some(FileError::NotAFileMap)
     );
     not_a_file_map.copy_from_slice(&file_bytes);
-    not_a_file_map[8] = 2;
+    not_a_file_map[8] = 1;
     assert_eq!(
         FileMap::<u64, u64>::open(&not_a_file_map).err(),
-        Some(FileError::UnsupportedVersion(2))
+        Some(FileError::UnsupportedVersion(1))
     );
 
     let alignment = FileMap::<u64, u64>::alignment();

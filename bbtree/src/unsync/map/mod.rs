@@ -31,7 +31,7 @@ use core::mem;
 use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
-use crate::allocator::{Allocator, Global};
+use crate::allocator::{Allocator, Global, InsertError};
 use crate::inline_key::{Auto, InlineKeyStrategy};
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
@@ -387,6 +387,31 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
         K: Ord,
     {
         self.tree.insert(key, value, &self.alloc, &mut self.length)
+    }
+
+    /// Inserts a key-value pair into the map, as [`Self::insert`] does,
+    /// unless the map's allocator refuses a page the insert needs: then the
+    /// map holds the entries it held, and the error gives the key and value
+    /// back ([`InsertError::into_entry`]). `insert` calls
+    /// [`handle_alloc_error`](alloc::alloc::handle_alloc_error) instead.
+    /// The pages are taken before the map changes, so most inserts, which
+    /// fit their leaf, take none.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bbtree::unsync::BBTreeMap;
+    ///
+    /// let mut map = BBTreeMap::new();
+    /// assert_eq!(map.try_insert(37, "a").ok(), Some(None));
+    /// assert_eq!(map.try_insert(37, "b").ok(), Some(Some("a")));
+    /// ```
+    pub fn try_insert(&mut self, key: K, value: V) -> Result<Option<V>, InsertError<K, V>>
+    where
+        K: Ord,
+    {
+        self.tree
+            .try_insert(key, value, &self.alloc, &mut self.length)
     }
 
     /// Removes a key from the map, returning the value at the key if the key

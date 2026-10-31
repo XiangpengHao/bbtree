@@ -439,7 +439,7 @@ where
                     // Lowered to a leaf since the batch started.
                     return;
                 };
-                let (mut node, mut version) = match tree.read_root(root_page, root, &self.key) {
+                let (mut node, mut version) = match tree.read_root(root, &self.key) {
                     RootRead::At(version) => (root, version),
                     RootRead::Outside(_) => return,
                     RootRead::Changed => continue 'restart,
@@ -533,7 +533,7 @@ where
                     *output = (self.batch.visit.borrow_mut()).look_up(tree, self.key.key());
                     return;
                 };
-                let (mut node, mut version) = match tree.read_root(root_page, root, &self.key) {
+                let (mut node, mut version) = match tree.read_root(root, &self.key) {
                     RootRead::At(version) => (root, version),
                     RootRead::Outside(_) => return,
                     RootRead::Changed => continue 'restart,

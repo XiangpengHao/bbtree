@@ -47,6 +47,7 @@ pub(crate) mod node;
 pub(crate) mod node_stack;
 mod prefix;
 mod remove;
+mod reserved_pages;
 pub(crate) mod root;
 mod search;
 mod shared_prefix;

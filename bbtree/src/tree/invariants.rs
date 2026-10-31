@@ -28,8 +28,8 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         match (self.root_page(), other.root_page()) {
             (Some(left), Some(right)) => {
                 assert_eq!(
-                    left.shared_prefix().as_bytes(),
-                    right.shared_prefix().as_bytes()
+                    self.shared_prefix().as_bytes(),
+                    other.shared_prefix().as_bytes()
                 );
                 left.node().check_same_nodes(right.node());
             }
@@ -100,7 +100,7 @@ impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             );
         }
         let mut walk = InOrderWalk {
-            shared_prefix: root_page.shared_prefix(),
+            shared_prefix: self.shared_prefix(),
             previous_key: None,
             entries: 0,
             leaves: 0,
@@ -129,7 +129,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let Some(root_page) = self.root_page() else {
             return;
         };
-        let shared_len = root_page.shared_prefix().len();
+        let shared_len = self.shared_prefix().len();
         Self::check_prefix_lens_in(root_page.node(), shared_len, shared_len, true, true);
     }
 

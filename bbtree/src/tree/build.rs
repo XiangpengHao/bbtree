@@ -68,7 +68,7 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> TreeBuilder<K, V, S, A> {
             let mut entry = (tree.shrink_shared_prefix_for(key, &self.alloc), value);
             // A copy, to check keys against without the tree, whose
             // rightmost leaf changes below.
-            let shared = tree.shared_prefix().clone();
+            let shared = *tree.shared_prefix();
             // On the right border, whose prefix is what every key shares.
             let leaf = tree.root_mut().border_leaf::<LastEdge>();
             // The entry past the full leaf, or one whose key shares less.

@@ -26,7 +26,7 @@ impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         };
         Self::from_node(
             root_page.node().clone_nodes(alloc),
-            root_page.shared_prefix().clone(),
+            *self.shared_prefix(),
             alloc,
         )
     }

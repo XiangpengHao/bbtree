@@ -47,7 +47,6 @@ use super::super::node::internal::Internal;
 use super::super::node::latch::{Latched, NodeLatch, Version};
 use super::super::node::leaf::Leaf;
 use super::super::node::optimistic::Routed;
-use super::super::node::root_page::RootPage;
 use super::super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::super::root::Tree;
 use super::LatchedTree;
@@ -414,12 +413,12 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     // stays as it is while the leaf is latched, and changes
                     // only while it is held.
                     let outside = if M::LATCHES {
-                        root_page.shared_prefix().place_outside(key)
+                        // SAFETY: the thread holds the root leaf, on both
+                        // borders, latched.
+                        unsafe { self.held_shared_prefix() }.place_outside(key)
                     } else {
-                        // SAFETY: the tree is latched, and its root page
-                        // allocated; the copy is checked by the leaf's
-                        // version below.
-                        let shared = unsafe { root_page.load_racing_shared_prefix() };
+                        // The copy is checked by the leaf's version below.
+                        let shared = self.load_racing_shared_prefix();
                         let outside = shared.and_then(|shared| shared.place_outside(key));
                         if !held.is_unchanged() {
                             continue 'restart;
@@ -431,7 +430,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
                     }
                     return Ok((held, false));
                 }
-                Node::Internal(root) => match self.read_root(root_page, root, key) {
+                Node::Internal(root) => match self.read_root(root, key) {
                     RootRead::At(version) => (root, version),
                     RootRead::Outside(outside) => return Err(outside),
                     RootRead::Changed => continue 'restart,
@@ -489,7 +488,6 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     #[inline(always)]
     pub(super) fn read_root<Q>(
         &self,
-        root_page: RootPage<K, V, Latched<S>>,
         root: Internal<K, V, Latched<S>>,
         key: &SearchKey<'_, K, Latched<S>, Q>,
     ) -> RootRead
@@ -500,9 +498,8 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         let Some(version) = self.root_version(root) else {
             return RootRead::Changed;
         };
-        // SAFETY: the tree is latched, and its root page allocated; the
-        // copy is checked by the root's version below.
-        let shared = unsafe { root_page.load_racing_shared_prefix() };
+        // The copy is checked by the root's version below.
+        let shared = self.load_racing_shared_prefix();
         match shared.and_then(|shared| shared.place_outside(key)) {
             None => RootRead::At(version),
             Some(outside) if root.latch().is_unchanged(version) => RootRead::Outside(outside),

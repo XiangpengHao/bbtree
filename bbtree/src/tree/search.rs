@@ -185,7 +185,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     {
         let root_page = self.root_page()?;
         let key = SearchKey::new(key);
-        if root_page.shared_prefix().place_outside(&key).is_some() {
+        if self.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
         root_page.node().find(&key, ()).map(Found::key_value)
@@ -203,7 +203,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     {
         let root_page = self.root_page()?;
         let key = SearchKey::new(key);
-        if root_page.shared_prefix().place_outside(&key).is_some() {
+        if self.shared_prefix().place_outside(&key).is_some() {
             return None;
         }
         root_page.node().find(&key, ()).map(Found::value_mut)

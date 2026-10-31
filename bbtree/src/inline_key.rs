@@ -190,7 +190,7 @@ pub trait InlineKey: Ord {
 
     /// How this key's encoding, padded with zeros, orders against `prefix`
     /// in its first `prefix.len()` bytes. The map checks every search's key
-    /// against what all of its keys share, at most 64 bytes, once, before
+    /// against what all of its keys share, at most 39 bytes, once, before
     /// the root: a key without them is outside every node.
     ///
     /// The default compares a window at a time. The std byte strings' impls

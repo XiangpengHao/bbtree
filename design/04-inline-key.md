@@ -44,7 +44,7 @@ touching the heap**.
 - **Search runs over the inline keys,** which compare in a register, so the
   search strategy follows the inline key, not `K`. On a tie, the remaining range
   of equal inline keys is searched on full keys. The run is found by a count
-  over every slot, never a binary search (Q6).
+  over every slot, not a binary search, but on x86-64 without SSE2 (Q6).
 - **No node prefetch** (D46). Every hit on a key longer than its inline key,
   and every tie, reads a key line, which sits on the critical path; the
   layouts put it where the search already reads (D29, D32), and internal
@@ -237,7 +237,7 @@ tie. Fraction of sorted neighbours sharing the first 8 / 16 bytes
 - **Paths:** see 05-fence-key.md.
 
 **Q6. (resolved) Search over the inline-key array: a count over every
-slot, on every target; never a binary search.**
+slot; on x86-64 without SSE2, a binary search.**
 - **The count:** one pass over every slot up to the capacity counts the
   inline keys below the target and those equal to it, clipped to `len`, so
   the run is `below..below + equal`. Its trip count is a constant per node
@@ -256,6 +256,12 @@ slot, on every target; never a binary search.**
   the search on baseline x86-64 and AVX2 (probe, pittsburgh, 2026-10-16,
   `u64`, `hash32` and borrowed-JSON hits and misses), and strings gain
   3–7% on an M1 Pro.
+- **Binary search without SSE2** (2026-10-31): targets for kernels
+  (`x86_64-unknown-none`) have no vector registers, so the count compares
+  every slot up to the capacity one at a time, where a binary search
+  probes `log2(len)` of them. There two branchless binary searches find the
+  run, the second from where the first ends. Not measured: the target runs
+  only in a kernel.
 - **No early-exit scan** (stop at the first inline key not below the
   target): it mispredicts about once per node, where it stops; with
   AVX-512 it was 6–18% slower than the count on every get.

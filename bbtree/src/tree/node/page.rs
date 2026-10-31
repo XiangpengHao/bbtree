@@ -1,6 +1,6 @@
 //! Node pages: the allocation boundary ([`FreshPage`]) and raw access to an
 //! initialized node's header and slot arrays ([`NodePtr`]). The root's page,
-//! a node of either kind and the root area after it, is `root_page.rs`'s.
+//! room for a node of either kind, is `root_page.rs`'s.
 
 use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
@@ -25,8 +25,8 @@ use crate::inline_key::sealed::Sealed;
 use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 
 /// What pages are allocated for: a leaf, an internal node ([`NodeKind`]s), or
-/// the root ([`RootPage`]), each with a page layout of its own (D21). A page
-/// is only ever used, and deallocated, with the layout it was allocated for.
+/// the root ([`RootPage`]), a page of the larger kind (D21). A page is only
+/// ever used, and deallocated, with the layout it was allocated for.
 ///
 /// # Safety
 ///
@@ -34,12 +34,12 @@ use crate::inline_key::{InlineKeyStrategy, InlineWidth};
 /// accesses them with.
 pub(crate) unsafe trait PageType: Sized {
     /// What pages of this type are for: which of the allocator's methods
-    /// hands them out and takes them back.
-    const KIND: PageKind;
+    /// hands them out and takes them back. Folded after monomorphization.
+    fn kind() -> PageKind;
 
     /// The allocation layout of every page of this type (D21) and strategy
     /// (D18), from the layout constants: a node kind's own, or for the root
-    /// page, both kinds' and the root area, folded after monomorphization.
+    /// page, the larger kind's, folded after monomorphization.
     /// Using it also runs those constants' compile-time assertions.
     fn page_layout() -> Layout;
 }
@@ -178,7 +178,7 @@ impl<P: PageType> FreshPage<P> {
     /// A page from `alloc`.
     pub(crate) fn allocate(alloc: &impl PageAllocator) -> Self {
         // The layout has a non-zero size: nodes are at least 64 B.
-        let page = alloc.allocate_page(P::KIND, P::page_layout());
+        let page = alloc.allocate_page(P::kind(), P::page_layout());
         // SAFETY: the page was just allocated by the map's allocator for
         // `P::page_layout()`, and nothing else has it.
         unsafe { Self::from_raw(page) }
@@ -188,7 +188,7 @@ impl<P: PageType> FreshPage<P> {
     /// give, the layout it was asked for.
     pub(crate) fn try_allocate(alloc: &impl Allocator) -> Result<Self, Layout> {
         let layout = P::page_layout();
-        let page = P::KIND
+        let page = P::kind()
             .allocate(alloc, layout)
             .map_err(|AllocError| layout)?;
         // SAFETY: as in `allocate`.
@@ -202,7 +202,7 @@ impl<P: PageType> FreshPage<P> {
         // `P::page_layout()`, the same every time for this type, and is used
         // by nothing else (type invariant); consuming `self` gives up the last
         // use of it.
-        unsafe { alloc.deallocate_page(P::KIND, page, P::page_layout()) }
+        unsafe { alloc.deallocate_page(P::kind(), page, P::page_layout()) }
     }
 }
 
@@ -1123,6 +1123,12 @@ mod test_pages {
             self.allocated.borrow().len()
         }
 
+        /// The layout each kind of page was asked for with, in the order
+        /// the kinds were first asked for.
+        pub(crate) fn kind_layouts(&self) -> Vec<(PageKind, Layout)> {
+            self.kind_layouts.borrow().clone()
+        }
+
         /// The number of blocks handed out and not given back.
         pub(crate) fn in_use_count(&self) -> usize {
             self.allocated.borrow().len() - self.released.borrow().len()
@@ -1201,15 +1207,6 @@ mod test_pages {
         unsafe fn deallocate_leaf(&self, page: NonNull<u8>, layout: Layout) {
             // SAFETY: forwarded.
             unsafe { self.deallocate_page_of(PageKind::Leaf, page, layout) }
-        }
-
-        fn allocate_root(&self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-            self.allocate_page_of(PageKind::Root, layout)
-        }
-
-        unsafe fn deallocate_root(&self, page: NonNull<u8>, layout: Layout) {
-            // SAFETY: forwarded.
-            unsafe { self.deallocate_page_of(PageKind::Root, page, layout) }
         }
     }
 

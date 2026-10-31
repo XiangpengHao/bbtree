@@ -79,12 +79,9 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
     }
 
     /// What a file map's start must be aligned to, so that each page is: the
-    /// largest page alignment.
+    /// largest page alignment, the root page's, a page of the larger kind.
     pub(crate) fn alignment() -> usize {
-        Self::root_page()
-            .align()
-            .max(Self::internal_page().align())
-            .max(Self::leaf_page().align())
+        Self::root_page().align()
     }
 
     /// Every size, offset and choice the node code reads the pages with, as
@@ -104,7 +101,6 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
             InlineKeySource::RecognizedStdTypes => 0,
             InlineKeySource::InlineKeyTrait { .. } => 1,
         };
-        let root = Self::root_page();
         let fields = [
             usize::BITS as usize,
             usize::from(cfg!(target_endian = "little")),
@@ -136,9 +132,6 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
             internal.keys.key_stride,
             internal.edges_offset,
             internal.edge_stride,
-            root.size(),
-            root.align(),
-            RootPage::<K, V, S>::area_offset(),
         ];
         // FNV-1a, over each field's eight little-endian bytes.
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -157,7 +150,7 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
     /// kind does, its head flag a `bool`; each edge leads past every page
     /// reached before it, so that the walk visits each page once and ends;
     /// every leaf lies at one depth, at most what a node stack holds; the
-    /// shared prefix fits its area; the leaves hold the header's number of
+    /// leaves hold the header's number of
     /// entries; and each slot that points beyond itself passes its type's
     /// check ([`Storable::check`]).
     /// Plain keys and values, inline keys and prefix lengths can hold any
@@ -172,11 +165,6 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
                 Err(FileError::Corrupt("entries without a tree"))
             };
         };
-        let shared_len = file_bytes
-            [(root & !LEAF_TAG) + RootPage::<K, V, S>::area_offset() + SharedPrefix::LEN_OFFSET];
-        if usize::from(shared_len) > SharedPrefix::MAX_LEN {
-            return Err(FileError::Corrupt("a shared prefix longer than its area"));
-        }
         let edges = NodePtr::<K, V, S>::internal_layout();
         let mut level = vec![root];
         let mut entries = 0;
@@ -278,9 +266,10 @@ impl<K: Storable, V: Storable, S: InlineKeyStrategy<K>> FileFormat<K, V, S> {
     }
 }
 
-/// What a file map starts with: where its tree is, and the layout it was
-/// written with. Kept in the file map as little-endian words after a magic
-/// number and the format's version, [`FileHeader::LEN`] bytes in all.
+/// What a file map starts with: where its tree is, what its keys share, and
+/// the layout it was written with. Kept in the file map as little-endian
+/// words after a magic number and the format's version, then the shared
+/// prefix, [`FileHeader::LEN`] bytes in all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileHeader {
     /// The layout's fingerprint ([`FileFormat::fingerprint`]).
@@ -292,6 +281,9 @@ pub(crate) struct FileHeader {
     root: usize,
     /// The file map's size in bytes, header included.
     byte_len: usize,
+    /// What every key of the tree shares (D50), which the tree keeps beside
+    /// its root page.
+    shared_prefix: SharedPrefix,
 }
 
 impl FileHeader {
@@ -301,10 +293,13 @@ impl FileHeader {
     /// where things are in the header, what an edge holds, how inline keys
     /// and prefixes encode keys. Changes with any of them, so that a file map
     /// of another format is refused.
-    const FORMAT_VERSION: u32 = 1;
+    const FORMAT_VERSION: u32 = 2;
 
     /// The header's size: room for what it holds, and to spare.
-    pub(crate) const LEN: usize = 64;
+    pub(crate) const LEN: usize = 128;
+
+    /// Where the shared prefix starts, past the words.
+    const SHARED_PREFIX_OFFSET: usize = 48;
 
     /// The number of entries.
     pub(crate) fn length(self) -> usize {
@@ -329,14 +324,17 @@ impl FileHeader {
         for (index, word) in words.iter().enumerate() {
             bytes[16 + 8 * index..24 + 8 * index].copy_from_slice(&word.to_le_bytes());
         }
+        bytes[Self::SHARED_PREFIX_OFFSET..][..SharedPrefix::SIZE]
+            .copy_from_slice(&self.shared_prefix.to_file_bytes());
         bytes
     }
 
     /// The header of `file_bytes`, which a file map of a tree with keys `K`,
     /// values `V` and strategy `S` must start with, checked: its magic,
-    /// version and fingerprint; that `file_bytes` is as long as it says, and
-    /// aligned to [`FileFormat::alignment`]; and that the root page lies
-    /// in it, past the header and aligned.
+    /// version and fingerprint; that the shared prefix fits its bytes; that
+    /// `file_bytes` is as long as it says, and aligned to
+    /// [`FileFormat::alignment`]; and that the root page lies in it, past
+    /// the header and aligned.
     pub(crate) fn read<K: Storable, V: Storable, S: InlineKeyStrategy<K>>(
         file_bytes: &[u8],
     ) -> Result<Self, FileError> {
@@ -365,11 +363,16 @@ impl FileHeader {
             return Err(FileError::LayoutMismatch);
         }
         let too_large = FileError::Corrupt("a size past the address space");
+        let shared_prefix = (bytes[Self::SHARED_PREFIX_OFFSET..][..SharedPrefix::SIZE].try_into())
+            .ok()
+            .and_then(SharedPrefix::from_file_bytes)
+            .ok_or(FileError::Corrupt("a shared prefix longer than its bytes"))?;
         let header = Self {
             fingerprint: word(0),
             length: usize::try_from(word(1)).map_err(|_| too_large)?,
             root: usize::try_from(word(2)).map_err(|_| too_large)?,
             byte_len: usize::try_from(word(3)).map_err(|_| too_large)?,
+            shared_prefix,
         };
         if file_bytes.len() < header.byte_len {
             return Err(FileError::Truncated {
@@ -412,6 +415,8 @@ pub(crate) struct FilePages<'t, K: Storable, V: Storable, S, L> {
     /// The number of entries.
     length: usize,
     byte_len: usize,
+    /// What every key of the tree shares, for the header.
+    shared_prefix: SharedPrefix,
     /// The tree the nodes are of, borrowed while they are read.
     _tree: PhantomData<&'t Tree<K::InWriter, V::InWriter, S>>,
     _leaf_bytes: PhantomData<fn() -> L>,
@@ -477,6 +482,7 @@ where
             offsets,
             length,
             byte_len: position,
+            shared_prefix: *tree.shared_prefix(),
             _tree: PhantomData,
             _leaf_bytes: PhantomData,
         }
@@ -526,6 +532,7 @@ where
             length: self.length,
             root,
             byte_len: self.byte_len,
+            shared_prefix: self.shared_prefix,
         }
     }
 
@@ -536,11 +543,8 @@ where
     pub(crate) fn write<E>(&self, write: &mut impl FnMut(&[u8]) -> Result<(), E>) -> Result<(), E> {
         write(&self.header().to_bytes())?;
         let mut position = FileHeader::LEN;
-        let largest_page = FileFormat::<K, V, S>::root_page()
-            .size()
-            .max(FileFormat::<K, V, S>::internal_page().size())
-            .max(FileFormat::<K, V, S>::leaf_page().size());
-        let mut page = vec![0; largest_page];
+        // The largest page: the root page, a page of the larger kind.
+        let mut page = vec![0; FileFormat::<K, V, S>::root_page().size()];
         let mut leaf_bytes = Vec::new();
         for (depth, nodes) in self.levels.iter().enumerate() {
             let size = Self::page_at(depth, self.levels.len()).size();
@@ -755,7 +759,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, InFile<S>> {
         // SAFETY: the root node lies in the file map at its tagged offset from
         // its start (caller).
         let root = unsafe { NodePtr::at_offset(start, root) };
-        Self::of_root_page(RootPage::of_node(Node::at(root)))
+        Self::of_root_page(RootPage::of_node(Node::at(root)), header.shared_prefix)
     }
 }
 

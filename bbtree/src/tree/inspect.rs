@@ -62,8 +62,7 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
     /// borders. Empty if the map has no tree, its keys share no byte, or
     /// they have no inline keys.
     pub fn shared_prefix(&self) -> &'a [u8] {
-        self.root_page
-            .map_or(&[], |root_page| root_page.shared_prefix().as_bytes())
+        self.tree.shared_prefix().as_bytes()
     }
 }
 
@@ -89,7 +88,7 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         let Some(root_page) = self.root_page else {
             return steps;
         };
-        if root_page.shared_prefix().place_outside(&search).is_some() {
+        if self.tree.shared_prefix().place_outside(&search).is_some() {
             return steps;
         }
         let mut view = NodeView::of_root_page(root_page);
@@ -153,7 +152,8 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> TreeView<'a, K, V, S> {
         Q: Ord + ?Sized,
     {
         let search = SearchKey::<K, S, Q>::new(key);
-        self.root_page?.shared_prefix().place_outside(&search)
+        self.root_page?;
+        self.tree.shared_prefix().place_outside(&search)
     }
 
     /// Runs the lanes and executor of
@@ -570,8 +570,8 @@ impl<'a, K: 'a, V: 'a, S: InlineKeyStrategy<K>> NodeView<'a, K, V, S> {
     }
 
     /// The node's page: its size, and where each of its slot arrays lies,
-    /// with how many of each array's slots it uses; the root's, with the
-    /// root area after the node (`tree/node/root_page.rs`).
+    /// with how many of each array's slots it uses; the root's in its root
+    /// page, as large as the larger kind's page (`tree/node/root_page.rs`).
     pub fn page_map(&self) -> PageMap {
         let page = match self.node {
             Node::Leaf(leaf) => PageMap::of_leaf::<K, V, S>(leaf),
@@ -717,16 +717,8 @@ impl PageMap {
         }
     }
 
-    /// The same node's map in the root's page: its size, and the root area.
+    /// The same node's map in the root's page, of its size.
     fn in_root_page<K, V, S: InlineKeyStrategy<K>>(mut self) -> Self {
-        let area = RootPage::<K, V, S>::area_bytes();
-        self.arrays.push(SlotArray::dense(
-            SlotContents::RootArea,
-            area.start,
-            area.len(),
-            1,
-            1,
-        ));
         self.size = RootPage::<K, V, S>::page_layout().size();
         self
     }
@@ -850,9 +842,6 @@ pub enum SlotContents {
     Values,
     /// An internal node's children.
     Edges,
-    /// What the tree keeps in the root's page, after the root node: what
-    /// every key shares (D50).
-    RootArea,
 }
 
 #[cfg(test)]

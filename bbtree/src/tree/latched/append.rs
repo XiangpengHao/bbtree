@@ -79,8 +79,9 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
         {
             return Err((key, value, policy));
         }
-        let root_page = self.root_page().expect("a tree with a last leaf");
-        let key = match PrefixedKey::checked::<Latched<S>>(root_page.shared_prefix(), key) {
+        // SAFETY: the thread holds the last leaf, on the right border.
+        let shared_prefix = unsafe { self.held_shared_prefix() };
+        let key = match PrefixedKey::checked::<Latched<S>>(shared_prefix, key) {
             Ok(key) => key,
             // A key that shares less shrinks the shared prefix first.
             Err(key) => return Err((key, value, policy)),

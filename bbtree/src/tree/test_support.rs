@@ -283,7 +283,7 @@ impl HashTagCase {
     /// saturates too: equal saturated tags tell nothing of lengths. A key
     /// that long ends within its inline key only in a leaf whose fences
     /// share 247 bytes or more: one between two others, as the tree's
-    /// shared prefix stops at 64 bytes (D50).
+    /// shared prefix stops at 39 bytes (D50).
     fn saturated_key_within_its_inline_key() -> Self {
         let shared = "p".repeat(Self::SATURATED_LEN - 5);
         let name = |number: usize| format!("{shared}a{number:04}");

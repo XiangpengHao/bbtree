@@ -21,11 +21,11 @@
 use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
 use core::cell::RefCell;
-use core::iter;
 use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
+use super::super::insert::SplitPages;
 use super::super::interleaving::{Backoff, Interleaving};
 use super::super::node::latch::Version;
 use super::super::node::page::{LatchedNodeHeader, PageAllocator};
@@ -120,12 +120,11 @@ impl FreeLists {
         }
     }
 
-    /// The free list of `kind`'s pages, a node kind's.
+    /// The free list of `kind`'s pages.
     fn list(&self, kind: PageKind) -> &FreeList {
         match kind {
             PageKind::Leaf => &self.leaves,
             PageKind::Internal => &self.internals,
-            PageKind::Root => unreachable!("only node pages are kept free"),
         }
     }
 
@@ -242,19 +241,16 @@ impl<'t, A: Allocator> NodePages<'t, A> {
         }
     }
 
-    /// Takes `leaves` leaf pages and `internals` internal node pages, every
-    /// page the operation will allocate, before it changes anything; or, if
-    /// `alloc` has none to give, takes none, and returns the layout it was
-    /// asked for.
-    pub(super) fn reserve(&self, leaves: usize, internals: usize) -> Result<(), Layout> {
+    /// Takes `split`'s pages, every page the operation will allocate, before
+    /// it changes anything; or, if `alloc` has none to give, takes none, and
+    /// returns the layout it was asked for.
+    pub(super) fn reserve(&self, split: SplitPages) -> Result<(), Layout> {
         let mut taken = self.taken.borrow_mut();
         debug_assert_eq!(
             taken.reserved_len, 0,
             "an operation reserves its pages once"
         );
-        let kinds = iter::repeat_n(PageKind::Leaf, leaves)
-            .chain(iter::repeat_n(PageKind::Internal, internals));
-        for kind in kinds {
+        for kind in split.kinds() {
             let Ok(page) = self.take(kind) else {
                 taken.give_back_reserved(self.free);
                 return Err(self.layout(kind));
@@ -324,12 +320,11 @@ unsafe impl<A: Allocator> PageAllocator for NodePages<'_, A> {
 }
 
 impl<A> NodePages<'_, A> {
-    /// The layout of `kind`'s pages, a node kind's.
+    /// The layout of `kind`'s pages.
     fn layout(&self, kind: PageKind) -> Layout {
         match kind {
             PageKind::Leaf => self.leaf,
             PageKind::Internal => self.internal,
-            PageKind::Root => unreachable!("only node pages are taken ahead"),
         }
     }
 }

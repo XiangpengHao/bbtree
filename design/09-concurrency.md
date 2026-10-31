@@ -247,7 +247,7 @@ not crash it or run user code on garbage:
   the compiler loads them once), clamps the length to the capacity, and
   runs the shared inline-key search on the page's slots: any inline keys
   give an answer in bounds (D14). The shared prefix is copied out of the
-  root page, as raw bytes.
+  map, beside the root pointer, as raw bytes.
 - **Edges** are followed only once the version of the node they were read
   from vouches for them, and the node's version is checked again after the
   child's is read, so the child was still the node's child then: two

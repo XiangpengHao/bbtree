@@ -362,11 +362,8 @@ impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> 
         K: Borrow<T> + Ord,
         R: RangeBounds<T>,
     {
-        let Some(root_page) = self.tree.root_page_mut() else {
-            return RangeMut::default();
-        };
         RangeMut {
-            walk: RangeWalk::new(root_page, range.start_bound(), range.end_bound()),
+            walk: (self.tree).range_walk_mut(range.start_bound(), range.end_bound()),
         }
     }
 }

@@ -85,7 +85,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         let upper = stack.cut(alloc);
         // As tall as the tree; every key of both parts shares what the
         // tree's keys did (D50).
-        let mut upper = Tree::from_node(upper, self.shared_prefix().clone(), alloc);
+        let mut upper = Tree::from_node(upper, *self.shared_prefix(), alloc);
         self.fix_border::<LastEdge>(alloc);
         upper.fix_border::<FirstEdge>(alloc);
         Cut { upper }

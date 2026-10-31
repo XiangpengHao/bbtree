@@ -99,7 +99,7 @@ impl PageMarks {
             SlotContents::Values => self.leaf && self.found == Some(slot),
             SlotContents::Edges => self.edge == Some(slot),
             SlotContents::HeadKey | SlotContents::Head => self.head,
-            SlotContents::Header | SlotContents::RootArea => false,
+            SlotContents::Header => false,
         }
     }
 
@@ -121,9 +121,7 @@ impl PageMarks {
     ) -> Option<(Certainty, ReadPhase)> {
         let certain = |phase| Some((Certainty::Certain, phase));
         match contents {
-            SlotContents::Header | SlotContents::RootArea if self.searched => {
-                certain(ReadPhase::Header)
-            }
+            SlotContents::Header if self.searched => certain(ReadPhase::Header),
             SlotContents::InlineKeys if self.read_inline_keys => certain(ReadPhase::InlineKeys),
             _ if !used => None,
             _ if self.is_result(contents, slot) => certain(ReadPhase::Result),
@@ -204,7 +202,7 @@ pub(crate) trait SlotLook: Copy {
 impl SlotLook for SlotContents {
     fn class(self) -> &'static str {
         match self {
-            SlotContents::Header | SlotContents::RootArea => "slot-header",
+            SlotContents::Header => "slot-header",
             SlotContents::InlineKeys => "slot-inline",
             SlotContents::HashTags => "slot-tags",
             SlotContents::Keys | SlotContents::HeadKey => "slot-keys",
@@ -215,7 +213,6 @@ impl SlotLook for SlotContents {
     fn label(self) -> &'static str {
         match self {
             SlotContents::Header => "header",
-            SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline key",
             SlotContents::HashTags => "hash tag",
             SlotContents::Keys => "key",
@@ -229,7 +226,6 @@ impl SlotLook for SlotContents {
     fn legend_label(self) -> &'static str {
         match self {
             SlotContents::Header => "header",
-            SlotContents::RootArea => "root area",
             SlotContents::InlineKeys => "inline keys",
             SlotContents::HashTags => "hash tags",
             SlotContents::Keys | SlotContents::HeadKey => "keys",
@@ -240,7 +236,7 @@ impl SlotLook for SlotContents {
 
     fn concept(self) -> Option<Concept> {
         match self {
-            SlotContents::Header | SlotContents::RootArea => None,
+            SlotContents::Header => None,
             SlotContents::InlineKeys => Some(Concept::InlineKey),
             SlotContents::HashTags => Some(Concept::HashTag),
             SlotContents::Keys => None,
@@ -253,7 +249,7 @@ impl SlotLook for SlotContents {
 
     fn part(self, slot: usize) -> Option<NodePart> {
         match self {
-            SlotContents::Header | SlotContents::RootArea => None,
+            SlotContents::Header => None,
             SlotContents::InlineKeys
             | SlotContents::HashTags
             | SlotContents::Keys
@@ -274,10 +270,8 @@ impl SlotLook for SlotContents {
             }
             Concept::FencePrefix => self == SlotContents::Header,
             // The root's prefix length is what every key shares; the bytes
-            // are in the root area (D50).
-            Concept::SharedPrefix => {
-                matches!(self, SlotContents::Header | SlotContents::RootArea)
-            }
+            // are in the map, beside the pointer to the root (D50).
+            Concept::SharedPrefix => self == SlotContents::Header,
             Concept::Separator => {
                 (self == SlotContents::Keys && !marks.leaf) || self == SlotContents::HeadKey
             }

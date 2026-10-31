@@ -306,13 +306,14 @@ fn iterator_sizes() {
 
 #[test]
 #[cfg_attr(not(target_pointer_width = "64"), ignore = "assumes 64-bit pointers")]
-fn three_words_like_std() {
-    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 24);
+fn one_cache_line() {
+    // Three words, as std's map, and what every key shares (D50).
     assert_eq!(
         size_of::<BBTreeMap<u64, u64>>(),
-        size_of::<BTreeMap<u64, u64>>()
+        size_of::<BTreeMap<u64, u64>>() + 40
     );
-    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 24);
+    assert_eq!(size_of::<BBTreeMap<u64, u64>>(), 64);
+    assert_eq!(size_of::<BBTreeMap<String, u64, WithInlineKey>>(), 64);
 }
 
 #[test]

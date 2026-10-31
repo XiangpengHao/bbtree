@@ -8,7 +8,7 @@ repository = "https://github.com/XiangpengHao/bbtree"
 
 [dependencies]
 # Released on its own, not with bbtree.
-bbtree = { path = "../bbtree", version = "0.1.5" }
+bbtree = { path = "../bbtree", version = "0.2.0" }
 crc32c = "0.6"
 # Verus's specs and proofs of the WAL, purely ghost, gone after compilation;
 # `alloc` for the specs of `Vec`.
