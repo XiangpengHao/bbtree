@@ -28,6 +28,8 @@ mod leaf_annex;
 mod map;
 mod node_config;
 mod proof;
+#[cfg(feature = "serde")]
+mod serde;
 mod tree;
 pub mod unsync;
 
