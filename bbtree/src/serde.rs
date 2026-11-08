@@ -1,8 +1,13 @@
 //! serde impls for [`unsync::BBTreeMap`] and [`unsync::BBTreeSet`], matching
 //! std's `BTreeMap`/`BTreeSet`: a map serializes as a map, a set as a
 //! sequence, both in key order.
+//!
+//! Deserializing collects, as `collect` does: it sorts the entries, which
+//! costs one pass over the sorted ones a serializer writes, and builds the
+//! tree into full nodes, keeping the last of equal keys, as std's does.
+//! Inserting one at a time would leave the leaves about a fifth empty.
 
-use core::{fmt, marker::PhantomData};
+use core::{fmt, iter, marker::PhantomData};
 
 use serde::{
     de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor},
@@ -40,11 +45,7 @@ impl<'de, K: Deserialize<'de> + Ord, V: Deserialize<'de>> Deserialize<'de> for B
             }
 
             fn visit_map<M: MapAccess<'de>>(self, mut access: M) -> Result<Self::Value, M::Error> {
-                let mut map = BBTreeMap::new();
-                while let Some((key, value)) = access.next_entry()? {
-                    map.insert(key, value);
-                }
-                Ok(map)
+                iter::from_fn(|| access.next_entry().transpose()).collect()
             }
         }
 
@@ -64,11 +65,7 @@ impl<'de, T: Deserialize<'de> + Ord> Deserialize<'de> for BBTreeSet<T> {
             }
 
             fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-                let mut set = BBTreeSet::new();
-                while let Some(value) = access.next_element()? {
-                    set.insert(value);
-                }
-                Ok(set)
+                iter::from_fn(|| access.next_element().transpose()).collect()
             }
         }
 

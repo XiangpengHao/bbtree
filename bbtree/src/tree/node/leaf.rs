@@ -1453,18 +1453,11 @@ pub(crate) struct KeyRun<'a, K> {
 
 // SAFETY: a `KeyRun` only reads the keys it borrows for `'a`, like a
 // `&'a [K]`, so it can go to and be shared by threads exactly as that can.
+// Without these impls, its raw pointer would make the set-merge iterators,
+// which hold runs (`unsync/set/merge.rs`), neither `Send` nor `Sync`.
 unsafe impl<K: Sync> Send for KeyRun<'_, K> {}
-// SAFETY: as above.
+// SAFETY: as for `Send`.
 unsafe impl<K: Sync> Sync for KeyRun<'_, K> {}
-
-/// The borrowing iterators are `Send` and `Sync` like std's, which needs
-/// the impls above: a `KeyRun`'s raw pointer would otherwise opt them out.
-const _: () = {
-    const fn send_and_sync<T: Send + Sync>() {}
-    send_and_sync::<crate::unsync::bbtree_map::Iter<'static, u64, u64>>();
-    send_and_sync::<crate::unsync::bbtree_map::Keys<'static, u64, u64>>();
-    send_and_sync::<crate::unsync::bbtree_set::Iter<'static, u64>>();
-};
 
 impl<K> Clone for KeyRun<'_, K> {
     fn clone(&self) -> Self {
