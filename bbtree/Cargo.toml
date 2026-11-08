@@ -10,6 +10,10 @@ readme = "../README.md"
 [dependencies]
 # Verus's specs and proofs, purely ghost, gone after compilation.
 vstd = { version = "=0.0.0-2026-08-30-0159", default-features = false }
+serde = { version = "1.0", default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"
 
 # Shuttle explores the latched tree's thread interleavings in tests built
 # with `--cfg shuttle` (`src/tree/interleaving.rs`), like loom's `cfg(loom)`:
@@ -23,6 +27,10 @@ default = ["std"]
 # scheduler once a short spin hasn't freed it (`src/tree/interleaving.rs`).
 # Without it, the wait spins. The crate is `no_std` either way.
 std = []
+# `Serialize` and `Deserialize` for `unsync::BBTreeMap` and
+# `unsync::BBTreeSet`, matching std's `BTreeMap` and `BTreeSet`: a map
+# serializes as a map, a set as a sequence, both in key order.
+serde = ["dep:serde"]
 # File maps (`bbtree::file`): a map compacted into one byte string that a reader
 # maps from a file and uses in place.
 file = []

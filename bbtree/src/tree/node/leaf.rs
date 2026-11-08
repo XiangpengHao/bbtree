@@ -1451,6 +1451,14 @@ pub(crate) struct KeyRun<'a, K> {
     _borrow: PhantomData<&'a K>,
 }
 
+// SAFETY: a `KeyRun` only reads the keys it borrows for `'a`, like a
+// `&'a [K]`, so it can go to and be shared by threads exactly as that can.
+// Without these impls, its raw pointer would make the set-merge iterators,
+// which hold runs (`unsync/set/merge.rs`), neither `Send` nor `Sync`.
+unsafe impl<K: Sync> Send for KeyRun<'_, K> {}
+// SAFETY: as for `Send`.
+unsafe impl<K: Sync> Sync for KeyRun<'_, K> {}
+
 impl<K> Clone for KeyRun<'_, K> {
     fn clone(&self) -> Self {
         *self

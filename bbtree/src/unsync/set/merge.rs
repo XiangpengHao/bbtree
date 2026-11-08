@@ -33,6 +33,19 @@ pub(super) struct SetCursor<'a, T, S> {
     run: KeyRun<'a, T>,
 }
 
+/// The iterators that hold cursors are `Send` and `Sync` when `T` is `Sync`,
+/// as std's are; `KeyRun`'s impls of both make them so.
+const _: () = {
+    const fn send_and_sync<I: Send + Sync>() {}
+    #[expect(dead_code, reason = "type-checked for every `T: Sync`, never called")]
+    const fn merge_iterators<'a, T: Sync + 'a>() {
+        send_and_sync::<super::Difference<'a, T>>();
+        send_and_sync::<super::Intersection<'a, T>>();
+        send_and_sync::<super::SymmetricDifference<'a, T>>();
+        send_and_sync::<super::Union<'a, T>>();
+    }
+};
+
 impl<T, S> Clone for SetCursor<'_, T, S> {
     fn clone(&self) -> Self {
         Self {
