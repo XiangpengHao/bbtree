@@ -44,8 +44,8 @@
         # Verus proves bbtree/src/proof/ (design/08-fuzzing-verification.md).
         # Keep the version in sync with the `vstd` pin in bbtree/Cargo.toml,
         # and verusRustToolchain with the release's rust-toolchain.toml.
-        verusVersion = "0.2026.08.30.b432e82";
-        verusRustToolchain = pkgs.rust-bin.stable."1.97.1".default.override {
+        verusVersion = "0.2026.11.02.8bf68ee";
+        verusRustToolchain = pkgs.rust-bin.stable."1.99.1".default.override {
           extensions = [
             "rustc-dev"
             "llvm-tools"
@@ -58,7 +58,7 @@
 
           src = pkgs.fetchzip {
             url = "https://github.com/verus-lang/verus/releases/download/release%2F${verusVersion}/verus-${verusVersion}-x86-linux.zip";
-            hash = "sha256-VMM0e9/Gb6fBFIqGoZaB+XLdwph2s5KuIdX6gmSY/ss=";
+            hash = "sha256-rRdcaRMbXq1Q5SN/JJ0vUzguLmF8i52PBYXgBSFUgtY=";
             stripRoot = false;
           };
 
