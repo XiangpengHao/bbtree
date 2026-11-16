@@ -427,6 +427,9 @@ impl WalTail {
                 assert(bytes[pos + i] == (header + all)[header_len + read.len() + i]);
             }
             assert(next.is_prefix_of(bytes.subrange(pos, bytes.len() as int)));
+            // Z3 proves each part of the goal, but not their conjunction,
+            // unless the parts are facts first.
+            assert(k < held.len() && held[k].fits() && held[k].lsn == self.next_lsn + k);
         }
     }
 

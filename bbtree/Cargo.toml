@@ -9,7 +9,7 @@ readme = "../README.md"
 
 [dependencies]
 # Verus's specs and proofs, purely ghost, gone after compilation.
-vstd = { version = "=0.0.0-2026-08-30-0159", default-features = false }
+vstd = { version = "=0.0.0-2026-11-01-0251", default-features = false }
 serde = { version = "1.0", default-features = false, optional = true }
 
 [dev-dependencies]
