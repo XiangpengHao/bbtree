@@ -6,7 +6,7 @@ use alloc::alloc::handle_alloc_error;
 use core::alloc::Layout;
 use core::fmt;
 use core::marker::PhantomData;
-use core::mem::offset_of;
+use core::mem::{offset_of, size_of};
 #[cfg(feature = "file")]
 use core::ops::Range;
 use core::ptr::NonNull;
@@ -643,6 +643,35 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         // SAFETY: the page is a fresh one of kind `Kind`, which nothing else
         // uses.
         unsafe { Self::initialize::<Kind>(page.into_raw()) }
+    }
+
+    /// Zeros `size` bytes of the page, leaving a latched page's latch word
+    /// as it is. After the root node moves out (`RootPage::raise`), this
+    /// page is reused as an internal node: a fresh page comes zeroed from
+    /// the allocator, and leftover leaf slots (heap addresses of types that
+    /// keep bytes off-page) would otherwise stay behind.
+    ///
+    /// # Safety
+    ///
+    /// The page is allocated with at least `size` bytes, the access is
+    /// exclusive, and nothing in it needs dropping.
+    pub(super) unsafe fn zero_except_latch(self, size: usize) {
+        let ptr = self.page().as_ptr();
+        if Self::is_latched() {
+            let latch = offset_of!(LatchedNodeHeader, latch);
+            let latch_end = latch + size_of::<NodeLatch>();
+            debug_assert!(size >= latch_end);
+            // SAFETY: the page is allocated with at least `size` bytes
+            // (caller), and the latch word stays: a latched root keeps its
+            // latch for as long as threads share the tree.
+            unsafe {
+                ptr.write_bytes(0, latch);
+                ptr.add(latch_end).write_bytes(0, size - latch_end);
+            }
+        } else {
+            // SAFETY: as above, with no latch word to keep.
+            unsafe { ptr.write_bytes(0, size) };
+        }
     }
 
     /// Makes the page at `page` an empty node of kind `Kind`, as
