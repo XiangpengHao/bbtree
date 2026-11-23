@@ -175,6 +175,13 @@ impl<K, V, S: InlineKeyStrategy<K>> RootPage<K, V, S> {
     /// was. Returns the page's new handle.
     pub(in crate::tree) fn raise(self, alloc: &impl PageAllocator, shared_len: usize) -> Self {
         let child = self.move_node_out(alloc);
+        // The old node was copied away, but its bytes stay here. A fresh
+        // internal page comes zeroed from the allocator (D21). File maps
+        // copy this page whole and only rewrite its edges, so leftover
+        // leaf slots would reach the file as heap addresses.
+        // SAFETY: move_node_out moved every key, value and edge to `child`;
+        // nothing in the page needs dropping, and the access is exclusive.
+        unsafe { self.node.zero_except_latch(Self::page_layout().size()) };
         // SAFETY: the root page is aligned to and as large as an internal
         // node's, the access is exclusive, and the root node's contents
         // moved to `child`: nothing in it needs dropping.

@@ -239,6 +239,45 @@ fn var_bytes_and_plain_slots_mix() {
     }
 }
 
+/// The same byte values make the same file map once the writer's tree has
+/// more than one leaf: leftover slots of the raised root page are zeros,
+/// not the writer's heap addresses.
+#[test]
+fn file_maps_with_byte_values_depend_on_the_entries_alone() {
+    let entries: Vec<(u64, Vec<u8>)> = (0..200_u64).map(|key| (key, vec![b'x'; 100])).collect();
+    let write = || {
+        let mut arena = ByteArena::default();
+        let items = (entries.iter()).map(|(key, value)| {
+            (
+                *key,
+                VarBytes::in_writer(value.as_slice().into(), &mut arena),
+            )
+        });
+        FileWriter::<u64, VarBytes, bbtree::Auto, HeapPages>::from_ascending(items)
+            .unwrap()
+            .to_buf()
+    };
+    let first = write();
+    let _pad = [0_u8; 160];
+    let second = write();
+    if first[..] != second[..] {
+        let diffs = first
+            .iter()
+            .zip(second.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        panic!("{} bytes differ of {}", diffs, first.len());
+    }
+    let file_map = FileMap::<u64, VarBytes>::open(&first).unwrap();
+    assert_eq!(file_map.len(), 200);
+    for (key, value) in &entries {
+        assert_eq!(
+            file_map.get(key).map(VarBytes::bytes),
+            Some(value.as_slice())
+        );
+    }
+}
+
 /// Values of hundreds of KiB, larger than a heap page: each starts a page,
 /// and runs on over the next; every smaller record stays in one page.
 #[test]
