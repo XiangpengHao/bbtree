@@ -3,18 +3,18 @@
 //! owning nothing. A seek: what a versioned read does many times a query,
 //! "the first entry at or after this key", into the leaves every thread is
 //! reading. As a lookup copies one value unlatched (`lookup.rs`, D57), a
-//! copied first places the range's start among a leaf's keys, reads the few
+//! copied first places the range's start among a leaf's keys, reads the
 //! entries that may be the first, one at a time with the version checked
-//! after each, and settles among the copies.
+//! after each, and settles among the copies: a binary search among the keys
+//! whose inline keys tie with the bound's.
 //!
 //! - **Placed by the inline keys**, as a latched search is (D18): the keys
 //!   whose inline keys sort below the bound's are before it, those above are
 //!   past it, and the few that tie are compared in full, on copies.
 //! - **One leaf.** The descent's leaf holds the first entry unless the bound
-//!   sorts past every key in it, when the next leaf's head does. That, more
-//!   ties than [`READ`] reads settle, a range unbounded below or starting
-//!   before every key, or a leaf that changed meanwhile, sends the read the
-//!   latched way (`scan.rs`).
+//!   sorts past every key in it, when the next leaf's head does. That, a
+//!   range unbounded below or starting before every key, or a leaf that
+//!   changed meanwhile, sends the read the latched way (`scan.rs`).
 //!
 //! No latch is taken on this path, so seekers write nothing to the leaves
 //! they read (`design/09-concurrency.md`, principle 3).
@@ -27,11 +27,6 @@ use super::super::node::inline_keys::SearchKey;
 use super::LatchedTree;
 use super::descent::Optimistic;
 use crate::strategy::InlineKeyStrategy;
-
-/// How many entries are read at most, one at a time: the keys whose inline
-/// keys tie with the bound's, and the one after them. Ties are rare and
-/// short (D18); a longer run goes the latched way.
-const READ: usize = 3;
 
 impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// A copy of the first entry whose key lies between `start` and `end`,
@@ -100,18 +95,17 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // leaf's head, if any.
             return self.first_latched(start, end);
         }
-        // The ties, compared in full, and the key after them, which is the
-        // first if no tie is: ties are rare and short (D18), so `READ` reads
-        // settle nearly every seek. Each reads one entry in place (a copy
-        // sized at run time would be a call) and checks the version, so a
-        // seek holds one entry however large the entries are; a longer run
-        // goes the latched way.
-        let after = (ties.end + 1).min(len);
-        if after - ties.start > READ {
-            return self.first_latched(start, end);
-        }
-        for index in ties.start..after {
-            let entry = leaf.load_racing_entry(index);
+        // The first entry at or past the bound among the ties, compared in
+        // full on copies: a binary search, each entry read in place and the
+        // version checked after it, so a long run of ties (keys that share
+        // more than an inline key) settles in a few reads, not latched. If
+        // every tie is before the bound, the key after them is the first.
+        let (mut lo, mut hi) = (ties.start, ties.end);
+        // A copy of the entry at `hi`, once read.
+        let mut at_hi = None;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = leaf.load_racing_entry(mid);
             if !held.is_unchanged() {
                 return self.first_latched(start, end);
             }
@@ -120,22 +114,32 @@ impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
             // it exclusively, from before the read to after it (checked just
             // above). `Copy` keys and values own nothing.
             let (stored, value) = unsafe { entry.assume_read() };
-            // A tie compares from past the bytes it shares with the bound;
-            // the key after the ties is past the bound.
-            if index < ties.end {
-                let before = match placed.cmp_tied(&key, &stored) {
-                    KeyOrdering::Greater => true,
-                    KeyOrdering::Equal => matches!(start, Bound::Excluded(_)),
-                    KeyOrdering::Less => false,
-                };
-                if before {
-                    continue;
-                }
+            let before = match placed.cmp_tied(&key, &stored) {
+                KeyOrdering::Greater => true,
+                KeyOrdering::Equal => matches!(start, Bound::Excluded(_)),
+                KeyOrdering::Less => false,
+            };
+            if before {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+                at_hi = Some((*stored, *value));
             }
-            return Self::within_end(*stored, *value, end);
         }
-        // Every tie sorts before the bound, and no key follows them here.
-        self.first_latched(start, end)
+        if let Some((stored, value)) = at_hi {
+            return Self::within_end(stored, value, end);
+        }
+        if ties.end >= len {
+            // Every tie sorts before the bound, and no key follows them here.
+            return self.first_latched(start, end);
+        }
+        let entry = leaf.load_racing_entry(ties.end);
+        if !held.is_unchanged() {
+            return self.first_latched(start, end);
+        }
+        // SAFETY: as above, for the index past the ties, below the length.
+        let (stored, value) = unsafe { entry.assume_read() };
+        Self::within_end(*stored, *value, end)
     }
 
     /// The entry, if its key is not past `end`.

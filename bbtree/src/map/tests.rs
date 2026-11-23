@@ -997,6 +997,44 @@ fn copied_firsts_match_std() {
     }
 }
 
+/// Copied firsts among long runs of keys whose inline keys tie: keys of 256
+/// groups, a group's sharing their first 8 bytes and differing only in the
+/// last 8, so that every leaf, holding keys of several groups, has no prefix
+/// and its keys tie in runs of a group's length. The first entry is found
+/// among them (a binary search on copies), as std's map finds it.
+#[test]
+fn copied_firsts_settle_long_runs_of_ties() {
+    let rng = TestRng::new(127);
+    let map = BBTreeMap::<[u8; 16], u32>::new();
+    let mut std_map = BTreeMap::new();
+    let key = |group: u8, n: u64| {
+        let mut k = [0xAA; 16];
+        k[0] = group;
+        k[8..].copy_from_slice(&n.to_be_bytes());
+        k
+    };
+    for group in 0..=255u8 {
+        for n in 0..20u64 {
+            let k = key(group, n * 10);
+            map.insert(k, u32::from(group) << 8 | n as u32).unwrap();
+            std_map.insert(k, u32::from(group) << 8 | n as u32);
+        }
+    }
+    let first_in = |range: (Bound<[u8; 16]>, Bound<[u8; 16]>)| {
+        std_map.range(range).next().map(|(&k, &v)| (k, v))
+    };
+    for _ in 0..5_000 {
+        let start = key(rng.below(256) as u8, rng.below_u64(210));
+        for range in [
+            (Bound::Included(start), Bound::Unbounded),
+            (Bound::Excluded(start), Bound::Unbounded),
+            (Bound::Included(start), Bound::Included(start)),
+        ] {
+            assert_eq!(map.first_copied(range), first_in(range), "{range:?}");
+        }
+    }
+}
+
 /// Copied firsts, while other threads insert and remove: the entry found
 /// is at or after the bound, never past the first key that is present
 /// throughout, and its value is its key's.
