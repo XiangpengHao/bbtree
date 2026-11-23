@@ -51,7 +51,8 @@ use super::inline_keys::KeyInliner;
 use super::page::NodeKind;
 use super::slots::KeyList;
 use super::type_identity::ByteString;
-use crate::inline_key::{InlineKeyStrategy, InlineWidth};
+use crate::inline_key::InlineWidth;
+use crate::strategy::InlineKeyStrategy;
 
 /// What the nodes of one kind store beside their keys, and how a search tells
 /// their keys apart, for keys `K` under one map's strategy: a row of the
@@ -353,7 +354,8 @@ mod tests {
     use std::vec::Vec;
 
     use super::{KeySearch, NodePlan};
-    use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
+    use crate::inline_key::InlineWidth;
+    use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::latch::Latched;
     use crate::tree::node::leaf::Leaf;

@@ -81,13 +81,12 @@ use super::node::leaf::{KeyRun, Leaf, LeafRun};
 use super::node::page::{NodePtr, PageByType};
 use super::node::root_page::RootPage;
 use super::node::{EntrySlots, Node};
-use super::node_stack::{
-    CopyableBorrow, Dying, FirstEdge, Immut, KeySide, LastEdge, NodeEnd, NodeStack, ValMut,
-};
+use super::node::{FirstEdge, LastEdge, NodeEnd};
+use super::node_stack::{CopyableBorrow, Dying, Immut, KeySide, NodeStack, ValMut};
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A borrow type a walk hands out entries with, and what it hands out for
 /// each entry.

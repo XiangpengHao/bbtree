@@ -29,7 +29,8 @@ use super::node::page::{InlineKeyNodeHeader, NodeHeader, NodeKind, NodePtr, Page
 use super::node::root_page::RootPage;
 use super::node::{Child, Node};
 use super::root::Tree;
-use crate::inline_key::{InlineKeyStrategy, InlineWord};
+use crate::inline_key::InlineWord;
+use crate::strategy::InlineKeyStrategy;
 
 pub use super::batch::LaneFetch;
 

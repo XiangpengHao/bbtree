@@ -9,7 +9,7 @@
 
 use super::{BBTreeSet, Iter};
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// Whether each of an iterator's next elements is in a set, looked up ahead
 /// of it: bit `i` of `found` for its `i`th next element, of the first

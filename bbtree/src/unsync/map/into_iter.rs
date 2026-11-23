@@ -16,7 +16,7 @@ use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::walk::DyingWalk;
 
 /// An owning iterator over the entries of a `BBTreeMap`, sorted by key.

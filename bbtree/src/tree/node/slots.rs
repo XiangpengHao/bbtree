@@ -21,7 +21,8 @@ use super::inline_keys::{InlineSlot, Separator, Window, WindowedKey};
 use super::internal::Internal;
 use super::node_plan::NodePlan;
 use super::page::NodeKind;
-use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
+use crate::inline_key::{InlineWidth, InlineWord};
+use crate::strategy::InlineKeyStrategy;
 
 /// Where `capacity` slots of `T` sit in memory: slot `i` at `stride * i`
 /// bytes past `anchor`. The slots of an array of their own sit side by

@@ -29,7 +29,7 @@ use super::super::node::leaf::{CandidateLine, Leaf};
 use super::super::node::optimistic::RacingEntry;
 use super::LatchedTree;
 use super::descent::{HeldLeaf, Optimistic, Shared};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A lookup that reading unlatched couldn't settle: the leaf changed, or the
 /// key's comparison needs it latched. It goes the latched way.

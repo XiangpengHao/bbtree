@@ -13,8 +13,8 @@ use std::vec::Vec;
 
 use super::{BBTreeMap, RangeCloned};
 use crate::allocator::{Global, InsertError};
-use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
-use crate::node_config::Configured;
+use crate::strategy::Configured;
+use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::node::latch::Latched;
 use crate::tree::node::page::TestPages;
 use crate::tree::test_support::{HashTagCase, LargePages, SmallInternalPages, TestRng};

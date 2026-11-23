@@ -17,7 +17,7 @@ use super::super::search::Found;
 use super::super::walk::{DyingWalk, RangeWalk};
 use super::LatchedTree;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// The value of the entry whose key equals `key`, exclusive, as the

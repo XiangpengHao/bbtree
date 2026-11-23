@@ -10,6 +10,10 @@
 //!   have them: with [`Auto`], the default, std byte strings and the 64- and
 //!   128-bit integers do, recognized by their type; with [`WithInlineKey`],
 //!   every key does, through its [`InlineKey`] impl.
+//!
+//! [`InlineKeyStrategy`]: crate::InlineKeyStrategy
+//! [`Auto`]: crate::Auto
+//! [`WithInlineKey`]: crate::WithInlineKey
 
 #![forbid(unsafe_code)]
 
@@ -18,7 +22,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use crate::leaf_annex::LeafAnnex;
 use crate::proof::SearchBytes;
 
 /// An inline key: bytes of a key's encoding, big-endian, so that inline keys
@@ -41,10 +44,15 @@ pub type InlineWord = u64;
 ///
 /// With [`Auto`], heap byte strings keep 8 bytes in leaves and 4 in internal
 /// nodes; [`WithInlineKey`] keeps the impl's declared width in both kinds.
+///
+/// [`Auto`]: crate::Auto
+/// [`WithInlineKey`]: crate::WithInlineKey
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InlineWidth {
     /// The first 2 bytes: the std integers' width, and under [`Auto`], fixed
     /// byte arrays'.
+    ///
+    /// [`Auto`]: crate::Auto
     Two,
     /// The first 4 bytes.
     Four,
@@ -138,6 +146,9 @@ impl InlineWidth {
 /// assert_eq!(names.get_copied(&UserName("ferris".to_string())), Some(7));
 /// # Ok::<(), bbtree::AllocError>(())
 /// ```
+///
+/// [`WithInlineKey`]: crate::WithInlineKey
+/// [`Auto`]: crate::Auto
 pub trait InlineKey: Ord {
     /// How many bytes of each inline key the nodes keep, where the map uses
     /// this impl (see [`InlineWidth`]).
@@ -156,6 +167,8 @@ pub trait InlineKey: Ord {
     /// leaves all 8, as for std byte strings under [`Auto`]. More of the
     /// separators' inline keys tie in 4 bytes, which costs little only
     /// because the comparison skips the bytes known equal.
+    ///
+    /// [`Auto`]: crate::Auto
     const HAS_CMP_FROM: bool = false;
 
     /// This key's inline key at `offset`: bytes `offset..offset + 8` of its
@@ -197,6 +210,8 @@ pub trait InlineKey: Ord {
     /// compare 32 bytes at a time, as [`Auto`]'s nodes do: a key whose
     /// bytes lie elsewhere is then read in two loads, where eight windows,
     /// in ascending order, draw the hardware to prefetch lines past it.
+    ///
+    /// [`Auto`]: crate::Auto
     fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
         let (words, tail) = prefix.as_chunks::<8>();
         for (index, word) in words.iter().enumerate() {
@@ -220,6 +235,8 @@ pub trait InlineKey: Ord {
 /// equal tags are equal lengths. It compares from where keys differ as
 /// [`Auto`]'s nodes do, 8 bytes at a time with no call to `memcmp`, and
 /// against a prefix 32 bytes at a time.
+///
+/// [`Auto`]: crate::Auto
 impl InlineKey for [u8] {
     const HAS_HASH_TAG: bool = true;
     const HAS_CMP_FROM: bool = true;
@@ -423,135 +440,6 @@ impl<T: InlineKey + ?Sized> InlineKey for Box<T> {
     #[inline]
     fn cmp_prefix(&self, prefix: &[u8]) -> Ordering {
         (**self).cmp_prefix(prefix)
-    }
-}
-
-/// The default strategy: std byte-string keys and 64- and 128-bit integer
-/// keys have inline keys, other keys have none, at no cost.
-///
-/// The key types recognized are the byte strings `String`, `str`,
-/// `Vec<u8>`, `[u8]`, `Box<str>`, `Box<[u8]>`, `&str`, `&[u8]`, `[u8; 16]`,
-/// `[u8; 20]` and `[u8; 32]`, with the `file` feature a file map's
-/// `VarBytes`, and the integers `u64`, `i64`, `u128` and `i128`. Their
-/// inline keys are those their [`InlineKey`] impls give. They
-/// are recognized by their type alone: a newtype around one of them is
-/// another type, and needs [`WithInlineKey`]. A lookup uses the inline keys
-/// when the type it looks up with is recognized too, as `&str` is for
-/// `String` keys; otherwise it compares full keys, as a map without inline
-/// keys does.
-///
-/// Fixed byte arrays keep 2 bytes per inline key. Heap-backed byte strings
-/// keep 8 in leaves, to read the heap less on prefix ties, and 4 in internal
-/// nodes, to keep those compact.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Auto;
-
-/// The opt-in strategy: every key has the inline key its [`InlineKey`] impl
-/// gives, of which the nodes keep [`InlineKey::WIDTH`] bytes, and the hash
-/// tag it gives if [`InlineKey::HAS_HASH_TAG`].
-///
-/// A lookup uses the inline keys when it looks up with the key type itself.
-/// A lookup through another borrowed form of the key (a `Q` other than `K`
-/// in [`BBTreeMap::read`]) has no inline key to compare, and compares full
-/// keys instead. Inline keys only speed up the search, so the answer is the
-/// same.
-///
-/// [`BBTreeMap::read`]: crate::BBTreeMap::read
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WithInlineKey;
-
-/// Which keys of a map with keys `K` have inline keys: [`Auto`] or
-/// [`WithInlineKey`], with the default [`NodeConfig`], or either of them
-/// with another, [`Configured`]; and what its leaves keep besides,
-/// [`WithLeafAnnex`]. These are the only implementations.
-///
-/// [`NodeConfig`]: crate::NodeConfig
-/// [`Configured`]: crate::Configured
-/// [`WithLeafAnnex`]: crate::WithLeafAnnex
-pub trait InlineKeyStrategy<K>: sealed::Sealed<K> {
-    /// What each leaf keeps besides its entries ([`LeafAnnex`]): nothing,
-    /// `()`, but with [`WithLeafAnnex`](crate::WithLeafAnnex).
-    type LeafAnnex: LeafAnnex;
-}
-
-impl<K> InlineKeyStrategy<K> for Auto {
-    type LeafAnnex = ();
-}
-
-impl<K: InlineKey> InlineKeyStrategy<K> for WithInlineKey {
-    type LeafAnnex = ();
-}
-
-/// What a strategy tells the nodes, kept out of the public API.
-pub(crate) mod sealed {
-    use core::cmp::Ordering;
-
-    use super::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
-    use crate::node_config::{DefaultNodeConfig, NodeConfig};
-
-    /// Where a strategy's inline keys come from. Plain data: the node code
-    /// resolves it for a key type (`tree/node/inline_keys.rs`), and page
-    /// layouts depend on the answer.
-    pub enum InlineKeySource<K> {
-        /// Std byte strings and integers, and a file map's `VarBytes`,
-        /// recognized by their type, have inline keys: windows of a byte
-        /// string's bytes, and an integer's own [`InlineKey`] impl. Other
-        /// keys have none ([`Auto`]).
-        RecognizedStdTypes,
-        /// Every key has the inline keys its [`InlineKey`] impl gives, of
-        /// which the nodes keep `width` bytes, and its hash tag and
-        /// comparison from where keys differ if the impl gives them
-        /// ([`WithInlineKey`]).
-        InlineKeyTrait {
-            inline_key_at: fn(&K, usize) -> InlineWord,
-            width: InlineWidth,
-            hash_tag: Option<fn(&K) -> u8>,
-            cmp_from: Option<fn(&K, &K, usize) -> Ordering>,
-            cmp_prefix: fn(&K, &[u8]) -> Ordering,
-        },
-    }
-
-    pub trait Sealed<K> {
-        const SOURCE: InlineKeySource<K>;
-
-        /// How the nodes are built (`node_config.rs`): every default, or a
-        /// `Configured` strategy's config. A strategy that wraps another
-        /// forwards the other's.
-        type Config: NodeConfig;
-
-        /// Whether the nodes keep a latch word in their header, for a tree
-        /// that threads share (`tree/node/latch.rs`): only the strategy a
-        /// shared `BBTreeMap` wraps its own in, never a public one.
-        const LATCHED: bool = false;
-
-        /// Whether the tree lies in a file map, whose edges are offsets from
-        /// their node's page rather than pointers (`tree/file.rs`): only
-        /// the strategy a `FileMap` wraps its own in, never a public one.
-        const IN_FILE: bool = false;
-    }
-
-    impl<K> Sealed<K> for Auto {
-        const SOURCE: InlineKeySource<K> = InlineKeySource::RecognizedStdTypes;
-        type Config = DefaultNodeConfig;
-    }
-
-    impl<K: InlineKey> Sealed<K> for WithInlineKey {
-        const SOURCE: InlineKeySource<K> = InlineKeySource::InlineKeyTrait {
-            inline_key_at: K::inline_key_at,
-            width: K::WIDTH,
-            hash_tag: if K::HAS_HASH_TAG {
-                Some(K::hash_tag)
-            } else {
-                None
-            },
-            cmp_from: if K::HAS_CMP_FROM {
-                Some(K::cmp_from)
-            } else {
-                None
-            },
-            cmp_prefix: K::cmp_prefix,
-        };
-        type Config = DefaultNodeConfig;
     }
 }
 

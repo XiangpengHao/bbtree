@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::string::String;
 use std::sync::MutexGuard;
 
-use crate::inline_key::WithInlineKey;
+use crate::strategy::WithInlineKey;
 use crate::unsync::map::{
     BBTreeMap, Entry, ExtractIf, IntoIter, IntoKeys, IntoValues, Iter, IterMut, Keys,
     OccupiedEntry, Range, RangeMut, VacantEntry, Values, ValuesMut,

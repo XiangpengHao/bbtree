@@ -27,7 +27,8 @@ use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeyList, KeySlots, NodeKeys, SeparatorSlots, Slots};
 use super::{Child, EntrySlots, Insertion, InsertionSide, Node, Split};
 use crate::allocator::PageKind;
-use crate::inline_key::{InlineKeyStrategy, InlineWidth};
+use crate::inline_key::InlineWidth;
+use crate::strategy::InlineKeyStrategy;
 
 /// An internal node, by its page.
 pub(crate) struct Internal<K, V, S> {
@@ -219,7 +220,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Internal<K, V, S> {
     }
 
     /// Edge `index`: the child's tagged pointer. In a file map, the edge is
-    /// the child's offset from this node's page (`tree/file.rs`), which
+    /// the child's offset from this node's page (`tree/file/mod.rs`), which
     /// this adds to it.
     ///
     /// # Safety

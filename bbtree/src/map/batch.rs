@@ -11,7 +11,7 @@ use core::mem;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, InsertError};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator> BBTreeMap<K, V, S, A> {
     /// Runs `f` on each key's entry, while no thread changes it, and returns

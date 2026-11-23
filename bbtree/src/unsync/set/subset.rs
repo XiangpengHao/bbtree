@@ -13,7 +13,7 @@ use super::BBTreeSet;
 use super::lookups::LookupsAhead;
 use super::merge::{MergeSides, MergeStep};
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<T: Ord, S: InlineKeyStrategy<T>, A: Allocator + Clone> BBTreeSet<T, S, A> {
     /// Returns `true` if the set is a subset of another, i.e., `other`

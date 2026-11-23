@@ -8,8 +8,9 @@
 
 use std::vec::Vec;
 
-use crate::inline_key::Auto;
-use crate::node_config::{Configured, NodeConfig};
+use crate::node_config::NodeConfig;
+use crate::strategy::Auto;
+use crate::strategy::Configured;
 use crate::tree::node::page::TestPages;
 use crate::tree::test_support::TestRng;
 use crate::unsync::map::{BBTreeMap, Entry};

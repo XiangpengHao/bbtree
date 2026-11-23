@@ -8,6 +8,12 @@
 
 - Before implementing a new feature, identify similar existing features, and check if it's worth to refactor existing code so it's reusable.
 
+-  Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) to check for sloppy code structure.
+-  Errors flagged by `deslop-please` must be fixed from first principles, don't do mechanical moves to hide them.
+    - `module-cycle` & `tangle`: what is the intended layer of abstraction? Which module should be at which layer?
+    - `field-leak` & `shallow-module`: Why we have these fields/functions at all? What are the patterns of use? Can they be hidden behind a narrow interface? Don't fix each leak one at a time, fix them holistically.
+    - Draw a diagram to help user understand the before and proposed after structure.
+
 ## Engineering
 
 - Prefer explicit props and function arguments so ownership and data flow remain visible. Use context only when a dependency must cross at least two component layers and the intermediate parent does not use it. Keep state owned by the component that creates it.
@@ -36,7 +42,8 @@
 
 ## Verification
 
-- Never run Miri (`cargo miri test`, any mode) in a coding session or a subagent. Miri runs in CI only. Local checks are `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test`.
+- Never run Miri (`cargo miri test`, any mode) in a coding session or a subagent. Miri runs in CI only. Local checks are `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` and `deslop-please --allow .deslop-please.allow`.
+- `.deslop-please.allow` lists the structure debt that predates the check (v0.1.3), so CI fails only on new errors. Fixing one removes its line. Add a line only when the user agrees the new error is not a problem.
 - Miri runs only the tests `.github/miri-nextest.toml` names. Don't mark tests `#[cfg_attr(miri, ignore)]`; to run a test under Miri, name it there.
 
 ## Benchmark rule

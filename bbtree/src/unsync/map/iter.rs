@@ -12,7 +12,7 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::allocator::Allocator;
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node::leaf::KeyRun;
 use crate::tree::node_stack::Immut;
 use crate::tree::root::Tree;

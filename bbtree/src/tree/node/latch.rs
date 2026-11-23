@@ -32,8 +32,8 @@ use core::sync::atomic::{AtomicU64, Ordering, fence};
 use super::super::interleaving::{Backoff, Interleaving};
 use super::internal::Internal;
 use super::leaf::Leaf;
-use crate::inline_key::InlineKeyStrategy;
-use crate::inline_key::sealed::{InlineKeySource, Sealed};
+use crate::strategy::InlineKeyStrategy;
+use crate::strategy::sealed::{InlineKeySource, Sealed};
 
 /// The strategy of a latched tree's nodes: `S`'s inline keys, and a latch
 /// word in every node's header (`page.rs`, `LatchedNodeHeader`). Nothing

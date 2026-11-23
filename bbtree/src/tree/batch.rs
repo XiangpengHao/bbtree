@@ -29,7 +29,7 @@ use super::root::Tree;
 use super::search::Found;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A call-site marker that compiles the batch's leaf searches apart from
 /// the single-key `get`'s, without changing node layouts: sharing one
@@ -646,7 +646,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
-    use crate::inline_key::{Auto, WithInlineKey};
+    use crate::strategy::{Auto, WithInlineKey};
     use crate::tree::node::page::TestPages;
     use crate::tree::test_support::TestRng;
 

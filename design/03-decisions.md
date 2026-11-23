@@ -1573,7 +1573,7 @@ contracts, access, positions and room, the code that holds it keeps by hand
   modules that touch pages (`node/mod.rs`, `page.rs`, `slots.rs`,
   `leaf.rs`, `internal.rs`, `root_page.rs`, `siblings.rs`,
   `inline_key_search.rs`, `vector_count.rs`), the tree's `root.rs`, `node_stack.rs`, `search.rs` and
-  `walk.rs`, and file maps' `tree/file.rs`, `file.rs` and
+  `walk.rs`, and file maps' `tree/file/mod.rs`, `tree/file/storable.rs`, `file.rs` and
   `file/var_bytes.rs` (D58).
 - **Was:** after std's `node.rs`, one handle generic over access and kind,
   positions and room as proof types, and edges as owned subtrees; it froze

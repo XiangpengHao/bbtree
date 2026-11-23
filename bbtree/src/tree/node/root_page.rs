@@ -20,7 +20,7 @@ use super::leaf::Leaf;
 use super::page::{FreshPage, NodePtr, PageAllocator, PageByType, PageType};
 use super::{Child, Node};
 use crate::allocator::PageKind;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A tree's root page, by a pointer to it tagged with the root node's kind,
 /// as an edge to the node would be.

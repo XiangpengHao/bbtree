@@ -15,7 +15,7 @@ use core::ops::RangeBounds;
 
 use super::{BBTreeSet, SetValZST};
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node::leaf::KeyRun;
 use crate::unsync::map::{self, ExtractionWalk, Keys};
 

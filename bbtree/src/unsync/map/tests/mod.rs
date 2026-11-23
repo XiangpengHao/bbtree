@@ -24,7 +24,7 @@ mod type_properties;
 use std::vec::Vec;
 
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 use crate::unsync::map::BBTreeMap;
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {

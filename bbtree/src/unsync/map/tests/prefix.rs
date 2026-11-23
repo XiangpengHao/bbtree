@@ -12,7 +12,7 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
+use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::test_support::TestRng;
 use crate::unsync::map::BBTreeMap;
 

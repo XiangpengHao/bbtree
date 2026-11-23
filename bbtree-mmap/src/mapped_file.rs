@@ -7,12 +7,12 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::Path;
 
-use bbtree::file::{FileBuf, FileMap};
+use bbtree::file::{FileBuf, FileMap, FileWriter};
 use bbtree::{Auto, InlineKeyStrategy};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::bbtree_map_file::DiskWriter;
 use crate::disk_type::DiskStored;
+use crate::heap_pages::HeapPages;
 
 /// A file map with keys `K`, values `V` and strategy `S`, from a file:
 /// mapped into memory, so that lookups read the pages they reach from the
@@ -60,7 +60,10 @@ enum FileMapBytes {
 impl<K: DiskStored, V: DiskStored, S: InlineKeyStrategy<K>> MappedFile<K, V, S> {
     /// Writes `writer`'s file map to the file at `path`, creating it, or
     /// truncating what it held.
-    pub(crate) fn create(path: impl AsRef<Path>, writer: &DiskWriter<K, V, S>) -> io::Result<()>
+    pub(crate) fn create(
+        path: impl AsRef<Path>,
+        writer: &FileWriter<K, V, S, HeapPages>,
+    ) -> io::Result<()>
     where
         S: InlineKeyStrategy<K::InWriter>,
     {
@@ -76,12 +79,11 @@ impl<K: DiskStored, V: DiskStored, S: InlineKeyStrategy<K>> MappedFile<K, V, S> 
     pub(crate) fn write_at(
         file: &mut File,
         offset: u64,
-        writer: &DiskWriter<K, V, S>,
+        writer: &FileWriter<K, V, S, HeapPages>,
     ) -> io::Result<Range<u64>>
     where
         S: InlineKeyStrategy<K::InWriter>,
     {
-        let writer = &writer.writer;
         let start = offset.next_multiple_of(FileMap::<K, V, S>::alignment() as u64);
         let end = start + writer.byte_len() as u64;
         file.set_len(offset)?;

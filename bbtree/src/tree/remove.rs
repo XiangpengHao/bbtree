@@ -30,14 +30,15 @@
 
 use core::borrow::Borrow;
 
+use super::node::FirstEdge;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::PageAllocator;
 use super::node::{Child, Node};
-use super::node_stack::{FirstEdge, MAX_DEPTH, NodeStackMut};
+use super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::root::Tree;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Removes the entry whose key equals `key` and returns it, with the key

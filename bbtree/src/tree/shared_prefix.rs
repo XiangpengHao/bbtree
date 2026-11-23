@@ -11,8 +11,9 @@ use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::mem::offset_of;
 
-use super::node::inline_keys::{KeyInliner, SearchKey, Window};
-use crate::inline_key::{InlineKey, InlineKeyStrategy};
+use super::node::inline_keys::{KeyInliner, SearchKey, Window, WindowedKey};
+use crate::inline_key::InlineKey;
+use crate::strategy::InlineKeyStrategy;
 
 /// The leading bytes of the encoding of every key of a tree (D18), as many
 /// as they all share, at most [`Self::MAX_LEN`]. None for a tree whose keys
@@ -43,7 +44,7 @@ impl SharedPrefix {
     /// more share at least these, which suffice.
     pub(in crate::tree) const MAX_LEN: usize = 39;
 
-    /// The value's size, its bytes in a file map's header (`tree/file.rs`).
+    /// The value's size, its bytes in a file map's header (`tree/file/mod.rs`).
     #[cfg(feature = "file")]
     pub(in crate::tree) const SIZE: usize = 1 + Self::MAX_LEN;
 
@@ -143,5 +144,64 @@ impl SharedPrefix {
             len,
             bytes: shared.try_into().expect("MAX_LEN bytes"),
         })
+    }
+}
+
+/// A key that shares what every key of its tree shares (D50). A search that
+/// skips each node's prefix unchecked needs one, and an insert computes the
+/// key's window from it. Only the tree makes one: by shrinking what its keys
+/// share to what the key shares too ([`Tree::shrink_shared_prefix_for`]),
+/// or by checking it ([`Self::checked`]).
+///
+/// [`Tree::shrink_shared_prefix_for`]: super::root::Tree::shrink_shared_prefix_for
+pub(in crate::tree) struct PrefixedKey<K>(K);
+
+impl<K> PrefixedKey<K> {
+    /// `key`, if it shares `shared`, what every key of a tree shares; or
+    /// else `key` back.
+    pub(in crate::tree) fn checked<S: InlineKeyStrategy<K>>(
+        shared: &SharedPrefix,
+        key: K,
+    ) -> Result<Self, K> {
+        if shared.is_shared_by::<K, S>(&key) {
+            Ok(Self(key))
+        } else {
+            Err(key)
+        }
+    }
+
+    /// `key`, once its tree's shared prefix shrank to what it shares too
+    /// ([`Tree::shrink_shared_prefix_for`]).
+    ///
+    /// [`Tree::shrink_shared_prefix_for`]: super::root::Tree::shrink_shared_prefix_for
+    pub(in crate::tree) fn shrunk_to(key: K) -> Self {
+        Self(key)
+    }
+
+    /// `key`, which a latched tree's descent (`tree/latched`) found shares
+    /// what every key of the tree shares, at a root version it checked, on
+    /// its way into the leaf it holds, where the key belongs. The leaf's
+    /// prefix is what its fences share, or the shared prefix on a border,
+    /// and `key` lies between the fences. Only a thread holding the leaf
+    /// changes its prefix.
+    pub(in crate::tree) fn checked_by_descent(key: K) -> Self {
+        Self(key)
+    }
+
+    pub(in crate::tree) fn key(&self) -> &K {
+        &self.0
+    }
+
+    pub(in crate::tree) fn into_key(self) -> K {
+        self.0
+    }
+
+    /// The key with its window at `prefix_len`, the prefix length of the
+    /// node it goes into, whose fences it lies between.
+    pub(in crate::tree) fn window_at<S: InlineKeyStrategy<K>>(
+        self,
+        prefix_len: usize,
+    ) -> WindowedKey<K, S> {
+        WindowedKey::new(self.0, prefix_len)
     }
 }
