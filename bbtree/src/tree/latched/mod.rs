@@ -83,7 +83,7 @@ use super::node::root_page::RootPage;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A tree that threads share, by an atomic pointer to its root page, tagged
 /// with the root's kind; null until the first insert makes one. Its nodes'
@@ -347,7 +347,7 @@ impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     where
         K: Ord,
     {
-        use super::node_stack::LastEdge;
+        use super::node::LastEdge;
 
         match self.root_page() {
             Some(root_page) => {

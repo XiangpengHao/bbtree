@@ -28,7 +28,7 @@ use core::mem;
 use core::ops::{Bound, ControlFlow, RangeBounds};
 
 use crate::allocator::{Allocator, Global, InsertError};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::latched::{LatchedTree, ReadOrInsert, UpdateOrInsert};
 
 /// An ordered map that threads share, through `&self`: a B+-tree whose

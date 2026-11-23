@@ -10,7 +10,7 @@ use core::borrow::Borrow;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, InsertError};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 use crate::tree::latched::WithLeaf;
 use crate::tree::node::annexed_leaf::AnnexedLeaf;
 

@@ -23,7 +23,7 @@ use std::panic::catch_unwind;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::test_support::{
     CacheLineAligned, FromNumber, PageAligned, StepEitherEnd, TestRng, hash_of,
 };

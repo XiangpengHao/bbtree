@@ -11,8 +11,8 @@ use core::marker::PhantomData;
 use super::latch::Latched;
 use super::leaf::Leaf;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
 use crate::leaf_annex::LeafAnnex;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Leaf<K, V, S> {
     /// Calls the annex's split, this leaf's with `right`'s, the new leaf
@@ -108,9 +108,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::allocator::Allocator;
-    use crate::inline_key::Auto;
-    use crate::leaf_annex::{LeafAnnex, WithLeafAnnex};
+    use crate::leaf_annex::LeafAnnex;
     use crate::map::BBTreeMap;
+    use crate::strategy::Auto;
+    use crate::strategy::WithLeafAnnex;
     use crate::tree::node::page::TestPages;
     use crate::tree::test_support::TestRng;
 

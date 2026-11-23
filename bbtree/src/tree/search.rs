@@ -12,9 +12,9 @@ use super::node::Node;
 use super::node::inline_keys::SearchKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node_stack::{FirstEdge, LastEdge};
+use super::node::{FirstEdge, LastEdge};
 use super::root::Tree;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// Where a search found a key: in a leaf, beside its value, or as a
 /// separator in an internal node, whose value is its head (D17).
@@ -233,8 +233,8 @@ mod tests {
     /// Every separator under and at `node`, at any depth, as its node and
     /// index, and the number of leaves.
     fn separators_and_leaves<K, V>(
-        node: Node<K, V, crate::inline_key::Auto>,
-        separators: &mut Vec<(Internal<K, V, crate::inline_key::Auto>, usize)>,
+        node: Node<K, V, crate::strategy::Auto>,
+        separators: &mut Vec<(Internal<K, V, crate::strategy::Auto>, usize)>,
     ) -> usize {
         match node {
             Node::Leaf(_) => 1,

@@ -12,7 +12,7 @@ use std::iter;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::inline_key::Auto;
+use crate::strategy::Auto;
 use crate::tree::test_support::HashTagCase;
 use crate::unsync::BBTreeMap;
 

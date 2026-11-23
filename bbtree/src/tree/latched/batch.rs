@@ -45,7 +45,7 @@ use super::descent::{HeldLeaf, RootRead};
 use super::insert::{NotInserted, UpdateOrInsert};
 use super::lookup::{RacingRead, Unsettled};
 use crate::allocator::{Allocator, InsertError};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// The leaf changed after the lane read it, or the separator its key
 /// matched was removed: the lane starts over from the root.

@@ -13,7 +13,7 @@ use core::cmp::Ordering;
 use core::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 
-use crate::inline_key::Auto;
+use crate::strategy::Auto;
 use crate::tree::node::Node;
 use crate::tree::node::inline_keys::SearchKey;
 use crate::tree::node::leaf::Leaf;

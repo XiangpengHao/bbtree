@@ -128,7 +128,8 @@ use self::leaf::Leaf;
 use self::node_plan::NodePlan;
 use self::page::{NodeKind, NodePtr, PageByType};
 use self::siblings::Siblings;
-use crate::inline_key::{InlineKeyStrategy, InlineWord};
+use crate::inline_key::InlineWord;
+use crate::strategy::InlineKeyStrategy;
 
 /// A node, of the kind its pointer's tag tells: what an edge or the root
 /// leads to.
@@ -527,6 +528,44 @@ pub(in crate::tree) trait Child<K, V, S: InlineKeyStrategy<K>>:
     fn shrink_prefix_to(self, prefix_len: usize) {
         if self.prefix_len() > prefix_len {
             self.refit_prefix(prefix_len);
+        }
+    }
+}
+
+/// An end of a node, [`FirstEdge`] or [`LastEdge`]: its first or last
+/// edge, which a walk down to the first or last entries takes. It is a type,
+/// not a value: a caller always knows which end it wants, so the code for
+/// one end holds no choice between them.
+pub(crate) trait NodeEnd {
+    const IS_LAST: bool;
+
+    /// This end's edge in `node`: 0, or its length, the only read of it.
+    fn edge<K, V, S>(node: Node<K, V, S>) -> usize {
+        if Self::IS_LAST { node.len() } else { 0 }
+    }
+}
+
+pub(crate) enum FirstEdge {}
+
+impl NodeEnd for FirstEdge {
+    const IS_LAST: bool = false;
+}
+
+pub(crate) enum LastEdge {}
+
+impl NodeEnd for LastEdge {
+    const IS_LAST: bool = true;
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
+    /// The leaf at this node's `End` border: down its first or last edges.
+    pub(in crate::tree) fn border_leaf<End: NodeEnd>(self) -> Leaf<K, V, S> {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => return leaf,
+                Node::Internal(internal) => node = internal.child(End::edge(node)),
+            }
         }
     }
 }

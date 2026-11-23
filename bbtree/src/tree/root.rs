@@ -5,7 +5,9 @@
 //! the prefix they share (`prefix.rs`). The root has nothing above it, so
 //! the tree keeps its fences beside it, as the bytes every key shares (D50,
 //! `shared_prefix.rs`). A search checks a query against them once, before
-//! the root. A node along the tree's left or right border, with no
+//! the root. A key that lacks those bytes shrinks them before the tree
+//! takes it, and the prefixes of the border nodes with them
+//! ([`Tree::shrink_shared_prefix_for`]). A node along the tree's left or right border, with no
 //! separator above it on that side, takes the root's fence there. The tree
 //! keeps the fences beside its root page, so that a root page is a node's
 //! page. The tree also remembers the last leaf an append went to, to append
@@ -22,15 +24,14 @@ use core::alloc::Layout;
 use core::cmp::Ordering;
 use core::mem;
 
-use super::node::Node;
-use super::node::inline_keys::SearchKey;
+use super::node::inline_keys::{SearchKey, Window};
 use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr, PageAllocator, PageByType};
 use super::node::root_page::RootPage;
-use super::prefix::PrefixedKey;
-use super::shared_prefix::SharedPrefix;
+use super::node::{Child, FirstEdge, LastEdge, Node, NodeEnd};
+use super::shared_prefix::{PrefixedKey, SharedPrefix};
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A tree: its root page, if it has one, which the tree owns with every
 /// node under it; what every key shares; and the last leaf an append went
@@ -80,7 +81,7 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// `shared_prefix`. For a latched tree (`tree/latched`): to take it
     /// apart once no other thread reaches it, or to run one of the tree's
     /// operations on the nodes a latched operation holds, as if it owned
-    /// them; and for a file map's tree (`tree/file.rs`).
+    /// them; and for a file map's tree (`tree/file/mod.rs`).
     pub(in crate::tree) fn of_root_page(
         root_page: RootPage<K, V, S>,
         shared_prefix: SharedPrefix,
@@ -359,5 +360,97 @@ impl<K, V, S: InlineKeyStrategy<K>> RightmostAppend<'_, K, V, S> {
         // Fitting appends preserve this leaf and all ancestors. There are
         // no callbacks after insertion; the caller counts the entry next.
         *rightmost_leaf = Some(leaf.node_ptr());
+    }
+}
+
+impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
+    /// Shrinks what every key of the tree shares to what `key` shares too,
+    /// before the tree takes it (D50), and returns `key`, which now shares
+    /// it. The nodes along the borders, which take the root's fences, shrink
+    /// their prefixes with it. Without a tree, it first makes one from
+    /// `alloc`. An empty tree, whose prefix nothing bounds yet, takes `key`'s
+    /// first bytes as what every key shares, and its root leaf takes them as
+    /// its prefix. Calls `InlineKey` with
+    /// [`WithInlineKey`](crate::WithInlineKey), before it changes anything
+    /// but making the tree.
+    ///
+    /// Every insert does this, and almost every one changes nothing: the
+    /// check is inline, while making the tree and starting or shrinking the
+    /// prefix are not. Always inline, so the batch's inserts, as extra
+    /// callers, don't outline it (D53).
+    #[inline(always)]
+    pub(in crate::tree) fn shrink_shared_prefix_for(
+        &mut self,
+        key: K,
+        alloc: &impl PageAllocator,
+    ) -> PrefixedKey<K> {
+        let root_page = self.root_page_or_new(alloc);
+        if NodePtr::<K, V, S>::has_inline_keys() {
+            if let Node::Leaf(root) = root_page.node()
+                && root.len() == 0
+            {
+                self.start_shared_prefix(root, &key);
+            } else {
+                let len = self.shared_prefix().len_shared_with::<K, S>(&key);
+                self.shrink_shared_prefix_to(len);
+            }
+        }
+        PrefixedKey::shrunk_to(key)
+    }
+
+    /// Makes `key`'s first bytes what every key of the tree shares, for a
+    /// tree with no keys yet, and the prefix of `root`, its empty root leaf.
+    #[cold]
+    #[inline(never)]
+    fn start_shared_prefix(&mut self, root: Leaf<K, V, S>, key: &K) {
+        let shared = SharedPrefix::of_key::<K, S>(key);
+        root.set_empty_prefix_len(shared.len());
+        *self.shared_prefix_mut() = shared;
+    }
+
+    /// Shrinks what every key of the tree shares to its first `len` bytes,
+    /// if there are more, and the border nodes' prefixes with it. For a key
+    /// the tree is about to take, which shares only those bytes. Reads no key
+    /// and calls no `InlineKey`.
+    #[inline]
+    fn shrink_shared_prefix_to(&mut self, len: usize) {
+        if len < self.shared_prefix().len() {
+            self.shrink_borders_to(len);
+        }
+    }
+
+    /// [`Self::shrink_shared_prefix_to`], for a `len` shorter than what
+    /// every key shares: rare, as the prefix only ever shrinks.
+    #[cold]
+    #[inline(never)]
+    fn shrink_borders_to(&mut self, len: usize) {
+        let fill = self.shared_prefix().window_at(len);
+        self.shared_prefix_mut().shrink_to(len);
+        self.move_borders_back_to(fill);
+    }
+
+    /// Moves the prefix of every node along the tree's left and right
+    /// borders back to `fill`'s, filled from it: the window there of what
+    /// every key of the tree shares, before it shrank.
+    fn move_borders_back_to(&mut self, fill: Window) {
+        self.move_border_back_to::<FirstEdge>(fill);
+        self.move_border_back_to::<LastEdge>(fill);
+    }
+
+    /// [`Self::move_borders_back_to`], along the `End` border.
+    fn move_border_back_to<End: NodeEnd>(&mut self, fill: Window) {
+        let mut node = self.root_mut();
+        loop {
+            node = match node {
+                Node::Leaf(leaf) => {
+                    leaf.move_prefix_back_to(fill);
+                    break;
+                }
+                Node::Internal(internal) => {
+                    internal.move_prefix_back_to(fill);
+                    internal.child(End::edge(node))
+                }
+            };
+        }
     }
 }

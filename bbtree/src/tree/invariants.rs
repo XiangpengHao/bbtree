@@ -11,15 +11,16 @@
 
 use alloc::vec::Vec;
 
+use super::node::LastEdge;
 use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
 use super::node::page::NodePtr;
 use super::node::{Child, Node};
-use super::node_stack::LastEdge;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
 
-use crate::inline_key::{InlineKeyStrategy, InlineWidth, InlineWord};
+use crate::inline_key::{InlineWidth, InlineWord};
+use crate::strategy::InlineKeyStrategy;
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Checks the keys and prefixes node by node, not just the ordered

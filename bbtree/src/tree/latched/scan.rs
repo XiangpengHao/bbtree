@@ -63,7 +63,7 @@ use super::super::node::leaf::Leaf;
 use super::super::node::optimistic::Routed;
 use super::LatchedTree;
 use super::descent::{DescentPath, HeldLeaf, PathLevel, Shared, TreePath};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A leaf as a scan saw it: its latch, and the version it was at while the
 /// scan held it. Equal stamps are of one leaf at one version.

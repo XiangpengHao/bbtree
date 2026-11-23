@@ -11,7 +11,7 @@ use core::ops::RangeBounds;
 
 use super::BBTreeMap;
 use crate::allocator::Allocator;
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node_stack::ValMut;
 use crate::tree::walk::{BorrowedWalk, RangeWalk};
 

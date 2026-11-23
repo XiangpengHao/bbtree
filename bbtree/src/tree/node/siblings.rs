@@ -7,7 +7,7 @@
 use super::Child;
 use super::internal::Internal;
 use super::page::PageByType;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// Separator `index` of `parent` and the children on either side of it, of
 /// kind `C`, ready to be merged or to move an entry from one child to the

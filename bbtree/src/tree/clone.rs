@@ -14,7 +14,7 @@ use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, NodePtr};
 use super::root::Tree;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K: Clone, V: Clone, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// A copy of the tree on pages from `alloc`, the copy's allocator. Every

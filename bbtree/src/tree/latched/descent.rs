@@ -50,7 +50,7 @@ use super::super::node::optimistic::Routed;
 use super::super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::super::root::Tree;
 use super::LatchedTree;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A leaf of a latched tree, latched in mode `M` until dropped.
 pub(super) struct HeldLeaf<K, V, S: InlineKeyStrategy<K>, M: LatchMode> {

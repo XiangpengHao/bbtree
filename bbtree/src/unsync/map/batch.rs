@@ -8,7 +8,7 @@ use core::borrow::Borrow;
 
 use super::BBTreeMap;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 use crate::tree::root::Tree;
 
 impl<K, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {

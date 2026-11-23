@@ -12,11 +12,11 @@
 use super::super::interleaving::Backoff;
 use super::super::node::Node;
 use super::super::node::latch::Latched;
-use super::super::node_stack::{FirstEdge, LastEdge, NodeEnd};
+use super::super::node::{FirstEdge, LastEdge, NodeEnd};
 use super::LatchedTree;
 use super::held::HeldNodes;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Shrinks what every key of the tree shares to what `key` shares too,

@@ -5,7 +5,7 @@
 //!
 //! The map owns a [`Tree`], which has no root page until the first insert, so
 //! that [`BBTreeMap::new`] allocates nothing. The strategy parameter `S`
-//! decides which keys have inline keys (D18, `inline_key.rs`); every method
+//! decides which keys have inline keys (D18, `strategy.rs`); every method
 //! is the same for every `S`. The allocator parameter `A` is where the map's
 //! pages come from (D8, `allocator.rs`): the map holds it, and gives it to
 //! every operation on its tree that allocates or frees a page.
@@ -32,7 +32,7 @@ use core::ops::Index;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 
 use crate::allocator::{Allocator, Global, InsertError};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 #[cfg(any(test, feature = "inspect"))]
 use crate::tree::inspect::TreeView;
 use crate::tree::node_stack::KeySide;

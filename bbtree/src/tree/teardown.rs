@@ -5,12 +5,12 @@
 
 #![forbid(unsafe_code)]
 
+use super::node::FirstEdge;
 use super::node::Node;
-use super::node_stack::FirstEdge;
 use super::root::Tree;
 use super::walk::DyingWalk;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Takes the tree apart, if there is one. Drops every key and value in
@@ -49,7 +49,7 @@ mod tests {
     use std::panic::catch_unwind;
     use std::vec::Vec;
 
-    use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
+    use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::tree::node::page::TestPages;
     use crate::tree::test_support::{Bulky, DropLedger, FromTracked, TestRng, TestTree, Tracked};
 

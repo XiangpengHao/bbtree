@@ -8,7 +8,8 @@ use std::panic::catch_unwind;
 use std::string::String;
 use std::vec::Vec;
 
-use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord, WithInlineKey};
+use crate::inline_key::{InlineKey, InlineWord};
+use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::invariants::NodeChecks;
 use crate::tree::node::inline_keys::{SearchKey, WindowedKey};
 use crate::tree::node::leaf::Leaf;

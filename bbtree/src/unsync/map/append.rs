@@ -12,7 +12,7 @@ use core::mem;
 
 use super::{BBTreeMap, IntoIter};
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 use crate::tree::build::TreeBuilder;
 
 impl<K: Ord, V, S: InlineKeyStrategy<K>, A: Allocator + Clone> BBTreeMap<K, V, S, A> {

@@ -33,7 +33,8 @@ use super::siblings::Siblings;
 use super::slots::{KeyColumns, KeySlots, NodeKeys, Slots};
 use super::{Child, EntrySlots, HeadSuccession, InsertionSide, Split};
 use crate::allocator::PageKind;
-use crate::inline_key::{InlineKeyStrategy, InlineWidth};
+use crate::inline_key::InlineWidth;
+use crate::strategy::InlineKeyStrategy;
 
 /// A leaf, by its page.
 pub(crate) struct Leaf<K, V, S> {

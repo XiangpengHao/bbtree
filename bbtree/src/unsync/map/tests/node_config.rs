@@ -5,8 +5,8 @@
 use std::string::String;
 
 use super::differential::Workload;
-use crate::inline_key::{Auto, WithInlineKey};
-use crate::node_config::Configured;
+use crate::strategy::Configured;
+use crate::strategy::{Auto, WithInlineKey};
 use crate::tree::test_support::{FromNumber, LargePages, SmallInternalPages};
 
 /// A key [`Auto`] doesn't recognize: its nodes keep no inline keys, and its

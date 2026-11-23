@@ -25,11 +25,11 @@ use core::mem::size_of;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
-use super::super::insert::SplitPages;
 use super::super::interleaving::{Backoff, Interleaving};
 use super::super::node::latch::Version;
 use super::super::node::page::{LatchedNodeHeader, PageAllocator};
 use super::super::node_stack::MAX_DEPTH;
+use super::super::reserved_pages::SplitPages;
 use crate::allocator::{AllocError, Allocator, PageKind};
 
 /// The free pages of one kind, a stack linked through the pages, behind a

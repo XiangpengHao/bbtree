@@ -41,13 +41,13 @@ use super::super::node::inline_keys::SearchKey;
 use super::super::node::internal::Internal;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
-use super::super::node_stack::{LastEdge, NodeEnd};
+use super::super::node::{LastEdge, NodeEnd};
 use super::LatchedTree;
 use super::descent::{Exclusive, PathLevel, TreePath};
 use super::held::HeldNodes;
 use super::pages::NodePages;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A removal found a node it needs held by another thread, or changed since
 /// its descent. It changed nothing, and starts over.

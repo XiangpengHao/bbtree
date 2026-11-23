@@ -24,7 +24,6 @@
 
 #![forbid(unsafe_code)]
 
-use core::iter;
 use core::mem;
 
 use super::node::inline_keys::SearchKey;
@@ -33,11 +32,11 @@ use super::node::leaf::Leaf;
 use super::node::page::{FreshPage, PageAllocator};
 use super::node::{Insertion, Node};
 use super::node_stack::{MAX_DEPTH, NodeStackMut};
-use super::prefix::PrefixedKey;
-use super::reserved_pages::ReservedPages;
+use super::reserved_pages::{ReservedPages, SplitPages};
 use super::root::Tree;
-use crate::allocator::{Allocator, InsertError, PageKind};
-use crate::inline_key::InlineKeyStrategy;
+use super::shared_prefix::PrefixedKey;
+use crate::allocator::{Allocator, InsertError};
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// [`Self::try_insert`], calling
@@ -153,42 +152,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
         stack.insert_prefixed(key, value, &pages, length);
         stack.finish_insertion();
         Ok(None)
-    }
-}
-
-/// The pages a split that inserts into a full leaf takes: a leaf's, for its
-/// right half; an internal node's for each internal node above it that is
-/// full too, and splits; and if the root splits, one of the root's kind for
-/// the root's node, which moves out of the root page as the tree grows.
-#[derive(Clone, Copy)]
-pub(in crate::tree) struct SplitPages {
-    leaves: usize,
-    internals: usize,
-}
-
-impl SplitPages {
-    /// No split: the leaf has room.
-    const NONE: Self = Self {
-        leaves: 0,
-        internals: 0,
-    };
-
-    /// The pages for a full leaf `depth` levels below the root, whose lowest
-    /// ancestor with room, if any, is at level `room`, the root's 0.
-    pub(in crate::tree) fn of_full_leaf(depth: usize, room: Option<usize>) -> Self {
-        let splits = depth - room.map_or(0, |level| level + 1);
-        let (leaves, internals) = match (room, depth) {
-            (None, 0) => (2, 0),
-            (None, _) => (1, splits + 1),
-            (Some(_), _) => (1, splits),
-        };
-        Self { leaves, internals }
-    }
-
-    /// Each page's kind, the leaves' first.
-    pub(in crate::tree) fn kinds(self) -> impl Iterator<Item = PageKind> {
-        iter::repeat_n(PageKind::Leaf, self.leaves)
-            .chain(iter::repeat_n(PageKind::Internal, self.internals))
     }
 }
 

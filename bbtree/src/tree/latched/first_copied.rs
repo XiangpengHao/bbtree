@@ -26,7 +26,7 @@ use core::ops::{Bound, ControlFlow, RangeBounds};
 use super::super::node::inline_keys::SearchKey;
 use super::LatchedTree;
 use super::descent::Optimistic;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K: Copy, V: Copy, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// A copy of the first entry whose key lies between `start` and `end`,

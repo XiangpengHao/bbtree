@@ -21,8 +21,9 @@ use super::optimistic::RacingReads;
 use super::root_page::RootPage;
 use super::slots::{InlineKeySlots, KeyColumns, KeySlots, SeparatorSlots, Slots};
 use crate::allocator::{AllocError, Allocator, PageKind};
-use crate::inline_key::sealed::Sealed;
-use crate::inline_key::{InlineKeyStrategy, InlineWidth};
+use crate::inline_key::InlineWidth;
+use crate::strategy::InlineKeyStrategy;
+use crate::strategy::sealed::Sealed;
 
 /// What pages are allocated for: a leaf, an internal node ([`NodeKind`]s), or
 /// the root ([`RootPage`]), a page of the larger kind (D21). A page is only
@@ -347,7 +348,7 @@ impl<K, V, S> Copy for NodePtr<K, V, S> {}
 
 impl<K, V, S> NodePtr<K, V, S> {
     /// The bit that marks a leaf's pointer, and a leaf's offset in a file map
-    /// (`tree/file.rs`).
+    /// (`tree/file/mod.rs`).
     pub(in crate::tree) const LEAF_TAG: usize = 1;
 
     /// The node of kind `Kind` in the page at `page`, tagged with its kind.
@@ -486,7 +487,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 
     /// Whether the map's nodes lie in a file map, whose edges are offsets
-    /// from their node's page (`tree/file.rs`).
+    /// from their node's page (`tree/file/mod.rs`).
     #[inline(always)]
     pub(in crate::tree) fn is_in_file() -> bool {
         <S as Sealed<K>>::IN_FILE
@@ -723,7 +724,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
     }
 
     /// Copies the first `size` bytes of the node's page to `dest`, as an
-    /// file map keeps them (`tree/file.rs`): byte for byte, but for the
+    /// file map keeps them (`tree/file/mod.rs`): byte for byte, but for the
     /// header's padding, which no write initializes, as zeros.
     ///
     /// # Safety
@@ -991,7 +992,7 @@ impl<K, V, S: InlineKeyStrategy<K>> NodePtr<K, V, S> {
         }
     }
 
-    /// The edge slots of an internal node in a file map (`tree/file.rs`),
+    /// The edge slots of an internal node in a file map (`tree/file/mod.rs`),
     /// [`Self::edge_slots`] read as what a file map keeps there: each child's
     /// offset from this node's page, tagged with its kind as a pointer to it
     /// would be.
@@ -1041,7 +1042,7 @@ mod test_pages {
 
     use super::{FreshPage, PageByType, PageType};
     use crate::allocator::{AllocError, Allocator, Global, PageKind};
-    use crate::inline_key::{Auto, InlineKeyStrategy};
+    use crate::strategy::{Auto, InlineKeyStrategy};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
 
@@ -1275,8 +1276,9 @@ mod tests {
     use std::vec::Vec;
 
     use super::{FreshPage, NodeHeader, NodeKind, NodePtr, TestPages};
-    use crate::inline_key::{Auto, InlineKeyStrategy, InlineWidth, WithInlineKey};
+    use crate::inline_key::InlineWidth;
     use crate::node_config::DefaultNodeConfig;
+    use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::layout::NodeLayout;
     use crate::tree::node::leaf::Leaf;

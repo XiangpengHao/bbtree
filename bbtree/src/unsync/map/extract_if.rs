@@ -21,7 +21,7 @@ use core::ops::{Bound, RangeBounds};
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node_stack::NodeStackMut;
 
 /// An iterator produced by calling `extract_if` on [`BBTreeMap`].

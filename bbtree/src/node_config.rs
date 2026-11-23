@@ -10,12 +10,6 @@
 
 #![forbid(unsafe_code)]
 
-use core::fmt;
-use core::marker::PhantomData;
-
-use crate::inline_key::InlineKeyStrategy;
-use crate::inline_key::sealed::{InlineKeySource, Sealed};
-
 /// How a map builds its nodes: constants the map reads at compile time, so
 /// that a map with a config runs as one without would at the same sizes.
 ///
@@ -63,6 +57,8 @@ use crate::inline_key::sealed::{InlineKeySource, Sealed};
 /// as the other. Only internal pages larger than leaves', with leaves larger
 /// still, break that, and a map with such a config panics at its first
 /// insert.
+///
+/// [`Configured`]: crate::Configured
 pub trait NodeConfig {
     /// The page size of leaves: at least 1024. Larger leaves are fewer,
     /// but an insert or a remove shifts more of a leaf's bytes.
@@ -84,52 +80,11 @@ pub trait NodeConfig {
     const HEAP_PAGE_SIZE: usize = Self::LEAF_PAGE_SIZE;
 }
 
-/// The config of [`Auto`](crate::Auto) and
-/// [`WithInlineKey`](crate::WithInlineKey): every default. `pub` only as
+/// The config of [`Auto`] and
+/// [`WithInlineKey`]: every default. `pub` only as
 /// their `Sealed::Config` must be (E0446); nothing exports it.
+///
+/// [`Auto`]: crate::Auto
 pub struct DefaultNodeConfig;
 
 impl NodeConfig for DefaultNodeConfig {}
-
-/// The strategy whose inline keys are strategy `S`'s, and whose nodes are
-/// built as config `C` says: `Configured<Auto, C>` or
-/// `Configured<WithInlineKey, C>`.
-pub struct Configured<S, C>(PhantomData<fn() -> (S, C)>);
-
-impl<S, C> Configured<S, C> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-// By hand: derives would bound `S` and `C`, which the marker doesn't hold.
-
-impl<S, C> Clone for Configured<S, C> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S, C> Copy for Configured<S, C> {}
-
-impl<S, C> Default for Configured<S, C> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S, C> fmt::Debug for Configured<S, C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Configured")
-    }
-}
-
-impl<K, S: InlineKeyStrategy<K>, C: NodeConfig> Sealed<K> for Configured<S, C> {
-    const SOURCE: InlineKeySource<K> = S::SOURCE;
-    type Config = C;
-}
-
-impl<K, S: InlineKeyStrategy<K>, C: NodeConfig> InlineKeyStrategy<K> for Configured<S, C> {
-    type LeafAnnex = S::LeafAnnex;
-}

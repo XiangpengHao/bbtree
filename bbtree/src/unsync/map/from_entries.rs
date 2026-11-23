@@ -21,7 +21,7 @@ use core::mem;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::build::TreeBuilder;
 use crate::tree::root::Tree;
 

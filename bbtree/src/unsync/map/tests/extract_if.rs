@@ -9,7 +9,7 @@ use core::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::vec::Vec;
 
-use crate::inline_key::Auto;
+use crate::strategy::Auto;
 use crate::tree::node::Node;
 use crate::tree::node::leaf::Leaf;
 use crate::unsync::BBTreeMap;

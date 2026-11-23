@@ -32,9 +32,10 @@ use super::node_plan::NodePlan;
 use super::page::{InlineKeyNodeHeader, NodeKind};
 use super::type_identity::{ByteString, SameType, StdInteger};
 use super::vector_count::VectorCount;
-use crate::inline_key::sealed::InlineKeySource;
-use crate::inline_key::{InlineKey, InlineKeyStrategy, InlineWidth, InlineWord};
+use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
 use crate::proof::SearchBytes;
+use crate::strategy::InlineKeyStrategy;
+use crate::strategy::sealed::InlineKeySource;
 
 /// The bytes of a window, whatever a node keeps of it.
 const WINDOW_LEN: usize = size_of::<InlineWord>();
@@ -792,7 +793,8 @@ mod tests {
         InlineKeyNodeHeader, InlineSlot, KeyInliner, NodePlan, SearchBytes, SearchKey, WINDOW_LEN,
         Window, WindowedKey,
     };
-    use crate::inline_key::{Auto, InlineKey, InlineWidth, InlineWord, WithInlineKey};
+    use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
+    use crate::strategy::{Auto, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
     use crate::tree::test_support::TestRng;

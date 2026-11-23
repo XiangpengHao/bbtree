@@ -5,8 +5,10 @@ leaves, and keys and values of any length in heap pages after each leaf
 (2026-10-21).
 
 - **bbtree**, behind the `file` feature: the file map, its header and its
-  check in `bbtree/src/tree/file.rs`; the API (`FileWriter`, `FileMap`,
-  `Storable`, `PlainBytes`, `LeafBytes`, `FileBuf`) in `bbtree/src/file.rs`.
+  check in `bbtree/src/tree/file/mod.rs`; what it asks of keys and values
+  (`Storable`, `PlainBytes`, `LeafBytes`) and `FileError` in
+  `bbtree/src/tree/file/storable.rs`; the API (`FileWriter`, `FileMap`,
+  `FileBuf`, and those traits re-exported) in `bbtree/src/file.rs`.
   It knows nothing of bytes of any length but two hooks: a slot type's
   check, and what a writer writes after each leaf.
 - **bbtree-mmap** (`bbtree-mmap/`), generic: `BBTreeMapFile`, a typed map in a

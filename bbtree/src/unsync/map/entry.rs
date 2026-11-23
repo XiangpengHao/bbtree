@@ -15,7 +15,7 @@ use core::fmt;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node::inline_keys::SearchKey;
 use crate::tree::node_stack::NodeStackMut;
 use crate::tree::root::Tree;

@@ -21,15 +21,16 @@ use std::vec;
 use std::vec::Vec;
 
 use super::invariants::NodeChecks;
+use super::node::FirstEdge;
 use super::node::Node;
 use super::node::inline_keys::Separator;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{NodePtr, TestPages};
-use super::node_stack::FirstEdge;
 use super::root::Tree;
-use crate::inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWord};
+use crate::inline_key::{InlineKey, InlineWord};
 use crate::node_config::NodeConfig;
+use crate::strategy::{Auto, InlineKeyStrategy};
 
 /// A deterministic xorshift64* generator; shared by reference.
 pub(crate) struct TestRng(Cell<u64>);

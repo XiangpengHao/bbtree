@@ -38,10 +38,13 @@ use super::node::root_page::RootPage;
 use super::node_stack::MAX_DEPTH;
 use super::root::Tree;
 use super::shared_prefix::SharedPrefix;
-use crate::file::{FileError, LeafBytes, Storable};
-use crate::inline_key::InlineKeyStrategy;
-use crate::inline_key::sealed::{InlineKeySource, Sealed};
 use crate::node_config::NodeConfig;
+use crate::strategy::InlineKeyStrategy;
+use crate::strategy::sealed::{InlineKeySource, Sealed};
+
+mod storable;
+
+pub use storable::{FileError, InWriter, LeafBytes, NoLeafBytes, PlainBytes, Storable};
 
 /// The strategy of a tree in a file map: `S`'s inline keys, and edges that
 /// are offsets from their node's page. Nothing public names it: an
@@ -771,7 +774,7 @@ mod tests {
 
     use super::{FileFormat, InFile};
     use crate::file::{FileBuf, FileError, FileMap, FileWriter, Storable};
-    use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
+    use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
     use crate::tree::node::internal::Internal;
     use crate::tree::node::leaf::Leaf;
     use crate::tree::node::page::{NodeHeader, NodePtr};
