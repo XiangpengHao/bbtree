@@ -26,7 +26,7 @@ use core::ops::{Bound, ControlFlow, RangeBounds};
 use super::super::node::inline_keys::SearchKey;
 use super::LatchedTree;
 use super::descent::Optimistic;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// How many entries are read at most, one at a time: the keys whose inline
 /// keys tie with the bound's, and the one after them. Ties are rare and

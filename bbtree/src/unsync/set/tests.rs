@@ -24,7 +24,7 @@ use std::string::String;
 use std::vec::Vec;
 
 use super::{BBTreeSet, IntoIter, Iter, Range};
-use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
+use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::node::page::TestPages;
 use crate::tree::test_support::{FromNumber, TestRng, hash_of};
 use crate::unsync::map::BBTreeMap;

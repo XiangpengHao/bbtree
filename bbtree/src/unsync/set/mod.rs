@@ -30,7 +30,7 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::unsync::map::BBTreeMap;
 
 pub use difference::Difference;
@@ -38,6 +38,20 @@ pub use intersection::Intersection;
 pub use iter::{ExtractIf, IntoIter, Iter, Range};
 pub use symmetric_difference::SymmetricDifference;
 pub use union::Union;
+
+/// The iterators that merge two sets hold cursors (`merge.rs`), and are
+/// `Send` and `Sync` when `T` is `Sync`, as std's are; `KeyRun`'s impls of
+/// both make them so.
+const _: () = {
+    const fn send_and_sync<I: Send + Sync>() {}
+    #[expect(dead_code, reason = "type-checked for every `T: Sync`, never called")]
+    const fn merge_iterators<'a, T: Sync + 'a>() {
+        send_and_sync::<Difference<'a, T>>();
+        send_and_sync::<Intersection<'a, T>>();
+        send_and_sync::<SymmetricDifference<'a, T>>();
+        send_and_sync::<Union<'a, T>>();
+    }
+};
 
 /// The value of every element of a set's map: it takes no space, and
 /// compares, hashes and prints as std's does.

@@ -17,7 +17,7 @@ use super::lookups::LookupsAhead;
 use super::merge::{MergeSides, MergeStep};
 use super::{BBTreeSet, Iter};
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the intersection of `BBTreeSet`s.
 ///

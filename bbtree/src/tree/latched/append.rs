@@ -25,12 +25,12 @@ use super::super::node::inline_keys::SearchKey;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
 use super::super::node::page::NodePtr;
-use super::super::prefix::PrefixedKey;
+use super::super::shared_prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf};
 use super::insert::InsertPolicy;
 use crate::allocator::InsertError;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> LatchedTree<K, V, S> {
     /// Appends `key` and `value` to the last leaf, and returns what `policy`

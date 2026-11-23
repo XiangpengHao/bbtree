@@ -3,13 +3,9 @@
 //! heap pages; and [`WithLeafAnnex`], the strategy that gives a map one.
 //!
 //! [`BBTreeMap`]: crate::BBTreeMap
-
-use core::fmt;
-use core::marker::PhantomData;
+//! [`WithLeafAnnex`]: crate::WithLeafAnnex
 
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
-use crate::inline_key::sealed::{InlineKeySource, Sealed};
 
 /// Data a [`BBTreeMap`] keeps in each of its leaves, right after the leaf's
 /// header, for the code that owns where its keys and values point: it reads
@@ -43,6 +39,8 @@ pub trait LeafAnnex: Default + Send + Sync {
 
 /// No annex: what every map keeps but one with [`WithLeafAnnex`]. It takes
 /// no room in a leaf.
+///
+/// [`WithLeafAnnex`]: crate::WithLeafAnnex
 impl LeafAnnex for () {
     #[inline(always)]
     fn split(&mut self, _right: &mut Self) {}
@@ -52,46 +50,4 @@ impl LeafAnnex for () {
 
     #[inline(always)]
     fn release(self, _alloc: &impl Allocator) {}
-}
-
-/// The strategy whose inline keys and node config are strategy `S`'s, and
-/// whose leaves keep an annex `L`: for a [`BBTreeMap`](crate::BBTreeMap).
-pub struct WithLeafAnnex<S, L>(PhantomData<fn() -> (S, L)>);
-
-impl<S, L> WithLeafAnnex<S, L> {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-// By hand: derives would bound `S` and `L`, which the marker doesn't hold.
-
-impl<S, L> Clone for WithLeafAnnex<S, L> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<S, L> Copy for WithLeafAnnex<S, L> {}
-
-impl<S, L> Default for WithLeafAnnex<S, L> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S, L> fmt::Debug for WithLeafAnnex<S, L> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("WithLeafAnnex")
-    }
-}
-
-impl<K, S: InlineKeyStrategy<K>, L: LeafAnnex> Sealed<K> for WithLeafAnnex<S, L> {
-    const SOURCE: InlineKeySource<K> = S::SOURCE;
-    type Config = S::Config;
-}
-
-impl<K, S: InlineKeyStrategy<K>, L: LeafAnnex> InlineKeyStrategy<K> for WithLeafAnnex<S, L> {
-    type LeafAnnex = L;
 }

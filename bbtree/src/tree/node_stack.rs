@@ -50,16 +50,16 @@ use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::Bound;
 
-use super::node::Node;
 use super::node::inline_keys::{SearchKey, WindowedKey};
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{NodePtr, PageAllocator};
-use super::prefix::PrefixedKey;
+use super::node::{FirstEdge, LastEdge, Node, NodeEnd};
 use super::root::Tree;
 use super::search::Found;
+use super::shared_prefix::PrefixedKey;
 use super::shared_prefix::SharedPrefix;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// The deepest a leaf can be below the root. A non-root internal node has
 /// at least 5 children (D13, D22), the root at least 2, and a leaf takes at
@@ -113,44 +113,6 @@ impl CopyableBorrow for Immut<'_> {}
 impl<K, V> CopyableBorrow for ValMut<'_, K, V> {}
 
 impl<K, V> CopyableBorrow for Dying<K, V> {}
-
-/// An end of a node, [`FirstEdge`] or [`LastEdge`], where a node stack goes
-/// down to its first or last entries. It is a type, not a value: a caller
-/// always knows which end it wants, so the code for one end holds no choice
-/// between them.
-pub(crate) trait NodeEnd {
-    const IS_LAST: bool;
-
-    /// This end's edge in `node`: 0, or its length, the only read of it.
-    fn edge<K, V, S>(node: Node<K, V, S>) -> usize {
-        if Self::IS_LAST { node.len() } else { 0 }
-    }
-}
-
-pub(crate) enum FirstEdge {}
-
-impl NodeEnd for FirstEdge {
-    const IS_LAST: bool = false;
-}
-
-pub(crate) enum LastEdge {}
-
-impl NodeEnd for LastEdge {
-    const IS_LAST: bool = true;
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> Node<K, V, S> {
-    /// The leaf at this node's `End` border: down its first or last edges.
-    pub(in crate::tree) fn border_leaf<End: NodeEnd>(self) -> Leaf<K, V, S> {
-        let mut node = self;
-        loop {
-            match node {
-                Node::Leaf(leaf) => return leaf,
-                Node::Internal(internal) => node = internal.child(End::edge(node)),
-            }
-        }
-    }
-}
 
 /// A node stack from a tree's root down to a position in one of its nodes,
 /// with the access to the whole tree that borrow type `B` says. A detached
@@ -240,6 +202,14 @@ impl<B, K, V, S> NodeStack<B, K, V, S> {
     pub(in crate::tree) fn attach(&mut self, root: Node<K, V, S>) {
         self.write_level(0, root.node_ptr(), 0);
         self.levels = 1;
+    }
+
+    /// Puts `node` on the node stack below its bottom node, with `index`
+    /// taken at it: for a node stack built from levels a descent recorded
+    /// ([`NodeStackMut::along`]).
+    fn push_level(&mut self, node: NodePtr<K, V, S>, index: usize) {
+        self.write_level(usize::from(self.levels), node, index);
+        self.levels += 1;
     }
 
     fn write_level(&mut self, depth: usize, node: NodePtr<K, V, S>, index: usize) {
@@ -667,9 +637,8 @@ impl<'a, K, V, S: InlineKeyStrategy<K>> NodeStackMut<'a, K, V, S> {
         levels: impl IntoIterator<Item = (Node<K, V, S>, usize)>,
     ) -> Self {
         let mut stack = Self::new(tree);
-        for (depth, (node, index)) in levels.into_iter().enumerate() {
-            stack.stack.write_level(depth, node.node_ptr(), index);
-            stack.stack.levels = depth as u8 + 1;
+        for (node, index) in levels {
+            stack.stack.push_level(node.node_ptr(), index);
         }
         stack
     }

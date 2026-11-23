@@ -24,7 +24,7 @@ use core::ops::{Bound, ControlFlow, RangeBounds};
 
 use super::BBTreeMap;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 use crate::tree::latched::{LeafStamp, ScanResume};
 
 /// An iterator over clones of the entries of a range of a [`BBTreeMap`]:

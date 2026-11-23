@@ -55,10 +55,11 @@ use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
 use super::node::siblings::Siblings;
 use super::node::{Child, Node};
-use super::node_stack::{FirstEdge, KeySide, LastEdge, NodeEnd, NodeStackMut};
+use super::node::{FirstEdge, LastEdge, NodeEnd};
+use super::node_stack::{KeySide, NodeStackMut};
 use super::root::Tree;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
     /// Cuts the tree at the leaf edge on `side` of `key`. Keeps what lies

@@ -22,7 +22,7 @@ use super::super::node::latch::{Latched, Version};
 use super::super::node::leaf::Leaf;
 use super::super::node_stack::MAX_DEPTH;
 use super::descent::{PathLevel, TreePath};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// The nodes an operation holds exclusively, besides the leaf its descent
 /// latched: let go of together when dropped, each at the next version, so

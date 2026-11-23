@@ -55,7 +55,7 @@ use super::internal::Internal;
 use super::latch::{NodeLatch, Version};
 use super::leaf::{CandidateLine, Leaf};
 use super::page::{NodeKind, NodePtr};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// Where a key goes from an internal node read optimistically, as far as
 /// its inline keys tell ([`Internal::route_racing_inline`]).

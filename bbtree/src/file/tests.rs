@@ -9,7 +9,8 @@ use core::ops::Bound;
 use std::vec::Vec;
 
 use super::{FileBuf, FileError, FileMap, FileWriter, NotAscending, PlainBytes};
-use crate::inline_key::{InlineKey, InlineWord, WithInlineKey};
+use crate::inline_key::{InlineKey, InlineWord};
+use crate::strategy::WithInlineKey;
 use crate::tree::test_support::TestRng;
 use crate::unsync::BBTreeMap;
 

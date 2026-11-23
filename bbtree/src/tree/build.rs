@@ -17,16 +17,17 @@
 
 #![forbid(unsafe_code)]
 
+use super::node::LastEdge;
 use super::node::Node;
 use super::node::inline_keys::WindowedKey;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::FreshPage;
-use super::node_stack::{LastEdge, NodeStackMut};
-use super::prefix::PrefixedKey;
+use super::node_stack::NodeStackMut;
 use super::root::Tree;
+use super::shared_prefix::PrefixedKey;
 use crate::allocator::Allocator;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// A tree being built from entries in ascending key order, on pages from
 /// `alloc`.

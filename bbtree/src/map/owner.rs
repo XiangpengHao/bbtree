@@ -10,7 +10,7 @@ use core::iter::FusedIterator;
 
 use super::BBTreeMap;
 use crate::allocator::{Allocator, Global};
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 use crate::tree::node::latch::Latched;
 use crate::tree::node_stack::ValMut;
 use crate::tree::walk::{DyingWalk, RangeWalk};

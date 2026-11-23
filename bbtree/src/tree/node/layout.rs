@@ -8,8 +8,9 @@ use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
 use super::page::{InlineKeyNodeHeader, LatchedNodeHeader, NodeHeader, NodePtr};
-use crate::inline_key::{Auto, InlineWidth, InlineWord};
+use crate::inline_key::{InlineWidth, InlineWord};
 use crate::node_config::NodeConfig;
+use crate::strategy::Auto;
 
 /// Byte layouts of the node pages for keys `K` and values `V`, with the page
 /// sizes of node config `C` (D59) and leaf annex `L` (`leaf_annex.rs`): for
@@ -850,8 +851,10 @@ mod tests {
     use std::vec::Vec;
 
     use super::{InternalLayout, KeyArea, LeafLayout, NodeLayout};
-    use crate::inline_key::{Auto, InlineWidth, WithInlineKey};
-    use crate::node_config::{Configured, DefaultNodeConfig};
+    use crate::inline_key::InlineWidth;
+    use crate::node_config::DefaultNodeConfig;
+    use crate::strategy::Configured;
+    use crate::strategy::{Auto, WithInlineKey};
     #[cfg(feature = "file")]
     use crate::tree::file::InFile;
     use crate::tree::node::latch::Latched;

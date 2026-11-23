@@ -76,6 +76,42 @@ jobs:
           cargo run --release -p bbtree-mmap --example huge_pages -- 100000 "$RUNNER_TEMP"
           cargo run --release -p bbtree-mmap --example var_bytes_lookups -- 100000
 
+  # Code structure: module cycles, tangles, field leaks, shallow modules
+  # (AGENTS.md). The allowlist holds the debt that predates the check, so
+  # only new errors fail. deslop-please reads the workspace through
+  # `rust-analyzer scip`, hence the component. It indexes from scratch in
+  # about 10 s, so nothing is cached: a restored index could be stale.
+  deslop:
+    name: deslop-please
+    runs-on: ubuntu-latest
+    env:
+      DESLOP_VERSION: 0.1.3
+      # Of the release's x86_64-unknown-linux-musl archive; a new version
+      # needs its own.
+      DESLOP_SHA256: 883563b888abf4605d6cdb25c04238b93c1a47838f9f863c8880f9cce87abb04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep this exact nightly aligned with flake.nix.
+      - name: Install Rust (nightly-2026-10-07)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-07
+          components: rust-analyzer
+
+      - name: Install deslop-please
+        working-directory: ${{ runner.temp }}
+        run: |
+          archive="deslop-please-x86_64-unknown-linux-musl-v${DESLOP_VERSION}.tar.gz"
+          curl -fsSLO "https://github.com/deterministic-machines/deslop-please/releases/download/v${DESLOP_VERSION}/$archive"
+          echo "$DESLOP_SHA256  $archive" | sha256sum -c -
+          mkdir -p deslop-bin
+          tar -xzf "$archive" -C deslop-bin
+          echo "$RUNNER_TEMP/deslop-bin" >> "$GITHUB_PATH"
+
+      - name: Check
+        run: deslop-please --allow .deslop-please.allow
+
   bench:
     name: bench (fmt + clippy + test + quick run)
     runs-on: ubuntu-latest
@@ -340,7 +376,7 @@ jobs:
   merge-gate:
     name: merge gate
     if: always()
-    needs: [plan, check, bench, fuzz, test-aarch64, test-macos, test-wasm, build-kernel, racing-reads, release-fuzz, release-package]
+    needs: [plan, check, deslop, bench, fuzz, test-aarch64, test-macos, test-wasm, build-kernel, racing-reads, release-fuzz, release-package]
     runs-on: ubuntu-latest
     steps:
       - name: Check that every job passed

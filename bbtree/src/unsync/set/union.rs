@@ -10,7 +10,7 @@ use core::ops::BitOr;
 use super::BBTreeSet;
 use super::merge::{MergeSides, MergeStep};
 use crate::allocator::Allocator;
-use crate::inline_key::{Auto, InlineKeyStrategy};
+use crate::strategy::{Auto, InlineKeyStrategy};
 
 /// A lazy iterator producing elements in the union of `BBTreeSet`s.
 ///

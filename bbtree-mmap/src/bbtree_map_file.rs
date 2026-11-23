@@ -67,7 +67,7 @@ where
         path: impl AsRef<Path>,
         entries: impl IntoIterator<Item = (impl DiskInput<K::Stored>, impl DiskInput<V::Stored>)>,
     ) -> io::Result<()> {
-        MappedFile::create(path, &Self::writer(entries)?)
+        MappedFile::create(path, &Self::writer(entries)?.writer)
     }
 
     /// Writes the map of `entries` into `file` at `offset`, rounded up to
@@ -81,7 +81,7 @@ where
         offset: u64,
         entries: impl IntoIterator<Item = (impl DiskInput<K::Stored>, impl DiskInput<V::Stored>)>,
     ) -> io::Result<Range<u64>> {
-        MappedFile::write_at(file, offset, &Self::writer(entries)?)
+        MappedFile::write_at(file, offset, &Self::writer(entries)?.writer)
     }
 
     /// The compacted map of `entries`, in memory, ready to write.
@@ -212,13 +212,9 @@ where
 /// The compacted map of a `BBTreeMapFile`, ready to write: a file map's
 /// writer, its leaves followed by heap pages, and the arena its tree's byte
 /// strings point into, which outlives it.
-pub(crate) struct DiskWriter<
-    K: DiskStored,
-    V: DiskStored,
-    S: bbtree::InlineKeyStrategy<K::InWriter>,
-> {
+struct DiskWriter<K: DiskStored, V: DiskStored, S: bbtree::InlineKeyStrategy<K::InWriter>> {
     /// Dropped first, before the bytes its tree points into.
-    pub(crate) writer: FileWriter<K, V, S, HeapPages>,
+    writer: FileWriter<K, V, S, HeapPages>,
     _arena: ByteArena,
 }
 

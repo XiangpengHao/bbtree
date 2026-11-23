@@ -1,21 +1,58 @@
 //! The pages an insert's split takes, from the map's allocator before the
 //! tree changes (`insert.rs`): an allocator that refuses one leaves the tree
 //! holding what it held, and the insert gives the entry back. The split then
-//! takes them as it goes, from [`ReservedPages`], which can't run out. A
-//! latched tree's splits reserve theirs too, off its free lists first
-//! (`latched/pages.rs`).
+//! takes them as it goes, from [`ReservedPages`], which can't run out. How
+//! many of each kind it takes is [`SplitPages`], which the insert counts
+//! from its node stack. A latched tree's splits reserve theirs too, off its
+//! free lists first (`latched/pages.rs`).
 
 use core::alloc::Layout;
 use core::cell::Cell;
+use core::iter;
 use core::ptr::NonNull;
 
-use super::insert::SplitPages;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
 use super::node::page::{PageAllocator, PageType};
 use super::node_stack::MAX_DEPTH;
 use crate::allocator::{AllocError, Allocator, PageKind};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
+
+/// The pages a split that inserts into a full leaf takes: a leaf's, for its
+/// right half; an internal node's for each internal node above it that is
+/// full too, and splits; and if the root splits, one of the root's kind for
+/// the root's node, which moves out of the root page as the tree grows.
+#[derive(Clone, Copy)]
+pub(in crate::tree) struct SplitPages {
+    leaves: usize,
+    internals: usize,
+}
+
+impl SplitPages {
+    /// No split: the leaf has room.
+    pub(in crate::tree) const NONE: Self = Self {
+        leaves: 0,
+        internals: 0,
+    };
+
+    /// The pages for a full leaf `depth` levels below the root, whose lowest
+    /// ancestor with room, if any, is at level `room`, the root's 0.
+    pub(in crate::tree) fn of_full_leaf(depth: usize, room: Option<usize>) -> Self {
+        let splits = depth - room.map_or(0, |level| level + 1);
+        let (leaves, internals) = match (room, depth) {
+            (None, 0) => (2, 0),
+            (None, _) => (1, splits + 1),
+            (Some(_), _) => (1, splits),
+        };
+        Self { leaves, internals }
+    }
+
+    /// Each page's kind, the leaves' first.
+    pub(in crate::tree) fn kinds(self) -> impl Iterator<Item = PageKind> {
+        iter::repeat_n(PageKind::Leaf, self.leaves)
+            .chain(iter::repeat_n(PageKind::Internal, self.internals))
+    }
+}
 
 /// Pages taken from a map's allocator for one split, which it hands out as
 /// the split asks, by kind. Those left go back to the allocator as it drops.

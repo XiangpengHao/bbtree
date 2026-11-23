@@ -25,7 +25,8 @@ use std::vec::Vec;
 
 use super::differential::{MirroredMaps, Workload};
 use super::prefix::shared_prefix_key;
-use crate::inline_key::{InlineKey, InlineWidth, InlineWord, WithInlineKey};
+use crate::inline_key::{InlineKey, InlineWidth, InlineWord};
+use crate::strategy::WithInlineKey;
 use crate::tree::test_support::{DropLedger, FromNumber, HashTagCase, TestRng, Tracked};
 use crate::unsync::map::BBTreeMap;
 

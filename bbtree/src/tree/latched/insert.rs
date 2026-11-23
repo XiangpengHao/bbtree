@@ -31,8 +31,8 @@
 
 use core::alloc::Layout;
 
-use super::super::insert::SplitPages;
 use super::super::interleaving::Backoff;
+use super::super::node::LastEdge;
 use super::super::node::Node;
 use super::super::node::annexed_leaf::AnnexedLeaf;
 use super::super::node::inline_keys::SearchKey;
@@ -40,14 +40,14 @@ use super::super::node::internal::Internal;
 use super::super::node::latch::Latched;
 use super::super::node::leaf::Leaf;
 use super::super::node::page::PageAllocator;
-use super::super::node_stack::LastEdge;
-use super::super::prefix::PrefixedKey;
+use super::super::reserved_pages::SplitPages;
+use super::super::shared_prefix::PrefixedKey;
 use super::LatchedTree;
 use super::descent::{Exclusive, HeldLeaf, TreePath};
 use super::held::HeldNodes;
 use super::pages::NodePages;
 use crate::allocator::{Allocator, InsertError};
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 /// What an insert does where the tree holds a key equal to its own, and
 /// where it holds none, in the leaf it holds exclusively, with the leaf's

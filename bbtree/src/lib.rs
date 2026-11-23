@@ -30,14 +30,16 @@ mod node_config;
 mod proof;
 #[cfg(feature = "serde")]
 mod serde;
+mod strategy;
 mod tree;
 pub mod unsync;
 
 pub use allocator::{AllocError, Allocator, Global};
-pub use inline_key::{Auto, InlineKey, InlineKeyStrategy, InlineWidth, InlineWord, WithInlineKey};
-pub use leaf_annex::{LeafAnnex, WithLeafAnnex};
+pub use inline_key::{InlineKey, InlineWidth, InlineWord};
+pub use leaf_annex::LeafAnnex;
 pub use map::BBTreeMap;
-pub use node_config::{Configured, NodeConfig};
+pub use node_config::NodeConfig;
+pub use strategy::{Auto, Configured, InlineKeyStrategy, WithInlineKey, WithLeafAnnex};
 pub use tree::node::annexed_leaf::AnnexedLeaf;
 
 /// Read-only views of a map's nodes, as the map stores them, from

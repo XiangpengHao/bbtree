@@ -47,15 +47,14 @@
 
 #![forbid(unsafe_code)]
 
-use super::node::inline_keys::{KeyInliner, Window, WindowedKey};
+use super::node::inline_keys::KeyInliner;
 use super::node::internal::Internal;
 use super::node::leaf::Leaf;
-use super::node::page::{NodePtr, PageAllocator};
-use super::node::{Child, Node};
-use super::node_stack::{FirstEdge, LastEdge, MAX_DEPTH, NodeEnd, NodeStackMut};
+use super::node::page::NodePtr;
+use super::node::{Child, Node, NodeEnd};
+use super::node_stack::{MAX_DEPTH, NodeStackMut};
 use super::root::Tree;
-use super::shared_prefix::SharedPrefix;
-use crate::inline_key::InlineKeyStrategy;
+use crate::strategy::InlineKeyStrategy;
 
 impl<K, V, S: InlineKeyStrategy<K>> NodeStackMut<'_, K, V, S> {
     /// Fits the prefixes of the nodes an insert split to their fences, from
@@ -249,147 +248,6 @@ impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
             stack.refit_children_to_fences([sibling]);
             stack.set_index(End::edge(stack.node()));
             stack.descend();
-        }
-    }
-}
-
-/// A key that shares what every key of its tree shares (D50). A search that
-/// skips each node's prefix unchecked needs one, and an insert computes the
-/// key's window from it. Only the tree makes one: by shrinking what its keys
-/// share to what the key shares too ([`Tree::shrink_shared_prefix_for`]), or
-/// by checking it ([`Self::checked`]).
-pub(in crate::tree) struct PrefixedKey<K>(K);
-
-impl<K> PrefixedKey<K> {
-    /// `key`, if it shares `shared`, what every key of a tree shares; or
-    /// else `key` back.
-    pub(in crate::tree) fn checked<S: InlineKeyStrategy<K>>(
-        shared: &SharedPrefix,
-        key: K,
-    ) -> Result<Self, K> {
-        if shared.is_shared_by::<K, S>(&key) {
-            Ok(Self(key))
-        } else {
-            Err(key)
-        }
-    }
-
-    /// `key`, which a latched tree's descent (`tree/latched`) found shares
-    /// what every key of the tree shares, at a root version it checked, on
-    /// its way into the leaf it holds, where the key belongs. The leaf's
-    /// prefix is what its fences share, or the shared prefix on a border,
-    /// and `key` lies between the fences. Only a thread holding the leaf
-    /// changes its prefix.
-    pub(in crate::tree) fn checked_by_descent(key: K) -> Self {
-        Self(key)
-    }
-
-    pub(in crate::tree) fn key(&self) -> &K {
-        &self.0
-    }
-
-    pub(in crate::tree) fn into_key(self) -> K {
-        self.0
-    }
-
-    /// The key with its window at `prefix_len`, the prefix length of the
-    /// node it goes into, whose fences it lies between.
-    pub(in crate::tree) fn window_at<S: InlineKeyStrategy<K>>(
-        self,
-        prefix_len: usize,
-    ) -> WindowedKey<K, S> {
-        WindowedKey::new(self.0, prefix_len)
-    }
-}
-
-impl<K, V, S: InlineKeyStrategy<K>> Tree<K, V, S> {
-    /// Shrinks what every key of the tree shares to what `key` shares too,
-    /// before the tree takes it (D50), and returns `key`, which now shares
-    /// it. The nodes along the borders, which take the root's fences, shrink
-    /// their prefixes with it. Without a tree, it first makes one from
-    /// `alloc`. An empty tree, whose prefix nothing bounds yet, takes `key`'s
-    /// first bytes as what every key shares, and its root leaf takes them as
-    /// its prefix. Calls `InlineKey` with
-    /// [`WithInlineKey`](crate::WithInlineKey), before it changes anything
-    /// but making the tree.
-    ///
-    /// Every insert does this, and almost every one changes nothing: the
-    /// check is inline, while making the tree and starting or shrinking the
-    /// prefix are not. Always inline, so the batch's inserts, as extra
-    /// callers, don't outline it (D53).
-    #[inline(always)]
-    pub(in crate::tree) fn shrink_shared_prefix_for(
-        &mut self,
-        key: K,
-        alloc: &impl PageAllocator,
-    ) -> PrefixedKey<K> {
-        let root_page = self.root_page_or_new(alloc);
-        if NodePtr::<K, V, S>::has_inline_keys() {
-            if let Node::Leaf(root) = root_page.node()
-                && root.len() == 0
-            {
-                self.start_shared_prefix(root, &key);
-            } else {
-                let len = self.shared_prefix().len_shared_with::<K, S>(&key);
-                self.shrink_shared_prefix_to(len);
-            }
-        }
-        PrefixedKey(key)
-    }
-
-    /// Makes `key`'s first bytes what every key of the tree shares, for a
-    /// tree with no keys yet, and the prefix of `root`, its empty root leaf.
-    #[cold]
-    #[inline(never)]
-    fn start_shared_prefix(&mut self, root: Leaf<K, V, S>, key: &K) {
-        let shared = SharedPrefix::of_key::<K, S>(key);
-        root.set_empty_prefix_len(shared.len());
-        *self.shared_prefix_mut() = shared;
-    }
-
-    /// Shrinks what every key of the tree shares to its first `len` bytes,
-    /// if there are more, and the border nodes' prefixes with it. For a key
-    /// the tree is about to take, which shares only those bytes. Reads no key
-    /// and calls no `InlineKey`.
-    #[inline]
-    fn shrink_shared_prefix_to(&mut self, len: usize) {
-        if len < self.shared_prefix().len() {
-            self.shrink_borders_to(len);
-        }
-    }
-
-    /// [`Self::shrink_shared_prefix_to`], for a `len` shorter than what
-    /// every key shares: rare, as the prefix only ever shrinks.
-    #[cold]
-    #[inline(never)]
-    fn shrink_borders_to(&mut self, len: usize) {
-        let fill = self.shared_prefix().window_at(len);
-        self.shared_prefix_mut().shrink_to(len);
-        self.move_borders_back_to(fill);
-    }
-
-    /// Moves the prefix of every node along the tree's left and right
-    /// borders back to `fill`'s, filled from it: the window there of what
-    /// every key of the tree shares, before it shrank.
-    fn move_borders_back_to(&mut self, fill: Window) {
-        self.move_border_back_to::<FirstEdge>(fill);
-        self.move_border_back_to::<LastEdge>(fill);
-    }
-
-    /// [`Self::move_borders_back_to`], along the `End` border.
-    fn move_border_back_to<End: NodeEnd>(&mut self, fill: Window) {
-        let mut node = self.root_mut();
-        loop {
-            node = match node {
-                Node::Leaf(leaf) => {
-                    leaf.move_prefix_back_to(fill);
-                    break;
-                }
-                Node::Internal(internal) => {
-                    internal.move_prefix_back_to(fill);
-                    internal.child(End::edge(node))
-                }
-            };
         }
     }
 }

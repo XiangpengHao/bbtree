@@ -6,7 +6,7 @@ use core::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::vec::Vec;
 
-use crate::inline_key::{Auto, InlineKeyStrategy, WithInlineKey};
+use crate::strategy::{Auto, InlineKeyStrategy, WithInlineKey};
 use crate::tree::invariants::NodeChecks;
 use crate::tree::node::inline_keys::{Separator, WindowedKey};
 use crate::tree::node::internal::Internal;

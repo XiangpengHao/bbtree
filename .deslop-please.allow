@@ -1,0 +1,17 @@
+# Existing architectural debt suppressed by `deslop-please --allow`.
+# Fixing an entry here never fails CI; new issues not listed here fail.
+module-cycle bbtree::tree::latched::append,bbtree::tree::latched::insert
+module-cycle bbtree::tree::node::annexed_leaf,bbtree::tree::node::hash_tags,bbtree::tree::node::inline_key_search,bbtree::tree::node::inline_keys,bbtree::tree::node::internal,bbtree::tree::node::latch,bbtree::tree::node::layout,bbtree::tree::node::leaf,bbtree::tree::node::node_plan,bbtree::tree::node::optimistic,bbtree::tree::node::page,bbtree::tree::node::root_page,bbtree::tree::node::siblings,bbtree::tree::node::slots,bbtree::tree::node::vector_count
+module-cycle bbtree_store::range,bbtree_store::store
+tangle bbtree::map::BBTreeMap,bbtree::map::range::RangeCloned
+tangle bbtree::tree::clone::PartialCopy,bbtree::tree::node::Child,bbtree::tree::node::Node,bbtree::tree::node::NodeEnd,bbtree::tree::node::internal::HeadKeys,bbtree::tree::node::internal::Internal,bbtree::tree::node::layout::NodeLayout,bbtree::tree::node::leaf::Leaf,bbtree::tree::node::optimistic::Placed,bbtree::tree::node::page::NodePtr,bbtree::tree::node::page::PageByType,bbtree::tree::node::root_page::RootPage,bbtree::tree::node::siblings::Siblings,bbtree::tree::node::slots::SeparatorSlots,bbtree::tree::node_stack::NodeStack,bbtree::tree::search::Found,bbtree::tree::search::InsertSearch,bbtree::tree::walk::Cursor,bbtree::tree::walk::DropRest,bbtree::tree::walk::DyingWalk,bbtree::tree::walk::Ends,bbtree::tree::walk::FullWalk,bbtree::tree::walk::WalkTop
+tangle bbtree::tree::cut::Cut,bbtree::tree::node_stack::NodeStackMut,bbtree::tree::root::Tree
+tangle bbtree::tree::latched::LatchedTree,bbtree::tree::latched::batch::CopyValue,bbtree::tree::latched::batch::EntryVisit,bbtree::tree::latched::batch::Lane,bbtree::tree::latched::batch::LeafLane,bbtree::tree::latched::batch::ReadBatch,bbtree::tree::latched::batch::ReadWith
+tangle bbtree::unsync::map::BBTreeMap,bbtree::unsync::map::append::Merge,bbtree::unsync::map::extract_if::ExtractIf,bbtree::unsync::map::extract_if::ExtractionWalk
+tangle bbtree::unsync::set::BBTreeSet,bbtree::unsync::set::difference::Difference,bbtree::unsync::set::difference::DifferenceStrategy,bbtree::unsync::set::intersection::Intersection,bbtree::unsync::set::intersection::IntersectionStrategy,bbtree::unsync::set::lookups::LookupsAhead
+tangle bbtree_mmap::var_bytes::ArenaBytes,bbtree_mmap::var_bytes::ByteArena,bbtree_mmap::var_bytes::VarBytes,bbtree_mmap::var_bytes::VarBytesQuery
+tangle bbtree_store::range::RangeCopies,bbtree_store::store::BBTreeStore
+tangle bbtree_store::wal::tail::ScannedBytes,bbtree_store::wal::tail::WalTail
+field-leak bbtree::tree::root::Tree::shared_prefix
+wide-directory bbtree/src/tree/
+wide-directory bbtree/src/tree/node/
